@@ -1,0 +1,86 @@
+# DuneTrace — Postgres + Ingest + Detector + Alerts + Customer API
+# Usage: docker compose up -d
+# Ingest API:   http://localhost:8001
+# Customer API: http://localhost:8002  (docs at /docs)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dunetrace
+      POSTGRES_PASSWORD: dunetrace
+      POSTGRES_DB: dunetrace
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dunetrace -d dunetrace"]
+      interval: 3s
+      timeout: 5s
+      retries: 5
+
+  ingest:
+    build: .
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /app/services/ingest
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    # PYTHONPATH set so `app` resolves to services/ingest/app
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      ENV: dev
+      AUTH_MODE: dev
+      PYTHONPATH: /app/services/ingest
+
+  detector:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      POLL_INTERVAL: 10
+      STALL_TIMEOUT_SECS: 90
+      PYTHONPATH: /app/packages/sdk-py:/app/services/detector
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+    working_dir: /app/services/detector
+    command: ["python", "-m", "app.worker"]
+
+  alerts:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      POLL_INTERVAL: 10
+      PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/alerts
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      detector:
+        condition: service_started
+    working_dir: /app/services/alerts
+    command: ["python", "-m", "alerts_svc.worker"]
+
+  api:
+    build: .
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      AUTH_MODE: dev
+      PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /app/services/api
+    command: ["uvicorn", "api_svc.main:app", "--host", "0.0.0.0", "--port", "8002"]
+
+volumes:
+  postgres_data:
