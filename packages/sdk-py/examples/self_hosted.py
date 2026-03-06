@@ -12,14 +12,11 @@ Use this when:
 See docs/self-hosted.md for running the full self-hosted stack
 (ingest + detector + explainer) with Docker Compose.
 """
-from dunetrace import DunetraceClient
+from dunetrace import Dunetrace
 from dunetrace.detectors import run_detectors, PROMPT_INJECTION_DETECTOR
 from dunetrace.models import FailureType
 
-# Point to a local ingest endpoint — or use a null URL and catch the log warning.
-# Events are queued in the ring buffer and shipped asynchronously, so the
-# agent thread is never blocked even if the endpoint is unreachable.
-dt = DunetraceClient(endpoint="http://localhost:8001")
+dt = Dunetrace(endpoint="http://localhost:8001")
 
 AGENT_ID = "self-hosted-example"
 TOOLS = ["web_search", "calculator"]

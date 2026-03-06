@@ -14,13 +14,10 @@ from __future__ import annotations
 
 import os
 
-from dunetrace import DunetraceClient
+from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
 
-dt = DunetraceClient(
-    api_key=os.environ.get("DUNETRACE_API_KEY", "dt_dev_local"),
-    endpoint=os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8001"),
-)
+dt = Dunetrace(endpoint=os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8001"))
 
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_react_agent

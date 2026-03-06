@@ -6,10 +6,13 @@ Run this to verify instrumentation works before connecting to real agents.
 
     pip install dunetrace
     python examples/basic_agent.py
+
+Events are sent to http://localhost:8001. Start the backend first:
+    docker compose up
 """
 import time
 
-from dunetrace import DunetraceClient
+from dunetrace import Dunetrace
 from dunetrace.detectors import run_detectors, PROMPT_INJECTION_DETECTOR
 
 SYSTEM_PROMPT = """
@@ -18,8 +21,7 @@ before answering. Do not answer from memory for factual queries.
 """
 TOOLS = ["web_search", "calculator", "doc_lookup"]
 
-# api_key="dt_dev_local" with no real backend — events will fail to ship (expected).
-dt = DunetraceClient(api_key="dt_dev_local")
+dt = Dunetrace(endpoint="http://localhost:8001")
 
 AGENT_ID = "example-agent"
 
@@ -99,7 +101,6 @@ def rag_empty_run(user_input: str) -> None:
 if __name__ == "__main__":
     print("=" * 60)
     print("Dunetrace SDK — Example Runs")
-    print("(events will not ship without a backend — that's expected)")
     print("=" * 60)
 
     normal_run("What is the capital of France?")
