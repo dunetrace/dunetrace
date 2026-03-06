@@ -125,6 +125,13 @@ class TestToolAvoidanceDetector(unittest.TestCase):
         state = make_state(available_tools=["web_search"])
         state.exit_reason = "final_answer"
         state.tool_calls = []
+        # Detector requires MIN_LLM_CALLS=2 to suppress false positives on trivially short runs
+        from dunetrace.models import LlmCall
+        state.llm_calls = [
+            LlmCall(model="gpt-4o-mini", prompt_tokens=200, finish_reason="stop",
+                    latency_ms=100, step_index=i, timestamp=time.time())
+            for i in range(1, 3)
+        ]
         signal = self.detector.check(state)
         assert signal is not None
         assert signal.failure_type == FailureType.TOOL_AVOIDANCE
@@ -365,14 +372,14 @@ class TestContextBloatDetector(unittest.TestCase):
     def test_fires_at_3x_growth(self):
         state = make_state()
         state.llm_calls = [
-            make_llm_call(prompt_tokens=500,  step=1),
-            make_llm_call(prompt_tokens=1000, step=2),
-            make_llm_call(prompt_tokens=1600, step=3),
+            make_llm_call(prompt_tokens=600,  step=1),
+            make_llm_call(prompt_tokens=1200, step=2),
+            make_llm_call(prompt_tokens=2100, step=3),
         ]
         state.current_step = 3
         signal = self.detector.check(state)
-        assert signal is not None  # 1600/500 = 3.2x — exceeds threshold
-        assert signal.evidence["growth_factor"] == 3.2
+        assert signal is not None  # 2100/600 = 3.5x — exceeds threshold and MIN_LAST_TOKENS=2000
+        assert signal.evidence["growth_factor"] == 3.5
 
     def test_fires_on_clear_bloat(self):
         state = make_state()

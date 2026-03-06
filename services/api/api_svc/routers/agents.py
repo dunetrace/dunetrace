@@ -1,10 +1,11 @@
 """services/api/api_svc/routers/agents.py"""
 from __future__ import annotations
 from typing import Optional
+import asyncio
 from fastapi import APIRouter, Depends, Query
 from api_svc.auth import require_customer
 from api_svc.config import settings
-from api_svc.db.queries import list_agents
+from api_svc.db.queries import list_agents, agent_signal_sparklines, agent_failure_type_counts
 from api_svc.schemas import AgentListResponse, AgentSummary, Page
 
 router = APIRouter(prefix="/v1/agents", tags=["Agents"])
@@ -17,6 +18,10 @@ async def get_agents(
     customer_id: str = Depends(require_customer),
 ) -> AgentListResponse:
     rows, total = await list_agents(customer_id, offset, limit)
+    sparklines, ft_counts = await asyncio.gather(
+        agent_signal_sparklines(customer_id),
+        agent_failure_type_counts(customer_id),
+    )
 
     def ts(v):
         if v is None:
@@ -31,6 +36,8 @@ async def get_agents(
             signal_count=r["signal_count"] or 0,
             critical_count=r["critical_count"] or 0,
             high_count=r["high_count"] or 0,
+            sparkline=sparklines.get(r["agent_id"], []),
+            failure_types=ft_counts.get(r["agent_id"], {}),
         )
         for r in rows
     ]

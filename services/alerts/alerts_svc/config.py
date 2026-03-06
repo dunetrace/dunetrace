@@ -1,5 +1,5 @@
 """
-services/alerts/app/config.py
+services/alerts/alerts_svc/config.py
 """
 from __future__ import annotations
 import os

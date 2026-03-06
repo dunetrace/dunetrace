@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api_svc.config import settings
 from api_svc.db.queries import init_pool, close_pool, check_db
-from api_svc.routers import agents, runs, signals
+from api_svc.routers import agents, runs, signals, insights
 from api_svc.schemas import HealthResponse
 
 logging.basicConfig(
@@ -77,6 +77,7 @@ def create_app() -> FastAPI:
     app.include_router(agents.router)
     app.include_router(runs.router)
     app.include_router(signals.router)
+    app.include_router(insights.router)
 
     @app.get("/health", response_model=HealthResponse, include_in_schema=False)
     async def health() -> HealthResponse:

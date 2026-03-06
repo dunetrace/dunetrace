@@ -1,8 +1,8 @@
 """
 dunetrace/client.py
 
-The main SDK client. Zero external dependencies.
-Agent thread never blocks — all I/O happens on the drain thread.
+Non-blocking SDK client. Zero external dependencies.
+The agent thread never blocks — all I/O happens on the background drain thread.
 """
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ import logging
 import time
 import urllib.request
 import urllib.error
-from collections import deque
-from threading import Thread, Event
-from typing import Optional
 from contextlib import contextmanager
+from threading import Event, Thread
+from typing import List, Optional
 
-from dunetrace.models import AgentEvent, EventType, RunState, hash_content, agent_version
+from dunetrace.buffer import RingBuffer
+from dunetrace.models import AgentEvent, EventType, hash_content, agent_version
 from dunetrace.run_context import RunContext
 
 logger = logging.getLogger("dunetrace")
@@ -24,38 +24,42 @@ logger = logging.getLogger("dunetrace")
 
 class Dunetrace:
     """
-    Non-blocking SDK client.
+    Non-blocking observability client.
 
-    Usage:
-        vig = Dunetrace(api_key="dt_live_...", agent_id="my-agent")
+    Usage::
 
-        with vig.run(user_input, system_prompt=SYSTEM_PROMPT, model="gpt-4o", tools=TOOLS) as run:
-            # your agent code here
+        dt = Dunetrace()  # defaults to http://localhost:8001, no key required
+
+        with dt.run("my-agent", user_input=user_input, model="gpt-4o", tools=TOOLS) as run:
+            run.llm_called("gpt-4o", prompt_tokens=150)
             run.tool_called("web_search", {"query": "..."})
             run.tool_responded("web_search", success=True, output_length=512)
+            run.final_answer()
+
+        dt.shutdown()
+
+    Cloud::
+
+        dt = Dunetrace(api_key="dt_live_...", endpoint="https://ingest.dunetrace.com")
     """
 
     def __init__(
         self,
-        api_key:     str,
-        agent_id:    str,
-        ingest_url:  str = "https://ingest.dunetrace.io/v1/ingest",
-        buffer_size: int = 10_000,
-        flush_interval_ms: int = 200,
-        debug: bool = False,
-    ):
-        self.api_key    = api_key
-        self.agent_id   = agent_id
-        self.ingest_url = ingest_url
+        endpoint:          str           = "http://localhost:8001",
+        api_key:           Optional[str] = None,
+        *,
+        buffer_size:       int  = 10_000,
+        flush_interval_ms: int  = 200,
+        debug:             bool = False,
+    ) -> None:
+        self._ingest_url     = endpoint.rstrip("/") + "/v1/ingest"
+        self._api_key        = api_key or ""
+        self._buffer         = RingBuffer[AgentEvent](maxsize=buffer_size)
+        self._stop_evt       = Event()
+        self._flush_interval = flush_interval_ms / 1000.0
 
         if debug:
             logging.basicConfig(level=logging.DEBUG)
-
-        # Ring buffer — drops oldest events under backpressure.
-        # Agent is NEVER blocked by a full buffer.
-        self._buffer   = deque(maxlen=buffer_size)
-        self._stop_evt = Event()
-        self._flush_interval = flush_interval_ms / 1000.0
 
         self._drain_thread = Thread(
             target=self._drain_loop,
@@ -63,45 +67,49 @@ class Dunetrace:
             name="dunetrace-drain",
         )
         self._drain_thread.start()
-        logger.debug("Dunetrace client started. agent_id=%s", agent_id)
+        logger.debug("Dunetrace started. endpoint=%s", endpoint)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     @contextmanager
     def run(
         self,
-        user_input:    str,
+        agent_id:      str,
+        *,
+        user_input:    str = "",
         system_prompt: str = "",
         model:         str = "unknown",
-        tools:         list = None,
+        tools:         Optional[List[str]] = None,
         parent_run_id: Optional[str] = None,
     ):
         """
         Context manager wrapping a single agent run.
-        Emits run.started on enter, run.completed / run.errored on exit.
+
+        Emits ``run.started`` on enter, ``run.completed`` on clean exit,
+        and ``run.errored`` if an exception escapes the block.
         """
-        tools = tools or []
+        tools   = tools or []
         version = agent_version(system_prompt, model, tools)
-        ctx = RunContext(
+        ctx     = RunContext(
             client=self,
-            agent_id=self.agent_id,
+            agent_id=agent_id,
             agent_version=version,
             available_tools=tools,
-            input_text_hash=hash_content(user_input),
+            input_text_hash=hash_content(user_input) if user_input else "",
             parent_run_id=parent_run_id,
         )
 
         self._emit(AgentEvent(
             event_type=EventType.RUN_STARTED,
             run_id=ctx.run_id,
-            agent_id=self.agent_id,
+            agent_id=agent_id,
             agent_version=version,
             step_index=0,
             parent_run_id=parent_run_id,
             payload={
-                "input_hash":  hash_content(user_input),
-                "model":       model,
-                "tools":       tools,
+                "input_hash": hash_content(user_input) if user_input else "",
+                "model":      model,
+                "tools":      tools,
             },
         ))
 
@@ -110,12 +118,12 @@ class Dunetrace:
             self._emit(AgentEvent(
                 event_type=EventType.RUN_COMPLETED,
                 run_id=ctx.run_id,
-                agent_id=self.agent_id,
+                agent_id=agent_id,
                 agent_version=version,
                 step_index=ctx.step,
                 payload={
-                    "total_steps":  ctx.step,
-                    "exit_reason":  ctx.exit_reason or "completed",
+                    "total_steps":     ctx.step,
+                    "exit_reason":     ctx.exit_reason or "completed",
                     "tool_call_count": len(ctx.state.tool_calls),
                 },
             ))
@@ -123,63 +131,52 @@ class Dunetrace:
             self._emit(AgentEvent(
                 event_type=EventType.RUN_ERRORED,
                 run_id=ctx.run_id,
-                agent_id=self.agent_id,
+                agent_id=agent_id,
                 agent_version=version,
                 step_index=ctx.step,
                 payload={
-                    "error_type":    type(exc).__name__,
-                    "error_hash":    hash_content(str(exc)),
-                    "step_index":    ctx.step,
+                    "error_type": type(exc).__name__,
+                    "error_hash": hash_content(str(exc)),
+                    "step_index": ctx.step,
                 },
             ))
             raise
 
-    def shutdown(self, timeout: float = 5.0):
-        """Flush remaining events and stop drain thread."""
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Flush remaining events and stop the drain thread."""
         self._stop_evt.set()
         self._drain_thread.join(timeout=timeout)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _emit(self, event: AgentEvent) -> None:
-        """
-        Hot path. Must be <100μs. No I/O. No blocking.
-        O(1) deque append is thread-safe in CPython.
-        """
-        self._buffer.append(event)
+        self._buffer.push(event)
 
     def _drain_loop(self) -> None:
-        """Background thread. Batches and ships events to ingest API."""
         while not self._stop_evt.is_set():
-            batch = []
-            while self._buffer and len(batch) < 100:
-                batch.append(self._buffer.popleft())
+            batch = self._buffer.drain(100)
             if batch:
                 self._ship(batch)
             else:
                 time.sleep(self._flush_interval)
 
-        # Final flush on shutdown
-        remaining = []
-        while self._buffer:
-            remaining.append(self._buffer.popleft())
+        remaining = self._buffer.drain_all()
         if remaining:
             self._ship(remaining)
 
-    def _ship(self, batch: list) -> None:
-        """POST batch to ingest API. Failures are logged, not raised."""
+    def _ship(self, batch: List[AgentEvent]) -> None:
         payload = json.dumps({
-            "api_key":  self.api_key,
-            "agent_id": self.agent_id,
+            "api_key":  self._api_key,
+            "agent_id": batch[0].agent_id if batch else "",
             "events":   [e.to_dict() for e in batch],
         }).encode()
 
         req = urllib.request.Request(
-            self.ingest_url,
+            self._ingest_url,
             data=payload,
             headers={
-                "Content-Type":  "application/json",
-                "X-Dunetrace-Agent": self.agent_id,
+                "Content-Type":      "application/json",
+                "X-Dunetrace-Agent": batch[0].agent_id if batch else "",
             },
             method="POST",
         )
@@ -187,5 +184,8 @@ class Dunetrace:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 logger.debug("Shipped %d events. status=%d", len(batch), resp.status)
         except Exception as exc:
-            # Never propagate — agent must not be affected by ingest failures
             logger.warning("Failed to ship %d events: %s", len(batch), exc)
+
+
+# Backwards-compatible alias
+DunetraceClient = Dunetrace

@@ -43,6 +43,8 @@ if _PYDANTIC:
         signal_count:   int
         critical_count: int
         high_count:     int
+        sparkline:      List[int] = []              # 7 daily signal counts, oldest→newest
+        failure_types:  Dict[str, int] = {}         # { "TOOL_LOOP": 3, ... }
 
     class AgentListResponse(_Model):
         agents: List[AgentSummary]
@@ -122,6 +124,52 @@ if _PYDANTIC:
         version: str = "0.1.0"
         db:      str = "unknown"
 
+    # ── Insights models ────────────────────────────────────────────────────────
+
+    class InputHashPattern(_Model):
+        input_hash:      str
+        failure_type:    str
+        triggered_count: int
+        total_runs:      int
+        rate:            float
+
+    class VersionStat(_Model):
+        agent_version:     str
+        run_count:         int
+        runs_with_signals: int
+        signal_count:      int
+        signal_rate:       float
+        first_seen:        Optional[float]
+        last_seen:         Optional[float]
+
+    class SignalTrendPoint(_Model):
+        failure_type:  str
+        agent_version: str
+        day:           str
+        count:         int
+
+    class TimeToFirstTool(_Model):
+        p25:            Optional[float]
+        p50:            Optional[float]
+        p75:            Optional[float]
+        avg_steps:      Optional[float]
+        runs_with_tool: int
+        total_runs:     int
+        daily_trend:    List[Dict[str, Any]]
+
+    class HourlyPatternPoint(_Model):
+        hour_of_day:  int
+        run_count:    int
+        signal_count: int
+        signal_rate:  float
+
+    class AgentInsights(_Model):
+        input_patterns: List[InputHashPattern]
+        signal_trends:  List[SignalTrendPoint]
+        versions:       List[VersionStat]
+        time_to_tool:   TimeToFirstTool
+        hourly_pattern: List[HourlyPatternPoint]
+
 else:
     # ── Stdlib dataclass fallback (sandbox / testing) ──────────────────────────
     from dataclasses import dataclass, field
@@ -142,6 +190,8 @@ else:
         signal_count: int
         critical_count: int
         high_count: int
+        sparkline: List[int] = _field(default_factory=list)
+        failure_types: Dict[str, int] = _field(default_factory=dict)
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)
 
     @dataclass

@@ -1,19 +1,23 @@
 """
 dunetrace/run_context.py
 
-RunContext is what the developer holds during a run.
-It provides the emit helpers (tool_called, llm_called, etc.)
-and accumulates RunState for the local sidecar detectors.
+RunContext is the object the developer holds inside a ``with dt.run(...) as run:`` block.
+Provides emit helpers (tool_called, llm_called, etc.) and accumulates RunState
+for local self-hosted detector use.
 """
 from __future__ import annotations
 
-import uuid
 import time
-from typing import TYPE_CHECKING, Optional, Any, Dict
+import uuid
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from dunetrace.models import (
-    AgentEvent, EventType, RunState,
-    ToolCall, RetrievalResult, hash_content,
+    AgentEvent,
+    EventType,
+    RetrievalResult,
+    RunState,
+    ToolCall,
+    hash_content,
 )
 
 if TYPE_CHECKING:
@@ -21,10 +25,7 @@ if TYPE_CHECKING:
 
 
 class RunContext:
-    """
-    Thin wrapper around a single agent run.
-    Developer calls methods on this; all events go through _emit.
-    """
+    """Thin wrapper around a single agent run."""
 
     def __init__(
         self,
@@ -34,13 +35,14 @@ class RunContext:
         available_tools: list,
         input_text_hash: str,
         parent_run_id:   Optional[str] = None,
-    ):
+    ) -> None:
         self._client       = client
         self.run_id        = str(uuid.uuid4())
         self.agent_id      = agent_id
         self.agent_version = agent_version
         self.step          = 0
-        self.exit_reason: Optional[str] = None
+        self.exit_reason:  Optional[str] = None
+        self._parent_run_id = parent_run_id
 
         self.state = RunState(
             run_id=self.run_id,
@@ -49,7 +51,6 @@ class RunContext:
             available_tools=available_tools,
             input_text_hash=input_text_hash,
         )
-        self._parent_run_id = parent_run_id
 
     # ── LLM hooks ─────────────────────────────────────────────────────────────
 
@@ -65,19 +66,20 @@ class RunContext:
         latency_ms:        int = 0,
         finish_reason:     str = "stop",
         output_hash:       str = "",
+        output_length:     int = 0,
     ) -> None:
         self._emit(EventType.LLM_RESPONDED, {
             "completion_tokens": completion_tokens,
             "latency_ms":        latency_ms,
             "finish_reason":     finish_reason,
             "output_hash":       output_hash,
+            "output_length":     output_length,
         })
 
-    # ── Tool hooks ─────────────────────────────────────────────────────────────
+    # ── Tool hooks ────────────────────────────────────────────────────────────
 
-    def tool_called(self, tool_name: str, args: Dict[str, Any] = None) -> None:
-        args = args or {}
-        args_hash = hash_content(str(args))
+    def tool_called(self, tool_name: str, args: Optional[Dict[str, Any]] = None) -> None:
+        args_hash = hash_content(str(args or {}))
         self.state.tool_calls.append(ToolCall(
             tool_name=tool_name,
             args_hash=args_hash,
@@ -96,6 +98,11 @@ class RunContext:
         output_length: int  = 0,
         latency_ms:    int  = 0,
     ) -> None:
+        # Back-fill success on the most recent matching ToolCall
+        for tc in reversed(self.state.tool_calls):
+            if tc.tool_name == tool_name and tc.success is None:
+                tc.success = success
+                break
         self._emit(EventType.TOOL_RESPONDED, {
             "tool_name":     tool_name,
             "success":       success,
@@ -103,7 +110,7 @@ class RunContext:
             "latency_ms":    latency_ms,
         })
 
-    # ── Retrieval hooks (RAG) ──────────────────────────────────────────────────
+    # ── Retrieval hooks (RAG) ─────────────────────────────────────────────────
 
     def retrieval_called(self, index_name: str, query_hash: str = "") -> None:
         self._emit(EventType.RETRIEVAL_CALLED, {
@@ -133,7 +140,7 @@ class RunContext:
 
     def final_answer(self) -> None:
         """Call when the agent produces its final answer."""
-        self.exit_reason = "final_answer"
+        self.exit_reason       = "final_answer"
         self.state.exit_reason = "final_answer"
 
     # ── Internal ──────────────────────────────────────────────────────────────

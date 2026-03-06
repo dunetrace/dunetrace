@@ -1,5 +1,5 @@
 """
-services/alerts/app/sender.py
+services/alerts/alerts_svc/sender.py
 
 HTTP delivery for alerts. Stdlib urllib only — no httpx, no requests.
 

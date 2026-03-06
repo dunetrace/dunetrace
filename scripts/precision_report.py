@@ -267,9 +267,9 @@ def print_inspect(cur, failure_type: str, agent_filter: str | None, limit: int =
 
     # Graduate hint
     print(f"{BOLD}To graduate this detector:{RESET}")
-    print(f"  Edit services/detector/app/db.py:")
+    print(f"  Edit services/detector/detector_svc/db.py:")
     print(f'  LIVE_DETECTORS = {{"{failure_type}"}}')
-    print(f"  Then restart: PYTHONPATH=.:../../packages/sdk-py SHADOW_MODE=false python -m app.worker")
+    print(f"  Then restart: PYTHONPATH=.:../../packages/sdk-py SHADOW_MODE=false python -m detector_svc.worker")
     print()
 
 

@@ -58,3 +58,15 @@ logs/
 # Database
 *.sqlite3
 *.db
+
+# Deployment — not in use yet
+railway.toml
+
+# SSH / TLS / secrets — never commit private keys or certs
+/config
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer

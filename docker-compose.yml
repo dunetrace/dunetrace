@@ -21,15 +21,15 @@ services:
       retries: 5
 
   ingest:
-    build: .
+    build:
+      context: .
+      dockerfile: services/ingest/Dockerfile
     ports:
       - "8001:8001"
     depends_on:
       postgres:
         condition: service_healthy
-    working_dir: /app/services/ingest
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
-    # PYTHONPATH set so `app` resolves to services/ingest/app
+    command: ["uvicorn", "ingest_svc.main:app", "--host", "0.0.0.0", "--port", "8001"]
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       ENV: dev
@@ -37,22 +37,27 @@ services:
       PYTHONPATH: /app/services/ingest
 
   detector:
-    build: .
+    build:
+      context: .
+      dockerfile: services/detector/Dockerfile
+    volumes:
+      - ./detectors.yml:/app/detectors.yml:ro
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
-      POLL_INTERVAL: 10
-      STALL_TIMEOUT_SECS: 90
+      POLL_INTERVAL: 5
+      STALL_TIMEOUT_SECS: 60
       PYTHONPATH: /app/packages/sdk-py:/app/services/detector
     depends_on:
       postgres:
         condition: service_healthy
       ingest:
         condition: service_started
-    working_dir: /app/services/detector
-    command: ["python", "-m", "app.worker"]
+    command: ["python", "-m", "detector_svc.worker"]
 
   alerts:
-    build: .
+    build:
+      context: .
+      dockerfile: services/alerts/Dockerfile
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       POLL_INTERVAL: 10
@@ -65,11 +70,12 @@ services:
         condition: service_healthy
       detector:
         condition: service_started
-    working_dir: /app/services/alerts
     command: ["python", "-m", "alerts_svc.worker"]
 
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
     ports:
       - "8002:8002"
     environment:
@@ -79,7 +85,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    working_dir: /app/services/api
     command: ["uvicorn", "api_svc.main:app", "--host", "0.0.0.0", "--port", "8002"]
 
 volumes:

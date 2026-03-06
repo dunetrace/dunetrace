@@ -1,0 +1,28 @@
+# Production Docker Compose — extend docker-compose.yml with prod overrides.
+# Usage: docker compose -f infra/docker-compose.yml -f infra/docker-compose.prod.yml up -d
+
+services:
+  ingest:
+    restart: always
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  detector:
+    restart: always
+
+  explainer:
+    restart: always
+
+  alerts:
+    restart: always
+
+  api:
+    restart: always
+
+  db:
+    restart: always
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+
+volumes:
+  pgdata_prod:

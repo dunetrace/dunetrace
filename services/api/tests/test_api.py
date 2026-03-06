@@ -15,17 +15,9 @@ Run:
 """
 from __future__ import annotations
 
-import sys
-import os
 import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py")))
-sys.path.insert(0, os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../explainer")))
 
 from api_svc.schemas import (
     AgentSummary, AgentListResponse,

@@ -28,8 +28,9 @@ for _p in [
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from dunetrace.models import FailureSignal, FailureType, Severity, Explanation, CodeFix
-from alerts_svc.explainer import explain
+from dunetrace.models import FailureSignal, FailureType, Severity
+from explainer_svc.models import Explanation, CodeFix
+from explainer_svc.explainer import explain
 
 from alerts_svc.formatters.slack   import format_slack, format_slack_simple
 from alerts_svc.formatters.webhook import format_webhook, sign_payload, build_signed_request

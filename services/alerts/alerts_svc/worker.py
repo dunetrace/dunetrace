@@ -1,5 +1,5 @@
 """
-services/alerts/app/worker.py
+services/alerts/alerts_svc/worker.py
 
 The alert delivery loop.
 
@@ -27,32 +27,19 @@ Delivery is at-least-once:
 
 Run:
     cd services/alerts
-    python -m app.worker
+    python -m alerts_svc.worker
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import sys
-import os
 import time
 
-# ── Path setup ─────────────────────────────────────────────────────────────────
-_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
-
-for _p in [
-    os.path.join(_ROOT, "packages/sdk-py"),
-    os.path.join(_ROOT, "services/explainer"),
-]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-# ── Imports ────────────────────────────────────────────────────────────────────
 from dunetrace.models import FailureSignal, FailureType, Severity
 
-from alerts_svc.explainer import explain  # bridge                             # type: ignore
-# Explanation is in dunetrace.models (added there for cross-service use)
-from alerts_svc.formatters.slack   import format_slack              # type: ignore
+from explainer_svc.explainer import explain
+from explainer_svc.models import Explanation
+from alerts_svc.formatters.slack   import format_slack
 from alerts_svc.formatters.webhook import build_signed_request      # type: ignore
 from alerts_svc.sender  import send_slack, send_webhook, SendResult
 from alerts_svc.db      import init_pool, close_pool, fetch_unalerted_signals, mark_alerted_batch

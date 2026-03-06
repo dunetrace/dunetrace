@@ -1,0 +1,72 @@
+# DuneTrace — Detector Thresholds
+#
+# Edit this file to tune detector sensitivity for your agents.
+# Restart the detector after any change:
+#
+#   docker compose restart detector
+#
+# All fields are optional. Omitted fields use the SDK default (shown below).
+# Per-agent-category overrides are supported — see the commented examples.
+
+default:
+
+  tool_loop:
+    threshold: 3      # fire if same tool called >= N times in window
+    window: 5         # number of recent tool calls to inspect
+
+  tool_thrashing:
+    window: 6         # alternating A/B pattern checked over last N tool calls
+
+  tool_avoidance:
+    min_llm_calls: 2  # ignore runs with fewer LLM calls (too short to judge)
+
+  goal_abandonment:
+    stall_steps: 4    # consecutive LLM-only events (no tool calls) to trigger
+
+  rag_empty_retrieval:
+    min_score: 0.3    # top relevance score below this is treated as empty
+    min_results: 1    # result count below this is treated as empty
+
+  llm_truncation_loop:
+    threshold: 2      # number of finish_reason=length events to trigger
+
+  context_bloat:
+    growth_factor: 3.0    # last/first prompt token ratio to trigger
+    min_calls: 3          # minimum LLM calls with token data required
+    min_last_tokens: 2000 # suppress signal if final token count is below this
+
+  retry_storm:
+    threshold: 3      # consecutive failures on the same tool to trigger
+
+  step_count_inflation:
+    inflation_factor: 2.0 # multiplier over P75 baseline to trigger
+
+  cascading_tool_failure:
+    threshold: 3      # consecutive cross-tool failures to trigger
+
+  first_step_failure:
+    max_step: 2       # step index at or below which an error triggers
+
+
+# ── Per-agent-category overrides ─────────────────────────────────────────────
+#
+# Add a section named after your agent category to override specific thresholds.
+# Any detector not listed here falls back to the "default" values above.
+#
+# Example: web-research agents legitimately call search multiple times,
+# so a higher tool_loop threshold reduces false positives.
+#
+# web-research:
+#   tool_loop:
+#     threshold: 5
+#   context_bloat:
+#     growth_factor: 4.0
+#
+# Example: coding agents accumulate large tool outputs (file reads, test output).
+#
+# coding:
+#   context_bloat:
+#     growth_factor: 5.0
+#     min_last_tokens: 4000
+#   step_count_inflation:
+#     inflation_factor: 1.5

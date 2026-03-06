@@ -1,15 +1,11 @@
 """
-services/alerts/app/formatters/slack.py
+services/alerts/alerts_svc/formatters/slack.py
 Converts an Explanation into a Slack Block Kit payload.
 """
 from __future__ import annotations
-import os, sys
+import os
 
-_SDK = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../packages/sdk-py"))
-if _SDK not in sys.path:
-    sys.path.insert(0, _SDK)
-
-from dunetrace.models import Explanation
+from explainer_svc.models import Explanation
 
 _SEVERITY_COLORS = {"CRITICAL": "#FF0000", "HIGH": "#FF6B00", "MEDIUM": "#FFB800", "LOW": "#36A64F"}
 _SEVERITY_EMOJI  = {"CRITICAL": ":red_circle:", "HIGH": ":large_orange_circle:", "MEDIUM": ":large_yellow_circle:", "LOW": ":white_circle:"}

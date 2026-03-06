@@ -26,19 +26,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 @pytest.fixture
 def mock_db(monkeypatch):
     """Patch all DB calls so tests run without Postgres."""
-    monkeypatch.setattr("app.db.postgres._pool", object())  # truthy non-None
-    monkeypatch.setattr("app.db.postgres.init_pool",    AsyncMock())
-    monkeypatch.setattr("app.db.postgres.close_pool",   AsyncMock())
-    monkeypatch.setattr("app.db.postgres.ensure_schema",AsyncMock())
-    monkeypatch.setattr("app.db.postgres.check_db",     AsyncMock(return_value="ok"))
-    monkeypatch.setattr("app.db.postgres.insert_events",AsyncMock(return_value=1))
-    monkeypatch.setattr("app.db.postgres.verify_api_key",
+    monkeypatch.setattr("ingest_svc.db.postgres._pool", object())  # truthy non-None
+    monkeypatch.setattr("ingest_svc.db.postgres.init_pool",    AsyncMock())
+    monkeypatch.setattr("ingest_svc.db.postgres.close_pool",   AsyncMock())
+    monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema",AsyncMock())
+    monkeypatch.setattr("ingest_svc.db.postgres.check_db",     AsyncMock(return_value="ok"))
+    monkeypatch.setattr("ingest_svc.db.postgres.insert_events",AsyncMock(return_value=1))
+    monkeypatch.setattr("ingest_svc.db.postgres.verify_api_key",
                         AsyncMock(return_value="agent-123"))
 
 
 @pytest.fixture
 async def client(mock_db):
-    from app.main import create_app
+    from ingest_svc.main import create_app
     application = create_app()
     async with AsyncClient(
         transport=ASGITransport(app=application),
@@ -222,13 +222,13 @@ class TestValidation:
 class TestAuth:
 
     async def test_invalid_key_returns_401(self, client, monkeypatch):
-        monkeypatch.setattr("app.db.postgres.verify_api_key",
+        monkeypatch.setattr("ingest_svc.db.postgres.verify_api_key",
                             AsyncMock(return_value=None))
         r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_bad"))
         assert r.status_code == 401
 
     async def test_401_has_detail(self, client, monkeypatch):
-        monkeypatch.setattr("app.db.postgres.verify_api_key",
+        monkeypatch.setattr("ingest_svc.db.postgres.verify_api_key",
                             AsyncMock(return_value=None))
         r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_bad"))
         assert "detail" in r.json()
@@ -254,7 +254,7 @@ class TestHealth:
         assert "db" in body
 
     async def test_db_status_reported(self, client, monkeypatch):
-        monkeypatch.setattr("app.routers.health.check_db",
+        monkeypatch.setattr("ingest_svc.routers.health.check_db",
                             AsyncMock(return_value="no_pool"))
         body = (await client.get("/health")).json()
         assert body["db"] == "no_pool"

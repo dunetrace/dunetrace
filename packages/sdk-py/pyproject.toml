@@ -1,12 +1,60 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dunetrace-sdk"
+name = "dunetrace"
 version = "0.1.0"
+description = "Behavioral observability for AI agents"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
+authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]
+keywords = ["ai", "agents", "observability", "llm", "monitoring"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+]
+
+# Zero required dependencies — the core SDK uses only the stdlib.
+dependencies = []
+
+[project.optional-dependencies]
+langchain = ["langchain>=0.1"]
+crewai    = ["crewai>=0.1"]
+openai    = ["openai>=1.0"]
+dev = [
+    "pytest>=7",
+    "pytest-cov",
+    "mypy",
+    "ruff",
+]
+
+[project.urls]
+Homepage    = "https://dunetrace.com"
+Repository  = "https://github.com/dunetrace/dunetrace-sdk"
+Issues      = "https://github.com/dunetrace/dunetrace-sdk/issues"
+Changelog   = "https://github.com/dunetrace/dunetrace-sdk/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where   = ["."]
 include = ["dunetrace*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict         = false
+ignore_missing_imports = true

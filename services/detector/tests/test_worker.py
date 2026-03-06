@@ -11,20 +11,13 @@ Run:
 from __future__ import annotations
 
 import asyncio
-import sys
-import os
 import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py")
-))
-
-from app.run_builder import build_run_state
+from detector_svc.run_builder import build_run_state
 from dunetrace.models import FailureType
-import app.worker  # must be imported before patch() can resolve "app.worker.*"
+import detector_svc.worker  # must be imported before patch() can resolve "detector_svc.worker.*"
 
 
 # ── Event factories ────────────────────────────────────────────────────────────
@@ -66,6 +59,10 @@ def run_completed(step: int = 10) -> dict:
 
 def llm_evt(step: int) -> dict:
     return evt("llm.called", step, {"model": "gpt-4o"})
+
+
+def llm_responded_evt(step: int, prompt_tokens: int = 500) -> dict:
+    return evt("llm.responded", step, {"prompt_tokens": prompt_tokens, "finish_reason": "stop"})
 
 
 # ── RunBuilder tests ───────────────────────────────────────────────────────────
@@ -219,8 +216,8 @@ class TestDetectorIntegrationViaRunBuilder(unittest.TestCase):
     def test_tool_avoidance_detected(self):
         events = [
             run_started(tools=["web_search"]),
-            llm_evt(1),
-            llm_evt(2),
+            llm_evt(1), llm_responded_evt(1),
+            llm_evt(2), llm_responded_evt(2),
             run_completed(3),
         ]
         signals = self._run(events)
@@ -299,10 +296,10 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
             written_shadow.append(shadow)
             return len(signals)
 
-        with patch("app.worker.fetch_run_events",   AsyncMock(return_value=events)), \
-             patch("app.worker.write_signals",       mock_write), \
-             patch("app.worker.mark_run_processed",  AsyncMock()):
-            from app.worker import process_run
+        with patch("detector_svc.worker.fetch_run_events",   AsyncMock(return_value=events)), \
+             patch("detector_svc.worker.write_signals",       mock_write), \
+             patch("detector_svc.worker.mark_run_processed",  AsyncMock()):
+            from detector_svc.worker import process_run
             count = await process_run("run-test-1", "agent-test", "abc1", "completed")
 
         self.assertGreater(count, 0)
@@ -325,11 +322,11 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
             captured_shadow.append(shadow)
             return len(signals)
 
-        with patch("app.worker.fetch_run_events",  AsyncMock(return_value=events)), \
-             patch("app.worker.write_signals",      mock_write), \
-             patch("app.worker.mark_run_processed", AsyncMock()), \
-             patch("app.worker.LIVE_DETECTORS",     set()):  # empty = all shadow
-            from app.worker import process_run
+        with patch("detector_svc.worker.fetch_run_events",  AsyncMock(return_value=events)), \
+             patch("detector_svc.worker.write_signals",      mock_write), \
+             patch("detector_svc.worker.mark_run_processed", AsyncMock()), \
+             patch("detector_svc.worker.LIVE_DETECTORS",     set()):  # empty = all shadow
+            from detector_svc.worker import process_run
             await process_run("run-1", "agent-1", "v1", "completed")
 
         self.assertTrue(all(s is True for s in captured_shadow),
@@ -339,10 +336,10 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         events = [run_started(tools=["web_search"]), tool_evt("web_search", 1), run_completed(2)]
         mark_mock = AsyncMock()
 
-        with patch("app.worker.fetch_run_events",  AsyncMock(return_value=events)), \
-             patch("app.worker.write_signals",      AsyncMock(return_value=0)), \
-             patch("app.worker.mark_run_processed", mark_mock):
-            from app.worker import process_run
+        with patch("detector_svc.worker.fetch_run_events",  AsyncMock(return_value=events)), \
+             patch("detector_svc.worker.write_signals",      AsyncMock(return_value=0)), \
+             patch("detector_svc.worker.mark_run_processed", mark_mock):
+            from detector_svc.worker import process_run
             await process_run("run-1", "agent-1", "v1", "completed")
 
         mark_mock.assert_called_once()
@@ -350,9 +347,9 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
     async def test_process_run_handles_empty_events_gracefully(self):
         mark_mock = AsyncMock()
 
-        with patch("app.worker.fetch_run_events",  AsyncMock(return_value=[])), \
-             patch("app.worker.mark_run_processed", mark_mock):
-            from app.worker import process_run
+        with patch("detector_svc.worker.fetch_run_events",  AsyncMock(return_value=[])), \
+             patch("detector_svc.worker.mark_run_processed", mark_mock):
+            from detector_svc.worker import process_run
             count = await process_run("run-empty", "a", "v", "completed")
 
         self.assertEqual(count, 0)
@@ -370,23 +367,23 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
             run_completed(2),
         ]
 
-        with patch("app.worker.fetch_completed_runs",
+        with patch("detector_svc.worker.fetch_completed_runs",
                    AsyncMock(return_value=completed)), \
-             patch("app.worker.fetch_stalled_runs",
+             patch("detector_svc.worker.fetch_stalled_runs",
                    AsyncMock(return_value=stalled)), \
-             patch("app.worker.fetch_run_events",
+             patch("detector_svc.worker.fetch_run_events",
                    AsyncMock(return_value=healthy_events)), \
-             patch("app.worker.write_signals",      AsyncMock(return_value=0)), \
-             patch("app.worker.mark_run_processed", AsyncMock()):
-            from app.worker import poll_once
+             patch("detector_svc.worker.write_signals",      AsyncMock(return_value=0)), \
+             patch("detector_svc.worker.mark_run_processed", AsyncMock()):
+            from detector_svc.worker import poll_once
             runs, signals = await poll_once()
 
         self.assertEqual(runs, 2)
 
     async def test_poll_once_returns_zero_when_no_work(self):
-        with patch("app.worker.fetch_completed_runs", AsyncMock(return_value=[])), \
-             patch("app.worker.fetch_stalled_runs",   AsyncMock(return_value=[])):
-            from app.worker import poll_once
+        with patch("detector_svc.worker.fetch_completed_runs", AsyncMock(return_value=[])), \
+             patch("detector_svc.worker.fetch_stalled_runs",   AsyncMock(return_value=[])):
+            from detector_svc.worker import poll_once
             runs, signals = await poll_once()
 
         self.assertEqual(runs, 0)

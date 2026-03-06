@@ -1,15 +1,172 @@
 # DuneTrace
 
-Production observability for AI agents. DuneTrace detects, explains, and alerts on agent failures in real-time — without sending raw prompts or outputs anywhere.
+Behavioral observability for AI agents. Detects tool loops, context bloat, prompt injection, and other failure patterns. Zero raw content transmitted.
 
-## What it does
+## Quickstart
 
-AI agents fail in ways that are invisible to traditional monitoring: tool loops, goal abandonment, prompt injection, RAG retrievals returning nothing, context bloat. DuneTrace instruments your agent, runs structural detectors on the event stream, and delivers actionable alerts with deterministic explanations and code fix suggestions.
+There are two parts:
+- **Backend** (clone + Docker) — runs the ingest API, detector, alerts worker, and dashboard API on your machine
+- **SDK** (pip install) — goes into your agent's Python environment to emit events to the backend
 
-- **Zero-overhead SDK** — ring buffer + background drain thread; your agent never blocks on I/O
-- **Content hashing** — only SHA-256 hashes of prompts/outputs leave your process
-- **Deterministic explanations** — no LLM calls in the pipeline; <1ms per explanation
-- **Shadow mode** — validate detector precision on real traffic before waking anyone up
+They can run on different machines. If you only want the SDK pointed at the cloud, skip the clone entirely.
+
+**1. Start the backend**
+
+```bash
+git clone https://github.com/dunetrace/dunetrace
+cd dunetrace
+cp .env.example .env
+docker compose up -d
+```
+
+- Ingest: http://localhost:8001
+- API + docs: http://localhost:8002/docs
+- Dashboard: open `dashboard/index.html` in your browser
+
+**2. Install the SDK** (in your agent's environment)
+
+```bash
+pip install dunetrace
+```
+
+**3. Instrument your agent**
+
+```python
+from dunetrace import Dunetrace
+
+dt = Dunetrace()  # points to localhost:8001
+
+with dt.run("my-agent") as run:
+    result = your_agent(user_input)
+```
+
+Runs appear in the dashboard immediately.
+
+## LangChain
+
+```bash
+pip install dunetrace[langchain]
+```
+
+```python
+from dunetrace import Dunetrace
+from dunetrace.integrations.langchain import DunetraceCallbackHandler
+
+dt = Dunetrace()
+
+agent_executor = AgentExecutor(
+    agent=agent, tools=tools,
+    callbacks=[DunetraceCallbackHandler(dt, agent_id="my-agent")],
+)
+```
+## Report events manually
+
+```python
+with dt.run("my-agent", user_input=user_input, model="gpt-4o", tools=["search"]) as run:
+    run.llm_called("gpt-4o", prompt_tokens=150)
+    run.llm_responded(finish_reason="tool_calls", latency_ms=320)
+
+    run.tool_called("search", {"query": user_input})
+    run.tool_responded("search", success=True, output_length=512)
+
+    run.llm_called("gpt-4o", prompt_tokens=480)
+    run.llm_responded(finish_reason="stop", output_length=120)
+    run.final_answer()
+
+dt.shutdown()
+```
+Manual reporting is the fallback until a native integration exists for your framework.
+
+
+## Dashboard
+
+Open `dashboard/index.html` directly in your browser.
+
+```bash
+open dashboard/index.html
+# or serve it:
+python -m http.server 3000 -d dashboard && open http://localhost:3000
+```
+
+The dashboard talks to the API at `http://localhost:8002`.
+
+
+**What you get today:**
+
+- **Agent list** — all instrumented agents, click to select
+- **Signals tab** — every detected failure grouped by run, with severity, detector name, confidence, and a plain-English explanation
+- **Runs tab** — list of runs for the selected agent with exit status and step count
+- **Run timeline** — per-run event-level view:
+  - Step-by-step event track (LLM calls, tool calls, run start/end/error)
+  - Duration strip — each step colored green → red by latency
+  - Token strip — prompt token growth plotted across steps
+  - Signal overlays — failure markers pinned to the step where they fired
+- **Insights tab** — cross-run analytics:
+  - Version comparison (signal rates across agent versions)
+  - Signal recurrence over the last 30 days
+  - Failure rate by input hash (recurring bad inputs)
+  - Steps-to-first-tool-call distribution
+
+## What it detects
+
+| Detector | What it catches | Severity |
+|---|---|---|
+| `TOOL_LOOP` | Same tool called ≥3× in a 5-step window | HIGH |
+| `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
+| `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
+| `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls | MEDIUM |
+| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
+| `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results but agent answered | MEDIUM |
+| `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
+| `CONTEXT_BLOAT` | Prompt tokens grow 3× from first to last LLM call | MEDIUM |
+| `SLOW_STEP` | Tool call >15s or LLM call >30s | MEDIUM/HIGH |
+| `RETRY_STORM` | Same tool fails 3+ times in a row | HIGH |
+| `EMPTY_LLM_RESPONSE` | Model returned zero-length output | HIGH |
+| `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent | MEDIUM |
+| `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
+| `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
+
+Detector thresholds are configurable — see `services/detector/detector_svc/detectors.py`.
+
+## What's supported now
+
+**SDK**
+- Python SDK — zero external dependencies, <1ms overhead, in-process ring buffer
+- LangChain callback handler (auto-instruments `AgentExecutor`)
+- Manual instrumentation API (`llm_called`, `tool_called`, `retrieval_called`, etc.)
+- All content SHA-256 hashed before leaving the process — no raw prompts or outputs transmitted
+
+**Detection (14 detectors)**
+- Tool behaviour: `TOOL_LOOP`, `TOOL_THRASHING`, `TOOL_AVOIDANCE`, `RETRY_STORM`, `CASCADING_TOOL_FAILURE`
+- LLM behaviour: `LLM_TRUNCATION_LOOP`, `CONTEXT_BLOAT`, `EMPTY_LLM_RESPONSE`, `GOAL_ABANDONMENT`
+- RAG: `RAG_EMPTY_RETRIEVAL`
+- Security: `PROMPT_INJECTION_SIGNAL`
+- Performance: `SLOW_STEP`
+- Run health: `FIRST_STEP_FAILURE`, `STEP_COUNT_INFLATION`
+- Configurable thresholds per agent category, provenance-commented tuning
+
+**Infrastructure**
+- Self-hosted Docker Compose stack (Postgres + ingest + detector + alerts + API)
+- Slack and webhook alerting
+- REST API with deterministic natural-language explanations for every signal
+- `AUTH_MODE=dev` (no key needed locally) and `AUTH_MODE=prod` for production
+
+## What's coming
+
+**SDK integrations**
+- OpenAI Agents SDK (in progress — `packages/sdk-py/dunetrace/integrations/openai.py`)
+- CrewAI (`packages/sdk-py/dunetrace/integrations/crewai.py`)
+- AutoGen, LlamaIndex, Haystack
+
+**Detection**
+- Cross-run baselines — `STEP_COUNT_INFLATION` and future detectors calibrate automatically from your own agent's history
+- Per-agent-category detector tuning
+- Tier 2 detectors: semantic drift, hallucination signal, plan–action mismatch
+
+**Platform**
+- Dashboard: filter runs by severity/date range, search by input hash
+- Admin API for API key provisioning (currently manual SQL)
+- Hosted cloud option (managed ingest, cross-run baselines, Slack/webhook) at dunetrace.com
 
 ## Architecture
 
@@ -18,149 +175,98 @@ Agent Code
   └─► Dunetrace SDK          (instrument runs, emit hashed events)
         └─► Ingest API        (POST /v1/ingest → Postgres)
               └─► Detector    (poll → reconstruct RunState → run detectors)
-                    └─► Alerts (poll → explain → format → Slack / webhook)
+                    └─► Alerts (poll → explain → Slack / webhook)
                           └─► Customer API  (query runs, signals, explanations)
 ```
-
-**Services**
 
 | Service | Port | Purpose |
 |---|---|---|
 | `services/ingest` | 8001 | Accept SDK events |
-| `services/detector` | — | Tier 1 detection worker |
-| `services/explainer` | — | Deterministic explanation templates |
+| `services/detector` | — | Detection worker |
+| `services/explainer` | — | Deterministic explanation library |
 | `services/alerts` | — | Slack / webhook delivery |
-| `services/api` | 8002 | Customer REST API |
+| `services/api` | 8002 | REST API |
 
-**SDK** lives in `packages/sdk-py`. The dashboard UI is in `packages/dashboard-ui`.
+## Tuning detectors
 
-## Tier 1 Detectors
+Edit `detectors.yml` in the repo root — no code change or rebuild needed:
 
-| Detector | What it catches |
-|---|---|
-| `TOOL_LOOP` | Same tool called ≥3× in a 5-step window |
-| `TOOL_THRASHING` | Agent alternates between exactly two tools |
-| `TOOL_AVOIDANCE` | Final answer given without calling available tools |
-| `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls |
-| `PROMPT_INJECTION` | Pattern-matched injection signatures in inputs |
-| `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results but agent answered |
-| `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times |
-| `CONTEXT_BLOAT` | Prompt tokens grow 3× from first to last LLM call |
+```yaml
+default:
+  tool_loop:
+    threshold: 2        # lower = catch loops sooner
+  context_bloat:
+    growth_factor: 4.0  # raise for agents that intentionally accumulate context
+```
 
-## Quick Start (Docker)
+Restart the detector to apply:
 
 ```bash
-cp .env.example .env
-# Optionally add SLACK_WEBHOOK_URL to .env for real alerts
-docker compose up -d
+docker compose restart detector
 ```
 
-- Ingest API: http://localhost:8001
-- Customer API: http://localhost:8002
-- API docs: http://localhost:8002/docs
-- Dashboard: open `packages/dashboard-ui/index.html` in a browser
+Per-agent-category overrides are supported — a named section inherits from `default` and overrides only what you specify:
 
-## SDK Usage
-
-```python
-from dunetrace import Dunetrace
-
-dt = Dunetrace(api_key="dt_dev_local", endpoint="http://localhost:8001")
-
-with dt.run(user_input="Find top 3 Python repos", agent_id="my-agent") as run:
-    run.llm_called(model="gpt-4o", prompt="...", tools=["search"])
-    run.tool_called("search", {"q": "python repos"})
-    run.tool_responded("search", result="...", result_count=10)
-    run.llm_responded(output="Here are the top 3...", finish_reason="stop", tokens=250)
-    run.final_answer("Here are the top 3 Python repos...")
+```yaml
+web-research:
+  tool_loop:
+    threshold: 5    # search agents legitimately repeat queries across pages
 ```
 
-### LangChain
+All thresholds and their defaults are documented in `detectors.yml`.
 
-```python
-from dunetrace.adapters.langchain import DunetraceCallback
-
-callback = DunetraceCallback(
-    client=dt,
-    system_prompt=SYSTEM_PROMPT,
-    model="gpt-4o",
-    tools=["search", "calculator"],
-)
-
-agent.invoke({"input": "..."}, config={"callbacks": [callback]})
-```
-
-See `packages/sdk-py/examples/` for full demos.
-
-## Local Development
+## Running tests
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Run services individually:
-
-```bash
-# Ingest API
-cd services/ingest && uvicorn app.main:app --reload --port 8001
+# Explainer
+PYTHONPATH=packages/sdk-py:services/explainer pytest services/explainer/tests/ -v
 
 # Detector worker
-cd services/detector && python -m app.worker
+PYTHONPATH=packages/sdk-py:services/detector pytest services/detector/tests/ -v
 
 # Alerts worker
-cd services/alerts && python -m alerts_svc.worker
+PYTHONPATH=packages/sdk-py:services/explainer:services/alerts pytest services/alerts/tests/ -v
 
-# Customer API
-cd services/api && uvicorn api_svc.main:app --reload --port 8002
-```
-
-## Tests
-
-```bash
-source .venv/bin/activate
-
-# SDK detectors
-PYTHONPATH=packages/sdk-py python -m unittest discover -s packages/sdk-py/tests -p "test_detectors.py" -v
-
-# Explainer templates
-PYTHONPATH=packages/sdk-py:services/explainer python -m unittest discover -s services/explainer/tests -p "test_explainer.py" -v
-
-# Detector worker
-PYTHONPATH=packages/sdk-py:services/detector python -m unittest discover -s services/detector/tests -p "test_worker.py" -v
-
-# Alerts worker
-PYTHONPATH=packages/sdk-py:services/explainer:services/alerts python -m unittest discover -s services/alerts/tests -p "test_alerts.py" -v
-
-# Customer API
-PYTHONPATH=packages/sdk-py:services/explainer:services/api python -m unittest discover -s services/api/tests -p "test_api.py" -v
+# API
+PYTHONPATH=packages/sdk-py:services/explainer:services/api pytest services/api/tests/ -v
 ```
 
 ## Configuration
 
-All configuration is via environment variables. Copy `.env.example` to `.env` to get started.
+Copy `.env.example` to `.env`. `AUTH_MODE=dev` is the default in `docker-compose.yml` — no API key needed locally.
 
-See [`docs/07-alerts.md`](docs/07-alerts.md) for Slack and webhook setup, and [`docs/shadow-mode.md`](docs/shadow-mode.md) for how to graduate detectors from shadow to live.
+For production, set `AUTH_MODE=prod` and provision API keys via:
 
-## Documentation
-
-Full docs are in [`docs/`](docs/):
-
-- [Introduction](docs/01-introduction.md)
-- [Core Concepts](docs/02-core-concepts.md)
-- [Architecture](docs/03-architecture.md)
-- [SDK Reference](docs/04-sdk-reference.md)
-- [Detectors](docs/05-detectors.md)
-- [Tracing](docs/06-tracing.md)
-- [Alerts](docs/07-alerts.md)
-- [API Reference](docs/08-api-reference.md)
-- [Dashboard](docs/09-dashboard.md)
-- [Getting Started](docs/10-getting-started.md)
-- [Shadow Mode](docs/shadow-mode.md)
-- [FAQ](docs/11-faq.md)
+```sql
+INSERT INTO api_keys (key, agent_id, customer_id)
+VALUES ('dt_live_...', 'their-agent', 'their-org');
+```
 
 ## Requirements
 
 - Python 3.12+
-- PostgreSQL 16+
-- Docker + Docker Compose (for the full stack)
+- PostgreSQL 16+ (included in Docker Compose)
+- Docker + Docker Compose
+
+## If this helps you
+
+If DuneTrace saves you debugging time, a GitHub star goes a long way — it helps others find the project.
+
+## Contributing
+
+Contributions are welcome. To get started:
+
+1. Fork the repo and create a branch
+2. Make your changes i.e add tests for new detectors or SDK behaviour
+3. Run the relevant test suite (see [Running tests](#running-tests))
+4. Open a pull request with a clear description of what and why
+
+For larger changes (new detectors, architecture changes), open an issue first to discuss the approach.
+
+## Contact
+
+Questions, feedback, or just want to say hi — [dunetrace@gmail.com](mailto:dunetrace@gmail.com)
+
+## License
+
+MIT

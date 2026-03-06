@@ -21,8 +21,8 @@ sys.path.insert(0, os.path.abspath(
 ))
 
 from dunetrace.models import FailureSignal, FailureType, Severity
-from app.explainer import explain
-from app.models import Explanation, CodeFix
+from explainer_svc.explainer import explain
+from explainer_svc.models import Explanation, CodeFix
 
 
 # ── Factories ──────────────────────────────────────────────────────────────────

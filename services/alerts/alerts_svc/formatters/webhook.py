@@ -1,15 +1,11 @@
 """
-services/alerts/app/formatters/webhook.py
+services/alerts/alerts_svc/formatters/webhook.py
 Signed JSON payload for generic webhooks.
 """
 from __future__ import annotations
-import hashlib, hmac, json, os, sys, time
+import hashlib, hmac, json, os, time
 
-_SDK = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../packages/sdk-py"))
-if _SDK not in sys.path:
-    sys.path.insert(0, _SDK)
-
-from dunetrace.models import Explanation
+from explainer_svc.models import Explanation
 
 
 def format_webhook(explanation: Explanation) -> dict:
