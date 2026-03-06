@@ -14,15 +14,16 @@ from __future__ import annotations
 
 import os
 
+from langchain import hub
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain.tools import Tool
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_openai import ChatOpenAI
+
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
 
 dt = Dunetrace(endpoint=os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8001"))
-
-from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain.tools import Tool
-from langchain import hub
 
 SYSTEM_PROMPT = (
     "You are a research assistant. "
@@ -36,7 +37,6 @@ llm = ChatOpenAI(
     openai_api_key=os.environ["OPENAI_API_KEY"],
 )
 
-from langchain_community.tools import DuckDuckGoSearchRun
 search = DuckDuckGoSearchRun()
 
 tools = [

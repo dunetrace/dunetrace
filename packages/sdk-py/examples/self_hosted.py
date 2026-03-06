@@ -1,20 +1,18 @@
 """
 examples/self_hosted.py
 
-Run Dunetrace detectors entirely in-process — no cloud API, no network.
+Run Dunetrace detectors entirely in-process — no network required.
 All detection happens locally; nothing leaves your infrastructure.
 
 Use this when:
-  - You're evaluating the SDK and don't have an API key yet
   - You need air-gapped operation
   - You want to run detectors as a library in your own pipeline
 
-See docs/self-hosted.md for running the full self-hosted stack
-(ingest + detector + explainer) with Docker Compose.
+To run the full self-hosted stack (ingest + detector + alerts) with Docker Compose,
+see the README at https://github.com/dunetrace/dunetrace
 """
 from dunetrace import Dunetrace
 from dunetrace.detectors import run_detectors, PROMPT_INJECTION_DETECTOR
-from dunetrace.models import FailureType
 
 dt = Dunetrace(endpoint="http://localhost:8001")
 
