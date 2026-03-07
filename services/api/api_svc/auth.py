@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, Header, status
 
+from api_svc.config import settings
 from api_svc.db.queries import verify_api_key
 
 
@@ -19,8 +20,12 @@ async def require_customer(
     FastAPI dependency: extract API key from Authorization header and verify.
     Returns customer_id if valid, raises 401 if not.
 
+    In dev mode (AUTH_MODE=dev), auth is skipped entirely.
     Header format: "Bearer dt_live_..." or "dt_dev_..."
     """
+    if settings.is_dev:
+        return "dev_customer"
+
     if not authorization:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

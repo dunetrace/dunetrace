@@ -4,7 +4,7 @@ examples/langchain_agent.py
 LangChain agent instrumented with Dunetrace. One callback, zero agent changes.
 
 Install:
-    pip install 'dunetrace[langchain]' langchain-openai langchain-community
+    pip install 'dunetrace[langchain]' langchain-openai
 
 Run:
     OPENAI_API_KEY=sk-... python examples/langchain_agent.py
@@ -13,11 +13,11 @@ Run:
 from __future__ import annotations
 
 import os
+import time
 
-from langchain import hub
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain.tools import Tool
-from langchain_community.tools import DuckDuckGoSearchRun
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain.tools import tool
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 
 from dunetrace import Dunetrace
@@ -37,27 +37,43 @@ llm = ChatOpenAI(
     openai_api_key=os.environ["OPENAI_API_KEY"],
 )
 
-search = DuckDuckGoSearchRun()
 
-tools = [
-    Tool(name="web_search", func=search.run,
-         description="Search the web. Input: a search query string."),
-    Tool(name="calculator",
-         func=lambda x: str(eval(x)),  # noqa: S307 — demo only, do not use eval in production
-         description="Evaluate a math expression. Input: a valid Python expression."),
-]
-tool_names = [t.name for t in tools]
+@tool
+def web_search(query: str) -> str:
+    """Search the web for information on a topic."""
+    time.sleep(0.3)
+    return f"Search results for '{query}': Found relevant information about {query}. This is a simulated result."
+
+
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate a math expression. Input: a valid Python arithmetic expression."""
+    try:
+        allowed = set("0123456789+-*/()., ")
+        if all(c in allowed for c in expression):
+            return f"{expression} = {eval(expression)}"  # noqa: S307
+        return f"Cannot evaluate '{expression}' — only basic arithmetic supported."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+tools = [web_search, calculator]
 
 callback = DunetraceCallbackHandler(
     dt,
     agent_id="langchain-example-agent",
     system_prompt=SYSTEM_PROMPT,
     model="gpt-4o-mini",
-    tools=tool_names,
+    tools=[t.name for t in tools],
 )
 
-prompt = hub.pull("hwchase17/react")
-agent  = create_react_agent(llm, tools, prompt)
+prompt = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT),
+    ("human", "{input}"),
+    MessagesPlaceholder("agent_scratchpad"),
+])
+
+agent = create_openai_tools_agent(llm, tools, prompt)
 agent_executor = AgentExecutor(
     agent=agent,
     tools=tools,
@@ -81,7 +97,7 @@ def run(scenario: str = "normal") -> None:
     print(f"\nScenario: {scenario}")
     print(f"Query: {query}\n")
     try:
-        result = agent_executor.invoke({"input": query}, config={"callbacks": [callback]})
+        result = agent_executor.invoke({"input": query})
         print(f"\nAnswer: {result['output']}")
     except Exception as e:
         print(f"Error: {e}")

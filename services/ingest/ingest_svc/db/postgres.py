@@ -162,7 +162,7 @@ async def verify_api_key(api_key: str) -> Optional[str]:
     Dev mode:  any dt_dev_* key is accepted immediately.
     Prod mode: checks the api_keys table.
     """
-    if settings.is_dev and api_key.startswith("dt_dev_"):
+    if settings.is_dev and (not api_key or api_key.startswith("dt_dev_")):
         return "dev"
 
     if not _pool:

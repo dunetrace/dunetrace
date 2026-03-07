@@ -8,7 +8,7 @@ There are two parts:
 - **Backend** (clone + Docker) — runs the ingest API, detector, alerts worker, and dashboard API on your machine
 - **SDK** (pip install) — goes into your agent's Python environment to emit events to the backend
 
-They can run on different machines. If you only want the SDK pointed at the cloud, skip the clone entirely.
+They can run on different machines — the SDK just needs the ingest endpoint to be reachable.
 
 **1. Start the backend**
 
@@ -16,12 +16,13 @@ They can run on different machines. If you only want the SDK pointed at the clou
 git clone https://github.com/dunetrace/dunetrace
 cd dunetrace
 cp .env.example .env
+docker compose build
 docker compose up -d
 ```
 
 - Ingest: http://localhost:8001
 - API + docs: http://localhost:8002/docs
-- Dashboard: open `dashboard/index.html` in your browser
+- Dashboard: http://localhost:3000 (see below)
 
 **2. Install the SDK** (in your agent's environment)
 
@@ -36,7 +37,8 @@ from dunetrace import Dunetrace
 
 dt = Dunetrace()  # points to localhost:8001
 
-with dt.run("my-agent") as run:
+# agent_id groups all runs from this agent in the dashboard
+with dt.run("my-agent", user_input=user_input) as run:
     result = your_agent(user_input)
 ```
 
@@ -80,12 +82,11 @@ Manual reporting is the fallback until a native integration exists for your fram
 
 ## Dashboard
 
-Open `dashboard/index.html` directly in your browser.
+The dashboard must be served over HTTP (opening `file://` directly blocks JS module loading).
 
 ```bash
-open dashboard/index.html
-# or serve it:
-python -m http.server 3000 -d dashboard && open http://localhost:3000
+python -m http.server 3000 -d dashboard
+# then open http://localhost:3000
 ```
 
 The dashboard talks to the API at `http://localhost:8002`.
@@ -143,7 +144,7 @@ Detector thresholds are configurable — see `services/detector/detector_svc/det
 - Security: `PROMPT_INJECTION_SIGNAL`
 - Performance: `SLOW_STEP`
 - Run health: `FIRST_STEP_FAILURE`, `STEP_COUNT_INFLATION`
-- Configurable thresholds per agent category, provenance-commented tuning
+- Configurable thresholds per agent category via `detectors.yml`
 
 **Infrastructure**
 - Self-hosted Docker Compose stack (Postgres + ingest + detector + alerts + API)
@@ -154,9 +155,8 @@ Detector thresholds are configurable — see `services/detector/detector_svc/det
 ## What's coming
 
 **SDK integrations**
-- OpenAI Agents SDK (in progress — `packages/sdk-py/dunetrace/integrations/openai.py`)
-- CrewAI (`packages/sdk-py/dunetrace/integrations/crewai.py`)
-- AutoGen, LlamaIndex, Haystack
+- OpenAI Agents SDK
+- CrewAI, AutoGen, LlamaIndex, Haystack
 
 **Detection**
 - Cross-run baselines — `STEP_COUNT_INFLATION` and future detectors calibrate automatically from your own agent's history
@@ -244,7 +244,7 @@ VALUES ('dt_live_...', 'their-agent', 'their-org');
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.11+
 - PostgreSQL 16+ (included in Docker Compose)
 - Docker + Docker Compose
 
