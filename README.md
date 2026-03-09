@@ -89,25 +89,31 @@ python -m http.server 3000 -d dashboard
 
 The dashboard fetches live data from the API at `http://localhost:8002` and auto-refreshes every 10 seconds.
 
+![Dashboard overview](dashboard.png)
+
+Click any run to open the detail panel and get metrics, detected signals with fix suggestions, and a step-by-step timeline.
+
+![Run detail panel](agentRun_detail.png)
+
 ## What it detects
 
 | Detector | What it catches | Severity |
 |---|---|---|
-| `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
-| `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
+| `SLOW_STEP` | Tool call >15s or LLM call >30s | MEDIUM/HIGH |
 | `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
 | `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
-| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance score <0.3, but agent answered | MEDIUM |
-| `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
 | `CONTEXT_BLOAT` | Prompt tokens grow 3× from first to last LLM call | MEDIUM |
-| `SLOW_STEP` | Tool call >15s or LLM call >30s | MEDIUM/HIGH |
-| `RETRY_STORM` | Same tool fails 3+ times in a row | HIGH |
-| `EMPTY_LLM_RESPONSE` | Model returned zero-length output with `finish_reason=stop` | HIGH |
 | `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent | MEDIUM |
-| `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
 | `REASONING_STALL` | LLM:tool-call ratio ≥4× — agent reasoning without acting | MEDIUM |
+| `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
+| `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
+| `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
+| `RETRY_STORM` | Same tool fails 3+ times in a row | HIGH |
+| `EMPTY_LLM_RESPONSE` | Model returned zero-length output with `finish_reason=stop` | HIGH |
+| `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
+| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
 
 Detector thresholds are configurable per-instance. See `packages/sdk-py/dunetrace/detectors.py`.
 
