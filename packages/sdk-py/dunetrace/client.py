@@ -16,6 +16,7 @@ from threading import Event, Thread
 from typing import List, Optional
 
 from dunetrace.buffer import RingBuffer
+from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
 from dunetrace.models import AgentEvent, EventType, hash_content, agent_version
 from dunetrace.run_context import RunContext
 
@@ -99,6 +100,22 @@ class Dunetrace:
             parent_run_id=parent_run_id,
         )
 
+        # Run injection check on raw input before it is hashed and discarded.
+        # Evidence (matched pattern names + count) is safe to transmit — no raw text.
+        _injection_evidence = None
+        if user_input:
+            _sig = PROMPT_INJECTION_DETECTOR.check_input(user_input, ctx.state)
+            if _sig:
+                _injection_evidence = _sig.evidence
+
+        payload: dict = {
+            "input_hash": hash_content(user_input) if user_input else "",
+            "model":      model,
+            "tools":      tools,
+        }
+        if _injection_evidence:
+            payload["injection_signal"] = _injection_evidence
+
         self._emit(AgentEvent(
             event_type=EventType.RUN_STARTED,
             run_id=ctx.run_id,
@@ -106,11 +123,7 @@ class Dunetrace:
             agent_version=version,
             step_index=0,
             parent_run_id=parent_run_id,
-            payload={
-                "input_hash": hash_content(user_input) if user_input else "",
-                "model":      model,
-                "tools":      tools,
-            },
+            payload=payload,
         ))
 
         try:

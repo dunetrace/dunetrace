@@ -82,6 +82,7 @@ END $$;
 # Add a detector name here ONLY after verifying precision > 80% on real data.
 #LIVE_DETECTORS: set[str] = set()  # empty until we validate on real traffic
 LIVE_DETECTORS: set[str] = {
+    "PROMPT_INJECTION_SIGNAL",
     "TOOL_LOOP",
     "TOOL_THRASHING",
     "TOOL_AVOIDANCE",

@@ -13,7 +13,6 @@ from dunetrace.detectors import (
     ToolLoopDetector,
     ToolThrashingDetector,
     ToolAvoidanceDetector,
-    GoalAbandonmentDetector,
     PromptInjectionDetector,
     RagEmptyRetrievalDetector,
 )

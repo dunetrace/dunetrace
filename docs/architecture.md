@@ -38,7 +38,7 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 │  Reconstructs       │  writes      │  Fetches unalerted      │
 │  RunState from      │ ──────────▶  │  shadow=FALSE signals   │
 │  events             │  signals     │  → explain()            │
-│  Runs 6 detectors   │              │  → format Slack/webhook │
+│  Runs 14 detectors  │              │  → format Slack/webhook │
 │  Writes signals     │              │  → HTTP POST with retry │
 └─────────────────────┘              └─────────────────────────┘
 
@@ -73,10 +73,10 @@ The entry point for all SDK traffic. Its only job is to accept events as fast as
 
 A background polling loop that runs every 5 seconds. It is the only process that runs detection logic.
 
-1. Fetches runs completed since last poll (from `events` table, looking for `run.completed` or `run.errored`)
+1. Fetches runs completed since last poll (terminal events `run.completed` or `run.errored`) plus any runs that have stalled (no new events for `STALL_TIMEOUT_SECS`)
 2. Checks `processed_runs` to skip already-processed runs
 3. Reconstructs `RunState` by fetching and replaying all events for each run
-4. Runs all 6 Tier 1 detectors against the `RunState`
+4. Runs all 14 Tier 1 detectors against the `RunState`
 5. Writes any `FailureSignal` rows to Postgres
 6. Marks the run as processed
 
@@ -160,9 +160,9 @@ CREATE TABLE processed_runs (
     run_id         TEXT PRIMARY KEY,
     agent_id       TEXT        NOT NULL,
     agent_version  TEXT        NOT NULL,
-    trigger        TEXT        NOT NULL,   -- "completed" | "errored" | "stalled"
+    processed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     signal_count   INTEGER     NOT NULL DEFAULT 0,
-    processed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    trigger        TEXT        NOT NULL   -- "completed" | "errored" | "stalled"
 );
 
 -- API key → customer mapping

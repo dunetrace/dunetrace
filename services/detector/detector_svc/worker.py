@@ -13,6 +13,7 @@ import asyncio
 import logging
 
 from dunetrace.detectors import run_detectors
+from dunetrace.models import FailureSignal, FailureType, Severity
 from detector_svc.detectors import get_detectors
 
 from detector_svc.config import settings
@@ -37,6 +38,29 @@ logging.basicConfig(
 logger = logging.getLogger("dunetrace.detector")
 
 
+def _injection_signal_from_events(events: list[dict], run_id: str, agent_id: str, agent_version: str):
+    """
+    Prompt injection is detected in the SDK on raw input before hashing.
+    Evidence is embedded in the run.started payload as 'injection_signal'.
+    Extract it here and materialise a FailureSignal.
+    """
+    for e in events:
+        if e["event_type"] == "run.started":
+            evidence = e.get("payload", {}).get("injection_signal")
+            if evidence:
+                return FailureSignal(
+                    failure_type=FailureType.PROMPT_INJECTION_SIGNAL,
+                    severity=Severity.CRITICAL,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    agent_version=agent_version,
+                    step_index=0,
+                    confidence=0.85,
+                    evidence=evidence,
+                )
+    return None
+
+
 async def process_run(
     run_id: str,
     agent_id: str,
@@ -54,6 +78,9 @@ async def process_run(
             agent_id, agent_version, run_id
         )
         signals = run_detectors(state, detectors=get_detectors())
+        inj = _injection_signal_from_events(events, run_id, agent_id, agent_version)
+        if inj:
+            signals.append(inj)
     except Exception as exc:
         logger.error("Run processing failed. run_id=%s err=%s", run_id, exc)
         await mark_run_processed(run_id, agent_id, agent_version, trigger, 0)
