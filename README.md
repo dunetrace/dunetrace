@@ -187,6 +187,35 @@ Agent Code
 | `services/alerts` | — | Slack / webhook delivery |
 | `services/api` | 8002 | REST API |
 
+## Slack alerts
+
+Add these lines to your `.env` to enable Slack notifications:
+
+```bash
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz
+SLACK_CHANNEL=#agent-alerts
+SLACK_MIN_SEVERITY=HIGH   # LOW | MEDIUM | HIGH | CRITICAL
+```
+
+Get a webhook URL from [api.slack.com/messaging/webhooks](https://api.slack.com/messaging/webhooks).
+
+Restart the alerts worker to pick up the change:
+
+```bash
+docker compose restart alerts
+```
+
+The alerts worker sends a message to Slack for every detected signal at or above `SLACK_MIN_SEVERITY`. Each message includes the agent ID, run ID, detector name, severity, confidence, and a plain-English explanation.
+
+**Generic webhook** (PagerDuty, Linear, custom endpoints):
+
+```bash
+WEBHOOK_URL=https://your-endpoint.example.com/alerts
+WEBHOOK_SECRET=your-hmac-secret   # optional — enables HMAC-SHA256 signature header
+```
+
+Both destinations can be active at the same time. Leave a variable blank to disable that destination.
+
 ## Tuning detectors
 
 Edit `detectors.yml` in the repo root — no code change or rebuild needed:
