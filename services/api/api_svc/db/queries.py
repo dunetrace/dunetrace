@@ -237,8 +237,14 @@ async def list_runs(
                 pr.agent_version,
                 pr.trigger                                              AS exit_reason,
                 pr.processed_at,
-                -- started_at from first event
-                (SELECT MIN(e.received_at) FROM events e WHERE e.run_id = pr.run_id) AS started_at,
+                -- started_at from SDK timestamp on run.started event
+                (SELECT e.timestamp FROM events e
+                 WHERE e.run_id = pr.run_id AND e.event_type = 'run.started'
+                 LIMIT 1) AS started_at,
+                -- completed_at from SDK timestamp on terminal event
+                (SELECT e.timestamp FROM events e
+                 WHERE e.run_id = pr.run_id AND e.event_type IN ('run.completed', 'run.errored')
+                 LIMIT 1) AS completed_at,
                 -- step_count
                 (SELECT MAX(e.step_index) + 1 FROM events e WHERE e.run_id = pr.run_id) AS step_count,
                 -- live signal count
@@ -291,10 +297,12 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
             run_id,
         )
 
-    started_at = events[0]["timestamp"] if events else None
-    completed_at = dict(pr)["processed_at"]
-    if hasattr(completed_at, "timestamp"):
-        completed_at = completed_at.timestamp()
+    started_at = next(
+        (e["timestamp"] for e in events if e["event_type"] == "run.started"), None
+    )
+    completed_at = next(
+        (e["timestamp"] for e in events if e["event_type"] in ("run.completed", "run.errored")), None
+    )
 
     # Build event list
     event_list = []

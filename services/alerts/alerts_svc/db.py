@@ -54,7 +54,7 @@ async def fetch_unalerted_signals(limit: int = 50) -> list[dict[str, Any]]:
                 detected_at
             FROM failure_signals
             WHERE alerted = FALSE
-              AND COALESCE(shadow, TRUE) = FALSE
+              AND COALESCE(], TRUE) = FALSE
             ORDER BY detected_at ASC
             LIMIT $1
             """,

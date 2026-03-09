@@ -5,10 +5,10 @@ Behavioral observability for AI agents. Detects tool loops, context bloat, promp
 ## Quickstart
 
 There are two parts:
-- **Backend** (clone + Docker) — runs the ingest API, detector, alerts worker, and dashboard API on your machine
-- **SDK** (pip install) — goes into your agent's Python environment to emit events to the backend
+- **Backend** (clone + Docker) : runs the ingest API, detector, alerts worker, and dashboard API on your machine
+- **SDK** (pip install) : goes into your agent's Python environment to emit events to the backend
 
-They can run on different machines — the SDK just needs the ingest endpoint to be reachable.
+They can run on different machines i.e. the SDK just needs the ingest endpoint to be reachable.
 
 **1. Start the backend**
 
@@ -20,9 +20,9 @@ docker compose build
 docker compose up -d
 ```
 
-- Ingest: http://localhost:8001
+- Ingest: http://localhost:8001 (SDK POST endpoint)
 - API + docs: http://localhost:8002/docs
-- Dashboard: http://localhost:3000 (see below)
+- Dashboard: http://localhost:3000
 
 **2. Install the SDK** (in your agent's environment)
 
@@ -82,31 +82,12 @@ Manual reporting is the fallback until a native integration exists for your fram
 
 ## Dashboard
 
-The dashboard must be served over HTTP (opening `file://` directly blocks JS module loading).
-
 ```bash
 python -m http.server 3000 -d dashboard
 # then open http://localhost:3000
 ```
 
-The dashboard talks to the API at `http://localhost:8002`.
-
-
-**What you get today:**
-
-- **Agent list** — all instrumented agents, click to select
-- **Signals tab** — every detected failure grouped by run, with severity, detector name, confidence, and a plain-English explanation
-- **Runs tab** — list of runs for the selected agent with exit status and step count
-- **Run timeline** — per-run event-level view:
-  - Step-by-step event track (LLM calls, tool calls, run start/end/error)
-  - Duration strip — each step colored green → red by latency
-  - Token strip — prompt token growth plotted across steps
-  - Signal overlays — failure markers pinned to the step where they fired
-- **Insights tab** — cross-run analytics:
-  - Version comparison (signal rates across agent versions)
-  - Signal recurrence over the last 30 days
-  - Failure rate by input hash (recurring bad inputs)
-  - Steps-to-first-tool-call distribution
+The dashboard fetches live data from the API at `http://localhost:8002` and auto-refreshes every 10 seconds.
 
 ## What it detects
 
@@ -127,15 +108,15 @@ The dashboard talks to the API at `http://localhost:8002`.
 | `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
 
-Detector thresholds are configurable — see `services/detector/detector_svc/detectors.py`.
+Detector thresholds are configurable. See `detectors.yml` in the repo root.
 
 ## What's supported now
 
 **SDK**
-- Python SDK — zero external dependencies, <1ms overhead, in-process ring buffer
+- Python SDK :  zero external dependencies, <1ms overhead, in-process ring buffer
 - LangChain callback handler (auto-instruments `AgentExecutor`)
 - Manual instrumentation API (`llm_called`, `tool_called`, `retrieval_called`, etc.)
-- All content SHA-256 hashed before leaving the process — no raw prompts or outputs transmitted
+- All content SHA-256 hashed before leaving the process i.e. no raw prompts or outputs transmitted
 
 **Detection (14 detectors)**
 - Tool behaviour: `TOOL_LOOP`, `TOOL_THRASHING`, `TOOL_AVOIDANCE`, `RETRY_STORM`, `CASCADING_TOOL_FAILURE`
@@ -159,14 +140,11 @@ Detector thresholds are configurable — see `services/detector/detector_svc/det
 - CrewAI, AutoGen, LlamaIndex, Haystack
 
 **Detection**
-- Cross-run baselines — `STEP_COUNT_INFLATION` and future detectors calibrate automatically from your own agent's history
 - Per-agent-category detector tuning
 - Tier 2 detectors: semantic drift, hallucination signal, plan–action mismatch
 
 **Platform**
 - Dashboard: filter runs by severity/date range, search by input hash
-- Admin API for API key provisioning (currently manual SQL)
-- Hosted cloud option (managed ingest, cross-run baselines, Slack/webhook) at dunetrace.com
 
 ## Architecture
 
@@ -205,7 +183,26 @@ Restart the alerts worker to pick up the change:
 docker compose restart alerts
 ```
 
-The alerts worker sends a message to Slack for every detected signal at or above `SLACK_MIN_SEVERITY`. Each message includes the agent ID, run ID, detector name, severity, confidence, and a plain-English explanation.
+The alerts worker sends a message to Slack for every detected signal at or above `SLACK_MIN_SEVERITY`. 
+
+**Shadow mode:** each signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`. Whether a signal is shadow or live is decided at detection time based on `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`.
+
+All 14 built-in detectors are live (`shadow = false`) by default i.e. no action needed. If you write a custom detector, it starts in shadow mode (stored in the DB, visible in the API, but never alerted) until you add its name to `LIVE_DETECTORS`:
+
+```python
+# services/detector/detector_svc/db.py
+LIVE_DETECTORS: set[str] = {
+    "TOOL_LOOP",
+    "YOUR_NEW_DETECTOR",   # add here once precision > 80%
+    ...
+}
+```
+
+After editing, rebuild and restart the detector:
+
+```bash
+docker compose build detector && docker compose restart detector
+```
 
 **Generic webhook** (PagerDuty, Linear, custom endpoints):
 
@@ -218,7 +215,7 @@ Both destinations can be active at the same time. Leave a variable blank to disa
 
 ## Tuning detectors
 
-Edit `detectors.yml` in the repo root — no code change or rebuild needed:
+Edit `detectors.yml` in the repo root. No code change or rebuild needed:
 
 ```yaml
 default:
@@ -234,7 +231,7 @@ Restart the detector to apply:
 docker compose restart detector
 ```
 
-Per-agent-category overrides are supported — a named section inherits from `default` and overrides only what you specify:
+Per-agent-category overrides are supported i.e. a named section inherits from `default` and overrides only what you specify:
 
 ```yaml
 web-research:
@@ -260,17 +257,6 @@ PYTHONPATH=packages/sdk-py:services/explainer:services/alerts pytest services/al
 PYTHONPATH=packages/sdk-py:services/explainer:services/api pytest services/api/tests/ -v
 ```
 
-## Configuration
-
-Copy `.env.example` to `.env`. `AUTH_MODE=dev` is the default in `docker-compose.yml` — no API key needed locally.
-
-For production, set `AUTH_MODE=prod` and provision API keys via:
-
-```sql
-INSERT INTO api_keys (key, agent_id, customer_id)
-VALUES ('dt_live_...', 'their-agent', 'their-org');
-```
-
 ## Requirements
 
 - Python 3.11+
@@ -279,14 +265,14 @@ VALUES ('dt_live_...', 'their-agent', 'their-org');
 
 ## If this helps you
 
-If DuneTrace saves you debugging time, a GitHub star goes a long way — it helps others find the project.
+If DuneTrace saves you debugging time, a GitHub star (⭐) goes a long way and it helps others find the project.
 
 ## Contributing
 
 Contributions are welcome. To get started:
 
 1. Fork the repo and create a branch
-2. Make your changes i.e add tests for new detectors or SDK behaviour
+2. Make your changes, e.g. add tests for new detectors or SDK changes
 3. Run the relevant test suite (see [Running tests](#running-tests))
 4. Open a pull request with a clear description of what and why
 

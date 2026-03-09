@@ -38,7 +38,7 @@ async def get_runs(
             agent_id=r["agent_id"],
             agent_version=r["agent_version"],
             started_at=_ts(r.get("started_at")),
-            completed_at=_ts(r.get("processed_at")),
+            completed_at=_ts(r.get("completed_at")),
             exit_reason=r.get("exit_reason"),
             step_count=r.get("step_count") or 0,
             signal_count=r.get("signal_count") or 0,
