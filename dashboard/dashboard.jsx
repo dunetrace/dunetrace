@@ -149,9 +149,12 @@ function Dashboard() {
   const [loading,       setLoading]       = useState(false);
   const [selectedDay,   setSelectedDay]   = useState(null);
   const [selectedRun,   setSelectedRun]   = useState(null);
-  const [sortBy,        setSortBy]        = useState("started_at");
-  const [sortDir,       setSortDir]       = useState("desc");
-  const [runsPage,      setRunsPage]      = useState(0);
+  const [sortBy,           setSortBy]           = useState("started_at");
+  const [sortDir,          setSortDir]          = useState("desc");
+  const [runsPage,         setRunsPage]         = useState(0);
+  const [runDetail,        setRunDetail]        = useState(null);
+  const [runDetailLoading, setRunDetailLoading] = useState(false);
+  const [timelineExpanded, setTimelineExpanded] = useState(false);
   const PAGE_SIZE = 15;
 
   // Load agents list
@@ -187,8 +190,21 @@ function Dashboard() {
     setSelectedRun(null);
     setSelectedDay(null);
     setRunsPage(0);
+    setRunDetail(null);
     loadAgentData(selectedAgent);
   }, [selectedAgent, loadAgentData]);
+
+  // Fetch full run detail (events + signals) when a run is selected
+  useEffect(() => {
+    if (!selectedRun) { setRunDetail(null); setTimelineExpanded(false); return; }
+    setRunDetailLoading(true);
+    setRunDetail(null);
+    setTimelineExpanded(false);
+    apiFetch(`/v1/runs/${encodeURIComponent(selectedRun.run_id)}`)
+      .then(d => setRunDetail(d))
+      .catch(e => console.error(e))
+      .finally(() => setRunDetailLoading(false));
+  }, [selectedRun]);
 
   // Auto-refresh agent data
   useEffect(() => {
@@ -196,13 +212,6 @@ function Dashboard() {
     const t = setInterval(() => loadAgentData(selectedAgent), 10000);
     return () => clearInterval(t);
   }, [selectedAgent, loadAgentData]);
-
-  // run_id → signals[]
-  const signalsByRun = useMemo(() => {
-    const map = {};
-    signals.forEach(s => { (map[s.run_id] = map[s.run_id] || []).push(s); });
-    return map;
-  }, [signals]);
 
   // Current agent record (for sidebar)
   const agentRecord = useMemo(
@@ -643,106 +652,166 @@ function Dashboard() {
         {/* ── Right panel: run detail ── */}
         {selectedRun && (
           <div style={{
-            width: 320, flexShrink: 0,
+            width: 400, flexShrink: 0,
             background: C.surface, borderLeft: `1px solid ${C.border}`,
             overflowY: "auto", padding: 16,
             display: "flex", flexDirection: "column", gap: 14,
           }}>
+            {/* Header */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: C.orange }}>RUN DETAIL</span>
-              <button onClick={() => setSelectedRun(null)}
+              <button onClick={() => { setSelectedRun(null); setTimelineExpanded(false); }}
                 style={{ background: "none", border: "none", color: C.textD, cursor: "pointer", fontSize: 16 }}>✕</button>
             </div>
 
-            {/* Run ID */}
-            <div style={{ background: C.surfaceB, borderRadius: 6, padding: 10, border: `1px solid ${C.border}` }}>
-              <div style={{ fontSize: 9, color: C.textD, marginBottom: 4, letterSpacing: "0.1em" }}>RUN ID</div>
-              <div style={{ fontSize: 10, color: C.textM, wordBreak: "break-all", fontFamily: "monospace" }}>
-                {selectedRun.run_id}
-              </div>
-            </div>
+            {runDetailLoading && (
+              <div style={{ padding: 40, textAlign: "center", color: C.textD }}>Loading…</div>
+            )}
 
-            {/* Status + Duration */}
-            {(() => {
-              const st  = exitStatus(selectedRun.exit_reason);
-              const dur = selectedRun.completed_at && selectedRun.started_at
-                ? selectedRun.completed_at - selectedRun.started_at : null;
+            {runDetail && (() => {
+              const st  = exitStatus(runDetail.exit_reason);
+              const dur = runDetail.completed_at && runDetail.started_at
+                ? runDetail.completed_at - runDetail.started_at : null;
+              const llmEvents  = (runDetail.events || []).filter(e => e.event_type === "llm.called");
+              const tokenSeries = llmEvents.map(e => e.payload?.prompt_tokens || 0).filter(t => t > 0);
+              const lastTokens  = tokenSeries[tokenSeries.length - 1] || 0;
+              const tokenGrowth = tokenSeries.length > 1
+                ? Math.round(((tokenSeries[tokenSeries.length - 1] - tokenSeries[0]) / (tokenSeries[0] || 1)) * 100)
+                : 0;
+
               return (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <div style={{ background: C.surfaceB, borderRadius: 6, padding: 10, border: `1px solid ${C.border}` }}>
-                    <div style={{ fontSize: 9, color: C.textD, marginBottom: 4, letterSpacing: "0.1em" }}>STATUS</div>
-                    <div style={{ fontSize: 12, fontWeight: 700,
-                      color: st.ok === true ? C.green : st.ok === false ? C.red : C.textM }}>
-                      {selectedRun.exit_reason}
+                <>
+                  {/* ── Section 1: Run ID / Status / Duration ── */}
+                  <div style={{ background: C.surfaceB, borderRadius: 6, padding: 12, border: `1px solid ${C.border}` }}>
+                    <div style={{ fontSize: 9, color: C.textD, marginBottom: 4, letterSpacing: "0.1em" }}>RUN ID</div>
+                    <div style={{ fontSize: 10, color: C.textM, wordBreak: "break-all", fontFamily: "monospace", marginBottom: 10 }}>
+                      {runDetail.run_id}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <div>
+                        <div style={{ fontSize: 9, color: C.textD, marginBottom: 3, letterSpacing: "0.1em" }}>STATUS</div>
+                        <div style={{ fontSize: 12, fontWeight: 700,
+                          color: st.ok === true ? C.green : st.ok === false ? C.red : C.textM }}>
+                          {st.ok === true ? "✓" : "✕"} {runDetail.exit_reason}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 9, color: C.textD, marginBottom: 3, letterSpacing: "0.1em" }}>DURATION</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: dur > 15 ? C.yellow : C.text }}>
+                          {fmtDuration(dur)}
+                        </div>
+                      </div>
                     </div>
                   </div>
-                  <div style={{ background: C.surfaceB, borderRadius: 6, padding: 10, border: `1px solid ${C.border}` }}>
-                    <div style={{ fontSize: 9, color: C.textD, marginBottom: 4, letterSpacing: "0.1em" }}>DURATION</div>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: dur > 15 ? C.yellow : C.text }}>
-                      {fmtDuration(dur)}
+
+                  {/* ── Section 2: Metrics ── */}
+                  <div style={{ background: C.surfaceB, borderRadius: 6, padding: 12, border: `1px solid ${C.border}` }}>
+                    <div style={{ fontSize: 9, color: C.textD, marginBottom: 10, letterSpacing: "0.1em" }}>METRICS</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: tokenSeries.length > 0 ? 12 : 0 }}>
+                      {[
+                        { label: "STEPS",    value: runDetail.step_count,           color: C.text },
+                        { label: "SIGNALS",  value: runDetail.signals?.length || 0,
+                          color: (runDetail.signals?.length || 0) > 0 ? C.orange : C.textD },
+                        { label: "LLM CALLS", value: llmEvents.length,              color: C.blue },
+                      ].map(m => (
+                        <div key={m.label} style={{ textAlign: "center" }}>
+                          <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.08em", marginBottom: 4 }}>{m.label}</div>
+                          <div style={{ fontSize: 16, fontWeight: 700, color: m.color }}>{m.value}</div>
+                        </div>
+                      ))}
                     </div>
+                    {tokenSeries.length > 0 && (
+                      <div style={{ paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                          <span style={{ fontSize: 9, color: C.textD, letterSpacing: "0.1em" }}>TOKEN GROWTH</span>
+                          <span style={{ fontSize: 10, fontFamily: "monospace",
+                            color: tokenGrowth > 100 ? C.yellow : C.textM }}>
+                            {lastTokens.toLocaleString()} tok{tokenGrowth > 0 ? ` +${tokenGrowth}%` : ""}
+                          </span>
+                        </div>
+                        <Sparkline values={tokenSeries} color={tokenGrowth > 100 ? C.yellow : C.blue} w={344} h={28} />
+                      </div>
+                    )}
                   </div>
-                </div>
+
+                  {/* ── Section 3: Signals detected ── */}
+                  <div>
+                    <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.1em", marginBottom: 8 }}>SIGNALS DETECTED</div>
+                    {(!runDetail.signals || runDetail.signals.length === 0) ? (
+                      <div style={{ fontSize: 11, color: C.green }}>✓ No signals — clean run</div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {runDetail.signals.map(s => {
+                          const col = SEV_COLOR[s.severity] || C.textM;
+                          return (
+                            <div key={s.id} style={{
+                              background: `${col}11`, border: `1px solid ${col}33`,
+                              borderRadius: 6, padding: "10px 12px",
+                            }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                                <span style={{ fontSize: 10, fontWeight: 700, color: col }}>
+                                  {s.failure_type.replace(/_/g, " ")}
+                                </span>
+                                <span style={{ fontSize: 9, color: col, opacity: 0.7 }}>{s.severity}</span>
+                              </div>
+                              {s.evidence_summary && (
+                                <div style={{ fontSize: 10, color: C.textM, lineHeight: 1.5, marginBottom: 4 }}>
+                                  {s.evidence_summary}
+                                </div>
+                              )}
+                              {s.what && s.what !== s.evidence_summary && (
+                                <div style={{ fontSize: 10, color: C.textD, lineHeight: 1.5, marginBottom: 4 }}>
+                                  {s.what}
+                                </div>
+                              )}
+                              {s.suggested_fixes?.[0] && (
+                                <details style={{ marginTop: 6 }}>
+                                  <summary style={{ fontSize: 9, color: col, cursor: "pointer", opacity: 0.8, userSelect: "none" }}>
+                                    Fix: {s.suggested_fixes[0].description}
+                                  </summary>
+                                  <pre style={{
+                                    fontSize: 9, color: "#86efac", margin: "6px 0 0",
+                                    background: "rgba(0,0,0,0.4)", padding: "8px 10px",
+                                    borderRadius: 4, overflowX: "auto", lineHeight: 1.6,
+                                  }}>
+                                    {s.suggested_fixes[0].code}
+                                  </pre>
+                                </details>
+                              )}
+                              <div style={{ fontSize: 9, color: C.textD, marginTop: 4 }}>
+                                step {s.step_index} · confidence {Math.round(s.confidence * 100)}%
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* ── Section 4: Timeline (collapsed) ── */}
+                  {(runDetail.events?.length > 0) && (
+                    <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
+                      <button
+                        onClick={() => setTimelineExpanded(x => !x)}
+                        style={{
+                          width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 6,
+                          background: "none", border: `1px solid ${C.border}`, color: C.textM,
+                          borderRadius: 4, padding: "6px 12px", cursor: "pointer",
+                          fontSize: 10, fontFamily: "inherit",
+                        }}>
+                        <span style={{ fontSize: 9 }}>{timelineExpanded ? "▼" : "▶"}</span>
+                        <span>{timelineExpanded ? "Hide timeline" : "Show timeline"}</span>
+                      </button>
+                      {timelineExpanded && (
+                        <div style={{ marginTop: 12 }}>
+                          <Timeline run={runDetail} />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
               );
             })()}
-
-            {/* Metrics */}
-            <div style={{ background: C.surfaceB, borderRadius: 6, padding: 12, border: `1px solid ${C.border}` }}>
-              <div style={{ fontSize: 9, color: C.textD, marginBottom: 10, letterSpacing: "0.1em" }}>METRICS</div>
-              {[
-                { label: "Steps",   value: selectedRun.step_count,   color: C.text },
-                { label: "Signals", value: selectedRun.signal_count,
-                  color: selectedRun.signal_count > 0 ? C.orange : C.textD },
-                { label: "Version", value: selectedRun.agent_version || "—", color: C.textM, small: true },
-                { label: "Time",
-                  value: `${fmtDate(toMs(selectedRun.started_at))} ${fmtTime(toMs(selectedRun.started_at))}`,
-                  color: C.textD, small: true },
-              ].map(m => (
-                <div key={m.label} style={{ display: "flex", justifyContent: "space-between", marginBottom: 7, alignItems: "baseline" }}>
-                  <span style={{ fontSize: 10, color: C.textD }}>{m.label}</span>
-                  <span style={{ fontSize: m.small ? 9 : 11, color: m.color, fontWeight: m.small ? 400 : 600 }}>
-                    {m.value}
-                  </span>
-                </div>
-              ))}
-            </div>
-
-            {/* Signals */}
-            <div>
-              <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.1em", marginBottom: 8 }}>SIGNALS DETECTED</div>
-              {(() => {
-                const sigs = signalsByRun[selectedRun.run_id] || [];
-                if (!sigs.length) return (
-                  <div style={{ fontSize: 11, color: C.green }}>✓ No signals — clean run</div>
-                );
-                return (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {sigs.map(s => {
-                      const col = SEV_COLOR[s.severity] || C.textM;
-                      return (
-                        <div key={s.id} style={{
-                          background: `${col}11`, border: `1px solid ${col}33`,
-                          borderRadius: 6, padding: "10px 12px",
-                        }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                            <span style={{ fontSize: 10, fontWeight: 700, color: col }}>
-                              {s.failure_type.replace(/_/g, " ")}
-                            </span>
-                            <span style={{ fontSize: 9, color: col, opacity: 0.7 }}>{s.severity}</span>
-                          </div>
-                          <div style={{ fontSize: 10, color: C.textM, lineHeight: 1.5, marginBottom: 6 }}>
-                            {s.evidence_summary || s.what}
-                          </div>
-                          <div style={{ fontSize: 9, color: C.textD }}>
-                            step {s.step_index} · confidence {Math.round(s.confidence * 100)}%
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
-            </div>
           </div>
         )}
       </div>

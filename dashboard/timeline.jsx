@@ -1,137 +1,5 @@
 const { useState } = React;
 
-// ── Mock run data ──────────────────────────────────────────────────────────────
-const NOW = Date.now() / 1000;
-
-const MOCK_RUNS = [
-  { run_id: "run-f4a9b2c1", label: "TOOL_LOOP" },
-  { run_id: "run-2c9a5b4e", label: "PROMPT_INJECTION" },
-  { run_id: "run-71bce930", label: "TOOL_THRASHING" },
-  { run_id: "run-c1d2e3f4", label: "SLOW_STEP" },
-  { run_id: "run-8d3e1f77", label: "Clean run" },
-];
-
-const MOCK_DETAIL = {
-  "run-f4a9b2c1": {
-    run_id: "run-f4a9b2c1", agent_id: "research-agent-v2", agent_version: "a7f3d9b2",
-    started_at: NOW - 182, completed_at: NOW - 54, exit_reason: "completed", step_count: 12,
-    events: [
-      { event_type: "run.started",    step_index: 0,  timestamp: NOW - 182, payload: { input_hash: "e3b0c442", tools: ["web_search", "calculator"] } },
-      { event_type: "llm.called",     step_index: 1,  timestamp: NOW - 175, payload: { model: "gpt-4o-mini", prompt_tokens: 480 } },
-      { event_type: "llm.responded",  step_index: 2,  timestamp: NOW - 168, payload: { finish_reason: "tool_calls", latency_ms: 820, output_length: 312 } },
-      { event_type: "tool.called",    step_index: 3,  timestamp: NOW - 166, payload: { tool_name: "web_search", args_hash: "a1b2c3d4" } },
-      { event_type: "tool.responded", step_index: 4,  timestamp: NOW - 158, payload: { success: true, output_length: 1024 } },
-      { event_type: "tool.called",    step_index: 5,  timestamp: NOW - 155, payload: { tool_name: "web_search", args_hash: "a1b2c3d4" } },
-      { event_type: "tool.responded", step_index: 6,  timestamp: NOW - 147, payload: { success: true, output_length: 1019 } },
-      { event_type: "tool.called",    step_index: 7,  timestamp: NOW - 143, payload: { tool_name: "web_search", args_hash: "a1b2c3d4" } },
-      { event_type: "tool.responded", step_index: 8,  timestamp: NOW - 135, payload: { success: true, output_length: 1021 } },
-      { event_type: "tool.called",    step_index: 9,  timestamp: NOW - 132, payload: { tool_name: "web_search", args_hash: "a1b2c3d4" } },
-      { event_type: "tool.responded", step_index: 10, timestamp: NOW - 124, payload: { success: true, output_length: 1018 } },
-      { event_type: "tool.called",    step_index: 11, timestamp: NOW - 121, payload: { tool_name: "web_search", args_hash: "a1b2c3d4" } },
-      { event_type: "run.completed",  step_index: 12, timestamp: NOW - 54,  payload: { exit_reason: "final_answer", total_steps: 12 } },
-    ],
-    signals: [
-      { id: 1, failure_type: "TOOL_LOOP", severity: "HIGH", step_index: 11, confidence: 0.95,
-        evidence: { tool: "web_search", count: 5, window: 5 },
-        title: "Tool loop: `web_search` called 5x in 5 steps",
-        what: "The agent called `web_search` 5 consecutive times with identical arguments, making no progress between calls.",
-        why_it_matters: "Looping agents burn tokens and cost money without producing value.",
-        evidence_summary: "Tool `web_search` called 5x in steps 7-11 with identical args. Confidence: 95%.",
-        suggested_fixes: [{ description: "Add per-tool call limit", language: "python", code: "MAX_CALLS_PER_TOOL = 3\nif tool_call_counts[tool] > MAX_CALLS_PER_TOOL:\n    raise RuntimeError(f'{tool} called too many times')" }],
-      }
-    ],
-  },
-  "run-2c9a5b4e": {
-    run_id: "run-2c9a5b4e", agent_id: "research-agent-v2", agent_version: "a7f3d9b2",
-    started_at: NOW - 1850, completed_at: NOW - 1780, exit_reason: "error", step_count: 3,
-    events: [
-      { event_type: "run.started",  step_index: 0, timestamp: NOW - 1850, payload: { input_hash: "d4e5f6a7", tools: ["web_search"] } },
-      { event_type: "llm.called",   step_index: 1, timestamp: NOW - 1845, payload: { model: "gpt-4o-mini", prompt_tokens: 310 } },
-      { event_type: "run.errored",  step_index: 2, timestamp: NOW - 1780, payload: { error: "InputRejected: injection detected" } },
-    ],
-    signals: [
-      { id: 2, failure_type: "PROMPT_INJECTION_SIGNAL", severity: "CRITICAL", step_index: 1, confidence: 0.85,
-        evidence: { matched_patterns: ["ignore_instructions", "you_are_now"], pattern_count: 2 },
-        title: "Prompt injection attempt (2 patterns matched)",
-        what: "The user input matched 2 known injection patterns at step 1.",
-        why_it_matters: "A successful injection can cause the agent to ignore safety instructions.",
-        evidence_summary: "Matched: ignore_instructions, you_are_now. Confidence: 85%.",
-        suggested_fixes: [{ description: "Reject and log injection attempts", language: "python", code: "if injection_detected:\n    log_security_event(user_id, input)\n    return {'error': 'INPUT_REJECTED'}" }],
-      }
-    ],
-  },
-  "run-71bce930": {
-    run_id: "run-71bce930", agent_id: "research-agent-v2", agent_version: "a7f3d9b2",
-    started_at: NOW - 4200, completed_at: NOW - 4100, exit_reason: "stalled", step_count: 18,
-    events: [
-      { event_type: "run.started",    step_index: 0,  timestamp: NOW - 4200, payload: { input_hash: "f9e8d7c6", tools: ["web_search", "database_lookup"] } },
-      { event_type: "llm.called",     step_index: 1,  timestamp: NOW - 4192, payload: { model: "gpt-4o-mini", prompt_tokens: 520 } },
-      { event_type: "tool.called",    step_index: 2,  timestamp: NOW - 4185, payload: { tool_name: "web_search", args_hash: "bb11" } },
-      { event_type: "tool.responded", step_index: 3,  timestamp: NOW - 4177, payload: { success: true, output_length: 512 } },
-      { event_type: "tool.called",    step_index: 4,  timestamp: NOW - 4172, payload: { tool_name: "database_lookup", args_hash: "cc22" } },
-      { event_type: "tool.responded", step_index: 5,  timestamp: NOW - 4165, payload: { success: true, output_length: 256 } },
-      { event_type: "tool.called",    step_index: 6,  timestamp: NOW - 4160, payload: { tool_name: "web_search", args_hash: "bb11" } },
-      { event_type: "tool.responded", step_index: 7,  timestamp: NOW - 4152, payload: { success: true, output_length: 508 } },
-      { event_type: "tool.called",    step_index: 8,  timestamp: NOW - 4147, payload: { tool_name: "database_lookup", args_hash: "cc22" } },
-      { event_type: "tool.responded", step_index: 9,  timestamp: NOW - 4140, payload: { success: true, output_length: 254 } },
-      { event_type: "tool.called",    step_index: 10, timestamp: NOW - 4135, payload: { tool_name: "web_search", args_hash: "bb11" } },
-      { event_type: "tool.responded", step_index: 11, timestamp: NOW - 4127, payload: { success: true, output_length: 510 } },
-      { event_type: "tool.called",    step_index: 12, timestamp: NOW - 4122, payload: { tool_name: "database_lookup", args_hash: "cc22" } },
-      { event_type: "tool.responded", step_index: 13, timestamp: NOW - 4115, payload: { success: true, output_length: 255 } },
-      { event_type: "tool.called",    step_index: 14, timestamp: NOW - 4110, payload: { tool_name: "web_search", args_hash: "bb11" } },
-      { event_type: "tool.responded", step_index: 15, timestamp: NOW - 4102, payload: { success: true, output_length: 511 } },
-      { event_type: "llm.called",     step_index: 16, timestamp: NOW - 4097, payload: { model: "gpt-4o-mini", prompt_tokens: 620 } },
-      { event_type: "run.completed",  step_index: 17, timestamp: NOW - 4100, payload: { exit_reason: "max_iterations" } },
-    ],
-    signals: [
-      { id: 3, failure_type: "TOOL_THRASHING", severity: "HIGH", step_index: 14, confidence: 0.90,
-        evidence: { tool_a: "web_search", tool_b: "database_lookup", oscillation_count: 4 },
-        title: "Tool thrashing: oscillating between web_search and database_lookup",
-        what: "The agent oscillated between web_search and database_lookup 4 times without converging.",
-        why_it_matters: "Thrashing agents never produce an answer and exhaust token budgets.",
-        evidence_summary: "4 oscillations across steps 2-15. Confidence: 90%.",
-        suggested_fixes: [{ description: "Detect oscillation and break early", language: "python", code: "recent = deque(maxlen=6)\nif len(set(recent)) == 2 and len(recent) == 6:\n    raise RuntimeError('Oscillation detected')" }],
-      }
-    ],
-  },
-  "run-c1d2e3f4": {
-    run_id: "run-c1d2e3f4", agent_id: "research-agent-v2", agent_version: "a7f3d9b2",
-    started_at: NOW - 320, completed_at: NOW - 240, exit_reason: "completed", step_count: 6,
-    events: [
-      { event_type: "run.started",    step_index: 0, timestamp: NOW - 320, payload: { input_hash: "9c3f2d1a", tools: ["web_search", "database_lookup"] } },
-      { event_type: "llm.called",     step_index: 1, timestamp: NOW - 312, payload: { model: "gpt-4o-mini", prompt_tokens: 440 } },
-      { event_type: "llm.responded",  step_index: 2, timestamp: NOW - 305, payload: { finish_reason: "tool_calls", latency_ms: 740, output_length: 280 } },
-      { event_type: "tool.called",    step_index: 3, timestamp: NOW - 303, payload: { tool_name: "database_lookup", args_hash: "fe9d8c7b" } },
-      { event_type: "tool.responded", step_index: 4, timestamp: NOW - 261, payload: { success: true, output_length: 3410 } },
-      { event_type: "llm.called",     step_index: 5, timestamp: NOW - 259, payload: { model: "gpt-4o-mini", prompt_tokens: 1380 } },
-      { event_type: "run.completed",  step_index: 6, timestamp: NOW - 240, payload: { exit_reason: "final_answer", total_steps: 6 } },
-    ],
-    signals: [
-      { id: 4, failure_type: "SLOW_STEP", severity: "HIGH", step_index: 3, confidence: 0.92,
-        evidence: { step_index: 3, duration_ms: 42000, threshold_ms: 15000, event_type: "tool.called", step_label: "tool execution", ratio: 2.8 },
-        title: "Slow step: tool execution at step 3 took 42.0s (2.8x threshold)",
-        what: "Step 3 (tool.called: database_lookup) took 42.0s to complete, 2.8x the 15s threshold. The tool API either timed out or returned a very large payload. The agent was blocked waiting the entire time.",
-        why_it_matters: "Slow tool calls add 42 seconds of latency to every user hitting this path. Under load, hung connections exhaust thread pools and cause cascading timeouts.",
-        evidence_summary: "Step 3 (tool.called): 42.0s (threshold: 15s, ratio: 2.8x). Confidence: 92%.",
-        suggested_fixes: [{ description: "Add a timeout to your tool call", language: "python", code: "result = await asyncio.wait_for(\n    run_tool('database_lookup', args),\n    timeout=10,  # fail fast\n)\n# Returns error cleanly instead of hanging 42s" }],
-      }
-    ],
-  },
-  "run-8d3e1f77": {
-    run_id: "run-8d3e1f77", agent_id: "research-agent-v2", agent_version: "a7f3d9b2",
-    started_at: NOW - 980, completed_at: NOW - 910, exit_reason: "completed", step_count: 5,
-    events: [
-      { event_type: "run.started",    step_index: 0, timestamp: NOW - 980, payload: { input_hash: "a1b2c3d4", tools: ["web_search"] } },
-      { event_type: "llm.called",     step_index: 1, timestamp: NOW - 972, payload: { model: "gpt-4o-mini", prompt_tokens: 390 } },
-      { event_type: "llm.responded",  step_index: 2, timestamp: NOW - 964, payload: { finish_reason: "tool_calls", latency_ms: 780, output_length: 290 } },
-      { event_type: "tool.called",    step_index: 3, timestamp: NOW - 962, payload: { tool_name: "web_search", args_hash: "e5f6a7b8" } },
-      { event_type: "tool.responded", step_index: 4, timestamp: NOW - 950, payload: { success: true, output_length: 2048 } },
-      { event_type: "run.completed",  step_index: 5, timestamp: NOW - 910, payload: { exit_reason: "final_answer", total_steps: 5 } },
-    ],
-    signals: [],
-  },
-};
-
 // ── Constants ──────────────────────────────────────────────────────────────────
 const EVENT_META = {
   "run.started":    { icon: "PLAY", color: "#22c55e",  label: "Start" },
@@ -154,7 +22,7 @@ function durationColor(ms) {
   return "#ff3b3b";
 }
 
-function fmtDuration(ms) {
+function fmtDurationMs(ms) {
   if (ms < 1000) return ms + "ms";
   return (ms / 1000).toFixed(1) + "s";
 }
@@ -284,7 +152,7 @@ function DurationStrip({ events, stepDurations, STEP_W, LEFT_PAD, signalByStep, 
                   fill={dms >= 10000 ? color : "#1f2937"}
                   fontSize={8} fontFamily="monospace"
                   fontWeight={isSlowSig ? "700" : "400"}>
-                  {fmtDuration(dms)}
+                  {fmtDurationMs(dms)}
                 </text>
               </g>
             );
@@ -340,45 +208,6 @@ function EventNode({ event, signal, x, isHovered, onClick }) {
   );
 }
 
-// ── Run selector ───────────────────────────────────────────────────────────────
-function RunSelector({ selectedId, onSelect }) {
-  var exitColor = { completed: "#22c55e", error: "#ff3b3b", stalled: "#f5c518" };
-  return (
-    <div style={{ display: "flex", gap: 6, marginBottom: 24, flexWrap: "wrap" }}>
-      {MOCK_RUNS.map(function(r) {
-        var detail = MOCK_DETAIL[r.run_id];
-        var isSel = selectedId === r.run_id;
-        var worstSig = null;
-        if (detail.signals.length) {
-          var order = { CRITICAL: 3, HIGH: 2, MEDIUM: 1, LOW: 0 };
-          worstSig = detail.signals.reduce(function(a, b) { return order[a.severity] >= order[b.severity] ? a : b; });
-        }
-        return (
-          <button key={r.run_id} onClick={function() { onSelect(r.run_id); }} style={{
-            padding: "8px 14px", borderRadius: 5, cursor: "pointer",
-            background: isSel ? "rgba(249,115,22,0.1)" : "rgba(255,255,255,0.02)",
-            border: "1px solid " + (isSel ? "rgba(249,115,22,0.4)" : "rgba(255,255,255,0.07)"),
-            textAlign: "left",
-          }}>
-            <div style={{ fontFamily: "monospace", fontSize: 10, color: isSel ? "#f97316" : "#4b5563", marginBottom: 3 }}>
-              {r.run_id}
-            </div>
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <span style={{ fontSize: 10, color: exitColor[detail.exit_reason] || "#6b7280", fontWeight: 600, textTransform: "uppercase" }}>
-                {detail.exit_reason}
-              </span>
-              {worstSig
-                ? <span style={{ fontSize: 9, color: SEVERITY_COLOR[worstSig.severity], fontWeight: 700 }}>&#9650; {r.label}</span>
-                : <span style={{ fontSize: 9, color: "#22c55e" }}>&#10003; clean</span>
-              }
-            </div>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 // ── Main timeline ──────────────────────────────────────────────────────────────
 function Timeline({ run }) {
   var [activeSignal, setActiveSignal] = useState(null);
@@ -416,7 +245,7 @@ function Timeline({ run }) {
           { label: "Version",        value: run.agent_version.slice(0, 8) },
           { label: "Total duration", value: totalDuration.toFixed(1) + "s" },
           { label: "Slowest step",
-            value: slowestStep !== null ? "step " + slowestStep + " \u00b7 " + fmtDuration(slowestMs) : "\u2014",
+            value: slowestStep !== null ? "step " + slowestStep + " \u00b7 " + fmtDurationMs(slowestMs) : "\u2014",
             color: slowestMs > 15000 ? "#ff7a00" : slowestMs > 2000 ? "#f5c518" : "#6b7280" },
           { label: "Exit",
             value: run.exit_reason,
@@ -521,7 +350,7 @@ function Timeline({ run }) {
               <div>
                 <div style={{ fontSize: 9, color: "#374151", textTransform: "uppercase", marginBottom: 3 }}>Duration to next</div>
                 <div style={{ fontFamily: "monospace", fontSize: 12, color: durationColor(dur), fontWeight: dur > 10000 ? 700 : 400 }}>
-                  {fmtDuration(dur)}
+                  {fmtDurationMs(dur)}
                 </div>
               </div>
             )}
@@ -544,47 +373,3 @@ function Timeline({ run }) {
   );
 }
 
-// ── App ────────────────────────────────────────────────────────────────────────
-function TimelineApp() {
-  var [selectedRun, setSelectedRun] = useState("run-c1d2e3f4");
-  var run = MOCK_DETAIL[selectedRun];
-
-  return (
-    <div style={{ minHeight: "100vh", background: "#0a0b0d", fontFamily: "'DM Mono','Fira Code',monospace", color: "#e8eaf0", padding: "32px" }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap');
-        * { box-sizing: border-box; }
-        button { font-family: inherit; }
-        ::-webkit-scrollbar { height: 4px; width: 4px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
-      `}</style>
-
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 32 }}>
-        <div style={{ width: 28, height: 28, borderRadius: 5, background: "linear-gradient(135deg,#f97316,#dc2626)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 900, color: "#fff" }}>D</div>
-        <div>
-          <div style={{ fontSize: 15, fontWeight: 500, color: "#e8eaf0" }}>Dunetrace &mdash; Run Timeline</div>
-          <div style={{ fontSize: 10, color: "#374151", letterSpacing: "0.08em" }}>research-agent-v2 &middot; click signal badges or nodes for explanation + fix</div>
-        </div>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 16, alignItems: "center" }}>
-          {[["#22c55e","Run lifecycle"],["#6366f1","LLM calls"],["#f97316","Tool calls"],["#ff7a00","Signal (click)"]].map(function(l) {
-            return (
-              <div key={l[1]} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                <div style={{ width: 6, height: 6, borderRadius: "50%", background: l[0] }} />
-                <span style={{ fontSize: 10, color: "#374151" }}>{l[1]}</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      <RunSelector selectedId={selectedRun} onSelect={setSelectedRun} />
-      <Timeline run={run} key={selectedRun} />
-
-      <div style={{ marginTop: 14, fontSize: 10, color: "#1f2937" }}>
-        Hover any node to inspect payload &middot; Duration bars show time to next event (green &lt;2s &middot; yellow 2-10s &middot; orange 10-30s &middot; red &gt;30s) &middot; Click colored bars or badges to see full explanation
-      </div>
-    </div>
-  );
-}

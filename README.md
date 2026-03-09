@@ -93,17 +93,17 @@ The dashboard fetches live data from the API at `http://localhost:8002` and auto
 
 | Detector | What it catches | Severity |
 |---|---|---|
-| `TOOL_LOOP` | Same tool called ≥3× in a 5-step window | HIGH |
+| `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
 | `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
 | `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls | MEDIUM |
 | `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
-| `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results but agent answered | MEDIUM |
+| `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance score <0.3, but agent answered | MEDIUM |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
 | `CONTEXT_BLOAT` | Prompt tokens grow 3× from first to last LLM call | MEDIUM |
 | `SLOW_STEP` | Tool call >15s or LLM call >30s | MEDIUM/HIGH |
 | `RETRY_STORM` | Same tool fails 3+ times in a row | HIGH |
-| `EMPTY_LLM_RESPONSE` | Model returned zero-length output | HIGH |
+| `EMPTY_LLM_RESPONSE` | Model returned zero-length output with `finish_reason=stop` | HIGH |
 | `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent | MEDIUM |
 | `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
@@ -280,7 +280,7 @@ For larger changes (new detectors, architecture changes), open an issue first to
 
 ## Contact
 
-Questions, feedback, or just want to say hi — [dunetrace@gmail.com](mailto:dunetrace@gmail.com)
+Questions, feedback, or just want to say hi - [dunetrace@gmail.com](mailto:dunetrace@gmail.com)
 
 ## License
 
