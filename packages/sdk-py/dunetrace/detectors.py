@@ -947,6 +947,73 @@ class FirstStepFailureDetector(BaseDetector):
         return None
 
 
+# ── REASONING_SPIN ─────────────────────────────────────────────────────────────
+
+class ReasoningSpinDetector(BaseDetector):
+    """
+    The agent made far more LLM calls than tool calls within a completed run,
+    indicating it spent most of its iterations reasoning/planning rather than
+    taking actions that advance state.
+
+    A healthy agent alternates: think → act → observe → think → act.
+    A spinning agent does: think → think → think → think → (minimal action).
+
+    This is different from TOOL_AVOIDANCE (zero tool calls) and
+    GOAL_ABANDONMENT (tools used then stopped mid-run). REASONING_SPIN fires
+    when the agent did use tools but the LLM:tool ratio is extremely skewed,
+    meaning the agent spent the bulk of its iterations deliberating without
+    making meaningful progress through tool use.
+
+    Fires only at final_answer to avoid false positives on in-progress runs
+    where the agent is legitimately planning before a burst of tool calls.
+
+    MEDIUM severity — the run may have completed, but efficiency is poor and
+    the agent is likely to hit step limits on harder variants of the same task.
+
+    Tunable parameters:
+        MIN_LLM_CALLS   (int, default 5)    — minimum LLM calls before checking.
+                        Prevents false positives on very short runs.
+        RATIO_THRESHOLD (float, default 4.0) — LLM calls / tool calls at or above
+                        which the signal fires. 4.0 means 4 LLM calls per 1 tool
+                        call. Raise for agents with multi-step chain-of-thought
+                        designs where high LLM:tool ratios are intentional.
+    """
+    name            = "REASONING_SPIN"
+    MIN_LLM_CALLS   = 5
+    RATIO_THRESHOLD = 4.0
+
+    def check(self, state: RunState) -> Optional[FailureSignal]:
+        if state.exit_reason != "final_answer":
+            return None
+
+        llm_count  = len(state.llm_calls)
+        tool_count = len(state.tool_calls)
+
+        if llm_count < self.MIN_LLM_CALLS:
+            return None
+
+        ratio = llm_count / max(tool_count, 1)
+
+        if ratio < self.RATIO_THRESHOLD:
+            return None
+
+        return FailureSignal(
+            failure_type=FailureType.REASONING_STALL,
+            severity=Severity.MEDIUM,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=state.current_step,
+            confidence=0.70,
+            evidence={
+                "llm_calls":      llm_count,
+                "tool_calls":     tool_count,
+                "ratio":          round(ratio, 2),
+                "threshold":      self.RATIO_THRESHOLD,
+            },
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TIER1_DETECTORS: List[BaseDetector] = [
@@ -963,6 +1030,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     StepCountInflationDetector(),
     CascadingToolFailureDetector(),
     FirstStepFailureDetector(),
+    ReasoningSpinDetector(),
     # PromptInjectionDetector is handled separately (needs raw input)
 ]
 

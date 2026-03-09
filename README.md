@@ -1,6 +1,6 @@
 # DuneTrace
 
-Behavioral observability for AI agents. Detects tool loops, context bloat, prompt injection, and other failure patterns. Zero raw content transmitted.
+Behavioral observability for AI agents at runtime. Detects tool loops, context bloat, prompt injection, and other failure patterns and get alerts immediately. Zero raw content transmitted. All text is SHA-256 hashed before leaving the agent process.
 
 ## Quickstart
 
@@ -96,7 +96,7 @@ The dashboard fetches live data from the API at `http://localhost:8002` and auto
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
 | `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
-| `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls | MEDIUM |
+| `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
 | `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance score <0.3, but agent answered | MEDIUM |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
@@ -107,8 +107,9 @@ The dashboard fetches live data from the API at `http://localhost:8002` and auto
 | `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent | MEDIUM |
 | `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
+| `REASONING_STALL` | LLM:tool-call ratio ≥4× — agent reasoning without acting | MEDIUM |
 
-Detector thresholds are configurable. See `detectors.yml` in the repo root.
+Detector thresholds are configurable per-instance. See `packages/sdk-py/dunetrace/detectors.py`.
 
 ## What's supported now
 
@@ -118,14 +119,14 @@ Detector thresholds are configurable. See `detectors.yml` in the repo root.
 - Manual instrumentation API (`llm_called`, `tool_called`, `retrieval_called`, etc.)
 - All content SHA-256 hashed before leaving the process i.e. no raw prompts or outputs transmitted
 
-**Detection (14 detectors)**
+**Detection (15 detectors)**
 - Tool behaviour: `TOOL_LOOP`, `TOOL_THRASHING`, `TOOL_AVOIDANCE`, `RETRY_STORM`, `CASCADING_TOOL_FAILURE`
-- LLM behaviour: `LLM_TRUNCATION_LOOP`, `CONTEXT_BLOAT`, `EMPTY_LLM_RESPONSE`, `GOAL_ABANDONMENT`
+- LLM behaviour: `LLM_TRUNCATION_LOOP`, `CONTEXT_BLOAT`, `EMPTY_LLM_RESPONSE`, `GOAL_ABANDONMENT`, `REASONING_STALL`
 - RAG: `RAG_EMPTY_RETRIEVAL`
 - Security: `PROMPT_INJECTION_SIGNAL`
 - Performance: `SLOW_STEP`
 - Run health: `FIRST_STEP_FAILURE`, `STEP_COUNT_INFLATION`
-- Configurable thresholds per agent category via `detectors.yml`
+- Configurable thresholds via keyword overrides on each detector class
 
 **Infrastructure**
 - Self-hosted Docker Compose stack (Postgres + ingest + detector + alerts + API)

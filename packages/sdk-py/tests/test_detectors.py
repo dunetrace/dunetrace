@@ -442,3 +442,92 @@ class TestContextBloatDetector(unittest.TestCase):
         state.current_step = 3
         signal = self.detector.check(state)
         assert signal.confidence == 0.80
+
+
+# ── ReasoningSpinDetector ─────────────────────────────────────────────────────
+
+from dunetrace.detectors import ReasoningSpinDetector
+from dunetrace.models import FailureType
+
+
+def _make_spin_state(llm_count: int, tool_count: int, exit_reason: str = "final_answer") -> RunState:
+    state = make_state()
+    state.llm_calls = [make_llm_call(step=i) for i in range(llm_count)]
+    state.tool_calls = [make_tool_call("web_search", step=i) for i in range(tool_count)]
+    state.current_step = max(llm_count, tool_count)
+    state.exit_reason = exit_reason
+    return state
+
+
+class TestReasoningSpinDetector(unittest.TestCase):
+    detector = ReasoningSpinDetector()
+
+    def test_fires_on_high_llm_to_tool_ratio(self):
+        """12 LLM calls, 1 tool call → ratio 12.0 — well above 4.0 threshold."""
+        state = _make_spin_state(llm_count=12, tool_count=1)
+        signal = self.detector.check(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.REASONING_STALL
+        assert signal.evidence["ratio"] == 12.0
+        assert signal.evidence["llm_calls"] == 12
+        assert signal.evidence["tool_calls"] == 1
+
+    def test_fires_at_boundary_ratio(self):
+        """8 LLM calls, 2 tool calls → ratio 4.0 — exactly at threshold."""
+        state = _make_spin_state(llm_count=8, tool_count=2)
+        signal = self.detector.check(state)
+        assert signal is not None
+
+    def test_fires_with_zero_tool_calls(self):
+        """5 LLM calls, 0 tool calls → ratio treated as 5/1 = 5.0."""
+        state = _make_spin_state(llm_count=5, tool_count=0)
+        signal = self.detector.check(state)
+        assert signal is not None
+        assert signal.evidence["ratio"] == 5.0
+
+    def test_no_signal_below_min_llm_calls(self):
+        """Only 4 LLM calls — below MIN_LLM_CALLS=5, must not fire."""
+        state = _make_spin_state(llm_count=4, tool_count=0)
+        assert self.detector.check(state) is None
+
+    def test_no_signal_on_healthy_ratio(self):
+        """6 LLM calls, 4 tool calls → ratio 1.5 — healthy agent."""
+        state = _make_spin_state(llm_count=6, tool_count=4)
+        assert self.detector.check(state) is None
+
+    def test_no_signal_below_threshold_ratio(self):
+        """5 LLM calls, 2 tool calls → ratio 2.5 — below 4.0."""
+        state = _make_spin_state(llm_count=5, tool_count=2)
+        assert self.detector.check(state) is None
+
+    def test_no_signal_before_final_answer(self):
+        """Run still in progress — must not fire mid-run."""
+        state = _make_spin_state(llm_count=12, tool_count=1, exit_reason=None)
+        assert self.detector.check(state) is None
+
+    def test_no_signal_on_error_exit(self):
+        """Run errored — must not fire (agent didn't complete deliberately)."""
+        state = _make_spin_state(llm_count=12, tool_count=1, exit_reason="error")
+        assert self.detector.check(state) is None
+
+    def test_severity_is_medium(self):
+        state = _make_spin_state(llm_count=10, tool_count=1)
+        signal = self.detector.check(state)
+        assert signal.severity.value == "MEDIUM"
+
+    def test_confidence(self):
+        state = _make_spin_state(llm_count=10, tool_count=1)
+        signal = self.detector.check(state)
+        assert signal.confidence == 0.70
+
+    def test_custom_threshold(self):
+        detector = ReasoningSpinDetector(RATIO_THRESHOLD=2.0)
+        state = _make_spin_state(llm_count=6, tool_count=2)  # ratio=3.0
+        signal = detector.check(state)
+        assert signal is not None
+
+    def test_custom_min_llm_calls(self):
+        detector = ReasoningSpinDetector(MIN_LLM_CALLS=3)
+        state = _make_spin_state(llm_count=4, tool_count=0)  # ratio=4.0, now above MIN
+        signal = detector.check(state)
+        assert signal is not None
