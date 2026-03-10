@@ -196,6 +196,16 @@ class Dunetrace:
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 logger.debug("Shipped %d events. status=%d", len(batch), resp.status)
+        except urllib.error.URLError as exc:
+            if "Connection refused" in str(exc):
+                logger.warning(
+                    "DuneTrace backend not reachable at %s — is it running?\n"
+                    "  Start it with: docker compose up -d\n"
+                    "  %d events dropped.",
+                    self._ingest_url, len(batch),
+                )
+            else:
+                logger.warning("Failed to ship %d events: %s", len(batch), exc)
         except Exception as exc:
             logger.warning("Failed to ship %d events: %s", len(batch), exc)
 

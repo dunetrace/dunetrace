@@ -66,6 +66,29 @@ agent_executor = AgentExecutor(
     callbacks=[DunetraceCallbackHandler(dt, agent_id="my-agent")],
 )
 ```
+## Running the examples
+
+**Basic agent** (no framework, simulates tool loops, prompt injection, RAG failures):
+
+```bash
+cd packages/sdk-py
+pip install dunetrace
+python examples/basic_agent.py
+```
+
+**LangChain agent** (real OpenAI calls, auto-instrumented via callback):
+
+```bash
+cd packages/sdk-py
+pip install 'dunetrace[langchain]' langchain-openai
+OPENAI_API_KEY=sk-... python examples/langchain_agent.py
+
+# Force a tool-loop scenario:
+OPENAI_API_KEY=sk-... SCENARIO=tool_loop python examples/langchain_agent.py
+```
+
+Both examples send events to `http://localhost:8001` by default. Start the backend first (`docker compose up -d`). Override the endpoint with `DUNETRACE_ENDPOINT=http://your-host:8001`.
+
 ## Report events manually
 
 ```python
@@ -87,12 +110,7 @@ Manual reporting is the fallback until a native integration exists for your fram
 
 ## Dashboard
 
-```bash
-python -m http.server 3000 -d dashboard
-# then open http://localhost:3000
-```
-
-The dashboard fetches live data from the API at `http://localhost:8002` and auto-refreshes every 10 seconds.
+The dashboard starts automatically with `docker compose up -d` and is served at `http://localhost:3000`. It fetches live data from the API at `http://localhost:8002` and auto-refreshes every 10 seconds.
 
 ![Dashboard overview](dashboard.png)
 
