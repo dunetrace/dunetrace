@@ -1,5 +1,10 @@
 # DuneTrace
 
+[![PyPI version](https://img.shields.io/pypi/v/dunetrace.svg)](https://pypi.org/project/dunetrace/)
+[![Python versions](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/dunetrace/)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/dunetrace?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/dunetrace)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Behavioral observability for AI agents at runtime. Detects tool loops, context bloat, prompt injection, and other failure patterns and get alerts immediately. Zero raw content transmitted. All text is SHA-256 hashed before leaving the agent process.
 
 ## Quickstart
@@ -291,4 +296,4 @@ Questions, feedback, or just want to say hi - [dunetrace@gmail.com](mailto:dunet
 
 ## License
 
-MIT
+[MIT](LICENSE)
