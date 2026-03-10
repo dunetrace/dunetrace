@@ -174,15 +174,18 @@ function EventNode({ event, signal, x, isHovered, onClick }) {
   var iconChars = { "PLAY": "▶", "END": "■", "ERR": "✕", "LLM": "◆", "TOOL": "⬡" };
   var icon = iconChars[meta.icon] || meta.icon;
 
+  var labelText = hasSig ? signal.failure_type.replace(/_/g, " ") : "";
+  var labelW = Math.max(84, labelText.length * 5.5 + 16);
+
   return (
     <g>
       {hasSig && (
         <g>
           <line x1={x} y1={-6} x2={x} y2={-40} stroke={sc} strokeWidth={1.5} strokeDasharray="2,2" opacity={0.7} />
           <polygon points={x + "," + (-6) + " " + (x-5) + "," + (-16) + " " + (x+5) + "," + (-16)} fill={sc} opacity={0.9} />
-          <rect x={x-42} y={-62} width={84} height={16} rx={2} fill={sc + "20"} stroke={sc + "55"} strokeWidth={0.5} />
+          <rect x={x - labelW / 2} y={-62} width={labelW} height={16} rx={2} fill={sc + "20"} stroke={sc + "55"} strokeWidth={0.5} />
           <text x={x} y={-50} textAnchor="middle" fill={sc} fontSize={8} fontWeight="700" fontFamily="monospace" letterSpacing="0.04em">
-            {signal.failure_type.replace(/_/g, " ")}
+            {labelText}
           </text>
         </g>
       )}

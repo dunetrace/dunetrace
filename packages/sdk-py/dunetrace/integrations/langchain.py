@@ -7,14 +7,17 @@ Drop-in LangChain callback handler. Add one line to any LangChain agent:
     from dunetrace.integrations.langchain import DunetraceCallbackHandler
 
     dt = Dunetrace()
+    callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
 
-    agent_executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
-        callbacks=[DunetraceCallbackHandler(dt, agent_id="my-agent")],
+    agent = create_agent(llm, tools, system_prompt="...")
+    result = agent.invoke(
+        {"messages": [("human", user_input)]},
+        config={"callbacks": [callback]},
     )
 
 No other changes to your agent code are required.
+Works with LangChain 1.x + LangGraph. For LangChain < 1.x with AgentExecutor,
+pass the handler to AgentExecutor(callbacks=[...]) instead.
 """
 from __future__ import annotations
 
@@ -23,7 +26,10 @@ import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 try:
-    from langchain.callbacks.base import BaseCallbackHandler
+    try:
+        from langchain_core.callbacks.base import BaseCallbackHandler  # langchain >= 0.2
+    except ImportError:
+        from langchain.callbacks.base import BaseCallbackHandler  # langchain < 0.2
     _LANGCHAIN_AVAILABLE = True
 except ImportError:
     _LANGCHAIN_AVAILABLE = False
@@ -80,7 +86,16 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
         self._root_lc_run_id = lc_run_id
         self._run_id = str(uuid.uuid4())
         self._step   = 0
-        user_input   = str(inputs.get("input", ""))
+
+        # AgentExecutor passes {"input": "..."}, LangGraph passes {"messages": [...]}
+        user_input = str(inputs.get("input", ""))
+        if not user_input and "messages" in inputs:
+            msgs = inputs["messages"]
+            last = msgs[-1] if msgs else None
+            if isinstance(last, (list, tuple)):
+                user_input = str(last[1]) if len(last) > 1 else ""
+            elif hasattr(last, "content"):
+                user_input = str(last.content)
 
         from dunetrace.models import AgentEvent, EventType
         self._client._emit(AgentEvent(
@@ -218,7 +233,27 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             payload=payload,
         ))
 
+    def on_tool_start(self, serialized: Dict, input_str: str, **kwargs: Any) -> None:
+        """Fires in LangGraph (prebuilt react agent). on_agent_action does NOT fire there."""
+        if not self._run_id:
+            return
+        self._step += 1
+        tool_name = serialized.get("name", kwargs.get("name", "unknown"))
+        from dunetrace.models import AgentEvent, EventType
+        self._client._emit(AgentEvent(
+            event_type=EventType.TOOL_CALLED,
+            run_id=self._run_id,
+            agent_id=self._agent_id,
+            agent_version=self._version,
+            step_index=self._step,
+            payload={
+                "tool_name": tool_name,
+                "args_hash": hash_content(input_str),
+            },
+        ))
+
     def on_agent_action(self, action: Any, **kwargs: Any) -> None:
+        """Fires in AgentExecutor (LangChain < 1.x). on_tool_start does NOT fire there."""
         if not self._run_id:
             return
         self._step += 1

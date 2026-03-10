@@ -112,9 +112,8 @@ def fetch_signals(agent_id: str) -> list[dict]:
 
 def main() -> None:
     from langchain_openai import ChatOpenAI
-    from langchain.agents import AgentExecutor, create_react_agent
-    from langchain.tools import Tool
-    from langchain import hub
+    from langchain.agents import create_agent
+    from langchain.tools import tool as lc_tool
 
     print("=" * 60)
     print("DuneTrace — Real Agent Smoke Test")
@@ -132,18 +131,10 @@ def main() -> None:
     # 2. Build the real agent
     print("\n[2/4] Running real GPT-4o-mini scenarios...")
 
-    tools = [
-        Tool(
-            name="search",
-            func=do_search,
-            description=(
-                "Search for information on a topic. "
-                "Input: a search query string. "
-                "May return partial results — search again if results are incomplete."
-            ),
-        ),
-    ]
-    tool_names = [t.name for t in tools]
+    @lc_tool
+    def search(query: str) -> str:
+        """Search for information on a topic. May return partial results — search again if incomplete."""
+        return do_search(query)
 
     dt = Dunetrace(
         api_key="dt_dev_test",
@@ -156,39 +147,27 @@ def main() -> None:
         agent_id=AGENT_ID,
         system_prompt=SYSTEM_PROMPT,
         model="gpt-4o-mini",
-        tools=tool_names,
+        tools=["search"],
     )
 
-    # Pass callback to the LLM directly — LangChain 0.3.x LCEL does NOT propagate
-    # AgentExecutor-level callbacks to inner LLM nodes, so on_chat_model_start /
-    # on_llm_end would never fire without this.
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY,
-                     callbacks=[callback])
-
-    prompt   = hub.pull("hwchase17/react")
-    agent    = create_react_agent(llm, tools, prompt)
-    executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
-        callbacks=[callback],
-        verbose=True,
-        max_iterations=15,
-        handle_parsing_errors=False,
-    )
+    llm   = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY)
+    agent = create_agent(llm, [search], system_prompt=SYSTEM_PROMPT)
 
     # ── Scenario 1: TOOL_LOOP ──────────────────────────────────────────────────
     print("\n  ── Scenario 1: TOOL_LOOP ──")
     print("  (Agent will search repeatedly; detector fires when search is called 3+ times in 5 steps)")
     try:
-        result = executor.invoke({
-            "input": (
+        result = agent.invoke(
+            {"messages": [("human", (
                 "I need a thorough literature review on quantum computing advances in 2024. "
                 "The search tool may return incomplete results — keep searching with the same "
                 "query until you have complete results. "
                 "Query to use: 'quantum computing advances 2024'."
-            )
-        })
-        print(f"\n  Agent answer: {str(result.get('output', ''))[:120]}")
+            ))]},
+            config={"callbacks": [callback]},
+        )
+        output = result["messages"][-1].content if result.get("messages") else ""
+        print(f"\n  Agent answer: {str(output)[:120]}")
     except Exception as exc:
         print(f"\n  Agent error: {exc}")
 
@@ -199,14 +178,12 @@ def main() -> None:
     print("\n  ── Scenario 2: TOOL_AVOIDANCE ──")
     print("  (Agent answers from memory without using any tool)")
     try:
-        result = executor.invoke({
-            "input": (
-                "In what year did World War II end? "
-                "This is a factual question you know the answer to. "
-                "Reply with Final Answer: directly."
-            )
-        })
-        print(f"\n  Agent answer: {str(result.get('output', ''))[:120]}")
+        result = agent.invoke(
+            {"messages": [("human", "In what year did World War II end?")]},
+            config={"callbacks": [callback]},
+        )
+        output = result["messages"][-1].content if result.get("messages") else ""
+        print(f"\n  Agent answer: {str(output)[:120]}")
     except Exception as exc:
         print(f"\n  Agent error (expected if model answered without a tool): {exc}")
 
@@ -245,9 +222,7 @@ def main() -> None:
             fix = s["suggested_fixes"][0]
             print(f"    Fix:   {fix.get('description', '')}")
 
-    print(f"\n  Dashboard:")
-    print(f"    python -m http.server 3000 -d dashboard")
-    print(f"    open http://localhost:3000")
+    print(f"\n  Dashboard : http://localhost:3000")
     sys.exit(0)
 
 

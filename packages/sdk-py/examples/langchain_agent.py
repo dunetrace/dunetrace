@@ -2,9 +2,10 @@
 examples/langchain_agent.py
 
 LangChain agent instrumented with Dunetrace. One callback, zero agent changes.
+Works with LangChain 1.x + LangGraph (langgraph >= 0.2).
 
 Install:
-    pip install 'dunetrace[langchain]' langchain-openai
+    pip install 'dunetrace[langchain]' langchain-openai langgraph
 
 Run:
     OPENAI_API_KEY=sk-... python examples/langchain_agent.py
@@ -15,10 +16,9 @@ from __future__ import annotations
 import os
 import time
 
-from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.tools import tool
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
+from langchain.agents import create_agent
 
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
@@ -67,21 +67,7 @@ callback = DunetraceCallbackHandler(
     tools=[t.name for t in tools],
 )
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", SYSTEM_PROMPT),
-    ("human", "{input}"),
-    MessagesPlaceholder("agent_scratchpad"),
-])
-
-agent = create_openai_tools_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    callbacks=[callback],
-    verbose=True,
-    max_iterations=12,
-    handle_parsing_errors=True,
-)
+agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
 
 SCENARIOS = {
     "normal": "What is the capital of France and what is its population?",
@@ -97,8 +83,12 @@ def run(scenario: str = "normal") -> None:
     print(f"\nScenario: {scenario}")
     print(f"Query: {query}\n")
     try:
-        result = agent_executor.invoke({"input": query})
-        print(f"\nAnswer: {result['output']}")
+        result = agent.invoke(
+            {"messages": [("human", query)]},
+            config={"callbacks": [callback]},
+        )
+        output = result["messages"][-1].content
+        print(f"\nAnswer: {output}")
     except Exception as e:
         print(f"Error: {e}")
     dt.shutdown(timeout=5)

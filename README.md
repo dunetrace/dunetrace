@@ -52,18 +52,23 @@ Runs appear in the dashboard immediately.
 ## LangChain
 
 ```bash
-pip install dunetrace[langchain]
+pip install 'dunetrace[langchain]' langchain-openai      # OpenAI
+pip install 'dunetrace[langchain]' langchain-anthropic   # Anthropic
+pip install 'dunetrace[langchain]' langchain-google-genai  # Gemini
 ```
 
 ```python
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
+from langchain.agents import create_agent
 
 dt = Dunetrace()
+callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
 
-agent_executor = AgentExecutor(
-    agent=agent, tools=tools,
-    callbacks=[DunetraceCallbackHandler(dt, agent_id="my-agent")],
+agent = create_agent(llm, tools, system_prompt="You are a helpful assistant.")
+result = agent.invoke(
+    {"messages": [("human", user_input)]},
+    config={"callbacks": [callback]},
 )
 ```
 ## Running the examples
