@@ -49,6 +49,13 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 │   GET /v1/agents/{id}/runs    GET /v1/agents/{id}/signals   │
 │   Read-only · bearer token auth · explains signals inline   │
 └──────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│                  Dashboard  :3000                            │
+│                                                             │
+│   Static HTML/JSX served by nginx (Docker)                  │
+│   Fetches live data from Customer API · auto-refreshes 10s  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -76,7 +83,7 @@ A background polling loop that runs every 5 seconds. It is the only process that
 1. Fetches runs completed since last poll (terminal events `run.completed` or `run.errored`) plus any runs that have stalled (no new events for `STALL_TIMEOUT_SECS`)
 2. Checks `processed_runs` to skip already-processed runs
 3. Reconstructs `RunState` by fetching and replaying all events for each run
-4. Runs all 14 Tier 1 detectors against the `RunState`
+4. Runs all 15 Tier 1 detectors against the `RunState`
 5. Writes any `FailureSignal` rows to Postgres
 6. Marks the run as processed
 
