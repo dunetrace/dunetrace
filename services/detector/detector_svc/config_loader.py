@@ -15,7 +15,7 @@ from typing import Any
 
 logger = logging.getLogger("dunetrace.config_loader")
 
-# Maps YAML section key → detector constructor kwarg names (all uppercase).
+# Maps YAML section key -> detector constructor kwarg names (all uppercase).
 # Only detectors with tunable params need an entry here.
 _PARAM_MAP: dict[str, dict[str, str]] = {
     "tool_loop":               {"threshold": "THRESHOLD", "window": "WINDOW"},
@@ -59,18 +59,18 @@ def load_detector_kwargs(config_path: str | None = None) -> dict[str, dict[str, 
     try:
         import yaml  # type: ignore[import]
     except ImportError:
-        logger.warning("PyYAML not installed — using SDK defaults for all detectors.")
+        logger.warning("PyYAML not installed i.e. using SDK defaults for all detectors.")
         return {}
 
     if not os.path.exists(path):
-        logger.info("No detectors.yml found at %s — using SDK defaults.", path)
+        logger.info("No detectors.yml found at %s i.e. using SDK defaults.", path)
         return {}
 
     try:
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
     except Exception as exc:
-        logger.warning("Failed to parse detectors.yml: %s — using SDK defaults.", exc)
+        logger.warning("Failed to parse detectors.yml: %s i.e. using SDK defaults.", exc)
         return {}
 
     result: dict[str, dict[str, dict[str, Any]]] = {}
@@ -91,5 +91,5 @@ def load_detector_kwargs(config_path: str | None = None) -> dict[str, dict[str, 
             if kwargs:
                 result[category][det_key] = kwargs
 
-    logger.info("Loaded detector config from %s — categories: %s", path, list(result))
+    logger.info("Loaded detector config from %s i.e. categories: %s", path, list(result))
     return result

@@ -5,16 +5,16 @@ The alert delivery loop.
 
 Every POLL_INTERVAL seconds:
   1. Fetch unalerted live signals from the DB
-  2. For each: reconstruct FailureSignal → explain() → format → send
+  2. For each: reconstruct FailureSignal -> explain() -> format -> send
   3. On successful delivery: mark as alerted
 
 Pipeline per signal:
     DB row
-      → FailureSignal (models)
-      → Explanation   (explainer)
-      → Slack payload + webhook payload (formatters)
-      → HTTP delivery (sender)
-      → mark alerted  (DB)
+      -> FailureSignal (models) 
+      -> Explanation   (explainer)
+      -> Slack payload + webhook payload (formatters)
+      -> HTTP delivery (sender)
+      -> mark alerted  (DB)
 
 Severity filter:
     Only signals at or above SLACK_MIN_SEVERITY are sent to Slack.
@@ -52,7 +52,7 @@ logging.basicConfig(
 logger = logging.getLogger("dunetrace.alerts")
 
 
-# ── Signal reconstruction ──────────────────────────────────────────────────────
+# Signal reconstruction
 
 def _row_to_signal(row: dict) -> FailureSignal:
     """Reconstruct a FailureSignal from a DB row dict."""
@@ -75,7 +75,7 @@ def _row_to_signal(row: dict) -> FailureSignal:
     )
 
 
-# ── Severity filter ────────────────────────────────────────────────────────────
+# Severity filter
 
 def _meets_slack_threshold(severity: str) -> bool:
     return (
@@ -84,17 +84,17 @@ def _meets_slack_threshold(severity: str) -> bool:
     )
 
 
-# ── Per-signal delivery ────────────────────────────────────────────────────────
+# Per-signal delivery
 
 def deliver(explanation: Explanation) -> dict[str, SendResult]:
     """
     Send an explanation to all configured destinations.
     Returns {destination: SendResult} for logging/metrics.
-    Synchronous — called from asyncio.to_thread to avoid blocking the loop.
+    Synchronous i.e. called from asyncio.to_thread to avoid blocking the loop.
     """
     results = {}
 
-    # ── Slack ──────────────────────────────────────────────────────────────────
+    # Slack
     if settings.slack_enabled:
         if _meets_slack_threshold(explanation.severity):
             payload = format_slack(explanation)
@@ -105,7 +105,7 @@ def deliver(explanation: Explanation) -> dict[str, SendResult]:
                 explanation.severity, settings.SLACK_MIN_SEVERITY, explanation.run_id,
             )
 
-    # ── Generic webhook ────────────────────────────────────────────────────────
+    # Generic webhook
     if settings.webhook_enabled:
         body, headers = build_signed_request(explanation, settings.WEBHOOK_SECRET)
         results["webhook"] = send_webhook(body, headers)
@@ -113,7 +113,7 @@ def deliver(explanation: Explanation) -> dict[str, SendResult]:
     return results
 
 
-# ── Poll cycle ─────────────────────────────────────────────────────────────────
+# Poll cycle
 
 async def poll_once() -> tuple[int, int]:
     """
@@ -156,7 +156,7 @@ async def poll_once() -> tuple[int, int]:
 
         # Mark as alerted only if at least one destination succeeded
         any_success = any(r.success for r in results.values()) if results else False
-        no_destinations = not results  # nothing configured — still mark done
+        no_destinations = not results  # nothing configured i.e. still mark done
 
         if any_success or no_destinations:
             delivered_ids.append(signal_id)
@@ -165,7 +165,7 @@ async def poll_once() -> tuple[int, int]:
                     logger.warning("Partial delivery failure. dest=%s signal_id=%d error=%s",
                                    dest, signal_id, result.error)
         else:
-            logger.error("All destinations failed for signal_id=%d — will retry next cycle",
+            logger.error("All destinations failed for signal_id=%d i.e. will retry next cycle",
                          signal_id)
 
     if delivered_ids:
@@ -175,7 +175,7 @@ async def poll_once() -> tuple[int, int]:
     return len(rows), len(delivered_ids)
 
 
-# ── Main loop ──────────────────────────────────────────────────────────────────
+# Main loop
 
 async def run_worker() -> None:
     await init_pool()
@@ -206,7 +206,7 @@ async def run_worker() -> None:
 
             await asyncio.sleep(settings.POLL_INTERVAL)
     except asyncio.CancelledError:
-        logger.info("Worker cancelled — shutting down")
+        logger.info("Worker cancelled i.e. shutting down gracefully")
     finally:
         await close_pool()
 

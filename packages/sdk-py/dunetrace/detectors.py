@@ -18,7 +18,7 @@ All detectors accept keyword overrides for their UPPERCASE class attributes:
     ToolLoopDetector(THRESHOLD=2)
 
 Each detector's docstring lists its tunable parameters and what they control.
-Unknown parameter names raise TypeError immediately — there is no silent fallback:
+Unknown parameter names raise TypeError immediately i.e. there is no silent fallback:
 
     ToolLoopDetector(THREHOLD=2)  # raises TypeError: unknown parameter 'THREHOLD'
 
@@ -32,7 +32,7 @@ import re
 from collections import Counter
 from typing import List, Optional
 
-from dunetrace.models import FailureSignal, FailureType, RunState, Severity
+from dunetrace.models import EventType, FailureSignal, FailureType, RunState, Severity
 
 
 # ── Base ──────────────────────────────────────────────────────────────────────
@@ -76,14 +76,14 @@ class ToolLoopDetector(BaseDetector):
     Same tool called >= THRESHOLD times within a WINDOW of steps.
 
     Invariant: No tool should dominate a sliding window without progress.
-    High confidence — this pattern is structurally unambiguous.
+    High confidence i.e. this pattern is structurally unambiguous.
 
     Tunable parameters:
-        WINDOW    (int, default 5)  — sliding window width in tool calls.
+        WINDOW    (int, default 5)   i.e. sliding window width in tool calls.
                   Increase for agents that legitimately call the same tool
                   in bursts (e.g. paginated search). Decrease to catch
                   tighter loops faster.
-        THRESHOLD (int, default 3)  — minimum repetitions within WINDOW
+        THRESHOLD (int, default 3)   i.e. minimum repetitions within WINDOW
                   to trigger. Must be <= WINDOW. Lower values increase
                   sensitivity and false-positive rate.
     """
@@ -127,7 +127,7 @@ class ToolThrashingDetector(BaseDetector):
     Indicates the agent cannot reconcile conflicting tool outputs.
 
     Tunable parameters:
-        WINDOW (int, default 6)  — number of recent tool calls to inspect.
+        WINDOW (int, default 6)   i.e. number of recent tool calls to inspect.
                Must be even for a clean alternating-pair pattern. Larger
                values require the oscillation to be sustained longer before
                firing; smaller values fire on shorter bursts.
@@ -183,7 +183,7 @@ class ToolAvoidanceDetector(BaseDetector):
     false-positive rate significantly.
 
     Tunable parameters:
-        MIN_LLM_CALLS (int, default 2)  — minimum number of LLM calls the
+        MIN_LLM_CALLS (int, default 2)   i.e. minimum number of LLM calls the
                       run must contain before this detector fires. Prevents
                       false positives on trivially short runs. Raise if your
                       agent category routinely answers in 1–2 LLM turns
@@ -229,7 +229,7 @@ class GoalAbandonmentDetector(BaseDetector):
     after at least one tool call had been made.
 
     Tunable parameters:
-        STALL_STEPS (int, default 4)  — number of consecutive LLM-only events
+        STALL_STEPS (int, default 4)   i.e. number of consecutive LLM-only events
                     required to trigger. Increase for agents that legitimately
                     do multi-step reasoning between tool calls. Decrease to
                     catch abandonment faster.
@@ -299,7 +299,7 @@ _INJECTION_PATTERNS_COMPILED = [
 class PromptInjectionDetector(BaseDetector):
     """
     Pattern-matches user input against known prompt injection signatures.
-    Fires on input receipt — before any LLM call.
+    Fires on input receipt i.e. before any LLM call.
 
     No tunable parameters. The pattern list (_INJECTION_PATTERNS_COMPILED)
     is a module-level constant; extend it by adding entries there.
@@ -345,11 +345,11 @@ class RagEmptyRetrievalDetector(BaseDetector):
     that was supposed to be grounded in retrieved data.
 
     Tunable parameters:
-        MIN_SCORE   (float, default 0.3)  — relevance score below which a
+        MIN_SCORE   (float, default 0.3)   i.e. relevance score below which a
                     retrieval is considered "effectively empty". Raise for
                     stricter RAG quality requirements; lower if your retrieval
                     system uses a compressed score range.
-        MIN_RESULTS (int, default 1)      — minimum result count required
+        MIN_RESULTS (int, default 1)       i.e. minimum result count required
                     for a retrieval to be considered non-empty. Raise if
                     your agent requires multiple grounding documents.
     """
@@ -397,7 +397,7 @@ class LlmTruncationLoopDetector(BaseDetector):
     finish_reason="length" fires THRESHOLD or more times within a run.
 
     "length" means the model hit its output token limit and stopped
-    mid-generation — the response is incomplete. One occurrence is
+    mid-generation i.e. the response is incomplete. One occurrence is
     recoverable. Multiple occurrences means the agent is not handling
     truncated responses: it keeps calling the LLM with a context that
     produces truncated output every time, typically because:
@@ -409,7 +409,7 @@ class LlmTruncationLoopDetector(BaseDetector):
     (broken JSON, incomplete plans, cut-off code).
 
     Tunable parameters:
-        THRESHOLD (int, default 2)  — number of truncated LLM responses
+        THRESHOLD (int, default 2): number of truncated LLM responses
                   required to trigger. Default of 2 means "more than one
                   truncation = systematic problem". Set to 1 for zero-tolerance
                   environments; raise for models with known token limit issues
@@ -462,19 +462,19 @@ class ContextBloatDetector(BaseDetector):
       - Escalating cost on every subsequent call in the run
 
     MEDIUM severity because bloat is a leading indicator, not a confirmed
-    failure — the run may still succeed. Pairs naturally with
+    failure i.e. the run may still succeed. Pairs naturally with
     LLM_TRUNCATION_LOOP which fires when bloat causes actual truncation.
 
     Tunable parameters:
-        MIN_CALLS       (int, default 3)    — minimum LLM calls with token
+        MIN_CALLS       (int, default 3): minimum LLM calls with token
                         data required before checking for a trend. Prevents
                         false positives on short runs.
-        GROWTH_FACTOR   (float, default 3.0) — ratio of last/first prompt
+        GROWTH_FACTOR   (float, default 3.0): ratio of last/first prompt
                         tokens that triggers the signal. 3.0 = context
                         tripled. Lower for stricter cost control; raise for
                         agents designed to accumulate context intentionally
                         (e.g. long-horizon coding agents).
-        MIN_LAST_TOKENS (int, default 2000) — minimum final prompt token
+        MIN_LAST_TOKENS (int, default 2000): minimum final prompt token
                         count required to trigger. Suppresses false positives
                         on small-context agents where proportional growth
                         poses no real truncation or cost risk.
@@ -578,13 +578,18 @@ class SlowStepDetector(BaseDetector):
         if not state.step_durations_ms or not state.events:
             return None
 
-        worst_step_idx  = None
-        worst_duration  = 0
-        worst_threshold = 1
-        worst_label     = "step"
+        worst_step_idx   = None
+        worst_duration   = 0
+        worst_threshold  = 1
+        worst_label      = "step"
         worst_event_type = ""
 
-        step_event_type = {e.step_index: e.event_type.value for e in state.events}
+        # Exclude external.signal events — they share the step_index of the
+        # agent event they annotate and must not overwrite its event_type or
+        # timestamp in the lookup dicts.
+        agent_events    = [e for e in state.events if e.event_type is not EventType.EXTERNAL_SIGNAL]
+        step_event_type = {e.step_index: e.event_type.value for e in agent_events}
+        step_timestamp  = {e.step_index: e.timestamp       for e in agent_events}
 
         for step_idx, duration_ms in state.step_durations_ms.items():
             event_type = step_event_type.get(step_idx, "")
@@ -605,6 +610,37 @@ class SlowStepDetector(BaseDetector):
         ratio    = worst_duration / worst_threshold
         severity = Severity.HIGH if ratio >= 5 else Severity.MEDIUM
 
+        evidence: dict = {
+            "step_index":   worst_step_idx,
+            "duration_ms":  worst_duration,
+            "threshold_ms": worst_threshold,
+            "event_type":   worst_event_type,
+            "step_label":   worst_label,
+            "ratio":        round(ratio, 1),
+            "all_slow_steps": {
+                k: v for k, v in state.step_durations_ms.items()
+                if v > self._threshold_for(step_event_type.get(k, ""))[0]
+            },
+        }
+
+        # Correlate with external signals that occurred during the slow step.
+        # A signal is coincident when its timestamp falls within
+        # [step_start, step_start + duration].
+        if state.external_signals:
+            step_start = step_timestamp.get(worst_step_idx, 0.0)
+            step_end   = step_start + worst_duration / 1000.0
+            coincident = [
+                {k: v for k, v in [
+                    ("signal_name", sig.signal_name),
+                    ("source",      sig.source),
+                    ("meta",        sig.meta or None),
+                ] if v}
+                for sig in state.external_signals
+                if step_start <= sig.timestamp <= step_end
+            ]
+            if coincident:
+                evidence["coincident_signals"] = coincident
+
         return FailureSignal(
             failure_type=FailureType.SLOW_STEP,
             severity=severity,
@@ -613,18 +649,7 @@ class SlowStepDetector(BaseDetector):
             agent_version=state.agent_version,
             step_index=worst_step_idx,
             confidence=0.92,
-            evidence={
-                "step_index":   worst_step_idx,
-                "duration_ms":  worst_duration,
-                "threshold_ms": worst_threshold,
-                "event_type":   worst_event_type,
-                "step_label":   worst_label,
-                "ratio":        round(ratio, 1),
-                "all_slow_steps": {
-                    k: v for k, v in state.step_durations_ms.items()
-                    if v > self._threshold_for(step_event_type.get(k, ""))[0]
-                },
-            },
+            evidence=evidence,
         )
 
 
@@ -644,6 +669,13 @@ class RetryStormDetector(BaseDetector):
     call) and the agent will almost always reach max_iterations without
     producing a useful answer.
 
+    Evidence includes:
+        args_identical       — True if every retry used the same hashed args
+                               (agent is not varying its approach at all).
+        failure_reason_hash  — Common error_hash across the streak when all
+                               failures share the same reason; None otherwise.
+        reason_identical     — True if every failure reported the same error.
+
     Tunable parameters:
         THRESHOLD (int, default 3)  — consecutive failures on the same tool
                   required to trigger. Lower values catch dependency failures
@@ -657,9 +689,9 @@ class RetryStormDetector(BaseDetector):
         if len(state.tool_calls) < self.THRESHOLD:
             return None
 
-        best_tool  = None
-        best_count = 0
-        best_first = 0
+        best_tool   = None
+        best_count  = 0
+        best_streak: list = []
 
         i = len(state.tool_calls) - 1
         while i >= 0:
@@ -668,22 +700,33 @@ class RetryStormDetector(BaseDetector):
                 i -= 1
                 continue
 
-            tool  = tc.tool_name
-            count = 0
-            j     = i
+            tool   = tc.tool_name
+            j      = i
+            streak = []
             while j >= 0 and state.tool_calls[j].tool_name == tool and state.tool_calls[j].success is False:
-                count += 1
+                streak.append(state.tool_calls[j])
                 j -= 1
 
-            if count >= self.THRESHOLD and count > best_count:
-                best_count = count
-                best_tool  = tool
-                best_first = state.tool_calls[j + 1].step_index
+            if len(streak) >= self.THRESHOLD and len(streak) > best_count:
+                best_count  = len(streak)
+                best_tool   = tool
+                best_streak = streak  # ordered newest-first
 
             i = j - 1
 
         if best_tool is None:
             return None
+
+        # Analyse the streak for args identity and failure reason identity.
+        # streak is newest-first; reverse for chronological ordering in evidence.
+        best_streak.reverse()
+        args_hashes  = [tc.args_hash  for tc in best_streak]
+        error_hashes = [tc.error_hash for tc in best_streak]
+
+        args_identical    = len(set(args_hashes)) == 1
+        all_have_reason   = all(h is not None for h in error_hashes)
+        reason_identical  = all_have_reason and len(set(error_hashes)) == 1
+        failure_reason_hash = error_hashes[0] if reason_identical else None
 
         return FailureSignal(
             failure_type=FailureType.RETRY_STORM,
@@ -694,10 +737,13 @@ class RetryStormDetector(BaseDetector):
             step_index=state.current_step,
             confidence=0.92,
             evidence={
-                "tool":              best_tool,
-                "consecutive_fails": best_count,
-                "threshold":         self.THRESHOLD,
-                "first_fail_step":   best_first,
+                "tool":                best_tool,
+                "consecutive_fails":   best_count,
+                "threshold":           self.THRESHOLD,
+                "first_fail_step":     best_streak[0].step_index,
+                "args_identical":      args_identical,
+                "failure_reason_hash": failure_reason_hash,
+                "reason_identical":    reason_identical,
             },
         )
 
@@ -955,8 +1001,8 @@ class ReasoningSpinDetector(BaseDetector):
     indicating it spent most of its iterations reasoning/planning rather than
     taking actions that advance state.
 
-    A healthy agent alternates: think → act → observe → think → act.
-    A spinning agent does: think → think → think → think → (minimal action).
+    A healthy agent alternates: think -> act -> observe -> think -> act.
+    A spinning agent does: think -> think -> think -> think -> (minimal action).
 
     This is different from TOOL_AVOIDANCE (zero tool calls) and
     GOAL_ABANDONMENT (tools used then stopped mid-run). REASONING_SPIN fires
@@ -971,9 +1017,9 @@ class ReasoningSpinDetector(BaseDetector):
     the agent is likely to hit step limits on harder variants of the same task.
 
     Tunable parameters:
-        MIN_LLM_CALLS   (int, default 5)    — minimum LLM calls before checking.
+        MIN_LLM_CALLS   (int, default 5): minimum LLM calls before checking.
                         Prevents false positives on very short runs.
-        RATIO_THRESHOLD (float, default 4.0) — LLM calls / tool calls at or above
+        RATIO_THRESHOLD (float, default 4.0): LLM calls / tool calls at or above
                         which the signal fires. 4.0 means 4 LLM calls per 1 tool
                         call. Raise for agents with multi-step chain-of-thought
                         designs where high LLM:tool ratios are intentional.

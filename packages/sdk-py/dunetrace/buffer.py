@@ -2,7 +2,7 @@
 dunetrace/buffer.py
 
 Thread-safe ring buffer for the drain queue.
-Drops the oldest event when full — the agent thread is never blocked.
+Drops the oldest event when full i.e. the agent thread is never blocked.
 """
 from __future__ import annotations
 

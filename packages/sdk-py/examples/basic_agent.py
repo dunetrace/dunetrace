@@ -1,7 +1,7 @@
 """
 examples/basic_agent.py
 
-Minimal working example — no framework required.
+Minimal working example i.e. no framework required.
 Run this to verify instrumentation works before connecting to real agents.
 
     pip install dunetrace
@@ -100,7 +100,7 @@ def rag_empty_run(user_input: str) -> None:
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Dunetrace SDK — Example Runs")
+    print("Dunetrace SDK - Basic Agent Example Runs")
     print("=" * 60)
 
     normal_run("What is the capital of France?")

@@ -1,7 +1,7 @@
 """
 services/api/api_svc/main.py
 
-Dunetrace customer API — read-only queries over runs and signals.
+Dunetrace customer API, read-only queries over runs and signals.
 
 Run:
     cd services/api

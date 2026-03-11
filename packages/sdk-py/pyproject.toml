@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace"
-version = "0.2.0"
+version = "0.3.0"
 description = "Behavioral observability for AI agents"
 readme = "README.md"
 license = "MIT"
@@ -26,6 +26,10 @@ dependencies = []
 
 [project.optional-dependencies]
 langchain = ["langchain>=1.0", "langgraph>=0.2"]
+otel = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+]
 dev = [
     "pytest>=7",
     "pytest-cov",

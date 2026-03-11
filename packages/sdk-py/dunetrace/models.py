@@ -2,7 +2,7 @@
 dunetrace/models.py
 
 Core data models for the SDK. Zero external dependencies.
-All content fields carry SHA-256 hashes — raw text never leaves your process.
+All content fields carry SHA-256 hashes i.e. raw text never leaves your process.
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ class EventType(str, Enum):
     TOOL_RESPONDED      = "tool.responded"
     RETRIEVAL_CALLED    = "retrieval.called"
     RETRIEVAL_RESPONDED = "retrieval.responded"
+    EXTERNAL_SIGNAL     = "external.signal"
 
 
 class Severity(str, Enum):
@@ -62,7 +63,7 @@ class FailureType(str, Enum):
 class AgentEvent:
     """
     A single instrumentation event emitted by the SDK.
-    All content is hashed — no raw prompts or outputs are ever sent.
+    All content is hashed i.e. no raw prompts or outputs are ever sent.
     """
     event_type:    EventType
     run_id:        str
@@ -95,6 +96,7 @@ class ToolCall:
     step_index: int
     timestamp:  float
     success:    Optional[bool] = None
+    error_hash: Optional[str]  = None  # hash_content(error_message) when success=False
 
 
 @dataclass
@@ -110,6 +112,23 @@ class LlmCall:
 
 
 @dataclass
+class ExternalSignal:
+    """
+    Infrastructure context emitted alongside agent events.
+
+    Emitted via ``run.external_signal("rate_limit", source="openai")``.
+    Does not advance the step counter — it annotates the current agent step,
+    not a new one. Detectors use this to correlate failures with known
+    infrastructure events (rate limits, cache misses, upstream outages).
+    """
+    signal_name: str
+    step_index:  int
+    timestamp:   float
+    source:      str = ""
+    meta:        Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class RetrievalResult:
     index_name:   str
     result_count: int
@@ -121,7 +140,7 @@ class RetrievalResult:
 class RunState:
     """
     Accumulated state for a single agent run.
-    Detectors operate on this — never on raw events.
+    Detectors operate on this i.e. never on raw events.
     """
     run_id:          str
     agent_id:        str
@@ -131,6 +150,7 @@ class RunState:
     llm_calls:       List[LlmCall]         = field(default_factory=list)
     retrievals:      List[RetrievalResult] = field(default_factory=list)
     events:          List[AgentEvent]      = field(default_factory=list)
+    external_signals:  List[ExternalSignal] = field(default_factory=list)
     step_durations_ms: Dict[int, int]      = field(default_factory=dict)
     current_step:    int                   = 0
     exit_reason:     Optional[str]         = None
@@ -166,8 +186,8 @@ def hash_content(text: str) -> str:
 def agent_version(system_prompt: str, model: str, tools: List[str]) -> str:
     """
     Deterministic version hash.
-    Same config (prompt + model + tools) → same version string.
-    Any change → new version, preventing deploy-induced false positives.
+    Same config (prompt + model + tools) -> same version string.
+    Any change -> new version, preventing deploy-induced false positives.
     """
     fingerprint = f"{system_prompt}:{model}:{sorted(tools)}"
     return hashlib.sha256(fingerprint.encode()).hexdigest()[:8]

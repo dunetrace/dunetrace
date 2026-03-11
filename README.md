@@ -1,4 +1,4 @@
-# DuneTrace
+# Dunetrace
 
 [![PyPI version](https://img.shields.io/pypi/v/dunetrace.svg)](https://pypi.org/project/dunetrace/)
 [![Python versions](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/dunetrace/)
@@ -112,6 +112,32 @@ dt.shutdown()
 ```
 Manual reporting is the fallback until a native integration exists for your framework.
 
+## Grafana / Loki integration
+
+Pass `emit_as_json=True` to write every event to stdout as a Loki-compatible NDJSON line. Use this when your infrastructure already has a log collector (Promtail, Grafana Alloy, Fluentd) pointed at your agent process i.e Dunetrace events flow into your existing stack without any additional forwarding setup.
+
+```python
+dt = Dunetrace(emit_as_json=True)
+```
+
+Each line is structured JSON with `ts` (RFC3339), `level`, `logger`, `event_type`, `agent_id`, `run_id`, `step_index`, and `payload`. `event_type` and `agent_id` are natural Loki stream labels; `run_id` lets you group all events from a single run in a Grafana query.
+
+`emit_as_json` and HTTP ingest are independent — both can be active at the same time.
+
+Minimal Promtail pipeline stage:
+
+```yaml
+pipeline_stages:
+  - json:
+      expressions: {ts: ts, event_type: event_type, agent_id: agent_id}
+  - timestamp:
+      source: ts
+      format: RFC3339Nano
+  - labels:
+      agent_id:
+      event_type:
+```
+
 
 ## Dashboard
 
@@ -138,7 +164,7 @@ Click any run to open the detail panel and get metrics, detected signals with fi
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
-| `RETRY_STORM` | Same tool fails 3+ times in a row | HIGH |
+| `RETRY_STORM` | Same tool fails 3+ times in a row; evidence includes whether retries used identical args and identical failure reason | HIGH |
 | `EMPTY_LLM_RESPONSE` | Model returned zero-length output with `finish_reason=stop` | HIGH |
 | `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
 | `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
@@ -148,10 +174,13 @@ Detector thresholds are configurable per-instance. See `packages/sdk-py/dunetrac
 ## What's supported now
 
 **SDK**
-- Python SDK :  zero external dependencies, <1ms overhead, in-process ring buffer
+- Python SDK: zero external dependencies, <1ms overhead, in-process ring buffer
 - LangChain callback handler (auto-instruments `AgentExecutor`)
 - Manual instrumentation API (`llm_called`, `tool_called`, `retrieval_called`, etc.)
-- All content SHA-256 hashed before leaving the process i.e. no raw prompts or outputs transmitted
+- `emit_as_json=True` - stdout NDJSON emitter compatible with Grafana Loki / Promtail
+- `otel_exporter=DunetraceOTelExporter(provider)` -  OTel span exporter for Tempo, Honeycomb, Datadog, Jaeger
+- `run.external_signal("rate_limit", source="openai")` - annotate agent steps with infrastructure context; `SLOW_STEP` signals include coincident infrastructure events
+- All content SHA-256 hashed before leaving the process - no raw prompts or outputs transmitted
 
 **Detection (15 detectors)**
 - Tool behaviour: `TOOL_LOOP`, `TOOL_THRASHING`, `TOOL_AVOIDANCE`, `RETRY_STORM`, `CASCADING_TOOL_FAILURE`
@@ -185,11 +214,13 @@ Detector thresholds are configurable per-instance. See `packages/sdk-py/dunetrac
 
 ```
 Agent Code
-  └─► Dunetrace SDK          (instrument runs, emit hashed events)
-        └─► Ingest API        (POST /v1/ingest → Postgres)
-              └─► Detector    (poll → reconstruct RunState → run detectors)
-                    └─► Alerts (poll → explain → Slack / webhook)
-                          └─► Customer API  (query runs, signals, explanations)
+  └─► Dunetrace SDK              (instrument runs, emit hashed events)
+        ├─► Ingest API           (POST /v1/ingest -> Postgres)        [default]
+        │     └─► Detector       (poll -> reconstruct RunState -> run detectors)
+        │           └─► Alerts   (poll -> explain -> Slack / webhook)
+        │                 └─► Customer API  (query runs, signals, explanations)
+        ├─► stdout NDJSON        (emit_as_json=True -> Loki / Grafana Alloy)
+        └─► OTel spans           (otel_exporter=… -> Tempo / Honeycomb / Datadog)
 ```
 
 | Service | Port | Purpose |
@@ -222,7 +253,7 @@ The alerts worker sends a message to Slack for every detected signal at or above
 
 **Shadow mode:** each signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`. Whether a signal is shadow or live is decided at detection time based on `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`.
 
-All 14 built-in detectors are live (`shadow = false`) by default i.e. no action needed. If you write a custom detector, it starts in shadow mode (stored in the DB, visible in the API, but never alerted) until you add its name to `LIVE_DETECTORS`:
+All 15 built-in detectors are live (`shadow = false`) by default i.e. no action needed. If you write a custom detector, it starts in shadow mode (stored in the DB, visible in the API, but never alerted) until you add its name to `LIVE_DETECTORS`:
 
 ```python
 # services/detector/detector_svc/db.py
@@ -298,9 +329,9 @@ PYTHONPATH=packages/sdk-py:services/explainer:services/api pytest services/api/t
 - PostgreSQL 16+ (included in Docker Compose)
 - Docker + Docker Compose
 
-## If this helps you
+## Star us (⭐)
 
-If DuneTrace saves you debugging time, a GitHub star (⭐) goes a long way and it helps others find the project.
+If Dunetrace look useful, give a GitHub star (⭐) and it helps others find the project.
 
 ## Contributing
 

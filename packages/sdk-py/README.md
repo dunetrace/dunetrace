@@ -1,6 +1,6 @@
 # Dunetrace SDK
 
-Behavioral observability for AI agents. Zero-dependency Python SDK that detects failure patterns in your LLM agents in real-time.
+Behavioral observability for AI agents at runtime. Zero-dependency Python SDK that detects failure patterns in your LLM agents in real-time.
 
 ## Install
 

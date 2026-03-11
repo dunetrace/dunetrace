@@ -28,7 +28,7 @@ except ImportError:
 
 
 if _PYDANTIC:
-    # ── Pydantic models (production) ───────────────────────────────────────────
+    # Pydantic models (production)
 
     class Page(_Model):
         total:    int
@@ -124,7 +124,7 @@ if _PYDANTIC:
         version: str = "0.1.0"
         db:      str = "unknown"
 
-    # ── Insights models ────────────────────────────────────────────────────────
+    # Insights models
 
     class InputHashPattern(_Model):
         input_hash:      str
@@ -171,7 +171,7 @@ if _PYDANTIC:
         hourly_pattern: List[HourlyPatternPoint]
 
 else:
-    # ── Stdlib dataclass fallback (sandbox / testing) ──────────────────────────
+    # Stdlib dataclass fallback (sandbox / testing)
     from dataclasses import dataclass, field
 
     @dataclass

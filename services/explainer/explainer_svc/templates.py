@@ -23,7 +23,7 @@ from dunetrace.models import FailureSignal, FailureType
 from explainer_svc.models import CodeFix, Explanation
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# Helpers
 
 def _base(signal: FailureSignal, **kwargs) -> dict:
     """Common fields shared by all Explanation instances."""
@@ -41,7 +41,7 @@ def _base(signal: FailureSignal, **kwargs) -> dict:
     )
 
 
-# ── TOOL_LOOP ──────────────────────────────────────────────────────────────────
+# TOOL_LOOP
 
 def explain_tool_loop(signal: FailureSignal) -> Explanation:
     ev         = signal.evidence
@@ -113,7 +113,7 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── TOOL_THRASHING ─────────────────────────────────────────────────────────────
+# TOOL_THRASHING
 
 def explain_tool_thrashing(signal: FailureSignal) -> Explanation:
     ev    = signal.evidence
@@ -178,7 +178,7 @@ def explain_tool_thrashing(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── TOOL_AVOIDANCE ─────────────────────────────────────────────────────────────
+# TOOL_AVOIDANCE
 
 def explain_tool_avoidance(signal: FailureSignal) -> Explanation:
     ev     = signal.evidence
@@ -245,7 +245,7 @@ def explain_tool_avoidance(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── GOAL_ABANDONMENT ──────────────────────────────────────────────────────────
+# GOAL_ABANDONMENT
 
 def explain_goal_abandonment(signal: FailureSignal) -> Explanation:
     ev           = signal.evidence
@@ -305,7 +305,7 @@ def explain_goal_abandonment(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── PROMPT_INJECTION_SIGNAL ────────────────────────────────────────────────────
+# PROMPT_INJECTION_SIGNAL
 
 def explain_prompt_injection(signal: FailureSignal) -> Explanation:
     ev       = signal.evidence
@@ -390,7 +390,7 @@ def explain_prompt_injection(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── RAG_EMPTY_RETRIEVAL ────────────────────────────────────────────────────────
+# RAG_EMPTY_RETRIEVAL
 
 def explain_rag_empty_retrieval(signal: FailureSignal) -> Explanation:
     ev      = signal.evidence
@@ -482,7 +482,7 @@ def explain_rag_empty_retrieval(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── LLM_TRUNCATION_LOOP ────────────────────────────────────────────────────────
+# LLM_TRUNCATION_LOOP
 
 def explain_llm_truncation_loop(signal: FailureSignal) -> Explanation:
     ev             = signal.evidence
@@ -569,7 +569,7 @@ def explain_llm_truncation_loop(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── CONTEXT_BLOAT ──────────────────────────────────────────────────────────────
+# CONTEXT_BLOAT
 
 def explain_context_bloat(signal: FailureSignal) -> Explanation:
     ev          = signal.evidence
@@ -754,7 +754,7 @@ def explain_retry_storm(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── EMPTY_LLM_RESPONSE ────────────────────────────────────────────────────────
+# EMPTY_LLM_RESPONSE
 
 def explain_empty_llm_response(signal: FailureSignal) -> Explanation:
     ev          = signal.evidence
@@ -817,7 +817,7 @@ def explain_empty_llm_response(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── STEP_COUNT_INFLATION ───────────────────────────────────────────────────────
+# STEP_COUNT_INFLATION
 
 def explain_step_count_inflation(signal: FailureSignal) -> Explanation:
     ev      = signal.evidence
@@ -898,7 +898,7 @@ def explain_step_count_inflation(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── CASCADING_TOOL_FAILURE ─────────────────────────────────────────────────────
+# CASCADING_TOOL_FAILURE
 
 def explain_cascading_tool_failure(signal: FailureSignal) -> Explanation:
     ev     = signal.evidence
@@ -990,7 +990,7 @@ def explain_cascading_tool_failure(signal: FailureSignal) -> Explanation:
     )
 
 
-# ── FIRST_STEP_FAILURE ─────────────────────────────────────────────────────────
+# FIRST_STEP_FAILURE
 
 def explain_first_step_failure(signal: FailureSignal) -> Explanation:
     ev      = signal.evidence

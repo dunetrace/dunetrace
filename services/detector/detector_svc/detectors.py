@@ -2,7 +2,7 @@
 services/detector/detector_svc/detectors.py
 
 Builds the active detector list from detectors.yml (repo root).
-Edit detectors.yml to tune thresholds — no code change needed.
+Edit detectors.yml to tune thresholds i.e. no code change needed.
 
 Restart the detector after any change:
     docker compose restart detector

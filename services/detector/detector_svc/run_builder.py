@@ -6,7 +6,7 @@ This is the bridge between flat DB records and the typed RunState
 that detectors operate on.
 
 Event rows come from the events table written by the ingest service.
-The SDK models live in packages/sdk-py — this module imports from there.
+The SDK models live in packages/sdk-py i.e. this module imports from there.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def build_run_state(events: list[dict]) -> RunState:
     """
     Reconstruct a RunState from a list of raw event dicts.
 
-    Handles missing/partial data gracefully — a partial RunState
+    Handles missing/partial data gracefully i.e. a partial RunState
     is still worth running detectors against.
     """
     if not events:
@@ -47,20 +47,20 @@ def build_run_state(events: list[dict]) -> RunState:
         payload    = raw.get("payload") or {}
         step_index = raw.get("step_index", 0)
 
-        # ── run.started — extract available tools and input hash ──────────────
+        # run.started - extract available tools and input hash
         if event_type == "run.started":
             state.available_tools  = payload.get("tools", [])
             state.input_text_hash  = payload.get("input_hash")
 
-        # ── run.completed — record exit reason ────────────────────────────────
+        # run.completed - record exit reason
         elif event_type == "run.completed":
             state.exit_reason = payload.get("exit_reason", "completed")
 
-        # ── run.errored ───────────────────────────────────────────────────────
+        # run.errored
         elif event_type == "run.errored":
             state.exit_reason = "error"
 
-        # ── llm.called — store pending call keyed by step_index ──────────────
+        # llm.called - store pending call keyed by step_index
         elif event_type == "llm.called":
             _pending_llm[step_index] = {
                 "model":         payload.get("model", "unknown"),
@@ -69,7 +69,7 @@ def build_run_state(events: list[dict]) -> RunState:
                 "timestamp":     raw.get("timestamp", 0.0),
             }
 
-        # ── llm.responded — merge with pending call, append LlmCall ──────────
+        # llm.responded - merge with pending call, append LlmCall
         elif event_type == "llm.responded":
             pending = _pending_llm.pop(step_index, {})
             # prompt_tokens live in llm.responded (our SDK), not llm.called.
@@ -87,7 +87,7 @@ def build_run_state(events: list[dict]) -> RunState:
                 )
             )
 
-        # ── tool.called — append to tool_calls list ───────────────────────────
+        # tool.called - append to tool_calls list
         elif event_type == "tool.called":
             tool_name = payload.get("tool_name", "unknown")
             state.tool_calls.append(
@@ -99,7 +99,7 @@ def build_run_state(events: list[dict]) -> RunState:
                 )
             )
 
-        # ── tool.responded — backfill success onto the matching ToolCall ──────
+        # tool.responded - backfill success onto the matching ToolCall
         elif event_type == "tool.responded":
             success = payload.get("success")
             if success is not None:
@@ -109,7 +109,7 @@ def build_run_state(events: list[dict]) -> RunState:
                         tc.success = bool(success)
                         break
 
-        # ── retrieval.responded — append to retrievals list ───────────────────
+        # retrieval.responded - append to retrievals list
         elif event_type == "retrieval.responded":
             state.retrievals.append(
                 RetrievalResult(
@@ -120,11 +120,11 @@ def build_run_state(events: list[dict]) -> RunState:
                 )
             )
 
-        # ── Reconstruct AgentEvent for event list ─────────────────────────────
+        # Reconstruct AgentEvent for event list
         try:
             et = EventType(event_type)
         except ValueError:
-            continue  # unknown type — skip silently
+            continue  # unknown type i.e. skip silently
 
         state.events.append(
             AgentEvent(

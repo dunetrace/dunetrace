@@ -7,11 +7,11 @@ Clear the database and run all example agents with 50 runs each.
   python scripts/run_all_examples.py
 
 Each agent is given a distinct agent_id so signals can be filtered per example:
-  basic-example-agent     → basic_agent.py scenarios (no OpenAI)
-  langchain-example-agent → langchain_agent.py scenarios (gpt-4o-mini)
+  basic-example-agent -> basic_agent.py scenarios (no OpenAI)
+  langchain-example-agent -> langchain_agent.py scenarios (gpt-4o-mini)
 
 Env vars:
-  RUNS_PER_AGENT  (default 50)  — runs per agent type
+  RUNS_PER_AGENT  (default 50)  -> runs per agent type
   INGEST_URL      (default http://localhost:8001)
   OPENAI_API_KEY  — required for langchain-example-agent
 """
@@ -252,7 +252,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"\n{SECTION}")
-    print("  DuneTrace — Run All Example Agents")
+    print("  DuneTrace - Run All Example Agents")
     print(f"  Runs per agent : {RUNS_PER}")
     print(f"  Ingest         : {INGEST_URL}")
     print(f"  OpenAI key     : {'set' if OPENAI_API_KEY else 'NOT SET (LangChain agent will be skipped)'}")

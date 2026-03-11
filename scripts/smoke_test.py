@@ -6,8 +6,8 @@ End-to-end test with a real LangChain + GPT-4o-mini agent.
 
   1. Waits for ingest + API services to be healthy
   2. Runs two real agent scenarios:
-       - tool_loop:      agent forced to search repeatedly → TOOL_LOOP signal
-       - tool_avoidance: trivial question answered from memory → TOOL_AVOIDANCE signal
+       - tool_loop:      agent forced to search repeatedly -> TOOL_LOOP signal
+       - tool_avoidance: trivial question answered from memory -> TOOL_AVOIDANCE signal
   3. Waits for the detector to process the runs
   4. Prints every signal detected with its explanation
   5. Exits 0 on pass, 1 on failure
@@ -116,7 +116,7 @@ def main() -> None:
     from langchain.tools import tool as lc_tool
 
     print("=" * 60)
-    print("DuneTrace — Real Agent Smoke Test")
+    print("DuneTrace: Real Agent Smoke Test")
     print(f"  Model  : gpt-4o-mini")
     print(f"  Ingest : {INGEST_URL}")
     print(f"  API    : {API_URL}")
@@ -133,7 +133,7 @@ def main() -> None:
 
     @lc_tool
     def search(query: str) -> str:
-        """Search for information on a topic. May return partial results — search again if incomplete."""
+        """Search for information on a topic. May return partial results i.e. search again if incomplete."""
         return do_search(query)
 
     dt = Dunetrace(
@@ -160,7 +160,7 @@ def main() -> None:
         result = agent.invoke(
             {"messages": [("human", (
                 "I need a thorough literature review on quantum computing advances in 2024. "
-                "The search tool may return incomplete results — keep searching with the same "
+                "The search tool may return incomplete results i.e. keep searching with the same "
                 "query until you have complete results. "
                 "Query to use: 'quantum computing advances 2024'."
             ))]},
@@ -175,7 +175,7 @@ def main() -> None:
     _search_attempts.clear()
 
     # ── Scenario 2: TOOL_AVOIDANCE ─────────────────────────────────────────────
-    print("\n  ── Scenario 2: TOOL_AVOIDANCE ──")
+    print("\n  Scenario 2: TOOL_AVOIDANCE")
     print("  (Agent answers from memory without using any tool)")
     try:
         result = agent.invoke(

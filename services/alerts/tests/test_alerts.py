@@ -1,7 +1,7 @@
 """
 tests/test_alerts.py
 
-Alert service tests — formatters, sender retry, worker pipeline.
+Alert service tests i.e. formatters, sender retry, worker pipeline.
 Zero external deps. No DB, no real HTTP calls.
 
 Run:
@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
-# ── Path setup ─────────────────────────────────────────────────────────────────
+# Path setup
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 
 for _p in [
@@ -37,6 +37,7 @@ from alerts_svc.formatters.webhook import format_webhook, sign_payload, build_si
 from alerts_svc.sender  import SendResult, send_with_retry
 from alerts_svc.config  import SEVERITY_ORDER
 import alerts_svc.worker as worker_module
+
 # ── Factories ──────────────────────────────────────────────────────────────────
 
 def make_signal(
@@ -92,7 +93,7 @@ def make_explanation(
     )
 
 
-# ── Slack formatter ────────────────────────────────────────────────────────────
+# Slack formatter
 
 class TestSlackFormatter(unittest.TestCase):
 
@@ -186,7 +187,7 @@ class TestSlackFormatter(unittest.TestCase):
         self.assertIn(self.exp.title, payload["attachments"][0]["text"])
 
 
-# ── Webhook formatter ──────────────────────────────────────────────────────────
+# Webhook formatter
 
 class TestWebhookFormatter(unittest.TestCase):
 
@@ -279,7 +280,7 @@ class TestWebhookFormatter(unittest.TestCase):
         self.assertEqual(headers["X-Dunetrace-Signature"], expected)
 
 
-# ── Sender retry logic ─────────────────────────────────────────────────────────
+# Sender retry logic
 
 class TestSenderRetry(unittest.TestCase):
 
@@ -342,7 +343,7 @@ class TestSenderRetry(unittest.TestCase):
         self.assertIn("503", result.error)
 
 
-# ── Severity threshold ─────────────────────────────────────────────────────────
+# Severity threshold
 
 class TestSeverityThreshold(unittest.TestCase):
 
@@ -369,7 +370,7 @@ class TestSeverityThreshold(unittest.TestCase):
             self.assertTrue(meets, f"CRITICAL should meet {threshold} threshold")
 
 
-# ── Worker pipeline ────────────────────────────────────────────────────────────
+# Worker pipeline
 
 class TestWorkerRowToSignal(unittest.TestCase):
 

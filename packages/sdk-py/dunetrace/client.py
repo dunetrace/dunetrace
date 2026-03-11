@@ -2,17 +2,19 @@
 dunetrace/client.py
 
 Non-blocking SDK client. Zero external dependencies.
-The agent thread never blocks — all I/O happens on the background drain thread.
+The agent thread never blocks i.e. all I/O happens on the background drain thread.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import logging
+import sys
 import time
 import urllib.request
 import urllib.error
 from contextlib import contextmanager
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import List, Optional
 
 from dunetrace.buffer import RingBuffer
@@ -51,6 +53,8 @@ class Dunetrace:
         *,
         buffer_size:       int  = 10_000,
         flush_interval_ms: int  = 200,
+        emit_as_json:      bool = False,
+        otel_exporter:     Optional[object] = None,
         debug:             bool = False,
     ) -> None:
         self._ingest_url     = endpoint.rstrip("/") + "/v1/ingest"
@@ -58,6 +62,9 @@ class Dunetrace:
         self._buffer         = RingBuffer[AgentEvent](maxsize=buffer_size)
         self._stop_evt       = Event()
         self._flush_interval = flush_interval_ms / 1000.0
+        self._emit_json      = emit_as_json
+        self._otel_exporter  = otel_exporter   # DunetraceOTelExporter or None
+        self._stdout_lock    = Lock()  # one JSON line per write, no interleaving
 
         if debug:
             logging.basicConfig(level=logging.DEBUG)
@@ -68,7 +75,10 @@ class Dunetrace:
             name="dunetrace-drain",
         )
         self._drain_thread.start()
-        logger.debug("Dunetrace started. endpoint=%s", endpoint)
+        logger.debug(
+            "Dunetrace started. endpoint=%s emit_as_json=%s otel=%s",
+            endpoint, emit_as_json, otel_exporter is not None,
+        )
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -101,7 +111,7 @@ class Dunetrace:
         )
 
         # Run injection check on raw input before it is hashed and discarded.
-        # Evidence (matched pattern names + count) is safe to transmit — no raw text.
+        # Evidence (matched pattern names + count) is safe to transmit i.e. no raw text.
         _injection_evidence = None
         if user_input:
             _sig = PROMPT_INJECTION_DETECTOR.check_input(user_input, ctx.state)
@@ -128,6 +138,10 @@ class Dunetrace:
 
         try:
             yield ctx
+            # Sync RunState fields detectors read before notifying the OTel exporter.
+            ctx.state.current_step = ctx.step
+            if self._otel_exporter is not None:
+                self._otel_exporter.notify_run_state(ctx.run_id, ctx.state)
             self._emit(AgentEvent(
                 event_type=EventType.RUN_COMPLETED,
                 run_id=ctx.run_id,
@@ -141,6 +155,10 @@ class Dunetrace:
                 },
             ))
         except Exception as exc:
+            ctx.state.current_step = ctx.step
+            ctx.state.exit_reason  = "error"
+            if self._otel_exporter is not None:
+                self._otel_exporter.notify_run_state(ctx.run_id, ctx.state)
             self._emit(AgentEvent(
                 event_type=EventType.RUN_ERRORED,
                 run_id=ctx.run_id,
@@ -163,7 +181,47 @@ class Dunetrace:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _emit(self, event: AgentEvent) -> None:
+        if self._emit_json:
+            self._write_json_line(event)
+        if self._otel_exporter is not None:
+            self._otel_exporter.handle(event)
         self._buffer.push(event)
+
+    def _write_json_line(self, event: AgentEvent) -> None:
+        """
+        Write one Loki-compatible NDJSON line to stdout.
+
+        Field mapping for Promtail / Grafana Alloy pipeline stages:
+          ts          → timestamp label (RFC3339 with microseconds)
+          level       → log level label (always "info")
+          logger      → "dunetrace"
+          event_type  → Loki stream label — index by agent + event_type
+          agent_id    → Loki stream label
+          run_id      → structured field
+          step_index  → structured field
+          payload     → structured field (hashes only, never raw content)
+        """
+        ts = datetime.datetime.utcfromtimestamp(event.timestamp).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        line = {
+            "ts":            ts,
+            "level":         "info",
+            "logger":        "dunetrace",
+            "event_type":    event.event_type.value,
+            "agent_id":      event.agent_id,
+            "run_id":        event.run_id,
+            "agent_version": event.agent_version,
+            "step_index":    event.step_index,
+            "payload":       event.payload,
+        }
+        if event.parent_run_id:
+            line["parent_run_id"] = event.parent_run_id
+
+        serialised = json.dumps(line, separators=(",", ":"))
+        with self._stdout_lock:
+            sys.stdout.write(serialised + "\n")
+            sys.stdout.flush()
 
     def _drain_loop(self) -> None:
         while not self._stop_evt.is_set():

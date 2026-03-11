@@ -1,13 +1,13 @@
 """
 services/alerts/alerts_svc/sender.py
 
-HTTP delivery for alerts. Stdlib urllib only — no httpx, no requests.
+HTTP delivery for alerts. Stdlib urllib only i.e. no httpx, no requests.
 
 Features:
   - Exponential backoff retry (configurable max retries + base delay)
   - Per-destination timeout (5s connect, 10s read)
   - Structured logging of every attempt and outcome
-  - Never raises — returns a SendResult so callers can decide what to do
+  - Never raises i.e. returns a SendResult so callers can decide what to do
 
 Supports two destinations:
   - Slack Incoming Webhook (POST JSON, check for "ok" in response)

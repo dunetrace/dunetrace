@@ -25,7 +25,7 @@ class Settings:
     DATABASE_URL:      str   = os.getenv("DATABASE_URL",
                                 "postgresql://dunetrace:dunetrace@localhost:5432/dunetrace")
 
-    # ── Slack ──────────────────────────────────────────────────────────────────
+    # Slack
     # Set SLACK_WEBHOOK_URL to enable Slack alerts.
     # Get one at: https://api.slack.com/messaging/webhooks
     SLACK_WEBHOOK_URL: str   = os.getenv("SLACK_WEBHOOK_URL", "")
@@ -34,13 +34,13 @@ class Settings:
     # Minimum severity to alert on. One of: LOW, MEDIUM, HIGH, CRITICAL
     SLACK_MIN_SEVERITY: str  = os.getenv("SLACK_MIN_SEVERITY", "HIGH")
 
-    # ── Generic webhook ────────────────────────────────────────────────────────
+    # Generic webhook
     # A JSON POST will be sent to this URL for every alert.
     # Useful for PagerDuty, Linear, custom webhooks, etc.
     WEBHOOK_URL:       str   = os.getenv("WEBHOOK_URL", "")
     WEBHOOK_SECRET:    str   = os.getenv("WEBHOOK_SECRET", "")   # HMAC-SHA256 signing key
 
-    # ── Worker ─────────────────────────────────────────────────────────────────
+    # Worker
     POLL_INTERVAL:     float = float(os.getenv("POLL_INTERVAL", "10"))
     BATCH_SIZE:        int   = int(os.getenv("BATCH_SIZE", "50"))
 

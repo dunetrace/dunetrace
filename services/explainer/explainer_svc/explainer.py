@@ -11,7 +11,7 @@ Public API for the explain layer.
 
 The explain layer is intentionally stateless and dependency-free.
 It can be imported directly by the detector worker, the REST API,
-or any future alert handler — no network calls, no DB, no LLM.
+or any future alert handler i.e. no network calls, no DB, no LLM.
 """
 from __future__ import annotations
 
@@ -29,19 +29,19 @@ def explain(signal: FailureSignal) -> Explanation:
     Produce a human-readable Explanation from a FailureSignal.
 
     Returns a fallback explanation for unknown failure types
-    rather than raising — the caller should never crash on explain().
+    rather than raising i.e. the caller should never crash on explain().
     """
     template = TEMPLATES.get(signal.failure_type)
 
     if template is None:
-        logger.warning("No template for failure_type=%s — using fallback",
+        logger.warning("No template for failure_type=%s i.e. using fallback",
                        signal.failure_type)
         return _fallback(signal)
 
     try:
         return template(signal)
     except Exception as exc:
-        logger.error("Template failed for %s: %s — using fallback",
+        logger.error("Template failed for %s: %s i.e. using fallback",
                      signal.failure_type, exc)
         return _fallback(signal)
 

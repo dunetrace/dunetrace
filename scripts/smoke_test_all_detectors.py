@@ -3,7 +3,7 @@
 scripts/smoke_test_all_detectors.py
 
 Synthetic end-to-end smoke test for every Tier 1 detector.
-Injects crafted event sequences directly to the ingest API —
+Injects crafted event sequences directly to the ingest API i.e.
 no LangChain or OpenAI key required.
 
 Coverage (12 of 13 detectors):
@@ -13,8 +13,8 @@ Coverage (12 of 13 detectors):
   FIRST_STEP_FAILURE
 
 Skipped (not triggerable through the ingest pipeline):
-  GOAL_ABANDONMENT       — needs stalled run (90 s timeout)
-  PROMPT_INJECTION_SIGNAL — checked pre-ingest via SDK check_input()
+  GOAL_ABANDONMENT: needs stalled run (90 s timeout)
+  PROMPT_INJECTION_SIGNAL: checked pre-ingest via SDK check_input()
 
 Usage:
     docker compose up -d
@@ -471,7 +471,7 @@ def main() -> None:
             print(f"  {RED}FAIL{RESET}  {ft}")
 
     not_tested = [
-        "GOAL_ABANDONMENT        (needs stalled run — 90 s wait, not suitable for smoke test)",
+        "GOAL_ABANDONMENT        (needs stalled run i.e. 90 s wait, not suitable for smoke test)",
         "PROMPT_INJECTION_SIGNAL (triggered pre-ingest via SDK check_input, not via pipeline)",
     ]
     print(f"\n  Skipped:")

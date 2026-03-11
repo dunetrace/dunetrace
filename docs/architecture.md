@@ -7,23 +7,28 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 ## System Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Your Agent                           │
-│                                                             │
-│   with dt.run(user_input) as run:                           │
-│       run.tool_called("web_search", {...})                  │
-│       run.tool_responded("web_search", ...)                 │
-└──────────────────────┬──────────────────────────────────────┘
-                       │  HTTP POST /v1/ingest (async, 202)
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│                   Ingest API  :8001                          │
-│                                                             │
-│   FastAPI · validates events · returns 202 immediately      │
-│   BackgroundTask writes to Postgres                         │
-└──────────────────────┬──────────────────────────────────────┘
-                       │  writes: events table
-                       ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                              Your Agent                                   │
+│                                                                           │
+│   with dt.run(user_input) as run:                                         │
+│       run.tool_called("web_search", {...})                                │
+│       run.tool_responded("web_search", ...)                               │
+│       run.external_signal("rate_limit", source="openai")                  │
+└──────┬──────────────────────────────┬──────────────────────────┬──────────┘
+       │  HTTP POST /v1/ingest        │  stdout NDJSON           │  OTel spans
+       │  (async, 202)                │  (emit_as_json=True)     │  (otel_exporter=…)
+       ▼                              ▼                          ▼
+┌─────────────────────┐  ┌────────────────────────┐  ┌──────────────────────┐
+│  Ingest API  :8001  │  │  Loki / Grafana Alloy  │  │  OTel Collector      │
+│                     │  │                        │  │  (Tempo / Honeycomb  │
+│  FastAPI ·          │  │  Promtail pipeline     │  │   / Datadog / Jaeger)│
+│  validates ·        │  │  → Grafana dashboards  │  │                      │
+│  202 immediately    │  └────────────────────────┘  └──────────────────────┘
+│  BackgroundTask     │
+│  writes to Postgres │
+└──────────┬──────────┘
+           │  writes: events table
+           ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                      Postgres                                │
 │                                                             │
@@ -38,7 +43,7 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 │  Reconstructs       │  writes      │  Fetches unalerted      │
 │  RunState from      │ ──────────▶  │  shadow=FALSE signals   │
 │  events             │  signals     │  → explain()            │
-│  Runs 14 detectors  │              │  → format Slack/webhook │
+│  Runs 15 detectors  │              │  → format Slack/webhook │
 │  Writes signals     │              │  → HTTP POST with retry │
 └─────────────────────┘              └─────────────────────────┘
 
@@ -57,6 +62,51 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 │   Fetches live data from Customer API · auto-refreshes 10s  │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## SDK Output Modes
+
+The SDK supports three independent output modes that can be combined:
+
+| Mode | How to enable | Destination | Use case |
+|---|---|---|---|
+| HTTP ingest (default) | Always on | Ingest API → Postgres → Detector | Full pipeline: detection, alerts, dashboard |
+| Loki NDJSON | `emit_as_json=True` | stdout → Promtail/Alloy → Loki | Existing Grafana stack integration |
+| OTel spans | `otel_exporter=DunetraceOTelExporter(provider)` | OTel collector → Tempo / Honeycomb / Datadog | Infra metric correlation |
+
+All three modes can be active simultaneously. OTel and NDJSON are zero-cost when disabled.
+
+### emit_as_json=True
+
+Writes one Loki-compatible NDJSON line to stdout per event. Fields match Promtail pipeline stages:
+
+```
+{"ts":"2026-03-01T12:00:00.123456Z","level":"info","logger":"dunetrace",
+ "event_type":"tool.called","agent_id":"my-agent","run_id":"…","step_index":3,
+ "payload":{…}}
+```
+
+Each line is written atomically under a lock i.e. no interleaving even when the agent is multi-threaded.
+
+### OTel span exporter
+
+`DunetraceOTelExporter` translates `AgentEvent` objects into OpenTelemetry spans in real time:
+
+```
+Trace (trace_id = run_id as 128-bit int)
+└── Span: "agent_run"         [dunetrace.agent_id, dunetrace.model, …]
+    ├── Span: "llm_call"      [gen_ai.request.model, gen_ai.usage.*, …]
+    ├── Span: "tool_call"     [dunetrace.tool_name, dunetrace.success, …]
+    │   └── SpanEvent: "rate_limit"   (from run.external_signal())
+    └── Span: "retrieval"     [dunetrace.index_name, dunetrace.result_count]
+```
+
+At run end, Tier 1 detectors run on the completed `RunState`. Each signal is written as indexed attributes on the root span (`dunetrace.signal.0.failure_type`, `.severity`, `.confidence`, `.evidence.*`). HIGH/CRITICAL signals set `span.status = ERROR`.
+
+### external_signal event type
+
+`run.external_signal("rate_limit", source="openai")` emits an `external.signal` event that does **not** advance the step counter. It records infrastructure context alongside the agent step it coincided with. `SlowStepDetector` checks for coincident external signals within the step's time window and includes them in evidence (`coincident_signals`).
 
 ---
 
@@ -95,7 +145,7 @@ Signals are written with `shadow=TRUE` unless the detector is in `LIVE_DETECTORS
 
 ### Explain Layer (library, not a service)
 
-Not a separate process — imported as a library by both the alerts worker and the customer API.
+Not a separate process i.e. imported as a library by both the alerts worker and the customer API.
 
 Takes a `FailureSignal` and returns an `Explanation` in under 1ms. Uses deterministic string templates, not LLM calls. The template for each failure type interpolates actual evidence values (tool names, counts, patterns) into pre-written text.
 
@@ -207,6 +257,6 @@ CREATE TABLE api_keys (
 
 **Detector worker down:** Runs queue up in the `events` table. When the worker restarts, it processes all unprocessed runs. Signals are delayed but not lost.
 
-**Postgres down:** Ingest returns 503. SDK logs a warning and continues buffering. Events during the outage are lost (the buffer eventually overwrites). This is acceptable — observability data loss during a DB outage is not a catastrophic failure.
+**Postgres down:** Ingest returns 503. SDK logs a warning and continues buffering. Events during the outage are lost (the buffer eventually overwrites). This is acceptable i.e. observability data loss during a DB outage is not a catastrophic failure.
 
 **Alerts worker down:** Signals accumulate as `alerted=FALSE`. When the worker restarts, it picks up where it left off. Alerts are delayed but not lost (at-least-once delivery).

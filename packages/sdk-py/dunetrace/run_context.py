@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 from dunetrace.models import (
     AgentEvent,
     EventType,
+    ExternalSignal,
     RetrievalResult,
     RunState,
     ToolCall,
@@ -97,18 +98,24 @@ class RunContext:
         success:       bool = True,
         output_length: int  = 0,
         latency_ms:    int  = 0,
+        error:         Optional[str] = None,
     ) -> None:
-        # Back-fill success on the most recent matching ToolCall
+        error_hash = hash_content(error) if (not success and error) else None
+        # Back-fill success and error_hash on the most recent matching ToolCall
         for tc in reversed(self.state.tool_calls):
             if tc.tool_name == tool_name and tc.success is None:
-                tc.success = success
+                tc.success    = success
+                tc.error_hash = error_hash
                 break
-        self._emit(EventType.TOOL_RESPONDED, {
+        payload: dict = {
             "tool_name":     tool_name,
             "success":       success,
             "output_length": output_length,
             "latency_ms":    latency_ms,
-        })
+        }
+        if error_hash:
+            payload["error_hash"] = error_hash
+        self._emit(EventType.TOOL_RESPONDED, payload)
 
     # ── Retrieval hooks (RAG) ─────────────────────────────────────────────────
 
@@ -137,6 +144,52 @@ class RunContext:
             "top_score":    top_score,
             "latency_ms":   latency_ms,
         })
+
+    # ── External signal hooks ─────────────────────────────────────────────────
+
+    def external_signal(self, signal_name: str, source: str = "", **meta: Any) -> None:
+        """
+        Emit an infrastructure context event at the current agent step.
+
+        Does not advance the step counter, the signal annotates whatever
+        agent step is currently in progress, not a new one.
+
+        Usage::
+
+            run.external_signal("rate_limit", source="openai")
+            run.external_signal("cache_miss", source="redis", key_prefix="emb:")
+            run.external_signal("upstream_error", source="serp_api", http_status=503)
+
+        Detectors (e.g. SLOW_STEP) correlate these signals with failures to
+        provide richer evidence: "tool took 100s i.e. coincided with rate_limit
+        from openai" rather than just "tool took 100s".
+        """
+        ts = time.time()
+        self.state.external_signals.append(ExternalSignal(
+            signal_name=signal_name,
+            step_index=self.step,
+            timestamp=ts,
+            source=source,
+            meta=dict(meta),
+        ))
+        payload: dict = {"signal_name": signal_name}
+        if source:
+            payload["source"] = source
+        if meta:
+            payload["meta"] = dict(meta)
+        # Emit directly — bypass _emit() so step counter does not advance.
+        event = AgentEvent(
+            event_type=EventType.EXTERNAL_SIGNAL,
+            run_id=self.run_id,
+            agent_id=self.agent_id,
+            agent_version=self.agent_version,
+            step_index=self.step,
+            timestamp=ts,
+            payload=payload,
+            parent_run_id=self._parent_run_id,
+        )
+        self.state.events.append(event)
+        self._client._emit(event)
 
     def final_answer(self) -> None:
         """Call when the agent produces its final answer."""
