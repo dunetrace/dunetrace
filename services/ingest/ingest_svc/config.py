@@ -28,6 +28,7 @@ class Settings:
     )
     AUTH_MODE: str = os.getenv("AUTH_MODE", "dev")
     MAX_BATCH_SIZE: int = int(os.getenv("MAX_BATCH_SIZE", "500"))
+    RATE_LIMIT_REQUESTS: int = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))  # per IP per minute
 
     @property
     def is_dev(self) -> bool:

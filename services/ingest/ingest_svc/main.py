@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
+from threading import Lock
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +33,28 @@ logging.basicConfig(
 logger = logging.getLogger("dunetrace.ingest")
 
 
-# ── Lifespan ───────────────────────────────────────────────────────────────────
+# Rate limiter
+
+_RATE_LIMIT_REQUESTS = settings.RATE_LIMIT_REQUESTS
+_RATE_LIMIT_WINDOW   = 60  # seconds
+
+_rate_counters: dict[str, list[float]] = defaultdict(list)
+_rate_lock = Lock()
+
+
+def _is_rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    with _rate_lock:
+        timestamps = _rate_counters[ip]
+        # drop entries outside the window
+        _rate_counters[ip] = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
+        if len(_rate_counters[ip]) >= _RATE_LIMIT_REQUESTS:
+            return True
+        _rate_counters[ip].append(now)
+        return False
+
+
+# Lifespan
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -43,7 +66,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
-# ── App ────────────────────────────────────────────────────────────────────────
+# App
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -60,9 +83,18 @@ def create_app() -> FastAPI:
         allow_headers=["Content-Type", "X-Dunetrace-Agent"],
     )
 
-    # Request timing log
+    # Rate limiting + request timing
     @app.middleware("http")
-    async def log_requests(request: Request, call_next):
+    async def rate_limit_and_log(request: Request, call_next):
+        # Only rate-limit the ingest endpoint
+        if request.url.path == "/v1/ingest":
+            ip = request.client.host if request.client else "unknown"
+            if _is_rate_limited(ip):
+                logger.warning("Rate limit exceeded. ip=%s", ip)
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Rate limit exceeded. Max 60 requests per minute."},
+                )
         t = time.monotonic()
         response = await call_next(request)
         ms = (time.monotonic() - t) * 1000

@@ -16,6 +16,7 @@ VALID_EVENT_TYPES = {
     "llm.called", "llm.responded",
     "tool.called", "tool.responded",
     "retrieval.called", "retrieval.responded",
+    "external.signal",
 }
 
 

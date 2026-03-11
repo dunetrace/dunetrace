@@ -125,48 +125,48 @@ async def poll_once() -> tuple[int, int]:
 
     logger.info("Found %d unalerted signal(s)", len(rows))
 
-    delivered_ids = []
-
+    # Build explanations first (fast, synchronous)
+    work: list[tuple[int, Explanation]] = []
     for row in rows:
-        signal_id = row["id"]
-
         try:
             signal      = _row_to_signal(row)
             explanation = explain(signal)
+            work.append((row["id"], explanation))
         except Exception as exc:
-            logger.error("Failed to build explanation for signal_id=%d: %s",
-                         signal_id, exc)
-            continue
+            logger.error("Failed to build explanation for signal_id=%d: %s", row["id"], exc)
 
+    if not work:
+        return len(rows), 0
+
+    # Deliver all signals concurrently
+    async def _deliver_one(signal_id: int, explanation: Explanation) -> int | None:
         logger.info(
             "[%s] %s — run_id=%s agent_id=%s confidence=%s",
-            explanation.severity,
-            explanation.title,
-            explanation.run_id,
-            explanation.agent_id,
-            explanation.confidence_pct(),
+            explanation.severity, explanation.title,
+            explanation.run_id, explanation.agent_id, explanation.confidence_pct(),
         )
-
-        # Run synchronous HTTP in a thread so we don't block the event loop
         try:
             results = await asyncio.to_thread(deliver, explanation)
         except Exception as exc:
             logger.error("Delivery error for signal_id=%d: %s", signal_id, exc)
-            continue
+            return None
 
-        # Mark as alerted only if at least one destination succeeded
-        any_success = any(r.success for r in results.values()) if results else False
-        no_destinations = not results  # nothing configured i.e. still mark done
+        any_success    = any(r.success for r in results.values()) if results else False
+        no_destinations = not results
 
         if any_success or no_destinations:
-            delivered_ids.append(signal_id)
             for dest, result in results.items():
                 if not result.success:
                     logger.warning("Partial delivery failure. dest=%s signal_id=%d error=%s",
                                    dest, signal_id, result.error)
+            return signal_id
         else:
-            logger.error("All destinations failed for signal_id=%d i.e. will retry next cycle",
+            logger.error("All destinations failed for signal_id=%d — will retry next cycle",
                          signal_id)
+            return None
+
+    outcomes = await asyncio.gather(*[_deliver_one(sid, exp) for sid, exp in work])
+    delivered_ids = [sid for sid in outcomes if sid is not None]
 
     if delivered_ids:
         await mark_alerted_batch(delivered_ids)
@@ -185,6 +185,11 @@ async def run_worker() -> None:
         enabled.append(f"Slack ({settings.SLACK_CHANNEL}, min={settings.SLACK_MIN_SEVERITY})")
     if settings.webhook_enabled:
         enabled.append(f"Webhook ({settings.WEBHOOK_URL[:40]}...)")
+        if not settings.WEBHOOK_SECRET:
+            logger.warning(
+                "WEBHOOK_URL is set but WEBHOOK_SECRET is empty — "
+                "payloads will be sent unsigned. Set WEBHOOK_SECRET for HMAC-SHA256 signing."
+            )
     if not enabled:
         logger.warning(
             "No destinations configured. "

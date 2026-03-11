@@ -26,6 +26,7 @@ services:
       dockerfile: services/ingest/Dockerfile
     ports:
       - "8001:8001"
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,11 +36,18 @@ services:
       ENV: dev
       AUTH_MODE: dev
       PYTHONPATH: /app/services/ingest
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   detector:
     build:
       context: .
       dockerfile: services/detector/Dockerfile
+    restart: unless-stopped
     volumes:
       - ./detectors.yml:/app/detectors.yml:ro
     environment:
@@ -53,11 +61,18 @@ services:
       ingest:
         condition: service_started
     command: ["python", "-m", "detector_svc.worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncpg\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   alerts:
     build:
       context: .
       dockerfile: services/alerts/Dockerfile
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       POLL_INTERVAL: 10
@@ -71,6 +86,12 @@ services:
       detector:
         condition: service_started
     command: ["python", "-m", "alerts_svc.worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncpg\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   api:
     build:
@@ -78,6 +99,7 @@ services:
       dockerfile: services/api/Dockerfile
     ports:
       - "8002:8002"
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       AUTH_MODE: dev
@@ -86,15 +108,28 @@ services:
       postgres:
         condition: service_healthy
     command: ["uvicorn", "api_svc.main:app", "--host", "0.0.0.0", "--port", "8002"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   dashboard:
     image: nginx:alpine
     ports:
       - "3000:80"
+    restart: unless-stopped
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro
     depends_on:
       - api
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
 volumes:
   postgres_data:
