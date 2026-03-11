@@ -5,7 +5,10 @@
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/dunetrace?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/dunetrace)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Behavioral observability for AI agents at runtime. Detects tool loops, context bloat, prompt injection, and other failure patterns and get alerts immediately. Zero raw content transmitted. All text is SHA-256 hashed before leaving the agent process.
+Privacy-safe observability for AI agents at runtime. Detects tool loops, context bloat, prompt injection, and other failure patterns and get alerts immediately. Zero raw content transmitted. All text is SHA-256 hashed before leaving the agent process.
+
+
+![Dunetrace demo](dunetrace-demo.gif)
 
 ## Quickstart
 
