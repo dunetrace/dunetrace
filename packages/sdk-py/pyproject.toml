@@ -7,11 +7,12 @@ name = "dunetrace"
 version = "0.3.0"
 description = "Behavioral observability for AI agents"
 readme = "README.md"
-license = "MIT"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]
 keywords = ["ai", "agents", "observability", "llm", "monitoring"]
 classifiers = [
+    "License :: OSI Approved :: Apache Software License",
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
