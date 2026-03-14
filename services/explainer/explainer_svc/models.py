@@ -1,8 +1,6 @@
 """
-services/explainer/explainer_svc/models.py
-
-Output types for the explain layer.
-An Explanation is what gets rendered in the dashboard / sent in an alert.
+Output types for the explanation layer. Explanation is what gets rendered
+in the dashboard and formatted into alerts.
 """
 from __future__ import annotations
 

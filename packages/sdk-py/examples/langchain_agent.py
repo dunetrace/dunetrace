@@ -1,8 +1,6 @@
 """
-examples/langchain_agent.py
-
-LangChain agent instrumented with Dunetrace. One callback, zero agent changes.
-Works with LangChain 1.x + LangGraph (langgraph >= 0.2).
+LangChain agent example. One callback, nothing else changes.
+Works with LangChain 1.x and LangGraph (langgraph >= 0.2).
 
 Install:
     pip install 'dunetrace[langchain]' langchain-openai langgraph

@@ -1,8 +1,6 @@
 """
-tests/test_alerts.py
-
-Alert service tests i.e. formatters, sender retry, worker pipeline.
-Zero external deps. No DB, no real HTTP calls.
+Tests for alert formatters, sender retry logic, and the worker pipeline.
+No DB, no real HTTP calls.
 
 Run:
     cd services/alerts

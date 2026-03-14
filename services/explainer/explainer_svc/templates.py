@@ -1,19 +1,12 @@
 """
-services/explainer/explainer_svc/templates.py
+One explanation template per Tier 1 failure type. All deterministic — no LLM calls.
+Templates fill in real evidence values (tool name, count, matched patterns, etc.)
+and end with concrete fix suggestions aimed at the on-call engineer.
 
-One template per Tier 1 failure type.
-
-Design principles:
-  - Fully deterministic. No LLM calls. Same signal → same explanation.
-  - Evidence-aware. Templates interpolate the actual evidence values
-    (tool name, loop count, matched patterns, etc.) into the text.
-  - Actionable. Every template ends with 1–3 concrete, copy-pasteable fixes.
-  - Audience: the engineer on call. Plain English, no jargon.
-
-Each template is a function:
+Each template follows the shape:
     def explain_<type>(signal: FailureSignal) -> Explanation
 
-All templates are registered in TEMPLATES dict at the bottom.
+All templates are registered in the TEMPLATES dict at the bottom of this file.
 """
 from __future__ import annotations
 

@@ -1,7 +1,5 @@
 """
-dunetrace/integrations/langchain.py
-
-Drop-in LangChain callback handler. Add one line to any LangChain agent:
+LangChain callback handler. Plug it into any agent and it auto-instruments everything:
 
     from dunetrace import Dunetrace
     from dunetrace.integrations.langchain import DunetraceCallbackHandler
@@ -15,9 +13,8 @@ Drop-in LangChain callback handler. Add one line to any LangChain agent:
         config={"callbacks": [callback]},
     )
 
-No other changes to your agent code are required.
-Works with LangChain 1.x + LangGraph. For LangChain < 1.x with AgentExecutor,
-pass the handler to AgentExecutor(callbacks=[...]) instead.
+No changes to agent code needed. Works with LangChain 1.x and LangGraph.
+For older AgentExecutor setups, pass the handler to AgentExecutor(callbacks=[...]) instead.
 """
 from __future__ import annotations
 

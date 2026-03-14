@@ -1,11 +1,6 @@
 """
-services/detector/detector_svc/config_loader.py
-
-Loads detector thresholds from detectors.yml and returns constructor kwargs
-for each detector class.
-
-Falls back to empty dicts (SDK defaults) if the file is missing or a
-detector is not mentioned.
+Reads detector thresholds from detectors.yml and returns kwargs for each detector class.
+Falls back to SDK defaults if the file is missing or a detector isn't listed.
 """
 from __future__ import annotations
 

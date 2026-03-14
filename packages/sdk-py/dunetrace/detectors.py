@@ -1,30 +1,23 @@
 """
-dunetrace/detectors.py
+Tier 1 structural detectors. Each takes a RunState and returns an optional signal.
+No LLM calls, no external dependencies, deterministic, <1ms per check.
 
-Tier 1 structural detectors. All are:
-- Pure functions (RunState → Optional[FailureSignal])
-- Zero LLM calls
-- Zero external dependencies
-- Deterministic
-- <1ms per check
-
-Every detector ships in shadow mode first. Do not graduate to live
-until precision > 80% is validated on real customer data.
+New detectors default to shadow mode. Don't flip them live until precision >80%
+is confirmed on real data.
 
 Tuning
 ------
-All detectors accept keyword overrides for their UPPERCASE class attributes:
+Detectors accept keyword overrides for their UPPERCASE class attributes:
 
     ToolLoopDetector(THRESHOLD=2)
 
-Each detector's docstring lists its tunable parameters and what they control.
-Unknown parameter names raise TypeError immediately i.e. there is no silent fallback:
+Each detector's docstring lists its tunable parameters. Unknown keys raise
+TypeError immediately — no silent fallbacks:
 
-    ToolLoopDetector(THREHOLD=2)  # raises TypeError: unknown parameter 'THREHOLD'
+    ToolLoopDetector(THREHOLD=2)  # TypeError: unknown parameter 'THREHOLD'
 
-The public defaults in TIER1_DETECTORS are conservative starting points.
-Tuned values derived from real customer data belong in the private
-detector service configuration, not here.
+The defaults in TIER1_DETECTORS are conservative starting points.
+Tuned values belong in the detector service config, not here.
 """
 from __future__ import annotations
 

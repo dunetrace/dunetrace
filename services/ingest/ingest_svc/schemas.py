@@ -1,8 +1,5 @@
 """
-services/ingest/ingest_svc/schemas.py
-
-Pydantic v2 request/response models.
-Replaces the hand-rolled validation.py entirely.
+Pydantic v2 request and response models for the ingest API.
 """
 from __future__ import annotations
 

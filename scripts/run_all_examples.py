@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-scripts/run_all_examples.py
+Clears the database and runs all example agents. Each gets a distinct agent_id
+so you can filter per example in the dashboard.
 
-Clear the database and run all example agents with 50 runs each.
-
-  python scripts/run_all_examples.py
-
-Each agent is given a distinct agent_id so signals can be filtered per example:
-  basic-example-agent -> basic_agent.py scenarios (no OpenAI)
-  langchain-example-agent -> langchain_agent.py scenarios (gpt-4o-mini)
+    python scripts/run_all_examples.py
 
 Env vars:
-  RUNS_PER_AGENT  (default 50)  -> runs per agent type
+  RUNS_PER_AGENT  (default 50)
   INGEST_URL      (default http://localhost:8001)
-  OPENAI_API_KEY  — required for langchain-example-agent
+  OPENAI_API_KEY  required for the LangChain example
 """
 from __future__ import annotations
 

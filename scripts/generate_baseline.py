@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
 """
-scripts/generate_baseline.py
+Generates 100 GPT-4o-mini agent runs for detector calibration.
+Uses three tools that produce organic failures: web_search (pagination forces loops),
+calculator (AST eval errors trigger retries), and doc_lookup (long outputs bloat context).
 
-Generate 100 real GPT-4o-mini agent runs for DuneTrace detector calibration.
-
-Three real tools that produce organic failures:
-  web_search: paginated results force multiple calls -> TOOL_LOOP
-  calculator: safe AST eval; division-by-zero raises -> RETRY_STORM / CASCADING
-  doc_lookup: returns long text on known topics -> CONTEXT_BLOAT
-
-Task mix:
-  30 research   — loop-prone deep queries
-  20 math       — calculator-heavy, some tricky
-  15 factual    — short known facts -> TOOL_AVOIDANCE
-  20 multi_tool — chained search + calc / lookup
-  15 adversarial — ambiguous / failure-prone prompts
+Task mix: 30 research, 20 math, 15 factual, 20 multi_tool, 15 adversarial.
 
 Usage:
     docker compose up -d --build

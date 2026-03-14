@@ -1,7 +1,5 @@
 """
-services/api/api_svc/main.py
-
-Dunetrace customer API, read-only queries over runs and signals.
+Customer REST API. Read-only — serves runs, signals, and agent summaries.
 
 Run:
     cd services/api
@@ -9,13 +7,6 @@ Run:
 
 Docs:
     http://localhost:8002/docs
-
-Endpoints:
-    GET /v1/agents                         — list agents with signal counts
-    GET /v1/agents/{agent_id}/runs         — list runs (?has_signals=true)
-    GET /v1/runs/{run_id}                  — run detail with events + explained signals
-    GET /v1/agents/{agent_id}/signals      — signals (?severity=HIGH&failure_type=TOOL_LOOP)
-    GET /health
 """
 from __future__ import annotations
 

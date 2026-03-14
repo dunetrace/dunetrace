@@ -1,9 +1,6 @@
 """
-dunetrace/run_context.py
-
-RunContext is the object the developer holds inside a ``with dt.run(...) as run:`` block.
-Provides emit helpers (tool_called, llm_called, etc.) and accumulates RunState
-for local self-hosted detector use.
+The object returned by `dt.run(...)`. Provides emit helpers like tool_called
+and llm_called, and builds up a RunState for local detection.
 """
 from __future__ import annotations
 

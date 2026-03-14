@@ -1,4 +1,4 @@
-"""Tests for DunetraceClient i.e. no network required."""
+"""Tests for DunetraceClient. No network required."""
 import json
 import threading
 import unittest

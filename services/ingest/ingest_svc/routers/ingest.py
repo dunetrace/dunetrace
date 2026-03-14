@@ -1,8 +1,4 @@
-"""
-services/ingest/ingest_svc/routers/ingest.py
-
-POST /v1/ingest
-"""
+"""POST /v1/ingest — accepts event batches from the SDK."""
 from __future__ import annotations
 
 import logging

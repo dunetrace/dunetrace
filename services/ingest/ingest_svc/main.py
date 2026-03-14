@@ -1,7 +1,5 @@
 """
-services/ingest/ingest_svc/main.py
-
-FastAPI ingest service for Dunetrace.
+Ingest API. Accepts event batches from the SDK and writes them to Postgres.
 
 Run:
     cd services/ingest

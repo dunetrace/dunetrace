@@ -1,7 +1,5 @@
 """
-services/explainer/explainer_svc/explainer.py
-
-Public API for the explain layer.
+Entry point for the explanation layer.
 
     from explainer_svc.explainer import explain
 
@@ -9,9 +7,8 @@ Public API for the explain layer.
     print(explanation.title)
     print(explanation.as_slack_text())
 
-The explain layer is intentionally stateless and dependency-free.
-It can be imported directly by the detector worker, the REST API,
-or any future alert handler i.e. no network calls, no DB, no LLM.
+Stateless and dependency-free — no network, no DB, no LLM.
+Can be imported directly by any service.
 """
 from __future__ import annotations
 

@@ -1,9 +1,6 @@
 """
-services/api/api_svc/db/queries.py
-
-All read queries for the customer API.
-Reads from: events, failure_signals, processed_runs, api_keys.
-No writes — this service is read-only.
+Database queries for the customer API. Reads from events, failure_signals,
+processed_runs, and api_keys. This service never writes.
 """
 from __future__ import annotations
 

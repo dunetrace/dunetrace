@@ -1,8 +1,5 @@
 """
-tests/test_explainer.py
-
-Tests for the explain layer.
-Zero external dependencies. No DB, no LLM, no network.
+Tests for the explanation layer. No DB, no LLM, no network.
 
 Run:
     cd services/explainer

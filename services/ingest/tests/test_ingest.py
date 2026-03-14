@@ -1,8 +1,5 @@
 """
-tests/test_ingest.py
-
-FastAPI ingest API tests using httpx AsyncClient.
-All DB calls are mocked — no Postgres needed to run tests.
+Tests for the ingest API. DB is mocked — no Postgres needed.
 
 Run:
     cd services/ingest

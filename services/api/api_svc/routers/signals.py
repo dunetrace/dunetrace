@@ -1,4 +1,4 @@
-"""services/api/api_svc/routers/signals.py"""
+"""Signals endpoints — list and filter detected failure signals."""
 from __future__ import annotations
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query

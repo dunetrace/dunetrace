@@ -1,8 +1,4 @@
-"""
-services/ingest/ingest_svc/routers/health.py
-
-GET /health
-"""
+"""GET /health — liveness check for the ingest service."""
 from fastapi import APIRouter
 from ingest_svc.db import check_db
 from ingest_svc.schemas import HealthResponse

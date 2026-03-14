@@ -1,12 +1,6 @@
 """
-services/detector/detector_svc/run_builder.py
-
-Reconstructs a RunState from raw event rows fetched from the DB.
-This is the bridge between flat DB records and the typed RunState
-that detectors operate on.
-
-Event rows come from the events table written by the ingest service.
-The SDK models live in packages/sdk-py i.e. this module imports from there.
+Rebuilds a RunState from raw event rows. Bridges the flat DB records
+with the typed RunState that detectors expect.
 """
 from __future__ import annotations
 

@@ -1,11 +1,6 @@
 """
-dunetrace/integrations/otel.py
-
-Optional OpenTelemetry exporter for DuneTrace.
-
-Converts agent events into OTel spans so failure signals can be correlated
-with infrastructure metrics in any OTel-compatible backend (Grafana Tempo,
-Honeycomb, Datadog APM, Jaeger).
+OTel span exporter for Dunetrace. Converts agent events into spans so you can
+correlate failure signals with infra metrics in Grafana Tempo, Honeycomb, Datadog, or Jaeger.
 
 Install:
     pip install 'dunetrace[otel]'

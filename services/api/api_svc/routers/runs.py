@@ -1,4 +1,4 @@
-"""services/api/api_svc/routers/runs.py"""
+"""Runs endpoints — list and inspect individual agent runs."""
 from __future__ import annotations
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status

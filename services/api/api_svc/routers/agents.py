@@ -1,4 +1,4 @@
-"""services/api/api_svc/routers/agents.py"""
+"""Agents endpoints — list agents and their signal summaries."""
 from __future__ import annotations
 from typing import Optional
 import asyncio

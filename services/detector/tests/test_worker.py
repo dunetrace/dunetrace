@@ -1,8 +1,5 @@
 """
-services/detector/tests/test_worker.py
-
-Tests for the detector worker — run_builder and process_run logic.
-No DB required — all async DB calls are mocked.
+Tests for the detector worker. DB is mocked — nothing running required.
 
 Run:
     cd services/detector

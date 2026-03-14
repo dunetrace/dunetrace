@@ -1,13 +1,11 @@
 """
-examples/basic_agent.py
-
-Minimal working example i.e. no framework required.
-Run this to verify instrumentation works before connecting to real agents.
+Minimal example — no framework needed. Good for verifying instrumentation
+before hooking up a real agent.
 
     pip install dunetrace
     python examples/basic_agent.py
 
-Events are sent to http://localhost:8001. Start the backend first:
+Sends events to http://localhost:8001. Start the backend first:
     docker compose up
 """
 import time

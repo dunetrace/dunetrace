@@ -1,28 +1,14 @@
 """
-services/alerts/alerts_svc/worker.py
+Alert delivery worker. Polls for unalerted live signals, explains them,
+formats payloads, and sends to Slack and/or webhook.
 
-The alert delivery loop.
+Each signal goes through: DB row → FailureSignal → Explanation → formatted payload → HTTP send → mark alerted.
 
-Every POLL_INTERVAL seconds:
-  1. Fetch unalerted live signals from the DB
-  2. For each: reconstruct FailureSignal -> explain() -> format -> send
-  3. On successful delivery: mark as alerted
+Slack only receives signals at or above SLACK_MIN_SEVERITY. The generic webhook
+gets everything and can filter on its end.
 
-Pipeline per signal:
-    DB row
-      -> FailureSignal (models) 
-      -> Explanation   (explainer)
-      -> Slack payload + webhook payload (formatters)
-      -> HTTP delivery (sender)
-      -> mark alerted  (DB)
-
-Severity filter:
-    Only signals at or above SLACK_MIN_SEVERITY are sent to Slack.
-    All live signals are sent to the generic webhook (recipient can filter).
-
-Delivery is at-least-once:
-    If the process crashes between send and mark_alerted,
-    the signal will be re-sent on the next restart.
+Delivery is at-least-once: if the process crashes between send and mark_alerted,
+the signal will be re-sent on the next restart.
     Idempotency is the receiver's responsibility.
 
 Run:

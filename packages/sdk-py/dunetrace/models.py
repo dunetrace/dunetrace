@@ -1,8 +1,6 @@
 """
-dunetrace/models.py
-
-Core data models for the SDK. Zero external dependencies.
-All content fields carry SHA-256 hashes i.e. raw text never leaves your process.
+Core data models. No external dependencies.
+Content fields store SHA-256 hashes — raw text never leaves your process.
 """
 from __future__ import annotations
 

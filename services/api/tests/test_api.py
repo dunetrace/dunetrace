@@ -1,13 +1,6 @@
 """
-services/api/tests/test_api.py
-
-Customer API tests — all logic tested through schemas and query contracts.
-No DB, no HTTP server needed. Validates:
-  - Response schema shapes (Pydantic models)
-  - Pagination logic
-  - Auth header parsing
-  - Filter parameter passing
-  - 404 handling
+Tests for the customer API — schemas, pagination, auth, and filters.
+No DB or HTTP server needed.
 
 Run:
     cd services/api

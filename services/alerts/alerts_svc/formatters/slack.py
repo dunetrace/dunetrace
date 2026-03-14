@@ -1,7 +1,4 @@
-"""
-services/alerts/alerts_svc/formatters/slack.py
-Converts an Explanation into a Slack Block Kit payload.
-"""
+"""Formats an Explanation as a Slack Block Kit payload."""
 from __future__ import annotations
 import os
 

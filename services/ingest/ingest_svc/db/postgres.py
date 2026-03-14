@@ -1,8 +1,5 @@
 """
-services/ingest/ingest_svc/db/postgres.py
-
-Async Postgres via asyncpg connection pool.
-Pool is created once at startup and injected via FastAPI lifespan.
+Async Postgres connection pool via asyncpg. Created at startup and shared via FastAPI lifespan.
 """
 from __future__ import annotations
 

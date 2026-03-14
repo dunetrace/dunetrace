@@ -1,11 +1,6 @@
 """
-services/detector/detector_svc/db.py
-
-All database I/O for the detector worker.
-
-Reads:   events table (written by ingest service)
-Writes:  failure_signals table
-Tracks:  processed_runs table (prevents double-processing)
+Database layer for the detector worker. Reads from events, writes to failure_signals,
+and tracks processed_runs to avoid running the same run twice.
 """
 from __future__ import annotations
 

@@ -1,9 +1,6 @@
 """
-services/api/api_svc/schemas.py
-
-Response models for the customer-facing API.
-Uses Pydantic v2 when available (production), stdlib dataclasses as fallback
-so tests can run in sandboxes without pydantic installed.
+Response models for the API. Uses Pydantic v2 in production, falls back to
+stdlib dataclasses so tests can run without it installed.
 """
 from __future__ import annotations
 from typing import Any, Dict, List, Optional

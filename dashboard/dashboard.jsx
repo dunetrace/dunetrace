@@ -155,6 +155,7 @@ function Dashboard() {
   const [runDetail,        setRunDetail]        = useState(null);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
   const [timelineExpanded, setTimelineExpanded] = useState(false);
+  const [graphRunId,       setGraphRunId]       = useState(null);
   const PAGE_SIZE = 15;
 
   // Load agents list
@@ -296,6 +297,7 @@ function Dashboard() {
       background: C.bg, minHeight: "100vh", color: C.text,
       fontFamily: "'JetBrains Mono','Fira Code','SF Mono',monospace",
       fontSize: 12,
+      position: "relative",
     }}>
 
       {/* ── Top bar ── */}
@@ -660,8 +662,19 @@ function Dashboard() {
             {/* Header */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: C.orange }}>RUN DETAIL</span>
-              <button onClick={() => { setSelectedRun(null); setTimelineExpanded(false); }}
-                style={{ background: "none", border: "none", color: C.textD, cursor: "pointer", fontSize: 16 }}>✕</button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                  onClick={() => setGraphRunId(selectedRun.run_id)}
+                  style={{
+                    background: C.surfaceB, border: `1px solid ${C.border}`,
+                    color: C.textM, borderRadius: 4, padding: "3px 10px",
+                    cursor: "pointer", fontSize: 10, fontFamily: "inherit",
+                    display: "flex", alignItems: "center", gap: 5,
+                  }}
+                >⬡ View Graph</button>
+                <button onClick={() => { setSelectedRun(null); setTimelineExpanded(false); }}
+                  style={{ background: "none", border: "none", color: C.textD, cursor: "pointer", fontSize: 16 }}>✕</button>
+              </div>
             </div>
 
             {runDetailLoading && (
@@ -815,6 +828,37 @@ function Dashboard() {
           </div>
         )}
       </div>
+
+      {/* ── Graph overlay ── */}
+      {graphRunId && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 100,
+          background: "rgba(8,11,17,0.92)",
+          display: "flex", flexDirection: "column",
+        }}>
+          {/* Close bar */}
+          <div style={{
+            height: 36, background: "#0F1824", borderBottom: "1px solid #1C2D45",
+            display: "flex", alignItems: "center", padding: "0 16px", gap: 12, flexShrink: 0,
+          }}>
+            <span style={{ fontSize: 10, color: "#475B75", fontFamily: "monospace" }}>
+              graph · {graphRunId}
+            </span>
+            <div style={{ flex: 1 }} />
+            <button
+              onClick={() => setGraphRunId(null)}
+              style={{
+                background: "none", border: "1px solid #1C2D45", color: "#94A3B8",
+                borderRadius: 4, padding: "2px 12px", cursor: "pointer",
+                fontSize: 10, fontFamily: "monospace",
+              }}
+            >✕ close</button>
+          </div>
+          <div style={{ flex: 1, overflow: "hidden" }}>
+            <DunetraceGraph runId={graphRunId} apiBase="http://localhost:8002" token="dev" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

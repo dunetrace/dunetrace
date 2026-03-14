@@ -1,13 +1,6 @@
-"""services/api/api_svc/routers/insights.py
-
-GET /v1/agents/{agent_id}/insights
-
-Returns five cross-run analytics metrics in a single call:
-  1. input_patterns  — which input hashes consistently trigger which failures
-  2. signal_trends   — failure type signal counts by day × version (last 30 d)
-  3. versions        — per-version signal rate comparison
-  4. time_to_tool    — steps before first tool call (P25/P50/P75 + 14-day trend)
-  5. hourly_pattern  — signal rate by UTC hour of day (last 30 d)
+"""
+Cross-run analytics for a single agent. One endpoint that returns input patterns,
+signal trends, version comparisons, time-to-first-tool, and hourly signal distribution.
 """
 from __future__ import annotations
 

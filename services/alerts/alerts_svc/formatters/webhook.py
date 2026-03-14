@@ -1,7 +1,4 @@
-"""
-services/alerts/alerts_svc/formatters/webhook.py
-Signed JSON payload for generic webhooks.
-"""
+"""Formats an Explanation as a signed JSON payload for generic webhooks."""
 from __future__ import annotations
 import hashlib, hmac, json, os, time
 

@@ -1,11 +1,6 @@
 """
-services/detector/detector_svc/worker.py
-
-Detect worker loop:
-  1) find completed/stalled runs
-  2) rebuild RunState from events
-  3) run Tier 1 detectors
-  4) store signals (shadow by default)
+Polling worker that picks up completed runs, rebuilds their state from events,
+runs all detectors, and stores any signals found.
 """
 from __future__ import annotations
 

@@ -1,8 +1,6 @@
 """
-dunetrace/client.py
-
-Non-blocking SDK client. Zero external dependencies.
-The agent thread never blocks i.e. all I/O happens on the background drain thread.
+SDK client. No external dependencies.
+All network I/O runs on a background drain thread so the agent is never blocked.
 """
 from __future__ import annotations
 

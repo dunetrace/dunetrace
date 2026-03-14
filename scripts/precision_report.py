@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-scripts/precision_report.py
-
-Queries shadow signals and prints a precision report to help decide
-which detectors are ready to graduate.
+Prints a precision report for shadow signals to help decide which detectors
+are ready to go live.
 
 Usage:
     cd dunetrace

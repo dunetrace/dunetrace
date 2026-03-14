@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-scripts/smoke_test_all_detectors.py
+Smoke test for all Tier 1 detectors. Sends crafted event sequences straight
+to the ingest API — no LangChain or API key needed.
 
-Synthetic end-to-end smoke test for every Tier 1 detector.
-Injects crafted event sequences directly to the ingest API i.e.
-no LangChain or OpenAI key required.
-
-Coverage (12 of 13 detectors):
+Covers 12 of 14 detectors:
   TOOL_LOOP · TOOL_THRASHING · TOOL_AVOIDANCE · RAG_EMPTY_RETRIEVAL
   LLM_TRUNCATION_LOOP · CONTEXT_BLOAT · SLOW_STEP · RETRY_STORM
   EMPTY_LLM_RESPONSE · STEP_COUNT_INFLATION · CASCADING_TOOL_FAILURE
   FIRST_STEP_FAILURE
 
-Skipped (not triggerable through the ingest pipeline):
-  GOAL_ABANDONMENT: needs stalled run (90 s timeout)
-  PROMPT_INJECTION_SIGNAL: checked pre-ingest via SDK check_input()
+Skipped: GOAL_ABANDONMENT needs a 90s stall; PROMPT_INJECTION_SIGNAL is checked pre-ingest.
 
 Usage:
     docker compose up -d

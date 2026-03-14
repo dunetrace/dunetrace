@@ -1,22 +1,14 @@
 #!/usr/bin/env python3
 """
-scripts/smoke_test.py
-
-End-to-end test with a real LangChain + GPT-4o-mini agent.
-
-  1. Waits for ingest + API services to be healthy
-  2. Runs two real agent scenarios:
-       - tool_loop:      agent forced to search repeatedly -> TOOL_LOOP signal
-       - tool_avoidance: trivial question answered from memory -> TOOL_AVOIDANCE signal
-  3. Waits for the detector to process the runs
-  4. Prints every signal detected with its explanation
-  5. Exits 0 on pass, 1 on failure
+End-to-end smoke test using a real LangChain + GPT-4o-mini agent.
+Runs tool_loop and tool_avoidance scenarios, waits for detection,
+and prints each signal with its explanation. Exits 1 on failure.
 
 Usage:
     docker compose up -d --build
     python scripts/smoke_test.py
 
-    # Override if needed:
+    # Override endpoints if needed:
     INGEST_URL=http://localhost:8001 API_URL=http://localhost:8002 python scripts/smoke_test.py
 """
 from __future__ import annotations
