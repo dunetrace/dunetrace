@@ -13,11 +13,8 @@ T = TypeVar("T")
 
 class RingBuffer(Generic[T]):
     """
-    Fixed-capacity FIFO backed by a deque with maxlen.
-
-    CPython's deque.append() and deque.popleft() are GIL-protected,
-    making single-producer / single-consumer usage safe without an
-    explicit lock. The Lock here guards multi-consumer drain calls.
+    Fixed-capacity FIFO backed by a deque. The deque's GIL protection covers
+    single-producer/single-consumer access; the Lock here guards concurrent drain calls.
     """
 
     def __init__(self, maxsize: int = 10_000) -> None:

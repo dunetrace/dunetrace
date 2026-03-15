@@ -34,10 +34,7 @@ class BaseDetector:
     name: str = "base"
 
     def __init__(self, **overrides: object) -> None:
-        """Instantiate with optional threshold overrides.
-
-        Only UPPERCASE class attributes are tunable. Passing an unknown key
-        raises TypeError immediately so typos fail at startup, not at runtime.
+        """Accept keyword overrides for UPPERCASE class attributes. Unknown keys raise TypeError at startup, not at runtime.
 
         Example:
             ToolLoopDetector(THRESHOLD=2)          # ok
@@ -66,19 +63,12 @@ class BaseDetector:
 
 class ToolLoopDetector(BaseDetector):
     """
-    Same tool called >= THRESHOLD times within a WINDOW of steps.
+    Same tool called >= THRESHOLD times within a WINDOW of steps. High confidence — the
+    pattern is structurally unambiguous.
 
-    Invariant: No tool should dominate a sliding window without progress.
-    High confidence i.e. this pattern is structurally unambiguous.
-
-    Tunable parameters:
-        WINDOW    (int, default 5)   i.e. sliding window width in tool calls.
-                  Increase for agents that legitimately call the same tool
-                  in bursts (e.g. paginated search). Decrease to catch
-                  tighter loops faster.
-        THRESHOLD (int, default 3)   i.e. minimum repetitions within WINDOW
-                  to trigger. Must be <= WINDOW. Lower values increase
-                  sensitivity and false-positive rate.
+    Tunable: WINDOW (default 5) — sliding window width. Increase for agents that legitimately
+    burst the same tool (e.g. paginated search). THRESHOLD (default 3) — repetitions needed
+    to fire; lower values increase sensitivity and false-positive rate.
     """
     name      = "TOOL_LOOP"
     WINDOW    = 5
@@ -114,16 +104,11 @@ class ToolLoopDetector(BaseDetector):
 
 class ToolThrashingDetector(BaseDetector):
     """
-    Agent oscillates between exactly two tools without making progress.
-    Pattern: [A, B, A, B, A, B] within WINDOW steps.
+    Agent oscillates between exactly two tools — [A, B, A, B, A, B] — within WINDOW steps,
+    usually because it can't reconcile conflicting tool outputs.
 
-    Indicates the agent cannot reconcile conflicting tool outputs.
-
-    Tunable parameters:
-        WINDOW (int, default 6)   i.e. number of recent tool calls to inspect.
-               Must be even for a clean alternating-pair pattern. Larger
-               values require the oscillation to be sustained longer before
-               firing; smaller values fire on shorter bursts.
+    Tunable: WINDOW (default 6) — must be even for a clean alternating-pair check. Larger
+    values require the oscillation to be sustained longer before firing.
     """
     name   = "TOOL_THRASHING"
     WINDOW = 6
@@ -164,23 +149,13 @@ class ToolThrashingDetector(BaseDetector):
 
 class ToolAvoidanceDetector(BaseDetector):
     """
-    Agent produced a final answer without calling any tools,
-    despite tools being available.
+    Agent produced a final answer without calling any tools, despite tools being available.
+    Lower confidence (0.75) — some queries legitimately don't need tools, so validate on
+    real data before treating this as live.
 
-    Lower confidence (0.75) because some queries legitimately don't
-    need tools. Precision validation on real data is critical here.
-
-    MIN_LLM_CALLS guards against short runs (e.g. 1-step "I know the answer"
-    responses) where the agent barely started and had no meaningful opportunity
-    to reason about whether a tool was needed. Firing on those inflates
-    false-positive rate significantly.
-
-    Tunable parameters:
-        MIN_LLM_CALLS (int, default 2)   i.e. minimum number of LLM calls the
-                      run must contain before this detector fires. Prevents
-                      false positives on trivially short runs. Raise if your
-                      agent category routinely answers in 1–2 LLM turns
-                      without tools by design.
+    MIN_LLM_CALLS (default 2) guards against short 1-step runs where the agent never had a
+    real chance to decide about tool use — those inflate the false-positive rate a lot.
+    Raise if your agent routinely answers in 1–2 turns without tools by design.
     """
     name          = "TOOL_AVOIDANCE"
     MIN_LLM_CALLS = 2
@@ -215,17 +190,11 @@ class ToolAvoidanceDetector(BaseDetector):
 
 class GoalAbandonmentDetector(BaseDetector):
     """
-    Agent was using tools, then stopped calling tools mid-run
-    without producing a final answer.
+    Agent used tools, then stopped mid-run without a final answer — STALL_STEPS consecutive
+    LLM events with no tool calls after at least one tool was called.
 
-    STALL_STEPS consecutive LLM events with no tool calls,
-    after at least one tool call had been made.
-
-    Tunable parameters:
-        STALL_STEPS (int, default 4)   i.e. number of consecutive LLM-only events
-                    required to trigger. Increase for agents that legitimately
-                    do multi-step reasoning between tool calls. Decrease to
-                    catch abandonment faster.
+    Tunable: STALL_STEPS (default 4). Increase for agents that do multi-step reasoning
+    between tool calls; decrease to catch abandonment faster.
     """
     name        = "GOAL_ABANDONMENT"
     STALL_STEPS = 4
@@ -291,11 +260,8 @@ _INJECTION_PATTERNS_COMPILED = [
 
 class PromptInjectionDetector(BaseDetector):
     """
-    Pattern-matches user input against known prompt injection signatures.
-    Fires on input receipt i.e. before any LLM call.
-
-    No tunable parameters. The pattern list (_INJECTION_PATTERNS_COMPILED)
-    is a module-level constant; extend it by adding entries there.
+    Pattern-matches user input against known injection signatures, before any LLM call.
+    No tunable parameters — extend by adding entries to _INJECTION_PATTERNS_COMPILED.
     """
     name = "PROMPT_INJECTION_SIGNAL"
 
@@ -331,20 +297,12 @@ class PromptInjectionDetector(BaseDetector):
 
 class RagEmptyRetrievalDetector(BaseDetector):
     """
-    Retrieval returned zero results or below-threshold relevance score,
-    but the agent produced a final answer anyway.
+    Retrieval returned zero results or a below-threshold score, but the agent answered anyway —
+    drawing from training memory instead of retrieved context.
 
-    The agent answered from memory (or hallucinated) on a query
-    that was supposed to be grounded in retrieved data.
-
-    Tunable parameters:
-        MIN_SCORE   (float, default 0.3)   i.e. relevance score below which a
-                    retrieval is considered "effectively empty". Raise for
-                    stricter RAG quality requirements; lower if your retrieval
-                    system uses a compressed score range.
-        MIN_RESULTS (int, default 1)       i.e. minimum result count required
-                    for a retrieval to be considered non-empty. Raise if
-                    your agent requires multiple grounding documents.
+    Tunable: MIN_SCORE (default 0.3) — raise for stricter RAG quality, lower if your retrieval
+    system uses a compressed score range. MIN_RESULTS (default 1) — raise if the agent needs
+    multiple grounding documents before answering.
     """
     name        = "RAG_EMPTY_RETRIEVAL"
     MIN_SCORE   = 0.3
@@ -387,26 +345,14 @@ class RagEmptyRetrievalDetector(BaseDetector):
 
 class LlmTruncationLoopDetector(BaseDetector):
     """
-    finish_reason="length" fires THRESHOLD or more times within a run.
+    finish_reason="length" fires THRESHOLD or more times in a run. One truncation is
+    recoverable; multiple means the agent isn't handling incomplete responses — it keeps
+    calling the LLM with a context that truncates every time (tool outputs appended without
+    summarising, context already bloated, etc.). HIGH severity because truncated outputs
+    break downstream logic: partial JSON, cut-off plans, incomplete code.
 
-    "length" means the model hit its output token limit and stopped
-    mid-generation i.e. the response is incomplete. One occurrence is
-    recoverable. Multiple occurrences means the agent is not handling
-    truncated responses: it keeps calling the LLM with a context that
-    produces truncated output every time, typically because:
-      - Tool outputs are being appended to context without summarising
-      - A summarisation step is present but not reducing context enough
-      - The agent is in a loop and context has bloated past the safe zone
-
-    HIGH severity — truncated outputs frequently cause downstream failures
-    (broken JSON, incomplete plans, cut-off code).
-
-    Tunable parameters:
-        THRESHOLD (int, default 2): number of truncated LLM responses
-                  required to trigger. Default of 2 means "more than one
-                  truncation = systematic problem". Set to 1 for zero-tolerance
-                  environments; raise for models with known token limit issues
-                  where a single truncation is expected and handled.
+    Tunable: THRESHOLD (default 2). Set to 1 for zero tolerance; raise for models where
+    a single truncation is expected and handled by the agent.
     """
     name      = "LLM_TRUNCATION_LOOP"
     THRESHOLD = 2
@@ -444,33 +390,17 @@ class LlmTruncationLoopDetector(BaseDetector):
 
 class ContextBloatDetector(BaseDetector):
     """
-    prompt_tokens grows by GROWTH_FACTOR or more from the first to the
-    last LLM call within a run (minimum MIN_CALLS calls required).
+    prompt_tokens grew by GROWTH_FACTOR or more from first to last LLM call. The agent
+    is accumulating tool outputs, history, or retrieved docs without pruning. Left unchecked:
+    context window overflow, attention dilution, and escalating per-call cost. MEDIUM severity
+    — bloat is a leading indicator; the run may still succeed. Pairs with LLM_TRUNCATION_LOOP
+    which fires when bloat causes actual truncation.
 
-    Context bloat means the agent is accumulating context (tool outputs,
-    conversation history, retrieved docs) without pruning or summarising.
-    Left unchecked, this leads to:
-      - Context window overflow (API error or silent truncation)
-      - LLM performance degradation from attention dilution
-      - Escalating cost on every subsequent call in the run
-
-    MEDIUM severity because bloat is a leading indicator, not a confirmed
-    failure i.e. the run may still succeed. Pairs naturally with
-    LLM_TRUNCATION_LOOP which fires when bloat causes actual truncation.
-
-    Tunable parameters:
-        MIN_CALLS       (int, default 3): minimum LLM calls with token
-                        data required before checking for a trend. Prevents
-                        false positives on short runs.
-        GROWTH_FACTOR   (float, default 3.0): ratio of last/first prompt
-                        tokens that triggers the signal. 3.0 = context
-                        tripled. Lower for stricter cost control; raise for
-                        agents designed to accumulate context intentionally
-                        (e.g. long-horizon coding agents).
-        MIN_LAST_TOKENS (int, default 2000): minimum final prompt token
-                        count required to trigger. Suppresses false positives
-                        on small-context agents where proportional growth
-                        poses no real truncation or cost risk.
+    Tunable: MIN_CALLS (default 3) — minimum LLM calls needed before checking, prevents
+    false positives on short runs. GROWTH_FACTOR (default 3.0) — last/first token ratio;
+    lower for stricter cost control, raise for agents that intentionally accumulate context.
+    MIN_LAST_TOKENS (default 2000) — suppresses false positives where proportional growth
+    on a tiny context isn't actually a problem.
     """
     name            = "CONTEXT_BLOAT"
     MIN_CALLS       = 3
@@ -523,35 +453,14 @@ class ContextBloatDetector(BaseDetector):
 
 class SlowStepDetector(BaseDetector):
     """
-    Any single step transition takes longer than a type-specific threshold.
+    Any single step takes longer than a type-specific threshold. Thresholds are set by what
+    precedes the gap: tool.called (15s — hung API), llm.called (30s — provider latency spike),
+    everything else (60s). A single slow step is meaningful on its own — a tool hanging 45s is
+    a problem once. Severity scales: 2–5× threshold → MEDIUM, >5× → HIGH.
 
-    Thresholds are set by what precedes the gap:
-      - After tool.called:  tool execution — slow means hung API or timeout
-      - After llm.called:   LLM inference — slow means provider latency spike
-      - After other events: agent overhead — slow means something unexpected
-
-    A single slow step is meaningful on its own (unlike loops that need N
-    repetitions). A tool hanging for 45 seconds is a problem regardless of
-    whether it happens once or ten times.
-
-    Severity scales with how far the duration exceeds the threshold:
-      - 2–5× threshold  → MEDIUM
-      - >5× threshold   → HIGH
-
-    Tunable parameters:
-        THRESHOLDS (list of (prefix, ms, label), default shown below)  —
-                   ordered list of (event_type_prefix, threshold_ms, label).
-                   First matching prefix wins. The empty-string entry is a
-                   catch-all and should remain last.
-
-                   Default:
-                       [("tool.called", 15_000, "tool execution"),
-                        ("llm.called",  30_000, "LLM call"),
-                        ("",            60_000, "step")]
-
-                   Tune per-category: web-search agents hitting slow external
-                   APIs may warrant a higher tool threshold; latency-sensitive
-                   applications may want lower LLM thresholds.
+    Tunable: THRESHOLDS is an ordered list of (event_type_prefix, threshold_ms, label). First
+    matching prefix wins; the empty-string entry is a catch-all and must stay last.
+    Default: [("tool.called", 15_000, ...), ("llm.called", 30_000, ...), ("", 60_000, ...)].
     """
     name = "SLOW_STEP"
 
@@ -650,30 +559,17 @@ class SlowStepDetector(BaseDetector):
 
 class RetryStormDetector(BaseDetector):
     """
-    Same tool called THRESHOLD or more times in a row where every preceding
-    tool.responded reported success=False.
+    Same tool called THRESHOLD or more times in a row, all returning success=False.
+    Unlike TOOL_LOOP, args_hash may differ — the agent is genuinely retrying — but the tool
+    keeps failing. Indicates a broken dependency (API down, rejecting every request) that
+    the agent can't detect and back off from. HIGH severity — each failure burns an LLM turn
+    to re-plan, and the agent will almost always exhaust max_iterations with nothing to show.
 
-    Distinct from TOOL_LOOP: args_hash may differ (genuine retry with varied
-    inputs) but the tool keeps failing. Indicates a broken dependency — an
-    API that is down, returning errors, or rejecting every request — that the
-    agent cannot detect and back off from.
+    Evidence: args_identical (True if no variation in args), reason_identical (True if the same
+    error every time), failure_reason_hash (common error hash when reason_identical).
 
-    HIGH severity: every failure burns tokens (LLM re-plans after each failed
-    call) and the agent will almost always reach max_iterations without
-    producing a useful answer.
-
-    Evidence includes:
-        args_identical       — True if every retry used the same hashed args
-                               (agent is not varying its approach at all).
-        failure_reason_hash  — Common error_hash across the streak when all
-                               failures share the same reason; None otherwise.
-        reason_identical     — True if every failure reported the same error.
-
-    Tunable parameters:
-        THRESHOLD (int, default 3)  — consecutive failures on the same tool
-                  required to trigger. Lower values catch dependency failures
-                  faster; raise for agents that implement their own retry
-                  logic and where 2 retries are expected before escalating.
+    Tunable: THRESHOLD (default 3). Lower to catch dependency failures faster; raise for agents
+    with built-in retry logic where 2 failures before escalation are expected.
     """
     name      = "RETRY_STORM"
     THRESHOLD = 3
@@ -745,16 +641,10 @@ class RetryStormDetector(BaseDetector):
 
 class EmptyLlmResponseDetector(BaseDetector):
     """
-    output_length == 0 on an llm.responded event with finish_reason == "stop".
-
-    The model was asked something and returned nothing. Most agent frameworks
-    don't handle empty responses gracefully — the agent typically crashes,
-    loops, or silently produces a blank final answer. High precision because
-    a legitimate zero-length stop response is effectively impossible in normal
-    operation.
-
-    No tunable parameters — the condition is binary and has no meaningful
-    threshold to adjust.
+    output_length == 0 with finish_reason == "stop" — the model returned nothing.
+    Most frameworks don't handle this gracefully; the agent typically crashes, loops, or
+    silently produces a blank answer. High precision — a legitimate zero-length stop
+    response is effectively impossible in normal operation. No tunable parameters.
     """
     name = "EMPTY_LLM_RESPONSE"
 
@@ -788,24 +678,13 @@ class EmptyLlmResponseDetector(BaseDetector):
 
 class StepCountInflationDetector(BaseDetector):
     """
-    Current run used more than INFLATION_FACTOR × the P75 step count for
-    this (agent_id, agent_version) over the last 50 historical runs.
+    Current run exceeded INFLATION_FACTOR × the P75 step count for this (agent_id,
+    agent_version) over the last 50 successful runs. Skips silently when baseline is absent
+    — needs at least 10 historical runs to be meaningful.
 
-    Requires state.baseline_p75_steps to be populated by the worker before
-    this detector runs. Returns None (skip silently) when baseline is absent
-    — the detector needs at least 10 historical runs to be meaningful.
-
-    Fires once per run (highest severity), scoped to the final step_index.
-
-    Tunable parameters:
-        INFLATION_FACTOR (float, default 2.0)  — multiplier applied to the
-                         P75 baseline. A run is flagged when:
-                             current_steps > baseline_p75 × INFLATION_FACTOR
-                         Lower values catch moderate inflation earlier;
-                         higher values reserve the signal for severe cases.
-                         Tune per-category: research agents with high step
-                         variance may need 2.5–3.0 to avoid noise; coding
-                         agents with stable step counts may warrant 1.5.
+    Tunable: INFLATION_FACTOR (default 2.0). Lower to catch moderate inflation earlier;
+    raise for research agents with high step variance (2.5–3.0) or lower for coding agents
+    with tight, predictable step counts (1.5).
     """
     name             = "STEP_COUNT_INFLATION"
     INFLATION_FACTOR = 2.0
@@ -840,22 +719,13 @@ class StepCountInflationDetector(BaseDetector):
 
 class CascadingToolFailureDetector(BaseDetector):
     """
-    THRESHOLD or more consecutive tool calls all returned success=False,
-    across at least 2 distinct tools.
+    THRESHOLD or more consecutive failures across at least 2 distinct tools. Unlike RETRY_STORM
+    (same tool) or TOOL_THRASHING (alternation pattern), this fires when multiple tools are all
+    broken — usually a shared upstream dependency (DB, API gateway) that every tool depends on.
+    HIGH severity — the agent can't make progress regardless of which tool it switches to.
 
-    Distinguishes from RETRY_STORM (same tool) and TOOL_THRASHING (alternation
-    pattern regardless of success). Cascade = multiple tools all broken in the
-    same run, often because a shared upstream dependency (a database, an API
-    gateway) has failed and every tool that depends on it returns an error.
-
-    HIGH severity: the agent cannot make progress regardless of which tool it
-    switches to, and will burn all remaining iterations before giving up.
-
-    Tunable parameters:
-        THRESHOLD (int, default 3)  — minimum consecutive cross-tool failures
-                  required to trigger. Raise for agents that handle partial
-                  dependency failures gracefully and where 2 failures before
-                  recovery are expected.
+    Tunable: THRESHOLD (default 3). Raise for agents that handle partial dependency failures
+    gracefully where 2 consecutive failures before recovery are expected.
     """
     name      = "CASCADING_TOOL_FAILURE"
     THRESHOLD = 3
@@ -900,25 +770,13 @@ class CascadingToolFailureDetector(BaseDetector):
 
 class FirstStepFailureDetector(BaseDetector):
     """
-    Error, empty LLM output, or tool failure at step <= MAX_STEP.
+    Error, empty LLM output, or tool failure at step <= MAX_STEP. Early failures point to
+    different root causes than mid-run failures — malformed input, prompt syntax errors, policy
+    refusals, missing params, or auth failures on the first tool call. Debug the setup, not the
+    loop. MEDIUM severity per occurrence; high recurrence is handled upstream by alert rate logic.
 
-    Early failures have a completely different root cause and remediation
-    profile vs mid-run failures:
-      - Not a logic or tool problem — it's the entrypoint
-      - Most likely: malformed input, prompt syntax error, policy refusal,
-        missing required parameter, or auth failure on the first tool call
-      - Debugging target: the run setup, not the agent loop
-
-    MEDIUM severity because it's a single data point — one bad input doesn't
-    mean the agent is broken. HIGH if it happens repeatedly (handled by alerts
-    rate logic).
-
-    Tunable parameters:
-        MAX_STEP (int, default 2)  — step index at or below which a failure
-                 is classified as "first step". Steps 0, 1, 2 = the setup
-                 phase. Raise for agents with a longer initialisation sequence
-                 (e.g. agents that authenticate and warm up before the first
-                 real tool call).
+    Tunable: MAX_STEP (default 2). Raise for agents with a longer init sequence (auth + warmup
+    before the first real tool call).
     """
     name     = "FIRST_STEP_FAILURE"
     MAX_STEP = 2
@@ -990,32 +848,16 @@ class FirstStepFailureDetector(BaseDetector):
 
 class ReasoningSpinDetector(BaseDetector):
     """
-    The agent made far more LLM calls than tool calls within a completed run,
-    indicating it spent most of its iterations reasoning/planning rather than
-    taking actions that advance state.
+    The LLM:tool call ratio is extremely skewed — the agent spent most of its steps
+    deliberating rather than acting. A healthy agent alternates think→act→observe;
+    a spinning one does think→think→think→(minimal action). Different from TOOL_AVOIDANCE
+    (zero tool calls) and GOAL_ABANDONMENT (stopped mid-run) — here the agent did complete
+    with tool use, but the ratio is way off. Only fires at final_answer. MEDIUM severity —
+    the run may have finished, but efficiency is poor and harder variants will hit step limits.
 
-    A healthy agent alternates: think -> act -> observe -> think -> act.
-    A spinning agent does: think -> think -> think -> think -> (minimal action).
-
-    This is different from TOOL_AVOIDANCE (zero tool calls) and
-    GOAL_ABANDONMENT (tools used then stopped mid-run). REASONING_SPIN fires
-    when the agent did use tools but the LLM:tool ratio is extremely skewed,
-    meaning the agent spent the bulk of its iterations deliberating without
-    making meaningful progress through tool use.
-
-    Fires only at final_answer to avoid false positives on in-progress runs
-    where the agent is legitimately planning before a burst of tool calls.
-
-    MEDIUM severity — the run may have completed, but efficiency is poor and
-    the agent is likely to hit step limits on harder variants of the same task.
-
-    Tunable parameters:
-        MIN_LLM_CALLS   (int, default 5): minimum LLM calls before checking.
-                        Prevents false positives on very short runs.
-        RATIO_THRESHOLD (float, default 4.0): LLM calls / tool calls at or above
-                        which the signal fires. 4.0 means 4 LLM calls per 1 tool
-                        call. Raise for agents with multi-step chain-of-thought
-                        designs where high LLM:tool ratios are intentional.
+    Tunable: MIN_LLM_CALLS (default 5) prevents false positives on short runs.
+    RATIO_THRESHOLD (default 4.0) — LLM calls / tool calls. Raise for agents with intentional
+    multi-step chain-of-thought designs where high ratios are expected.
     """
     name            = "REASONING_SPIN"
     MIN_LLM_CALLS   = 5
@@ -1080,19 +922,9 @@ def run_detectors(
     state: RunState,
     detectors: Optional[List[BaseDetector]] = None,
 ) -> List[FailureSignal]:
-    """Run Tier 1 detectors against the current run state.
-
-    Args:
-        state:     The reconstructed run state to check.
-        detectors: Detector list to use. Defaults to TIER1_DETECTORS (public
-                   conservative defaults). Pass a custom list to use
-                   production-tuned parameters from the private detector
-                   configuration without modifying this file.
-
-    Returns:
-        List of FailureSignal, one per triggered detector. Empty list if
-        no failures detected.
-    """
+    """Run all detectors against a run state. Pass a custom list to use production-tuned
+    parameters; defaults to TIER1_DETECTORS if omitted. Returns one FailureSignal per
+    triggered detector, or an empty list if nothing fired."""
     active = detectors if detectors is not None else TIER1_DETECTORS
     signals = []
     for detector in active:

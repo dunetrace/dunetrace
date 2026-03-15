@@ -12,13 +12,7 @@ from api_svc.db.queries import verify_api_key
 async def require_customer(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> str:
-    """
-    FastAPI dependency: extract API key from Authorization header and verify.
-    Returns customer_id if valid, raises 401 if not.
-
-    In dev mode (AUTH_MODE=dev), auth is skipped entirely.
-    Header format: "Bearer dt_live_..." or "dt_dev_..."
-    """
+    """FastAPI dependency that validates the Authorization header and returns customer_id. Raises 401 if invalid. In dev mode (AUTH_MODE=dev), auth is skipped. Header format: "Bearer dt_live_..." or just the key."""
     if settings.is_dev:
         return "dev_customer"
 

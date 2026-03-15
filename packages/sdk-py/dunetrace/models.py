@@ -59,10 +59,7 @@ class FailureType(str, Enum):
 
 @dataclass
 class AgentEvent:
-    """
-    A single instrumentation event emitted by the SDK.
-    All content is hashed i.e. no raw prompts or outputs are ever sent.
-    """
+    """A single instrumentation event emitted by the SDK. All content fields are hashed — no raw prompts or outputs."""
     event_type:    EventType
     run_id:        str
     agent_id:      str
@@ -112,12 +109,10 @@ class LlmCall:
 @dataclass
 class ExternalSignal:
     """
-    Infrastructure context emitted alongside agent events.
+    Infrastructure context attached to an agent step (rate limits, cache misses, upstream outages).
 
-    Emitted via ``run.external_signal("rate_limit", source="openai")``.
-    Does not advance the step counter — it annotates the current agent step,
-    not a new one. Detectors use this to correlate failures with known
-    infrastructure events (rate limits, cache misses, upstream outages).
+    Emitted via ``run.external_signal("rate_limit", source="openai")``. Does not advance the step
+    counter — it annotates the current step so detectors can correlate failures with infra events.
     """
     signal_name: str
     step_index:  int
@@ -136,10 +131,7 @@ class RetrievalResult:
 
 @dataclass
 class RunState:
-    """
-    Accumulated state for a single agent run.
-    Detectors operate on this i.e. never on raw events.
-    """
+    """Accumulated state for a single agent run. Detectors consume this, not raw events."""
     run_id:          str
     agent_id:        str
     agent_version:   str
@@ -182,10 +174,6 @@ def hash_content(text: str) -> str:
 
 
 def agent_version(system_prompt: str, model: str, tools: List[str]) -> str:
-    """
-    Deterministic version hash.
-    Same config (prompt + model + tools) -> same version string.
-    Any change -> new version, preventing deploy-induced false positives.
-    """
+    """Same config always produces the same 8-char hash — any change produces a new version, preventing deploy-induced false positives."""
     fingerprint = f"{system_prompt}:{model}:{sorted(tools)}"
     return hashlib.sha256(fingerprint.encode()).hexdigest()[:8]

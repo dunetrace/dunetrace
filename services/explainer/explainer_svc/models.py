@@ -10,10 +10,7 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class CodeFix:
-    """
-    A concrete, copy-pasteable code suggestion.
-    language is used for syntax highlighting in the UI.
-    """
+    """A concrete, copy-pasteable code suggestion. language drives syntax highlighting in the UI."""
     description: str
     language:    str           # "python" | "yaml" | "text"
     code:        str
@@ -21,14 +18,7 @@ class CodeFix:
 
 @dataclass
 class Explanation:
-    """
-    The full human-readable explanation of a FailureSignal.
-
-    Produced by explain(signal) and consumed by:
-      - The alert layer (formats into Slack/email messages)
-      - The REST API (sends to dashboard)
-      - Future: LLM patch suggester (uses this as context)
-    """
+    """Full human-readable explanation of a FailureSignal. Produced by explain(signal) and consumed by the alert layer, the REST API, and (future) the LLM patch suggester."""
     # Identity
     failure_type:     str
     severity:         str

@@ -113,14 +113,11 @@ async def fetch_step_count_baseline(
     lookback: int = 50,
 ) -> "Optional[float]":
     """
-    Returns P75 step count over the last `lookback` *successfully completed*
-    runs for this (agent_id, agent_version), excluding the current run.
-
-    Only completed runs are used because errored runs (e.g. tool exceptions at
-    step 2) pull the P75 down and cause STEP_COUNT_INFLATION to fire on any
-    run that takes a normal number of steps for a complex task.
-
+    P75 step count over the last `lookback` successfully completed runs, excluding the current run.
     Returns None if fewer than `min_runs` historical runs exist.
+
+    Errored runs are excluded — early-exit errors pull P75 down and cause STEP_COUNT_INFLATION
+    to fire on runs that took a perfectly normal number of steps for a complex task.
     """
     if not _pool:
         return None
@@ -164,11 +161,7 @@ async def fetch_step_count_baseline(
 
 
 async def fetch_completed_runs(limit: int) -> list[dict]:
-    """
-    Find runs that have a terminal event (run.completed or run.errored)
-    and have NOT been processed yet.
-    Returns list of {run_id, agent_id, agent_version, trigger}.
-    """
+    """Runs with a terminal event (run.completed or run.errored) that haven't been processed yet."""
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -191,11 +184,7 @@ async def fetch_completed_runs(limit: int) -> list[dict]:
 
 
 async def fetch_stalled_runs(stall_timeout_secs: float, limit: int) -> list[dict]:
-    """
-    Find runs that haven't had a new event for stall_timeout_secs
-    and haven't completed or been processed yet.
-    These may be agents that are stuck mid-run.
-    """
+    """Runs that started, never completed, and haven't received a new event in stall_timeout_secs — likely agents stuck mid-run."""
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -227,10 +216,7 @@ async def fetch_stalled_runs(stall_timeout_secs: float, limit: int) -> list[dict
 
 
 async def fetch_run_events(run_id: str) -> list[dict]:
-    """
-    Fetch all events for a run, ordered by step_index.
-    Returns list of raw event dicts.
-    """
+    """All events for a run, ordered by step_index then timestamp."""
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -255,11 +241,7 @@ async def fetch_run_events(run_id: str) -> list[dict]:
 # ── Writes ─────────────────────────────────────────────────────────────────────
 
 async def write_signals(signals: list, shadow: bool) -> int:
-    """
-    Write FailureSignal objects to failure_signals table.
-    shadow=True means stored but not alerted.
-    Returns number of rows written.
-    """
+    """Write FailureSignal objects to failure_signals. shadow=True stores them without alerting. Returns row count written."""
     if not signals:
         return 0
 

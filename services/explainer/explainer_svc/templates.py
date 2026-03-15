@@ -19,7 +19,7 @@ from explainer_svc.models import CodeFix, Explanation
 # Helpers
 
 def _base(signal: FailureSignal, **kwargs) -> dict:
-    """Common fields shared by all Explanation instances."""
+    """Base kwargs shared by every Explanation constructor call."""
     return dict(
         failure_type=signal.failure_type.value,
         severity=signal.severity.value,

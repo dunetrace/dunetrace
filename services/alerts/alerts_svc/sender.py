@@ -35,10 +35,7 @@ class SendResult:
 
 
 def _post(url: str, body: bytes, headers: dict) -> tuple[int, str]:
-    """
-    Single HTTP POST. Returns (status_code, response_body).
-    Raises urllib.error.URLError / HTTPError on failure.
-    """
+    """Single HTTP POST. Returns (status_code, response_body) or raises URLError/HTTPError."""
     req = urllib.request.Request(
         url,
         data=body,
@@ -57,12 +54,7 @@ def send_with_retry(
     max_retries: int = None,
     retry_backoff: float = None,
 ) -> SendResult:
-    """
-    POST body to url with exponential backoff retry.
-
-    max_retries=3, backoff=2.0 means delays of 2s, 4s, 8s between attempts.
-    Total max wait: ~14s before giving up.
-    """
+    """POST with exponential backoff. max_retries=3, backoff=2.0 → delays of 2s, 4s, 8s (~14s total before giving up)."""
     max_retries   = max_retries   if max_retries   is not None else settings.MAX_RETRIES
     retry_backoff = retry_backoff if retry_backoff is not None else settings.RETRY_BACKOFF
 

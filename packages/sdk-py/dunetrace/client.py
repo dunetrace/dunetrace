@@ -109,7 +109,7 @@ class Dunetrace:
         )
 
         # Run injection check on raw input before it is hashed and discarded.
-        # Evidence (matched pattern names + count) is safe to transmit i.e. no raw text.
+        # Evidence (matched pattern names + count) is safe to transmit — no raw text.
         _injection_evidence = None
         if user_input:
             _sig = PROMPT_INJECTION_DETECTOR.check_input(user_input, ctx.state)
@@ -189,15 +189,9 @@ class Dunetrace:
         """
         Write one Loki-compatible NDJSON line to stdout.
 
-        Field mapping for Promtail / Grafana Alloy pipeline stages:
-          ts          → timestamp label (RFC3339 with microseconds)
-          level       → log level label (always "info")
-          logger      → "dunetrace"
-          event_type  → Loki stream label — index by agent + event_type
-          agent_id    → Loki stream label
-          run_id      → structured field
-          step_index  → structured field
-          payload     → structured field (hashes only, never raw content)
+        Fields: ts (RFC3339), level ("info"), logger ("dunetrace"), event_type and agent_id
+        as Loki stream labels, run_id/step_index/payload as structured fields.
+        payload contains hashes only — never raw content.
         """
         ts = datetime.datetime.utcfromtimestamp(event.timestamp).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"

@@ -1,6 +1,6 @@
 """
 Loads the active detector list and thresholds from detectors.yml.
-Edit that file to tune — no code changes or rebuild needed.
+Edit that file to tune - no code changes or rebuild needed.
 
 Restart to pick up changes:
     docker compose restart detector

@@ -146,10 +146,7 @@ class RunContext:
 
     def external_signal(self, signal_name: str, source: str = "", **meta: Any) -> None:
         """
-        Emit an infrastructure context event at the current agent step.
-
-        Does not advance the step counter, the signal annotates whatever
-        agent step is currently in progress, not a new one.
+        Emit an infrastructure context event at the current agent step without advancing the step counter.
 
         Usage::
 
@@ -157,9 +154,8 @@ class RunContext:
             run.external_signal("cache_miss", source="redis", key_prefix="emb:")
             run.external_signal("upstream_error", source="serp_api", http_status=503)
 
-        Detectors (e.g. SLOW_STEP) correlate these signals with failures to
-        provide richer evidence: "tool took 100s i.e. coincided with rate_limit
-        from openai" rather than just "tool took 100s".
+        SLOW_STEP and other detectors correlate these signals with failures so evidence reads
+        "tool took 100s — coincided with rate_limit from openai" rather than just "tool took 100s".
         """
         ts = time.time()
         self.state.external_signals.append(ExternalSignal(

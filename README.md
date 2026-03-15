@@ -157,6 +157,8 @@ SLACK_CHANNEL=#agent-alerts
 SLACK_MIN_SEVERITY=HIGH   # LOW | MEDIUM | HIGH | CRITICAL
 ```
 
+![Slack alert](slack-alert.png)
+
 Get a webhook URL from [api.slack.com/messaging/webhooks](https://api.slack.com/messaging/webhooks). Restart the alerts worker to pick up the change:
 
 ```bash

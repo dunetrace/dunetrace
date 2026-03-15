@@ -90,11 +90,9 @@ class _RunSpans:
 
 class DunetraceOTelExporter:
     """
-    Translates DuneTrace AgentEvents into OpenTelemetry spans.
-
-    Thread-safe: the internal run-state dict is protected by a lock.
-    All span operations are called from the emitting thread (typically
-    the agent thread), so span open/close is always sequential per run.
+    Translates Dunetrace AgentEvents into OpenTelemetry spans. Thread-safe — the internal
+    run-state dict is lock-protected. Span open/close is always sequential per run since
+    all operations are called from the emitting (agent) thread.
     """
 
     def __init__(
@@ -115,10 +113,7 @@ class DunetraceOTelExporter:
     # ── Called by Dunetrace client ─────────────────────────────────────────────
 
     def notify_run_state(self, run_id: str, state: RunState) -> None:
-        """
-        Called by the client just before run.completed / run.errored is emitted.
-        Stores the completed RunState so _on_run_ended can run detectors on it.
-        """
+        """Called just before run.completed / run.errored is emitted. Stores the RunState so _on_run_ended can run detectors."""
         with self._lock:
             rs = self._runs.get(run_id)
         if rs:
@@ -285,11 +280,7 @@ class DunetraceOTelExporter:
         rs.child_span = None
 
     def _on_external_signal(self, event: AgentEvent) -> None:
-        """
-        Attach the signal as a SpanEvent on the currently-open child span
-        (so it appears at the right time within the tool/LLM call), or on
-        the root span if no child is open.
-        """
+        """Attach the signal as a SpanEvent on the currently-open child span, or on the root span if no child is open."""
         with self._lock:
             rs = self._runs.get(event.run_id)
         if not rs:

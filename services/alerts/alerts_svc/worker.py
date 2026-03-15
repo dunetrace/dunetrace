@@ -18,6 +18,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -56,7 +57,7 @@ def _row_to_signal(row: dict) -> FailureSignal:
         agent_version = row["agent_version"],
         step_index    = row["step_index"],
         confidence    = row["confidence"],
-        evidence      = row.get("evidence") or {},
+        evidence      = json.loads(row["evidence"]) if isinstance(row.get("evidence"), str) else (row.get("evidence") or {}),
         detected_at   = detected_at,
     )
 
@@ -73,11 +74,7 @@ def _meets_slack_threshold(severity: str) -> bool:
 # Per-signal delivery
 
 def deliver(explanation: Explanation) -> dict[str, SendResult]:
-    """
-    Send an explanation to all configured destinations.
-    Returns {destination: SendResult} for logging/metrics.
-    Synchronous i.e. called from asyncio.to_thread to avoid blocking the loop.
-    """
+    """Send an explanation to all configured destinations. Returns {destination: SendResult}. Synchronous — called via asyncio.to_thread to avoid blocking the event loop."""
     results = {}
 
     # Slack
@@ -102,9 +99,7 @@ def deliver(explanation: Explanation) -> dict[str, SendResult]:
 # Poll cycle
 
 async def poll_once() -> tuple[int, int]:
-    """
-    One poll cycle. Returns (signals_found, signals_delivered).
-    """
+    """One poll cycle. Returns (signals_found, signals_delivered)."""
     rows = await fetch_unalerted_signals(limit=settings.BATCH_SIZE)
     if not rows:
         return 0, 0
@@ -197,7 +192,7 @@ async def run_worker() -> None:
 
             await asyncio.sleep(settings.POLL_INTERVAL)
     except asyncio.CancelledError:
-        logger.info("Worker cancelled i.e. shutting down gracefully")
+        logger.info("Worker cancelled — shutting down gracefully")
     finally:
         await close_pool()
 

@@ -112,10 +112,7 @@ async def ensure_schema() -> None:
 # ── Queries ────────────────────────────────────────────────────────────────────
 
 async def insert_events(events: list, batch_id: str) -> int:
-    """
-    Bulk insert a list of IngestEvent objects.
-    Called from a BackgroundTask — response is already sent.
-    """
+    """Bulk insert IngestEvent objects. Called from a BackgroundTask after the response is already sent."""
     if not _pool:
         logger.error("insert_events: pool not available, dropping %d events", len(events))
         return 0
@@ -153,12 +150,7 @@ async def insert_events(events: list, batch_id: str) -> int:
 
 
 async def verify_api_key(api_key: str) -> Optional[str]:
-    """
-    Returns agent_id if valid, None if not.
-
-    Dev mode:  any dt_dev_* key is accepted immediately.
-    Prod mode: checks the api_keys table.
-    """
+    """Returns agent_id if the key is valid, None otherwise. In dev mode, any dt_dev_* key is accepted."""
     if settings.is_dev and (not api_key or api_key.startswith("dt_dev_")):
         return "dev"
 

@@ -71,10 +71,7 @@ async def verify_api_key(key: str) -> Optional[str]:
 # ── Agents ────────────────────────────────────────────────────────────────────
 
 async def list_agents(customer_id: str, offset: int, limit: int) -> tuple[list, int]:
-    """
-    Returns (rows, total_count).
-    Each row: agent_id, last_seen, run_count, signal_count, critical_count, high_count
-    """
+    """Returns (rows, total_count). Each row has: agent_id, last_seen, run_count, signal_count, critical_count, high_count."""
     if not _pool:
         return [], 0
 
@@ -120,10 +117,7 @@ async def list_agents(customer_id: str, offset: int, limit: int) -> tuple[list, 
 # ── Failure type breakdown ────────────────────────────────────────────────────
 
 async def agent_failure_type_counts(customer_id: str) -> dict:
-    """
-    Returns per-agent failure type counts (live signals only).
-    { agent_id: { "TOOL_LOOP": 3, "TOOL_AVOIDANCE": 1, ... } }
-    """
+    """Live signal counts per agent broken down by failure type: { agent_id: { "TOOL_LOOP": 3, ... } }."""
     if not _pool:
         return {}
 
@@ -152,10 +146,7 @@ async def agent_failure_type_counts(customer_id: str) -> dict:
 # ── Sparklines ────────────────────────────────────────────────────────────────
 
 async def agent_signal_sparklines(customer_id: str) -> dict:
-    """
-    Returns 7-day daily signal counts per agent, oldest→newest.
-    { agent_id: [day-6, day-5, ..., today] }  — 7 ints, UTC days.
-    """
+    """7-day daily live signal counts per agent, oldest→newest: { agent_id: [day-6, ..., today] }."""
     if not _pool:
         return {}
 
@@ -476,11 +467,7 @@ async def list_signals(
 # ── Insights ───────────────────────────────────────────────────────────────────
 
 async def agent_input_hash_patterns(agent_id: str) -> list:
-    """
-    Input hashes that consistently produce specific failure types.
-    Returns: [{input_hash, failure_type, triggered_count, total_runs, rate}]
-    Only includes hashes seen ≥2 times so a single bad run doesn't dominate.
-    """
+    """Input hashes that consistently produce specific failure types. Only hashes seen ≥2 times so a single bad run doesn't dominate. Returns: [{input_hash, failure_type, triggered_count, total_runs, rate}]."""
     if not _pool:
         return []
     async with _pool.acquire() as conn:
@@ -524,10 +511,7 @@ async def agent_input_hash_patterns(agent_id: str) -> list:
 
 
 async def agent_signal_recurrence(agent_id: str) -> list:
-    """
-    Signal counts grouped by failure_type × agent_version × day (last 30 d).
-    Returns: [{failure_type, agent_version, day (ISO str), count}]
-    """
+    """Signal counts by failure_type × agent_version × day for the last 30 days. Returns: [{failure_type, agent_version, day (ISO str), count}]."""
     if not _pool:
         return []
     async with _pool.acquire() as conn:
@@ -555,12 +539,7 @@ async def agent_signal_recurrence(agent_id: str) -> list:
 
 
 async def agent_version_stats(agent_id: str) -> list:
-    """
-    Per-version signal rate: runs_with_signals / total_runs.
-    Returns: [{agent_version, run_count, runs_with_signals, signal_count,
-               signal_rate, first_seen, last_seen}]
-    Ordered newest-version first.
-    """
+    """Signal rate per version (runs_with_signals / total_runs), newest first. Returns: [{agent_version, run_count, runs_with_signals, signal_count, signal_rate, first_seen, last_seen}]."""
     if not _pool:
         return []
 
@@ -609,10 +588,7 @@ async def agent_version_stats(agent_id: str) -> list:
 
 
 async def agent_time_to_first_tool(agent_id: str) -> dict:
-    """
-    Steps before first tool call: overall P25/P50/P75 + 14-day daily trend.
-    Returns: {p25, p50, p75, avg_steps, runs_with_tool, total_runs, daily_trend}
-    """
+    """Steps before the first tool call — overall P25/P50/P75 plus a 14-day daily trend. Returns: {p25, p50, p75, avg_steps, runs_with_tool, total_runs, daily_trend}."""
     if not _pool:
         return {
             "p25": None, "p50": None, "p75": None,
@@ -684,11 +660,7 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
 
 
 async def agent_hourly_pattern(agent_id: str) -> list:
-    """
-    Signal rate by UTC hour of day (last 30 d).
-    Returns: [{hour_of_day, run_count, signal_count, signal_rate}]
-    Only hours with ≥1 run are returned (sparse is fine — UI fills gaps).
-    """
+    """Signal rate by UTC hour of day over the last 30 days. Sparse — only hours with ≥1 run are returned; the UI fills gaps. Returns: [{hour_of_day, run_count, signal_count, signal_rate}]."""
     if not _pool:
         return []
     async with _pool.acquire() as conn:

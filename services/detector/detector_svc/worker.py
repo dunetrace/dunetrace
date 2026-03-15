@@ -34,11 +34,7 @@ logger = logging.getLogger("dunetrace.detector")
 
 
 def _injection_signal_from_events(events: list[dict], run_id: str, agent_id: str, agent_version: str):
-    """
-    Prompt injection is detected in the SDK on raw input before hashing.
-    Evidence is embedded in the run.started payload as 'injection_signal'.
-    Extract it here and materialise a FailureSignal.
-    """
+    """Extract prompt injection evidence from the run.started payload and build a FailureSignal. The SDK detects injection on raw input before hashing, so by the time we get here the evidence is already baked into the event."""
     for e in events:
         if e["event_type"] == "run.started":
             evidence = e.get("payload", {}).get("injection_signal")

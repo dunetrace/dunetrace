@@ -158,6 +158,17 @@ function Dashboard() {
   const [graphRunId,       setGraphRunId]       = useState(null);
   const PAGE_SIZE = 15;
 
+  // Deep-link: /runs/<run_id> from Slack alert → auto-open that run
+  useEffect(() => {
+    const match = window.location.pathname.match(/^\/runs\/([^/]+)$/);
+    if (!match) return;
+    const runId = match[1];
+    // Don't setSelectedAgent — its useEffect calls setSelectedRun(null) and would clear our selection.
+    // Just set selectedRun directly; the detail panel fetches everything it needs from run_id alone.
+    setSelectedRun({ run_id: runId });
+    window.history.replaceState(null, "", "/");
+  }, []);
+
   // Load agents list
   const loadAgents = useCallback(async () => {
     try {
@@ -505,8 +516,8 @@ function Dashboard() {
                       ["DUR",      "duration"],
                       ["STEPS",    "step_count"],
                       ["SIGNALS",  "signal_count"],
-                      ["VERSION",  "agent_version"],
                       ["TIME",     "started_at"],
+                      ["VERSION",  "agent_version"],
                     ].map(([label, col]) => (
                       <div key={col} onClick={() => toggleSort(col)} style={{
                         fontSize: 9, color: sortBy === col ? C.orange : C.textD,
@@ -529,7 +540,7 @@ function Dashboard() {
                         onClick={() => setSelectedRun(isSel ? null : r)}
                         style={{
                           display: "grid",
-                          gridTemplateColumns: "200px 70px 70px 60px 80px 1fr 130px",
+                          gridTemplateColumns: "200px 70px 70px 60px 80px 130px 1fr",
                           padding: "8px 20px",
                           borderBottom: `1px solid ${C.border}22`,
                           background: isSel      ? `${C.orange}12`
@@ -556,11 +567,11 @@ function Dashboard() {
                         }}>
                           {r.signal_count > 0 ? `▲ ${r.signal_count}` : "—"}
                         </span>
+                        <span style={{ fontSize: 10, color: C.textD }}>
+                          {fmtDate(toMs(r.started_at))} {fmtTime(toMs(r.started_at))}
+                        </span>
                         <span style={{ fontSize: 10, color: C.textD, fontFamily: "monospace" }}>
                           {r.agent_version || "—"}
-                        </span>
-                        <span style={{ fontSize: 10, color: C.textD, textAlign: "right" }}>
-                          {fmtDate(toMs(r.started_at))} {fmtTime(toMs(r.started_at))}
                         </span>
                       </div>
                     );

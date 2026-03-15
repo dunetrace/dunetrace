@@ -22,33 +22,24 @@ logger = logging.getLogger("dunetrace.explainer")
 
 
 def explain(signal: FailureSignal) -> Explanation:
-    """
-    Produce a human-readable Explanation from a FailureSignal.
-
-    Returns a fallback explanation for unknown failure types
-    rather than raising i.e. the caller should never crash on explain().
-    """
+    """Produce a human-readable Explanation from a FailureSignal. Returns a fallback for unknown failure types rather than raising — the caller should never crash on explain()."""
     template = TEMPLATES.get(signal.failure_type)
 
     if template is None:
-        logger.warning("No template for failure_type=%s i.e. using fallback",
+        logger.warning("No template for failure_type=%s — using fallback",
                        signal.failure_type)
         return _fallback(signal)
 
     try:
         return template(signal)
     except Exception as exc:
-        logger.error("Template failed for %s: %s i.e. using fallback",
+        logger.error("Template failed for %s: %s — using fallback",
                      signal.failure_type, exc)
         return _fallback(signal)
 
 
 def _fallback(signal: FailureSignal) -> Explanation:
-    """
-    Generic explanation for failure types without a template.
-    Used for Tier 2 / Tier 3 types not yet implemented,
-    and as a safety net if a template raises.
-    """
+    """Generic explanation for failure types without a template. Used for Tier 2/3 types not yet implemented, and as a safety net when a template raises."""
     return Explanation(
         failure_type=signal.failure_type.value,
         severity=signal.severity.value,

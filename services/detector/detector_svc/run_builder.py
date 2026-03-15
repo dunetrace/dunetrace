@@ -12,12 +12,7 @@ from dunetrace.models import (
 
 
 def build_run_state(events: list[dict]) -> RunState:
-    """
-    Reconstruct a RunState from a list of raw event dicts.
-
-    Handles missing/partial data gracefully i.e. a partial RunState
-    is still worth running detectors against.
-    """
+    """Reconstruct a RunState from raw event dicts. Handles missing/partial data — a partial RunState is still worth running detectors against."""
     if not events:
         raise ValueError("Cannot build RunState from empty event list")
 
@@ -118,7 +113,7 @@ def build_run_state(events: list[dict]) -> RunState:
         try:
             et = EventType(event_type)
         except ValueError:
-            continue  # unknown type i.e. skip silently
+            continue  # unknown type — skip silently
 
         state.events.append(
             AgentEvent(

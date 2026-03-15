@@ -40,13 +40,10 @@ if TYPE_CHECKING:
 
 class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
     """
-    LangChain callback handler for Dunetrace.
-
-    Translates LangChain events into the Dunetrace canonical event schema.
-    ``on_chain_start`` fires for every chain in LangChain (AgentExecutor,
-    LLMChain, tool chains, etc.). We guard against this by only treating the
-    FIRST ``on_chain_start`` per ``invoke()`` as the real run start, using
-    LangChain's run_id from kwargs to identify it.
+    LangChain callback handler that translates LangChain events into Dunetrace events.
+    ``on_chain_start`` fires for every chain (AgentExecutor, LLMChain, tool chains, etc.),
+    so we only treat the FIRST one per ``invoke()`` as the real run start, identified by
+    LangChain's run_id from kwargs.
     """
 
     def __init__(
