@@ -71,11 +71,11 @@ The SDK supports three independent output modes that can be combined:
 
 | Mode | How to enable | Destination | Use case |
 |---|---|---|---|
-| HTTP ingest (default) | Always on | Ingest API → Postgres → Detector | Full pipeline: detection, alerts, dashboard |
+| HTTP ingest (default) | `endpoint="http://…"` (default); set `endpoint=None` to disable | Ingest API → Postgres → Detector | Full pipeline: detection, alerts, dashboard |
 | Loki NDJSON | `emit_as_json=True` | stdout → Promtail/Alloy → Loki | Existing Grafana stack integration |
 | OTel spans | `otel_exporter=DunetraceOTelExporter(provider)` | OTel collector → Tempo / Honeycomb / Datadog | Infra metric correlation |
 
-All three modes can be active simultaneously. OTel and NDJSON are zero-cost when disabled.
+All three modes can be active simultaneously. OTel and NDJSON are zero-cost when disabled. Pass `endpoint=None` to use OTel or NDJSON without any HTTP ingest (useful for local testing or pure-OTel deployments).
 
 ### emit_as_json=True
 
@@ -130,10 +130,10 @@ The entry point for all SDK traffic. Its only job is to accept events as fast as
 
 A background polling loop that runs every 5 seconds. It is the only process that runs detection logic.
 
-1. Fetches runs completed since last poll (terminal events `run.completed` or `run.errored`) plus any runs that have stalled (no new events for `STALL_TIMEOUT_SECS`)
+1. Fetches runs completed since last poll (terminal events `run.completed` or `run.errored`) plus any runs that have stalled (no new events for `STALL_TIMEOUT_SECS`, default 90s)
 2. Checks `processed_runs` to skip already-processed runs
 3. Reconstructs `RunState` by fetching and replaying all events for each run
-4. Runs all 15 Tier 1 detectors against the `RunState`
+4. Runs 14 Tier 1 detectors against the `RunState`. `PROMPT_INJECTION_SIGNAL` is handled separately — the SDK detects injection on raw input before hashing and embeds evidence in the `run.started` payload; the worker extracts it from there rather than running the detector on `RunState`
 5. Writes any `FailureSignal` rows to Postgres
 6. Marks the run as processed
 

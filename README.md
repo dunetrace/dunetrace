@@ -107,7 +107,7 @@ Use this as a fallback until a native integration exists for your framework.
 | `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM |
 | `CONTEXT_BLOAT` | Prompt tokens grow 3× from first to last LLM call | MEDIUM |
-| `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent | MEDIUM |
+| `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent ¹ | MEDIUM |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
 | `REASONING_STALL` | LLM:tool-call ratio ≥4× — agent reasoning without acting | MEDIUM |
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
@@ -119,6 +119,8 @@ Use this as a fallback until a native integration exists for your framework.
 | `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
 
 Thresholds are configurable. See [Tuning detectors](#tuning-detectors).
+
+¹ **`STEP_COUNT_INFLATION` requires a warm baseline.** P75 is computed from the last 50 successfully completed runs (errored runs excluded) for the same `agent_id` + `agent_version` pair. The detector produces no signal, not even a shadow signal until at least 10 such runs exist. It activates automatically once that threshold is crossed; no configuration is needed.
 
 ---
 

@@ -12,6 +12,7 @@ from dunetrace.models import (
     AgentEvent,
     EventType,
     ExternalSignal,
+    LlmCall,
     RetrievalResult,
     RunState,
     ToolCall,
@@ -53,6 +54,14 @@ class RunContext:
     # ── LLM hooks ─────────────────────────────────────────────────────────────
 
     def llm_called(self, model: str, prompt_tokens: int = 0) -> None:
+        self.state.llm_calls.append(LlmCall(
+            model=model,
+            prompt_tokens=prompt_tokens,
+            finish_reason=None,
+            latency_ms=None,
+            step_index=self.step,
+            timestamp=time.time(),
+        ))
         self._emit(EventType.LLM_CALLED, {
             "model":         model,
             "prompt_tokens": prompt_tokens,
@@ -66,6 +75,12 @@ class RunContext:
         output_hash:       str = "",
         output_length:     int = 0,
     ) -> None:
+        # Back-fill the most recent LlmCall with response data.
+        if self.state.llm_calls:
+            lc = self.state.llm_calls[-1]
+            lc.finish_reason  = finish_reason
+            lc.latency_ms     = latency_ms
+            lc.output_length  = output_length
         self._emit(EventType.LLM_RESPONDED, {
             "completion_tokens": completion_tokens,
             "latency_ms":        latency_ms,

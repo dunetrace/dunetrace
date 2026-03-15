@@ -1096,6 +1096,120 @@ def explain_first_step_failure(signal: FailureSignal) -> Explanation:
     )
 
 
+# SLOW_STEP
+
+def explain_slow_step(signal: FailureSignal) -> Explanation:
+    ev           = signal.evidence
+    duration_ms  = ev.get("duration_ms", 0)
+    threshold_ms = ev.get("threshold_ms", 0)
+    event_type   = ev.get("event_type", "step")
+    step_label   = ev.get("step_label", event_type)
+    step_idx     = ev.get("step_index", signal.step_index)
+    ratio        = round(duration_ms / threshold_ms, 1) if threshold_ms else "?"
+    duration_s   = round(duration_ms / 1000, 1)
+    threshold_s  = round(threshold_ms / 1000, 1)
+    coincident   = ev.get("coincident_signals", [])
+
+    coincident_note = ""
+    if coincident:
+        names = ", ".join(s.get("signal_name", "unknown") for s in coincident)
+        coincident_note = f" A coincident infrastructure signal was recorded during this step: {names}."
+
+    return Explanation(
+        **_base(signal),
+        title=f"Slow step: {step_label} took {duration_s}s (threshold {threshold_s}s)",
+        what=(
+            f"Step {step_idx} ({step_label}) took {duration_s}s — "
+            f"{ratio}× the normal {threshold_s}s threshold for this step type.{coincident_note} "
+            f"Slow steps stall the agent loop and inflate per-run latency and token cost. "
+            f"At this rate, a 10-step run would take {round(duration_s * 10, 0)}s end-to-end."
+        ),
+        why_it_matters=(
+            "Latency outliers in agent runs compound quickly: a single tool call "
+            "that hangs for 30s can exceed the user-facing timeout for the whole session. "
+            "They also mask real failures — a step timing out silently looks identical "
+            "to a step returning an empty result."
+        ),
+        evidence_summary=(
+            f"{step_label} at step {step_idx}: {duration_ms}ms "
+            f"(threshold {threshold_ms}ms, {ratio}×). "
+            f"Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description="Add a per-call timeout and surface it as an external_signal",
+                language="python",
+                code=(
+                    "import signal as _signal\n\n"
+                    "def call_with_timeout(fn, args, timeout_s=10):\n"
+                    "    def _handler(sig, frame):\n"
+                    "        raise TimeoutError(f'Tool call exceeded {timeout_s}s')\n"
+                    "    _signal.signal(_signal.SIGALRM, _handler)\n"
+                    "    _signal.alarm(timeout_s)\n"
+                    "    try:\n"
+                    "        return fn(*args)\n"
+                    "    except TimeoutError:\n"
+                    "        run.external_signal('tool_timeout', source='timeout_guard',\n"
+                    "                            timeout_s=timeout_s)\n"
+                    "        return None\n"
+                    "    finally:\n"
+                    "        _signal.alarm(0)"
+                ),
+            ),
+        ],
+    )
+
+
+# REASONING_STALL
+
+def explain_reasoning_stall(signal: FailureSignal) -> Explanation:
+    ev         = signal.evidence
+    llm_calls  = ev.get("llm_calls", "?")
+    tool_calls = ev.get("tool_calls", "?")
+    ratio      = ev.get("ratio", "?")
+    threshold  = ev.get("threshold", 4.0)
+
+    return Explanation(
+        **_base(signal),
+        title=f"Reasoning stall: {llm_calls} LLM calls, only {tool_calls} tool calls ({ratio}× ratio)",
+        what=(
+            f"The agent made {llm_calls} LLM calls but only {tool_calls} tool calls — "
+            f"a {ratio}× LLM-to-tool ratio, well above the {threshold}× threshold. "
+            f"A healthy agent alternates think → act → observe. When the ratio skews this far, "
+            f"the agent is deliberating in circles rather than gathering new information from tools."
+        ),
+        why_it_matters=(
+            "Each extra LLM call without a corresponding tool call burns tokens with diminishing returns. "
+            "The agent is re-processing the same context rather than acquiring new facts. "
+            "This typically ends in a low-quality answer, a hallucination, or a silent timeout — "
+            "none of which are visible to the caller without tracing."
+        ),
+        evidence_summary=(
+            f"{llm_calls} LLM calls vs {tool_calls} tool calls (ratio {ratio}×, "
+            f"threshold {threshold}×). Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description="Add a reasoning step cap that forces a tool call or exit",
+                language="python",
+                code=(
+                    "MAX_CONSECUTIVE_LLM = 3\n\n"
+                    "consecutive_llm = 0\n"
+                    "for step in agent_loop():\n"
+                    "    if step.type == 'llm':\n"
+                    "        consecutive_llm += 1\n"
+                    "    else:\n"
+                    "        consecutive_llm = 0\n\n"
+                    "    if consecutive_llm >= MAX_CONSECUTIVE_LLM:\n"
+                    "        # Force a tool call or terminate\n"
+                    "        inject_message('You must call a tool before reasoning further.')\n"
+                    "        consecutive_llm = 0"
+                ),
+            ),
+        ],
+    )
+
+
 TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.TOOL_LOOP:               explain_tool_loop,
     FailureType.TOOL_THRASHING:          explain_tool_thrashing,
@@ -1110,4 +1224,6 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.STEP_COUNT_INFLATION:    explain_step_count_inflation,
     FailureType.CASCADING_TOOL_FAILURE:  explain_cascading_tool_failure,
     FailureType.FIRST_STEP_FAILURE:      explain_first_step_failure,
+    FailureType.SLOW_STEP:               explain_slow_step,
+    FailureType.REASONING_STALL:         explain_reasoning_stall,
 }

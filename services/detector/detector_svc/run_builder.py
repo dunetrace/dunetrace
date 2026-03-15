@@ -28,8 +28,11 @@ def build_run_state(events: list[dict]) -> RunState:
         agent_version=agent_version,
     )
 
-    # Track pending llm.called data so we can merge finish_reason when llm.responded arrives
-    _pending_llm: dict[int, dict] = {}
+    # Track pending llm.called data so we can merge with llm.responded.
+    # Stored as a list because llm.called and llm.responded always have
+    # consecutive step indices (the SDK increments the counter on each emit),
+    # so we can't key by step_index — we just pop the most recent pending call.
+    _pending_llm: list[dict] = []
 
     for raw in events:
         event_type = raw["event_type"]
@@ -49,21 +52,21 @@ def build_run_state(events: list[dict]) -> RunState:
         elif event_type == "run.errored":
             state.exit_reason = "error"
 
-        # llm.called - store pending call keyed by step_index
+        # llm.called - push pending call onto the stack
         elif event_type == "llm.called":
-            _pending_llm[step_index] = {
+            _pending_llm.append({
                 "model":         payload.get("model", "unknown"),
                 "prompt_tokens": payload.get("prompt_tokens"),
                 "step_index":    step_index,
                 "timestamp":     raw.get("timestamp", 0.0),
-            }
+            })
 
-        # llm.responded - merge with pending call, append LlmCall
+        # llm.responded - pop most recent pending call and merge into LlmCall
         elif event_type == "llm.responded":
-            pending = _pending_llm.pop(step_index, {})
-            # prompt_tokens live in llm.responded (our SDK), not llm.called.
-            # Fall back to llm.called in case a custom SDK puts them there.
-            prompt_tokens = payload.get("prompt_tokens") or pending.get("prompt_tokens")
+            pending = _pending_llm.pop() if _pending_llm else {}
+            # prompt_tokens come from llm.called in our SDK.
+            # Fall back to llm.responded in case a custom SDK puts them there.
+            prompt_tokens = pending.get("prompt_tokens") or payload.get("prompt_tokens")
             state.llm_calls.append(
                 LlmCall(
                     model=pending.get("model", payload.get("model", "unknown")),
@@ -71,7 +74,7 @@ def build_run_state(events: list[dict]) -> RunState:
                     finish_reason=payload.get("finish_reason"),
                     latency_ms=payload.get("latency_ms"),
                     output_length=payload.get("output_length"),
-                    step_index=step_index,
+                    step_index=pending.get("step_index", step_index),
                     timestamp=pending.get("timestamp", raw.get("timestamp", 0.0)),
                 )
             )
@@ -88,14 +91,17 @@ def build_run_state(events: list[dict]) -> RunState:
                 )
             )
 
-        # tool.responded - backfill success onto the matching ToolCall
+        # tool.responded - backfill success onto the most recent unmatched ToolCall
+        # matching by tool_name (not step_index) because tool.called and tool.responded
+        # have consecutive step indices in the SDK, not the same step_index.
         elif event_type == "tool.responded":
-            success = payload.get("success")
+            success   = payload.get("success")
+            tool_name = payload.get("tool_name", "")
             if success is not None:
-                # Find the most recent ToolCall at this step_index and update it.
                 for tc in reversed(state.tool_calls):
-                    if tc.step_index == step_index:
-                        tc.success = bool(success)
+                    if tc.tool_name == tool_name and tc.success is None:
+                        tc.success    = bool(success)
+                        tc.error_hash = payload.get("error_hash")
                         break
 
         # retrieval.responded - append to retrievals list
