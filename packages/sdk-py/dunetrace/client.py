@@ -55,7 +55,7 @@ class Dunetrace:
         otel_exporter:     Optional[object] = None,
         debug:             bool = False,
     ) -> None:
-        self._ingest_url     = endpoint.rstrip("/") + "/v1/ingest"
+        self._ingest_url     = endpoint.rstrip("/") + "/v1/ingest" if endpoint else None
         self._api_key        = api_key or ""
         self._buffer         = RingBuffer[AgentEvent](maxsize=buffer_size)
         self._stop_evt       = Event()
@@ -219,12 +219,13 @@ class Dunetrace:
         while not self._stop_evt.is_set():
             batch = self._buffer.drain(100)
             if batch:
-                self._ship(batch)
+                if self._ingest_url:
+                    self._ship(batch)
             else:
                 time.sleep(self._flush_interval)
 
         remaining = self._buffer.drain_all()
-        if remaining:
+        if remaining and self._ingest_url:
             self._ship(remaining)
 
     def _ship(self, batch: List[AgentEvent]) -> None:
