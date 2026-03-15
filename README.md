@@ -7,8 +7,6 @@
 
 Privacy-safe observability for AI agents at runtime. Detects tool loops, context bloat, prompt injection, and other failure patterns with instant alerts. Zero raw content transmitted. All text is SHA-256 hashed before leaving the agent process.
 
-![Dunetrace demo](dunetrace-demo.gif)
-
 ---
 
 ## Quick Start
