@@ -104,6 +104,31 @@ Trace (trace_id = run_id as 128-bit int)
 
 At run end, Tier 1 detectors run on the completed `RunState`. Each signal is written as indexed attributes on the root span (`dunetrace.signal.0.failure_type`, `.severity`, `.confidence`, `.evidence.*`). HIGH/CRITICAL signals set `span.status = ERROR`.
 
+Orphaned child spans (a `tool_called` with no matching `tool_responded`, e.g. when an exception fires mid-tool) are force-closed with `status = ERROR` so backends visually flag the broken step.
+
+**Resource attributes** are not set by the exporter — they are the caller's responsibility. Pass a `Resource` to the `TracerProvider` before constructing `DunetraceOTelExporter`:
+
+```python
+from opentelemetry.sdk.resources import Resource
+
+resource = Resource.create({
+    "service.name":           "my-agent-service",
+    "service.version":        "0.3.1",
+    "deployment.environment": "production",
+})
+provider = TracerProvider(resource=resource)
+```
+
+Without resource attributes, spans appear as an anonymous service in Datadog, Honeycomb, and similar backends. This makes it impossible to filter by agent service in a multi-service environment.
+
+**Known gaps:**
+
+| Gap | Detail |
+|---|---|
+| Streaming LLM | `llm_called` / `llm_responded` fire once each. Streaming runs produce a single `llm_call` span covering the full stream duration with no per-chunk events. No fix planned — the SDK's privacy model hashes all content, so chunk payloads can't be attached as span events anyway. |
+| Parallel tool calls | The exporter tracks one open child span per run (`rs.child_span`). If two tools fire concurrently, the first span is orphan-closed (marked ERROR) when the second `tool_called` arrives. Both spans end up in the trace but the first loses response-time precision. Parallel agents (LangGraph `Send`) will see this. |
+| Multi-agent W3C trace linking | `parent_run_id` is stored as a span attribute (`dunetrace.parent_run_id`) but child agent runs start a fresh trace with their own `trace_id`. Traces from parent and child agents appear as disconnected in Tempo/Honeycomb. Full W3C `traceparent` propagation is not implemented — callers who need linked traces must propagate the parent span context manually via the standard OTel API. |
+
 ### external_signal event type
 
 `run.external_signal("rate_limit", source="openai")` emits an `external.signal` event that does **not** advance the step counter. It records infrastructure context alongside the agent step it coincided with. `SlowStepDetector` checks for coincident external signals within the step's time window and includes them in evidence (`coincident_signals`).

@@ -39,10 +39,13 @@ explicitly via the standard OTel API, see CONTEXT PROPAGATION below.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger("dunetrace.otel")
 
 try:
     from opentelemetry import trace
@@ -116,11 +119,11 @@ class DunetraceOTelExporter:
         """Called just before run.completed / run.errored is emitted. Stores the RunState so _on_run_ended can run detectors."""
         with self._lock:
             rs = self._runs.get(run_id)
-        if rs:
-            rs.run_state = state
+            if rs:
+                rs.run_state = state
 
     def handle(self, event: AgentEvent) -> None:
-        """Route one AgentEvent to the appropriate span operation."""
+        """Route one AgentEvent to the appropriate span operation. Never raises."""
         _DISPATCH = {
             EventType.RUN_STARTED:         self._on_run_started,
             EventType.RUN_COMPLETED:       self._on_run_ended,
@@ -135,7 +138,13 @@ class DunetraceOTelExporter:
         }
         fn = _DISPATCH.get(event.event_type)
         if fn:
-            fn(event)
+            try:
+                fn(event)
+            except Exception as exc:
+                logger.warning(
+                    "Dunetrace OTel: failed to handle %s for run %s: %s",
+                    event.event_type, event.run_id, exc,
+                )
 
     # ── Span handlers ─────────────────────────────────────────────────────────
 
@@ -182,6 +191,7 @@ class DunetraceOTelExporter:
 
         # Guard: close any orphaned child (mismatched called/responded pairs).
         if rs.child_span:
+            rs.child_span.set_status(StatusCode.ERROR, "span ended without a response event")
             rs.child_span.end(end_time=_ns(event.timestamp))
 
         parent_ctx = trace.set_span_in_context(rs.root_span)
@@ -308,8 +318,10 @@ class DunetraceOTelExporter:
         if not rs:
             return
 
-        # Close any orphaned child span (e.g. tool that never got a response).
+        # Close any orphaned child span (e.g. tool that never got a response event).
+        # Mark ERROR — if we're here without a response, something went wrong mid-step.
         if rs.child_span:
+            rs.child_span.set_status(StatusCode.ERROR, "span ended without a response event")
             rs.child_span.end(end_time=_ns(event.timestamp))
 
         root = rs.root_span

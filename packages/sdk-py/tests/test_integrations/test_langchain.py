@@ -77,7 +77,8 @@ class TestDunetraceCallbackHandler(unittest.TestCase):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "root"}, run_id="lc-root")
         start_count = len(emitted)
-        handler.on_chain_start({}, {"input": "sub"}, run_id="lc-sub")
+        # Sub-chains always pass parent_run_id in real LangChain
+        handler.on_chain_start({}, {"input": "sub"}, run_id="lc-sub", parent_run_id="lc-root")
         self.assertEqual(len(emitted), start_count)  # no extra event
 
     def test_handler_resets_after_completion(self):

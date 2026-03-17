@@ -51,19 +51,73 @@ result = agent.invoke(
 
 Three independent output modes, combine freely:
 
+| Mode | How to enable | Destination |
+|---|---|---|
+| HTTP ingest (default) | `endpoint="http://…"` | Dunetrace backend → detection, alerts, dashboard |
+| Loki NDJSON | `emit_as_json=True` | stdout → Promtail/Alloy → Grafana |
+| OpenTelemetry | `otel_exporter=DunetraceOTelExporter(provider)` | Any OTel collector (Tempo, Honeycomb, Datadog, Jaeger) |
+
+Use `endpoint=None` to disable HTTP ingest entirely (OTel-only or Grafana-only mode):
+
 ```python
-# Default: HTTP POST to backend (detection, alerts, dashboard)
-dt = Dunetrace(endpoint="http://localhost:8001")
+dt = Dunetrace(endpoint=None, otel_exporter=DunetraceOTelExporter(provider))
+```
 
-# Loki/Grafana: NDJSON to stdout (works alongside HTTP)
-dt = Dunetrace(emit_as_json=True)
+### OpenTelemetry
 
-# OpenTelemetry: spans to any OTel collector
+```python
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
 from dunetrace.integrations.otel import DunetraceOTelExporter
 
-provider = TracerProvider()
+resource = Resource.create({
+    "service.name": "my-agent-service",
+    "deployment.environment": "production",
+})
+provider = TracerProvider(resource=resource)
+provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter()))
+
 dt = Dunetrace(otel_exporter=DunetraceOTelExporter(provider))
+```
+
+Each agent run produces a trace rooted at a deterministic `trace_id` derived from `run_id`:
+
+```
+Trace (trace_id = run_id as 128-bit int)
+└── Span: "agent_run"         [dunetrace.agent_id, dunetrace.run_id, dunetrace.model, …]
+    ├── Span: "llm_call"      [gen_ai.request.model, gen_ai.usage.input_tokens, …]
+    ├── Span: "tool_call"     [dunetrace.tool_name, dunetrace.success, dunetrace.latency_ms]
+    │   └── SpanEvent: "rate_limit"   (from run.external_signal("rate_limit", source="openai"))
+    └── Span: "retrieval"     [dunetrace.index_name, dunetrace.result_count, dunetrace.top_score]
+```
+
+Failure signals detected at run end are written as indexed attributes on the root span:
+
+```
+dunetrace.signal.0.failure_type = "TOOL_LOOP"
+dunetrace.signal.0.severity     = "HIGH"
+dunetrace.signal.0.confidence   = 0.95
+dunetrace.signal.0.evidence.*   = …
+```
+
+HIGH and CRITICAL signals also set `span.status = ERROR`.
+
+**With LangChain:** pass `DunetraceOTelExporter` to `Dunetrace` alongside `DunetraceCallbackHandler`, no other changes needed. Both work simultaneously.
+
+### Loki / Grafana
+
+```python
+dt = Dunetrace(emit_as_json=True)
+```
+
+Writes one NDJSON line per event to stdout. Compatible with Promtail and Grafana Alloy pipeline stages:
+
+```json
+{"ts":"2026-03-17T12:00:00Z","level":"info","logger":"dunetrace",
+ "event_type":"tool.called","agent_id":"my-agent","run_id":"…","step_index":3,
+ "payload":{…}}
 ```
 
 ## Infrastructure context

@@ -236,6 +236,51 @@ pipeline_stages:
 
 ---
 
+## OpenTelemetry
+
+```bash
+pip install 'dunetrace[otel]' opentelemetry-exporter-otlp-proto-grpc
+```
+
+```python
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from dunetrace.integrations.otel import DunetraceOTelExporter
+
+resource = Resource.create({
+    "service.name": "my-agent-service",
+    "deployment.environment": "production",
+})
+provider = TracerProvider(resource=resource)
+provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter()))
+
+dt = Dunetrace(otel_exporter=DunetraceOTelExporter(provider))
+```
+
+Each agent run produces a trace with a deterministic `trace_id` derived from `run_id`, so you can correlate Dunetrace signals with infra metrics in Tempo, Honeycomb, Datadog, or Jaeger:
+
+```
+Trace
+└── Span: "agent_run"     [dunetrace.agent_id, dunetrace.model, dunetrace.tools, …]
+    ├── Span: "llm_call"  [gen_ai.request.model, gen_ai.usage.input_tokens, …]
+    ├── Span: "tool_call" [dunetrace.tool_name, dunetrace.success, dunetrace.latency_ms]
+    └── Span: "retrieval" [dunetrace.index_name, dunetrace.result_count, dunetrace.top_score]
+```
+
+Failure signals detected at run end are written as indexed attributes on the root span (`dunetrace.signal.0.failure_type`, `.severity`, `.confidence`). HIGH/CRITICAL signals set `span.status = ERROR`.
+
+Use `endpoint=None` to run OTel-only with no HTTP ingest:
+
+```python
+dt = Dunetrace(endpoint=None, otel_exporter=DunetraceOTelExporter(provider))
+```
+
+**With LangChain:** use `DunetraceCallbackHandler` and `DunetraceOTelExporter` together, they are independent and both active simultaneously without any extra configuration.
+
+---
+
 ## Architecture
 
 ```
