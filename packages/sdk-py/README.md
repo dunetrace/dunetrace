@@ -17,6 +17,7 @@ pip install 'dunetrace[langchain,otel]'  # both
 from dunetrace import Dunetrace
 
 dt = Dunetrace()  # defaults to http://localhost:8001
+user_input = "What is the capital of France?"
 
 with dt.run("my-agent", user_input=user_input, model="gpt-4o", tools=["search"]) as run:
     run.llm_called("gpt-4o", prompt_tokens=150)
@@ -63,6 +64,7 @@ def web_search(query: str) -> str:
 llm = ChatOpenAI(model="gpt-4o-mini")
 tools = [web_search]
 system_prompt = "You are a helpful assistant."
+user_input = "What is the capital of France?"
 
 dt = Dunetrace()
 callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
