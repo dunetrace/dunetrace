@@ -859,7 +859,7 @@ class ReasoningSpinDetector(BaseDetector):
     RATIO_THRESHOLD (default 4.0) — LLM calls / tool calls. Raise for agents with intentional
     multi-step chain-of-thought designs where high ratios are expected.
     """
-    name            = "REASONING_SPIN"
+    name            = "REASONING_STALL"
     MIN_LLM_CALLS   = 5
     RATIO_THRESHOLD = 4.0
 

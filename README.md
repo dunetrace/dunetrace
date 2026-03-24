@@ -145,7 +145,7 @@ OPENAI_API_KEY=sk-... python examples/langchain_agent.py
 OPENAI_API_KEY=sk-... SCENARIO=tool_loop python examples/langchain_agent.py
 ```
 
-Both examples send events to `http://localhost:8001` by default. Override with `DUNETRACE_ENDPOINT=http://your-host:8001`.
+Both examples send events to `http://localhost:8001` by default. Override with `DUNETRACE_ENDPOINT=http://your-host:8001`. Now, check dashboard at `http://localhost:3000`.
 
 ---
 
@@ -156,7 +156,9 @@ Add to your `.env`:
 ```bash
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz
 SLACK_CHANNEL=#agent-alerts
-SLACK_MIN_SEVERITY=HIGH   # LOW | MEDIUM | HIGH | CRITICAL
+# SLACK_MIN_SEVERITY controls the minimum severity to alert on.
+# Options: LOW | MEDIUM | HIGH | CRITICAL  (default: HIGH)
+SLACK_MIN_SEVERITY=HIGH
 ```
 
 ![Slack alert](slack-alert.png)
@@ -164,7 +166,7 @@ SLACK_MIN_SEVERITY=HIGH   # LOW | MEDIUM | HIGH | CRITICAL
 Get a webhook URL from [api.slack.com/messaging/webhooks](https://api.slack.com/messaging/webhooks). Restart the alerts worker to pick up the change:
 
 ```bash
-docker compose restart alerts
+docker compose up -d --force-recreate alerts
 ```
 
 **Generic webhook** (PagerDuty, Linear, custom endpoints):

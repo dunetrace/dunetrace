@@ -7,7 +7,7 @@ LangChain callback handler. Plug it into any agent and it auto-instruments every
     dt = Dunetrace()
     callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
 
-    agent = create_agent(llm, tools, system_prompt="...")
+    agent = create_react_agent(llm, tools, state_modifier="...")
     result = agent.invoke(
         {"messages": [("human", user_input)]},
         config={"callbacks": [callback]},
@@ -323,7 +323,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 "output_hash":   "",
                 "output_length": 0,
                 "latency_ms":    0,
-                "error_type":    type(error).__name__,
+                "error_hash":    hash_content(str(error)),
             })
         except Exception as exc:
             logger.warning("Dunetrace: on_llm_error failed: %s", exc)
@@ -385,7 +385,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             from dunetrace.models import EventType
             self._safe_emit(EventType.TOOL_RESPONDED, ctx, {
                 "success":    False,
-                "error_type": type(error).__name__,
+                "error_hash": hash_content(str(error)),
             })
         except Exception as exc:
             logger.warning("Dunetrace: on_tool_error failed: %s", exc)
