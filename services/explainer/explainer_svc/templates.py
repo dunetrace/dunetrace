@@ -41,12 +41,20 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
     tool       = ev.get("tool", "unknown_tool")
     count      = ev.get("count", "?")
     window     = ev.get("window", "?")
+    first_step = ev.get("first_step")
+    last_step  = ev.get("last_step")
+
+    if first_step is not None and last_step is not None:
+        step_range = f"steps {first_step}–{last_step}"
+    else:
+        # fallback for signals stored before this fix
+        step_range = f"steps {signal.step_index - window + 1}–{signal.step_index}"
 
     return Explanation(
         **_base(signal),
-        title=f"Tool loop detected: `{tool}` called {count}× in {window} steps",
+        title=f"Tool loop detected: `{tool}` called {count}× in {step_range}",
         what=(
-            f"The agent called `{tool}` {count} times within a {window}-step window "
+            f"The agent called `{tool}` {count} times in {step_range} "
             f"without making progress. This is a tight loop — the agent keeps trying "
             f"the same tool with the same or similar arguments, never advancing past "
             f"the same point in its reasoning."
@@ -58,8 +66,7 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
             f"Users waiting on a response will time out or give up."
         ),
         evidence_summary=(
-            f"Tool `{tool}` was called {count} times in steps "
-            f"{signal.step_index - window + 1}–{signal.step_index}. "
+            f"Tool `{tool}` was called {count} times in {step_range}. "
             f"Confidence: {int(signal.confidence * 100)}%."
         ),
         suggested_fixes=[

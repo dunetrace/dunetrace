@@ -142,7 +142,7 @@ async def fetch_step_count_baseline(
                 LIMIT $4
             ),
             step_counts AS (
-                SELECT MAX(e.step_index) + 1 AS step_count
+                SELECT MAX(e.step_index) AS step_count
                 FROM recent r
                 JOIN events e ON e.run_id = r.run_id
                 GROUP BY r.run_id

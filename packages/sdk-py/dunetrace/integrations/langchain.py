@@ -7,7 +7,7 @@ LangChain callback handler. Plug it into any agent and it auto-instruments every
     dt = Dunetrace()
     callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
 
-    agent = create_react_agent(llm, tools, state_modifier="...")
+    agent = create_react_agent(llm, tools, prompt="...")
     result = agent.invoke(
         {"messages": [("human", user_input)]},
         config={"callbacks": [callback]},
@@ -62,6 +62,7 @@ class _RunCtx:
     model:           str            = ""
     children:        Set[str]       = field(default_factory=set)   # child lc_run_ids
     start_time:      float          = field(default_factory=time.time)
+    child_steps:     Dict[str, int] = field(default_factory=dict)  # lc_run_id → step_index at call time
 
 
 class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
@@ -123,7 +124,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 self._lc_parent[child_lc_id] = root
                 self._runs[root].children.add(child_lc_id)
 
-    def _safe_emit(self, event_type: Any, ctx: _RunCtx, payload: dict) -> None:
+    def _safe_emit(self, event_type: Any, ctx: _RunCtx, payload: dict, step: Optional[int] = None) -> None:
         """Emit one event, swallowing any exception so the agent is never broken."""
         try:
             from dunetrace.models import AgentEvent
@@ -132,7 +133,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 run_id=ctx.run_id,
                 agent_id=self._agent_id,
                 agent_version=self._version,
-                step_index=ctx.step,
+                step_index=step if step is not None else ctx.step,
                 payload=payload,
             ))
         except Exception as exc:
@@ -339,6 +340,8 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 self._register_child(lc_run_id, str(kwargs.get("parent_run_id") or ""))
             ctx.step += 1
             ctx.tool_call_count += 1
+            if lc_run_id:
+                ctx.child_steps[lc_run_id] = ctx.step
             tool_name = serialized.get("name", kwargs.get("name", "unknown"))
             from dunetrace.models import EventType
             self._safe_emit(EventType.TOOL_CALLED, ctx, {
@@ -369,11 +372,13 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             ctx = self._ctx(kwargs)
             if not ctx:
                 return
+            lc_run_id = str(kwargs.get("run_id") or "")
+            step = ctx.child_steps.pop(lc_run_id, None)
             from dunetrace.models import EventType
             self._safe_emit(EventType.TOOL_RESPONDED, ctx, {
                 "success":       True,
                 "output_length": len(str(output)),
-            })
+            }, step=step)
         except Exception as exc:
             logger.warning("Dunetrace: on_tool_end failed: %s", exc)
 
@@ -382,11 +387,13 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             ctx = self._ctx(kwargs)
             if not ctx:
                 return
+            lc_run_id = str(kwargs.get("run_id") or "")
+            step = ctx.child_steps.pop(lc_run_id, None)
             from dunetrace.models import EventType
             self._safe_emit(EventType.TOOL_RESPONDED, ctx, {
                 "success":    False,
                 "error_hash": hash_content(str(error)),
-            })
+            }, step=step)
         except Exception as exc:
             logger.warning("Dunetrace: on_tool_error failed: %s", exc)
 
@@ -399,6 +406,8 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             if lc_run_id:
                 self._register_child(lc_run_id, str(kwargs.get("parent_run_id") or ""))
             ctx.step += 1
+            if lc_run_id:
+                ctx.child_steps[lc_run_id] = ctx.step
             index_name = serialized.get("name", serialized.get("id", ["unknown"])[-1]
                          if isinstance(serialized.get("id"), list) else "unknown")
             from dunetrace.models import EventType
@@ -414,6 +423,8 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             ctx = self._ctx(kwargs)
             if not ctx:
                 return
+            lc_run_id = str(kwargs.get("run_id") or "")
+            step = ctx.child_steps.pop(lc_run_id, None)
             docs = list(documents) if documents else []
             result_count = len(docs)
 
@@ -429,7 +440,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             self._safe_emit(EventType.RETRIEVAL_RESPONDED, ctx, {
                 "result_count": result_count,
                 "top_score":    top_score,
-            })
+            }, step=step)
         except Exception as exc:
             logger.warning("Dunetrace: on_retriever_end failed: %s", exc)
 
@@ -438,12 +449,14 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             ctx = self._ctx(kwargs)
             if not ctx:
                 return
+            lc_run_id = str(kwargs.get("run_id") or "")
+            step = ctx.child_steps.pop(lc_run_id, None)
             from dunetrace.models import EventType
             self._safe_emit(EventType.RETRIEVAL_RESPONDED, ctx, {
                 "result_count": 0,
                 "top_score":    None,
-                "error_type":   type(error).__name__,
-            })
+                "error_hash":   hash_content(str(error)),
+            }, step=step)
         except Exception as exc:
             logger.warning("Dunetrace: on_retriever_error failed: %s", exc)
 

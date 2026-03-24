@@ -38,7 +38,7 @@ dt.shutdown()
 pip install 'dunetrace[langchain]' langchain-openai langgraph python-dotenv
 ```
 
-Create a `.env` file:
+Add your key to the root `.env` file :
 
 ```
 OPENAI_API_KEY=sk-...
@@ -56,7 +56,7 @@ from langgraph.prebuilt import create_react_agent
 dt = Dunetrace()
 callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
 
-agent = create_react_agent(llm, tools, state_modifier=system_prompt)
+agent = create_react_agent(llm, tools, prompt=system_prompt)
 result = agent.invoke(
     {"messages": [("human", user_input)]},
     config={"callbacks": [callback]},

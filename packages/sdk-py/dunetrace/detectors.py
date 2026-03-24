@@ -83,18 +83,21 @@ class ToolLoopDetector(BaseDetector):
 
         for tool, count in counts.items():
             if count >= self.THRESHOLD:
+                all_calls = [c for c in state.tool_calls if c.tool_name == tool]
                 return FailureSignal(
                     failure_type=FailureType.TOOL_LOOP,
                     severity=Severity.HIGH,
                     run_id=state.run_id,
                     agent_id=state.agent_id,
                     agent_version=state.agent_version,
-                    step_index=state.current_step,
+                    step_index=window[-1].step_index,
                     confidence=0.95,
                     evidence={
-                        "tool":   tool,
-                        "count":  count,
-                        "window": self.WINDOW,
+                        "tool":       tool,
+                        "count":      len(all_calls),
+                        "window":     self.WINDOW,
+                        "first_step": all_calls[0].step_index,
+                        "last_step":  all_calls[-1].step_index,
                     },
                 )
         return None

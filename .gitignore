@@ -70,3 +70,4 @@ railway.toml
 *.pfx
 *.crt
 *.cer
+dunetrace/

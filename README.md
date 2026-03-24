@@ -54,14 +54,16 @@ Then open the dashboard: **http://localhost:3000**
 
 ![Run detail panel](agentRun_detail.png)
 
+![Run graph](graph.png)
+
 ---
 
 ## LangChain
 
 ```bash
-pip install 'dunetrace[langchain]' langchain-openai langgraph      # OpenAI
-pip install 'dunetrace[langchain]' langchain-anthropic langgraph   # Anthropic
-pip install 'dunetrace[langchain]' langchain-google-genai langgraph  # Gemini
+pip install 'dunetrace[langchain]' langchain-openai langgraph python-dotenv       # OpenAI
+pip install 'dunetrace[langchain]' langchain-anthropic langgraph python-dotenv    # Anthropic
+pip install 'dunetrace[langchain]' langchain-google-genai langgraph python-dotenv # Gemini
 ```
 
 ```python
@@ -72,7 +74,7 @@ from dunetrace.integrations.langchain import DunetraceCallbackHandler
 dt = Dunetrace()
 callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
 
-agent = create_react_agent(llm, tools, state_modifier=system_prompt)
+agent = create_react_agent(llm, tools, prompt=system_prompt)
 result = agent.invoke(
     {"messages": [("human", user_input)]},
     config={"callbacks": [callback]},
@@ -144,7 +146,7 @@ cd packages/sdk-py
 pip install 'dunetrace[langchain]' langchain-openai langgraph python-dotenv
 ```
 
-Create a `.env` file in `packages/sdk-py/`:
+Add your key to the root `.env` file:
 
 ```
 OPENAI_API_KEY=sk-...

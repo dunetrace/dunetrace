@@ -2,13 +2,16 @@ const { useState } = React;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const EVENT_META = {
-  "run.started":    { icon: "PLAY", color: "#22c55e",  label: "Start" },
-  "run.completed":  { icon: "END",  color: "#22c55e",  label: "Done" },
-  "run.errored":    { icon: "ERR",  color: "#ff3b3b",  label: "Error" },
-  "llm.called":     { icon: "LLM",  color: "#818cf8",  label: "LLM" },
-  "llm.responded":  { icon: "LLM",  color: "#6366f1",  label: "LLM dn" },
-  "tool.called":    { icon: "TOOL", color: "#f97316",  label: "Tool" },
-  "tool.responded": { icon: "TOOL", color: "#fb923c",  label: "Tool dn" },
+  "run.started":          { icon: "PLAY", color: "#22c55e",  label: "Start"       },
+  "run.completed":        { icon: "END",  color: "#22c55e",  label: "Done"        },
+  "run.errored":          { icon: "ERR",  color: "#ff3b3b",  label: "Error"       },
+  "llm.called":           { icon: "LLM",  color: "#2DD4BF",  label: "LLM"         },
+  "llm.responded":        { icon: "LLM",  color: "#2DD4BF",  label: "LLM ↩"       },
+  "tool.called":          { icon: "TOOL", color: "#f97316",  label: "Tool"        },
+  "tool.responded":       { icon: "TOOL", color: "#f97316",  label: "Tool ↩"      },
+  "retrieval.called":     { icon: "RAG",  color: "#A78BFA",  label: "Retrieval"   },
+  "retrieval.responded":  { icon: "RAG",  color: "#A78BFA",  label: "Retrieval ↩" },
+  "external.signal":      { icon: "EXT",  color: "#f5c518",  label: "External"    },
 };
 
 const SEVERITY_COLOR = {
@@ -168,11 +171,11 @@ function EventNode({ event, signal, x, isHovered, onClick }) {
   var meta = EVENT_META[event.event_type] || { icon: "?", color: "#374151", label: "?" };
   var hasSig = !!signal;
   var sc = hasSig ? SEVERITY_COLOR[signal.severity] : null;
-  var tn = event.event_type === "tool.called" ? toolName(event) : "";
-
   // Encode icon as short text
-  var iconChars = { "PLAY": "▶", "END": "■", "ERR": "✕", "LLM": "◆", "TOOL": "⬡" };
+  var iconChars = { "PLAY": "▶", "END": "■", "ERR": "✕", "LLM": "◆", "TOOL": "⬡", "RAG": "⊞", "EXT": "⚑" };
   var icon = iconChars[meta.icon] || meta.icon;
+  var tn = (event.event_type === "tool.called" || event.event_type === "tool.responded")
+    ? toolName(event) : "";
 
   var labelText = hasSig ? signal.failure_type.replace(/_/g, " ") : "";
   var labelW = Math.max(84, labelText.length * 5.5 + 16);
@@ -357,7 +360,7 @@ function Timeline({ run }) {
                 </div>
               </div>
             )}
-            {Object.entries(ev.payload).slice(0, 4).map(function([k, v]) {
+            {Object.entries(ev.payload).slice(0, 6).map(function([k, v]) {
               return (
                 <div key={k}>
                   <div style={{ fontSize: 9, color: "#374151", textTransform: "uppercase", marginBottom: 3 }}>{k.replace(/_/g, " ")}</div>

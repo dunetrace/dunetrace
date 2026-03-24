@@ -24,7 +24,7 @@ const C = {
 };
 
 // ── Layout constants ───────────────────────────────────────────────────────────
-const NW = 180, NH = 52, Y_STEP = 110;
+const NW = 180, NH = 52, Y_STEP = 140;
 const MAIN_X  = 400;  // x for normal events
 const LOOP_X  = 680;  // x for loop-lane events
 const MAX_CONSECUTIVE_COMPRESS = 3;  // compress consecutive runs longer than this
@@ -314,16 +314,16 @@ function runSummary(run) {
 
 // ── Node visuals ──────────────────────────────────────────────────────────────
 function nodeColor(node) {
-  if (node.type === "start")     return { fill: "#0A1F38", border: C.blue,    text: C.white  };
-  if (node.type === "end")       return { fill: "#111C2A", border: "#5A7A9A", text: C.light  };
-  if (node.type === "signal")    return { fill: "#4A1010", border: "#FF5555", text: C.white  };
-  if (node.type === "external")  return { fill: "#1C1500", border: C.yellow,  text: C.yellow };
-  if (node.type === "retrieval") return { fill: "#091C30", border: "#5BB5E0", text: C.light  };
-  if (node.type === "llm")       return { fill: "#0C1D32", border: "#4A9FC8", text: C.light  };
+  if (node.type === "start")     return { fill: "#0C3520", border: "#22C55E", text: "#86EFAC" };
+  if (node.type === "end")       return { fill: "#161C2A", border: "#6B7280", text: C.light   };
+  if (node.type === "signal")    return { fill: "#3A0A0A", border: "#EF4444", text: "#FCA5A5" };
+  if (node.type === "external")  return { fill: "#2C1800", border: "#F59E0B", text: "#FCD34D" };
+  if (node.type === "retrieval") return { fill: "#18105C", border: "#A78BFA", text: "#C4B5FD" };
+  if (node.type === "llm")       return { fill: "#082E3C", border: "#2DD4BF", text: "#99F6E4" };
   if (node.type === "tool") {
-    if (node.loop) return { fill: "#2A0808", border: "#FF5555", text: "#FF9999" };
-    if (node.ok)   return { fill: "#0A1E14", border: "#4ADE80", text: "#86EFAC" };
-    return                { fill: "#0C1C2A", border: "#4A7090", text: C.light   };
+    if (node.loop) return { fill: "#3A0808", border: "#EF4444", text: "#FCA5A5" };
+    if (node.ok)   return { fill: "#0B2C18", border: "#4ADE80", text: "#86EFAC" };
+    return                { fill: "#0D1E38", border: "#60A5FA", text: "#BAE6FD" };
   }
   return { fill: C.surf2, border: C.border, text: C.mid };
 }
@@ -404,12 +404,12 @@ function DetailPanel({ node, onClose }) {
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
         {rows.map(([k, v]) => (
           <div key={k} style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 9, color: C.dim, letterSpacing: 1, textTransform: "uppercase", marginBottom: 2 }}>
+            <div style={{ fontSize: 9, color: C.mid, letterSpacing: 1, textTransform: "uppercase", marginBottom: 2 }}>
               {k.replace(/_/g, " ")}
             </div>
             <div style={{
               fontSize: 11, lineHeight: 1.5,
-              color:      k === "fix" ? C.orange : k === "evidence" ? C.red : C.light,
+              color:      k === "fix" ? C.orange : k === "evidence" ? C.red : C.white,
               background: k === "fix" ? "#1A0D00" : k === "evidence" ? "#2A0808" : "transparent",
               padding:    (k === "fix" || k === "evidence") ? "6px 8px" : 0,
               borderRadius: 3,
@@ -729,7 +729,7 @@ function DunetraceGraph({
                     <text
                       x={nx + 16} y={ny + NH / 2 + 1}
                       textAnchor="middle" dominantBaseline="middle"
-                      fontSize={isSignal ? 14 : 12} fill={col.text} fontFamily="monospace"
+                      fontSize={isSignal ? 14 : 12} fill={col.border} fontFamily="monospace"
                     >{nodeIcon(node.type)}</text>
 
                     <text x={nx + 26} y={ny + 17} fontSize={10} fontWeight={700}
@@ -737,7 +737,7 @@ function DunetraceGraph({
                     >{node.label}</text>
 
                     <text x={nx + 26} y={ny + 32} fontSize={9}
-                      fill={C.mid} fontFamily="monospace" opacity={0.9}
+                      fill={col.text} fontFamily="monospace" opacity={0.7}
                     >{node.sub.length > 22 ? node.sub.slice(0, 22) + "…" : node.sub}</text>
 
                     {node.loop && node.type === "tool" && (
@@ -752,7 +752,7 @@ function DunetraceGraph({
 
                     {!isSelected && (
                       <text x={nx + NW - 8} y={ny + NH - 6} textAnchor="end"
-                        fontSize={8} fill={C.dim} fontFamily="monospace" opacity={0.5}>inspect →</text>
+                        fontSize={8} fill={C.mid} fontFamily="monospace" opacity={0.6}>inspect →</text>
                     )}
                   </g>
                 );
@@ -772,12 +772,13 @@ function DunetraceGraph({
           fontSize: 10, color: C.dim, fontFamily: "monospace",
         }}>
           {[
-            { icon: "◆", col: C.mid,    label: "LLM call"        },
-            { icon: "⚙", col: C.green,  label: "Tool call"       },
-            { icon: "⚙", col: C.red,    label: "Tool (looping)"  },
-            { icon: "⊞", col: C.blue,   label: "Retrieval"       },
-            { icon: "⚑", col: C.yellow, label: "External signal" },
-            { icon: "⚡", col: C.red,   label: "Failure signal"  },
+            { icon: "◆", col: "#2DD4BF", label: "LLM call"        },
+            { icon: "⚙", col: "#60A5FA", label: "Tool call"       },
+            { icon: "⚙", col: "#4ADE80", label: "Tool (success)"  },
+            { icon: "⚙", col: "#EF4444", label: "Tool (looping)"  },
+            { icon: "⊞", col: "#A78BFA", label: "Retrieval"       },
+            { icon: "⚑", col: "#F59E0B", label: "External signal" },
+            { icon: "⚡", col: "#EF4444", label: "Failure signal"  },
           ].map(({ icon, col, label }) => (
             <div key={label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ color: col, fontSize: 11 }}>{icon}</span>

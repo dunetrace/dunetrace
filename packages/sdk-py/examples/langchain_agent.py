@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
@@ -67,7 +68,7 @@ callback = DunetraceCallbackHandler(
     tools=[t.name for t in tools],
 )
 
-agent = create_react_agent(llm, tools, state_modifier=SYSTEM_PROMPT)
+agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
 SCENARIOS = {
     "normal": "What is the capital of France and what is its population?",

@@ -87,7 +87,7 @@ class RunContext:
             "finish_reason":     finish_reason,
             "output_hash":       output_hash,
             "output_length":     output_length,
-        })
+        }, advance=False)
 
     # ── Tool hooks ────────────────────────────────────────────────────────────
 
@@ -127,7 +127,7 @@ class RunContext:
         }
         if error_hash:
             payload["error_hash"] = error_hash
-        self._emit(EventType.TOOL_RESPONDED, payload)
+        self._emit(EventType.TOOL_RESPONDED, payload, advance=False)
 
     # ── Retrieval hooks (RAG) ─────────────────────────────────────────────────
 
@@ -155,7 +155,7 @@ class RunContext:
             "result_count": result_count,
             "top_score":    top_score,
             "latency_ms":   latency_ms,
-        })
+        }, advance=False)
 
     # ── External signal hooks ─────────────────────────────────────────────────
 
@@ -206,8 +206,9 @@ class RunContext:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _emit(self, event_type: EventType, payload: dict) -> None:
-        self.step += 1
+    def _emit(self, event_type: EventType, payload: dict, *, advance: bool = True) -> None:
+        if advance:
+            self.step += 1
         event = AgentEvent(
             event_type=event_type,
             run_id=self.run_id,

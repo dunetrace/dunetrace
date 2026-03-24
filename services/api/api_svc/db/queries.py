@@ -234,7 +234,7 @@ async def list_runs(
                  WHERE e.run_id = pr.run_id AND e.event_type IN ('run.completed', 'run.errored')
                  LIMIT 1) AS completed_at,
                 -- step_count
-                (SELECT MAX(e.step_index) + 1 FROM events e WHERE e.run_id = pr.run_id) AS step_count,
+                (SELECT MAX(e.step_index) FROM events e WHERE e.run_id = pr.run_id) AS step_count,
                 -- live signal count
                 (SELECT COUNT(*) FROM failure_signals s
                  WHERE s.run_id = pr.run_id AND s.shadow = FALSE)      AS signal_count
@@ -360,7 +360,7 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
         "exit_reason":   pr_dict["trigger"],
         "started_at":    started_at,
         "completed_at":  completed_at,
-        "step_count":    len(events),
+        "step_count":    max((e["step_index"] for e in event_list), default=0) if event_list else 0,
         "events":        event_list,
         "signals":       signal_list,
     }
