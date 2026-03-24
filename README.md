@@ -59,22 +59,25 @@ Then open the dashboard: **http://localhost:3000**
 ## LangChain
 
 ```bash
-pip install 'dunetrace[langchain]' langchain-openai      # OpenAI
-pip install 'dunetrace[langchain]' langchain-anthropic   # Anthropic
-pip install 'dunetrace[langchain]' langchain-google-genai  # Gemini
+pip install 'dunetrace[langchain]' langchain-openai langgraph      # OpenAI
+pip install 'dunetrace[langchain]' langchain-anthropic langgraph   # Anthropic
+pip install 'dunetrace[langchain]' langchain-google-genai langgraph  # Gemini
 ```
 
 ```python
+from langgraph.prebuilt import create_react_agent
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
 
 dt = Dunetrace()
 callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
 
+agent = create_react_agent(llm, tools, state_modifier=system_prompt)
 result = agent.invoke(
     {"messages": [("human", user_input)]},
     config={"callbacks": [callback]},
 )
+dt.shutdown()
 ```
 
 ## Manual instrumentation
@@ -138,11 +141,20 @@ python examples/basic_agent.py
 
 ```bash
 cd packages/sdk-py
-pip install 'dunetrace[langchain]' langchain-openai
-OPENAI_API_KEY=sk-... python examples/langchain_agent.py
+pip install 'dunetrace[langchain]' langchain-openai langgraph python-dotenv
+```
+
+Create a `.env` file in `packages/sdk-py/`:
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+```bash
+python examples/langchain_agent.py
 
 # Force a tool-loop scenario:
-OPENAI_API_KEY=sk-... SCENARIO=tool_loop python examples/langchain_agent.py
+SCENARIO=tool_loop python examples/langchain_agent.py
 ```
 
 Both examples send events to `http://localhost:8001` by default. Override with `DUNETRACE_ENDPOINT=http://your-host:8001`. Now, check dashboard at `http://localhost:3000`.
