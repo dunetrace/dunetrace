@@ -49,9 +49,20 @@ DUNETRACE_ENDPOINT=http://localhost:8001
 from dotenv import load_dotenv
 load_dotenv()
 
+from langchain_openai import ChatOpenAI
+from langchain.tools import tool
+from langgraph.prebuilt import create_react_agent
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
-from langgraph.prebuilt import create_react_agent
+
+@tool
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    return f"Results for {query}"
+
+llm = ChatOpenAI(model="gpt-4o-mini")
+tools = [web_search]
+system_prompt = "You are a helpful assistant."
 
 dt = Dunetrace()
 callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
