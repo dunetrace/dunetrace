@@ -1,5 +1,7 @@
 # Dunetrace
 
+![Dunetrace](dunetrace.png)
+
 ### Runtime observability for AI agents
 **Detect structural failures automatically. Alert before your users do.**
 
@@ -23,7 +25,6 @@ cp .env.example .env
 docker compose build
 docker compose up -d
 ```
-
 ### 2. Install the SDK
 
 ```bash
@@ -36,7 +37,6 @@ pip install dunetrace
 from dunetrace import Dunetrace
 
 dt = Dunetrace()  # points to localhost:8001
-user_input = "What is the capital of France?"
 
 with dt.run("my-agent", user_input=user_input) as run:
     result = your_agent(user_input)
@@ -72,26 +72,14 @@ pip install 'dunetrace[langchain]' langchain-google-genai langgraph python-doten
 ```
 
 ```python
-from langchain_openai import ChatOpenAI
-from langchain.tools import tool
 from langgraph.prebuilt import create_react_agent
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
 
-@tool
-def web_search(query: str) -> str:
-    """Search the web for information."""
-    return f"Results for {query}"
-
-llm = ChatOpenAI(model="gpt-4o-mini")
-tools = [web_search]
-system_prompt = "You are a helpful assistant."
-user_input = "What is the capital of France?"
-
 dt = Dunetrace()
 callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
 
-agent = create_react_agent(llm, tools, prompt=system_prompt)
+agent = create_react_agent(llm, tools, state_modifier=system_prompt)
 result = agent.invoke(
     {"messages": [("human", user_input)]},
     config={"callbacks": [callback]},
@@ -102,11 +90,6 @@ dt.shutdown()
 ## Manual instrumentation
 
 ```python
-from dunetrace import Dunetrace
-
-dt = Dunetrace()
-user_input = "What is the capital of France?"
-
 with dt.run("my-agent", user_input=user_input, model="gpt-4o", tools=["search"]) as run:
     run.llm_called("gpt-4o", prompt_tokens=150)
     run.llm_responded(finish_reason="tool_calls", latency_ms=320)
