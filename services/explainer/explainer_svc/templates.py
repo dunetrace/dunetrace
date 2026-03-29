@@ -37,12 +37,15 @@ def _base(signal: FailureSignal, **kwargs) -> dict:
 # TOOL_LOOP
 
 def explain_tool_loop(signal: FailureSignal) -> Explanation:
-    ev         = signal.evidence
-    tool       = ev.get("tool", "unknown_tool")
-    count      = ev.get("count", "?")
-    window     = ev.get("window", "?")
-    first_step = ev.get("first_step")
-    last_step  = ev.get("last_step")
+    ev             = signal.evidence
+    tool           = ev.get("tool", "unknown_tool")
+    count          = ev.get("count", "?")
+    window         = ev.get("window", "?")
+    first_step     = ev.get("first_step")
+    last_step      = ev.get("last_step")
+    args_identical = ev.get("args_identical")
+    args_similar   = ev.get("args_similar")
+    success_rate   = ev.get("success_rate")
 
     if first_step is not None and last_step is not None:
         step_range = f"steps {first_step}–{last_step}"
@@ -50,15 +53,87 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
         # fallback for signals stored before this fix
         step_range = f"steps {signal.step_index - window + 1}–{signal.step_index}"
 
+    # Branch on loop cause to produce a targeted fix
+    if args_identical:
+        what = (
+            f"The agent called `{tool}` {count} times in {step_range} with identical "
+            f"arguments every time (same args_hash across all calls). It is not tracking "
+            f"which queries it has already tried."
+        )
+        root_fix = CodeFix(
+            description=f"Deduplicate `{tool}` calls — identical args hash seen {count}×",
+            language="python",
+            code=(
+                f"seen_{tool}_args = set()\n\n"
+                f"def call_{tool}(args):\n"
+                f"    key = hash_args(args)  # same hash the SDK computes\n"
+                f"    if key in seen_{tool}_args:\n"
+                f"        return None  # skip — already tried this\n"
+                f"    seen_{tool}_args.add(key)\n"
+                f"    return {tool}(args)"
+            ),
+        )
+    elif args_similar:
+        what = (
+            f"The agent called `{tool}` {count} times in {step_range} with slightly "
+            f"different arguments each time (args_hash varied, but only {ev.get('args_hashes', []) and len(set(ev.get('args_hashes', []))) or '≤2'} "
+            f"unique hashes). It is rephrasing the same query without making progress."
+        )
+        root_fix = CodeFix(
+            description=f"Add a result-quality check — `{tool}` is being retried with rephrasings",
+            language="text",
+            code=(
+                f"Add to system prompt:\n\n"
+                f"\"If {tool} returns a low-value or empty result, do not rephrase and retry. "
+                f"Instead, proceed with the best result you have, use a different tool, "
+                f"or tell the user what you found and ask for clarification.\""
+            ),
+        )
+    elif success_rate is not None and success_rate < 0.5:
+        what = (
+            f"The agent called `{tool}` {count} times in {step_range}. "
+            f"Most calls failed (success rate: {int(success_rate * 100)}%). "
+            f"The agent is retrying a broken tool rather than moving on."
+        )
+        root_fix = CodeFix(
+            description=f"Add failure threshold — `{tool}` is failing on {int((1 - success_rate) * 100)}% of calls",
+            language="python",
+            code=(
+                f"{tool}_failures = 0\nMAX_{tool.upper()}_FAILURES = 2\n\n"
+                f"result = call_{tool}(args)\n"
+                f"if result.error:\n"
+                f"    {tool}_failures += 1\n"
+                f"    if {tool}_failures >= MAX_{tool.upper()}_FAILURES:\n"
+                f"        # stop retrying — escalate or use fallback\n"
+                f"        raise ToolUnavailableError(f\"{tool} failed {{MAX_{tool.upper()}_FAILURES}} times\")"
+            ),
+        )
+    else:
+        what = (
+            f"The agent called `{tool}` {count} times in {step_range} "
+            f"without making progress. No clear cause was identified from the call pattern."
+        )
+        root_fix = CodeFix(
+            description=f"Add a per-tool call limit as a circuit breaker",
+            language="python",
+            code=(
+                f"tool_call_counts = {{}}\n"
+                f"MAX_CALLS_PER_TOOL = {count // 2 if isinstance(count, int) else 3}\n\n"
+                f"def call_tool(tool_name, args):\n"
+                f"    tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1\n"
+                f"    if tool_call_counts[tool_name] > MAX_CALLS_PER_TOOL:\n"
+                f"        raise RuntimeError(\n"
+                f"            f\"Tool {{tool_name}} called too many times. \"\n"
+                f"            f\"Results so far: {{previous_results}}\"\n"
+                f"        )\n"
+                f"    return run_{tool}(args)"
+            ),
+        )
+
     return Explanation(
         **_base(signal),
         title=f"Tool loop detected: `{tool}` called {count}× in {step_range}",
-        what=(
-            f"The agent called `{tool}` {count} times in {step_range} "
-            f"without making progress. This is a tight loop — the agent keeps trying "
-            f"the same tool with the same or similar arguments, never advancing past "
-            f"the same point in its reasoning."
-        ),
+        what=what,
         why_it_matters=(
             f"Looping agents burn tokens and cost money without producing value. "
             f"A {window}-step loop at typical GPT-4o pricing costs roughly "
@@ -70,33 +145,7 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
             f"Confidence: {int(signal.confidence * 100)}%."
         ),
         suggested_fixes=[
-            CodeFix(
-                description=f"Add a per-tool call limit in your agent loop",
-                language="python",
-                code=(
-                    f"# Track how many times each tool has been called\n"
-                    f"tool_call_counts = {{}}\n"
-                    f"MAX_CALLS_PER_TOOL = 3\n\n"
-                    f"def call_tool(tool_name, args):\n"
-                    f"    tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1\n"
-                    f"    if tool_call_counts[tool_name] > MAX_CALLS_PER_TOOL:\n"
-                    f"        raise RuntimeError(\n"
-                    f"            f\"Tool {{tool_name}} called too many times. \"\n"
-                    f"            f\"Results so far: {{previous_results}}\"\n"
-                    f"        )\n"
-                    f"    return run_{tool}(args)"
-                ),
-            ),
-            CodeFix(
-                description="Instruct the model to vary its approach if a tool isn't working",
-                language="text",
-                code=(
-                    f"Add to system prompt:\n\n"
-                    f"\"If {tool} returns the same result twice in a row, stop calling it. "
-                    f"Either use a different tool, reformulate your approach, "
-                    f"or tell the user what you found so far and ask for clarification.\""
-                ),
-            ),
+            root_fix,
             CodeFix(
                 description="Set a hard step limit as a circuit breaker",
                 language="python",

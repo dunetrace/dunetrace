@@ -83,7 +83,14 @@ class ToolLoopDetector(BaseDetector):
 
         for tool, count in counts.items():
             if count >= self.THRESHOLD:
-                all_calls = [c for c in state.tool_calls if c.tool_name == tool]
+                all_calls   = [c for c in state.tool_calls if c.tool_name == tool]
+                args_hashes = [c.args_hash for c in all_calls]
+                unique_hashes = len(set(args_hashes))
+                calls_with_result = [c for c in all_calls if c.success is not None]
+                success_rate = (
+                    sum(1 for c in calls_with_result if c.success) / len(calls_with_result)
+                    if calls_with_result else None
+                )
                 return FailureSignal(
                     failure_type=FailureType.TOOL_LOOP,
                     severity=Severity.HIGH,
@@ -93,11 +100,15 @@ class ToolLoopDetector(BaseDetector):
                     step_index=window[-1].step_index,
                     confidence=0.95,
                     evidence={
-                        "tool":       tool,
-                        "count":      len(all_calls),
-                        "window":     self.WINDOW,
-                        "first_step": all_calls[0].step_index,
-                        "last_step":  all_calls[-1].step_index,
+                        "tool":          tool,
+                        "count":         len(all_calls),
+                        "window":        self.WINDOW,
+                        "first_step":    all_calls[0].step_index,
+                        "last_step":     all_calls[-1].step_index,
+                        "args_hashes":   args_hashes,
+                        "args_identical": unique_hashes == 1,
+                        "args_similar":  unique_hashes <= 2,
+                        "success_rate":  success_rate,
                     },
                 )
         return None

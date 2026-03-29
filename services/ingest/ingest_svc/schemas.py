@@ -38,7 +38,7 @@ class IngestEvent(BaseModel):
 
 
 class IngestRequest(BaseModel):
-    api_key:  str            = Field(default="")
+    api_key:  str            = Field(min_length=1)
     agent_id: str            = Field(min_length=1)
     events:   List[IngestEvent] = Field(min_length=1)
 
