@@ -72,7 +72,7 @@ dt.shutdown()
 dt = Dunetrace(emit_as_json=True)
 ```
 
-Writes every event to stdout as a Loki-compatible NDJSON line. Each line includes `ts`, `level`, `logger`, `event_type`, `agent_id`, `run_id`, `step_index`, and `payload`. Works alongside HTTP ingest — both can be active at the same time.
+Writes every event to stdout as a Loki-compatible NDJSON line. Each line includes `ts`, `level`, `logger`, `event_type`, `agent_id`, `run_id`, `step_index`, and `payload`. Works alongside HTTP ingest, both can be active at the same time.
 
 Minimal Promtail pipeline stage:
 

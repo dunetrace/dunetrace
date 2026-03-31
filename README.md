@@ -3,6 +3,7 @@
 ![Dunetrace](dunetrace.png)
 
 ### Runtime observability for AI agents
+
 **Detect structural failures automatically. Alert before your users do.**
 
 [![PyPI version](https://img.shields.io/pypi/v/dunetrace.svg)](https://pypi.org/project/dunetrace/)
@@ -38,7 +39,7 @@ Dunetrace instruments the agent loop itself. Every tool call, LLM call, and retr
 
 No raw content ever leaves your agent process.
 
-Every prompt, tool argument, and model output is SHA-256 hashed before transmission. The ingest API receives hashes, token counts, latency values, and call sequences — never plaintext.
+Every prompt, tool argument, and model output is SHA-256 hashed before transmission. The ingest API receives hashes, token counts, latency values, and call sequences - never plaintext.
 
 The database has no raw content column. This matters for enterprise teams with data governance requirements (GDPR, HIPAA, internal data classification).
 
@@ -47,7 +48,7 @@ The database has no raw content column. This matters for enterprise teams with d
 {
   "event":      "tool_called",
   "tool_name":  "web_search",
-  "args_hash":  "a3f7c9d2...",
+  "args_hash":  "a3f7c9d2...",    // SHA(args), not args
   "step":       3,
   "timestamp":  1741772467.312
 }
@@ -70,28 +71,48 @@ docker compose up -d
 ### 2. Install the SDK
 
 ```bash
-pip install dunetrace
+pip install dunetrace                    # any framework
+pip install 'dunetrace[langchain]'      # LangChain / LangGraph
 ```
 
 ### 3. Instrument your agent
 
+**LangChain / LangGraph**: add a callback handler (auto-captures all LLM calls, tool calls, and retrievals):
+
+```python
+from dunetrace import Dunetrace
+from dunetrace.integrations.langchain import DunetraceCallbackHandler
+
+dt = Dunetrace()
+callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
+
+result = agent.invoke(input, config={"callbacks": [callback]})
+dt.shutdown()
+```
+
+**Other frameworks**: wrap the run and emit events manually:
+
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace()  # points to localhost:8001
-user_input = "What is the capital of France?"
-
-with dt.run("my-agent", user_input=user_input) as run:
-    result = your_agent(user_input)
+dt = Dunetrace()
+with dt.run("my-agent", user_input=user_input, model="gpt-4o", tools=["search"]) as run:
+    run.llm_called(...)
+    run.tool_called(...)
+    run.final_answer()
 ```
 
-Then open the dashboard: **http://localhost:3000**
+→ Full setup and examples: [docs/integrations.md](docs/integrations.md)
 
-| Endpoint | URL |
-|---|---|
-| Dashboard | http://localhost:3000 |
-| API + docs | http://localhost:8002/docs |
-| Ingest (SDK) | http://localhost:8001 |
+Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
+
+
+| Endpoint     | URL                                                      |
+| ------------ | -------------------------------------------------------- |
+| Dashboard    | [http://localhost:3000](http://localhost:3000)           |
+| API + docs   | [http://localhost:8002/docs](http://localhost:8002/docs) |
+| Ingest (SDK) | [http://localhost:8001](http://localhost:8001)           |
+
 
 ---
 
@@ -107,23 +128,25 @@ Then open the dashboard: **http://localhost:3000**
 
 ## What it detects
 
-| Detector | What it catches | Severity |
-|---|---|---|
-| `SLOW_STEP` | Tool call >15s or LLM call >30s | MEDIUM/HIGH |
-| `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
-| `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
-| `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM |
-| `CONTEXT_BLOAT` | Prompt tokens grow 3× from first to last LLM call | MEDIUM |
-| `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent | MEDIUM |
-| `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
-| `REASONING_STALL` | LLM:tool-call ratio ≥4× — agent reasoning without acting | MEDIUM |
-| `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
-| `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
-| `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
-| `RETRY_STORM` | Same tool fails 3+ times in a row | HIGH |
-| `EMPTY_LLM_RESPONSE` | Model returned zero-length output with `finish_reason=stop` | HIGH |
-| `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
-| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
+
+| Detector                  | What it catches                                                    | Severity    |
+| ------------------------- | ------------------------------------------------------------------ | ----------- |
+| `TOOL_LOOP`               | Same tool called ≥3× in a 5-tool-call window                       | HIGH        |
+| `TOOL_THRASHING`          | Agent alternates between exactly two tools                         | HIGH        |
+| `LLM_TRUNCATION_LOOP`     | `finish_reason=length` fires ≥2 times                              | HIGH        |
+| `RETRY_STORM`             | Same tool fails 3+ times in a row                                  | HIGH        |
+| `EMPTY_LLM_RESPONSE`      | Model returned zero-length output with `finish_reason=stop`        | HIGH        |
+| `CASCADING_TOOL_FAILURE`  | 3+ consecutive failures across 2+ distinct tools                   | HIGH        |
+| `SLOW_STEP`               | Tool call >15s or LLM call >30s                                    | MEDIUM/HIGH |
+| `TOOL_AVOIDANCE`          | Final answer given without calling available tools                 | MEDIUM      |
+| `GOAL_ABANDONMENT`        | Tool use stops, then ≥4 consecutive LLM calls with no exit         | MEDIUM      |
+| `RAG_EMPTY_RETRIEVAL`     | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM      |
+| `CONTEXT_BLOAT`           | Prompt tokens grow 3× from first to last LLM call                  | MEDIUM      |
+| `STEP_COUNT_INFLATION`    | Run used >2× the P75 step count for this agent                     | MEDIUM      |
+| `FIRST_STEP_FAILURE`      | Error or empty output at step ≤2                                   | MEDIUM      |
+| `REASONING_STALL`         | LLM:tool-call ratio ≥4× — agent reasoning without acting           | MEDIUM      |
+| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns                 | CRITICAL    |
+
 
 Thresholds are configurable. → [docs/detectors.md](docs/detectors.md)
 

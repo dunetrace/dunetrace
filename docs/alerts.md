@@ -31,10 +31,10 @@ Works with PagerDuty, Linear, or any custom endpoint.
 
 ```bash
 WEBHOOK_URL=https://your-endpoint.example.com/alerts
-WEBHOOK_SECRET=your-hmac-secret   # optional — enables HMAC-SHA256 signature header
+WEBHOOK_SECRET=your-hmac-secret   # optional: enables HMAC-SHA256 signature header
 ```
 
-When `WEBHOOK_SECRET` is set, each request includes an `X-Dunetrace-Signature` header containing `HMAC-SHA256(body, secret)`. Use `(run_id, failure_type, detected_at)` as the idempotency key — the alerts worker delivers at-least-once, so duplicates are possible if it crashes between sending and marking.
+When `WEBHOOK_SECRET` is set, each request includes an `X-Dunetrace-Signature` header containing `HMAC-SHA256(body, secret)`. Use `(run_id, failure_type, detected_at)` as the idempotency key, the alerts worker delivers at-least-once, so duplicates are possible if it crashes between sending and marking.
 
 The webhook payload:
 

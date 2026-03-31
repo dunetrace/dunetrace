@@ -1,6 +1,6 @@
 # Detectors
 
-Dunetrace runs 15 structural detectors against every completed agent run. All thresholds are configurable — no code changes required.
+Dunetrace runs 15 structural detectors against every completed agent run. All thresholds are configurable i.e. no code changes required.
 
 ---
 
@@ -80,4 +80,4 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 4. Writes any triggered `FailureSignal` rows to `failure_signals`
 5. Marks the run as processed in `processed_runs`
 
-Detection adds zero latency to the agent — it runs entirely after the run completes.
+Detection adds zero latency to the agent i.e it runs entirely after the run completes.
