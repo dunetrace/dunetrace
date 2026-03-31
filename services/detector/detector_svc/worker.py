@@ -97,15 +97,14 @@ async def poll_once() -> tuple[int, int]:
     if not runs:
         return 0, 0
 
-    total_signals = 0
-    for r in runs:
-        total_signals += await process_run(
-            r["run_id"],
-            r["agent_id"],
-            r["agent_version"],
-            r.get("trigger", "unknown"),
-        )
-    return len(runs), total_signals
+    semaphore = asyncio.Semaphore(settings.DETECTOR_CONCURRENCY)
+
+    async def process_run_bounded(r):
+        async with semaphore:
+            return await process_run(r["run_id"], r["agent_id"], r["agent_version"], r.get("trigger", "unknown"))
+
+    results = await asyncio.gather(*[process_run_bounded(r) for r in runs])
+    return len(runs), sum(results)
 
 
 async def run_worker() -> None:

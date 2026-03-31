@@ -28,6 +28,7 @@ class Settings:
     POLL_INTERVAL: float = float(os.getenv("POLL_INTERVAL", "5"))
     STALL_TIMEOUT_SECS: float = float(os.getenv("STALL_TIMEOUT_SECS", "90"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "100"))
+    DETECTOR_CONCURRENCY: int = int(os.getenv("DETECTOR_CONCURRENCY", "8"))
 
 
 settings = Settings()
