@@ -40,9 +40,9 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 ┌─────────────────────┐              ┌─────────────────────────┐
 │   Detector Worker   │              │    Alerts Worker        │
 │                     │              │                         │
-│  Reconstructs       │  writes      │  Fetches unalerted      │
-│  RunState from      │ ──────────▶  │  shadow=FALSE signals   │
-│  events             │  signals     │  → explain()            │
+│  Reconstructs       │              │  Fetches unalerted      │
+│  RunState from      │              │  shadow=FALSE signals   │
+│  events             │              │  → explain()            │
 │  Runs 15 detectors  │              │  → format Slack/webhook │
 │  Writes signals     │              │  → HTTP POST with retry │
 └─────────────────────┘              └─────────────────────────┘
@@ -103,6 +103,18 @@ Trace (trace_id = run_id as 128-bit int)
 ```
 
 At run end, Tier 1 detectors run on the completed `RunState`. Each signal is written as indexed attributes on the root span (`dunetrace.signal.0.failure_type`, `.severity`, `.confidence`, `.evidence.*`). HIGH/CRITICAL signals set `span.status = ERROR`.
+
+**Two independent detector passes — thresholds may differ:**
+
+| | OTel path | Server-side path |
+|---|---|---|
+| Where | Client-side, in the SDK process | Detector worker, server-side |
+| When | At run end, before span export | After ingestion, on next poll cycle |
+| Thresholds | SDK defaults (`TIER1_DETECTORS` hardcoded in `detectors.py`) | `detectors.yml` (configurable, loaded at worker startup) |
+| Output | Root span attributes | `failure_signals` table → alerts → dashboard |
+| Works without server | Yes | No |
+
+If you tune thresholds in `detectors.yml`, the OTel span annotations and the dashboard signals can disagree. The server-side path is the source of truth for alerts and the dashboard. The OTel path is useful for SDK-only deployments or correlating signals with infra metrics in Tempo/Honeycomb without running the full server stack.
 
 Orphaned child spans (a `tool_called` with no matching `tool_responded`, e.g. when an exception fires mid-tool) are force-closed with `status = ERROR` so backends visually flag the broken step.
 
@@ -197,7 +209,7 @@ A background polling loop that runs every 10 seconds. It is the only process tha
 A read-only FastAPI service. Powers the dashboard and any customer integrations.
 
 - All endpoints require `Authorization: Bearer <api_key>`
-- In `AUTH_MODE=dev`, any non-empty token is accepted
+- In `AUTH_MODE=dev`, auth is skipped entirely i.e. no token required
 - All signal responses include the full explanation (title, what, why, fixes)
 - Pagination via `offset` / `limit` query params
 
@@ -263,22 +275,22 @@ CREATE TABLE api_keys (
 
 | Component | Latency | Throughput |
 |---|---|---|
-| SDK `_emit()` | <1μs (deque append) | Millions/sec |
-| SDK drain thread | 200ms batch interval | 100 events/batch |
+| SDK `_emit()` | <1μs (deque append, default config) | Millions/sec |
+| SDK drain thread | 200ms idle poll; continuous under load | 100 events/batch |
 | Ingest API (202) | ~5ms | ~1,000 req/sec (single instance) |
 | Ingest DB write | ~20ms | Background, non-blocking |
-| Detector poll cycle | 5s | ~50 runs/cycle |
+| Detector poll cycle | 5s | ~100 runs/cycle |
 | Explain layer | <1ms | Synchronous |
 | Alerts poll cycle | 10s | 50 signals/cycle |
 | Customer API | ~10ms | ~500 req/sec |
 
-**Agent overhead:** The SDK adds less than 500μs to any agent run in the common case. The drain thread is entirely background. Even under backpressure (ingest API down), the ring buffer drops the oldest events rather than blocking the agent.
+**Agent overhead:** The SDK adds less than 500μs to any agent run when using the default HTTP ingest path (`emit_as_json=False`, no OTel exporter). With `emit_as_json=True` or an OTel exporter, `_emit()` also serialises to JSON or creates spans synchronously — overhead increases accordingly. The drain thread is entirely background. Even under backpressure (ingest API down), the ring buffer drops the oldest events rather than blocking the agent.
 
 ---
 
 ## Failure Modes
 
-**Ingest API down:** SDK background thread retries failed batches. Events buffer in memory for up to ~33 minutes at 200ms intervals with a 10,000-event buffer. Agent is never affected.
+**Ingest API down:** The drain thread drains events from the buffer before shipping. If `_ship()` fails, those events are dropped — there is no retry. New events continue to buffer (up to 10,000) and will be shipped once the API recovers. The agent is never blocked.
 
 **Detector worker down:** Runs queue up in the `events` table. When the worker restarts, it processes all unprocessed runs. Signals are delayed but not lost.
 

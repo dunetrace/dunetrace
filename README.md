@@ -173,14 +173,17 @@ Slack and generic webhook (PagerDuty, Linear, custom). → [docs/alerts.md](docs
 
 ```
 Agent Code
-  └─► Dunetrace SDK              (instrument runs, emit hashed events)
-        ├─► Ingest API           (POST /v1/ingest -> Postgres)
-        │     └─► Detector       (poll -> reconstruct RunState -> run detectors)
-        │           └─► Alerts   (poll -> explain -> Slack / webhook)
-        │                 └─► Customer API  (query runs, signals, explanations)
+  └─► Dunetrace SDK              (hashes content → Dunetrace event schema)
+        │                        (mirrors to OTel span schema, content stripped)
+        └─► Ingest API           (POST /v1/ingest -> Postgres)
+                    ├─► Detector       (poll -> reconstruct RunState -> run detectors -> write signals)
+                    ├─► Alerts         (poll -> explain -> Slack / webhook)
+                    └─► Customer API   (query runs, signals, explanations)
         ├─► stdout NDJSON        (emit_as_json=True -> Loki / Grafana Alloy)
-        └─► OTel spans           (otel_exporter=… -> Tempo / Honeycomb / Datadog)
+        └─► OTel exporter        (otel_exporter=… -> Tempo / Honeycomb / Datadog)
 ```
+
+> OTel spans are derived from the same instrumentation as Dunetrace events. Content fields are SHA-256 hashed before either path emits. The OTel exporter runs a local detector pass (SDK default thresholds) and annotates the root span — independent of the server-side detector, which uses `detectors.yml` and is the source of truth for alerts and the dashboard. → [docs/architecture.md](docs/architecture.md#otel-span-exporter)
 
 → [docs/architecture.md](docs/architecture.md) for service internals, DB schema, and performance characteristics.
 
