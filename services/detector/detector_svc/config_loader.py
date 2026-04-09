@@ -28,6 +28,7 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
     "step_count_inflation":    {"inflation_factor": "INFLATION_FACTOR"},
     "cascading_tool_failure":  {"threshold": "THRESHOLD"},
     "first_step_failure":      {"max_step": "MAX_STEP"},
+    "reasoning_stall":         {"ratio_threshold": "RATIO_THRESHOLD", "min_llm_calls": "MIN_LLM_CALLS"},
 }
 
 

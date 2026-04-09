@@ -68,7 +68,7 @@ async def process_run(
         state.baseline_p75_steps = await fetch_step_count_baseline(
             agent_id, agent_version, run_id
         )
-        signals = run_detectors(state, detectors=get_detectors())
+        signals = run_detectors(state, detectors=get_detectors(agent_id))
         inj = _injection_signal_from_events(events, run_id, agent_id, agent_version)
         if inj:
             signals.append(inj)

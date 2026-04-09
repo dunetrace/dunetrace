@@ -17,6 +17,7 @@ from dunetrace.detectors import (
     LlmTruncationLoopDetector,
     PromptInjectionDetector,
     RagEmptyRetrievalDetector,
+    ReasoningSpinDetector,
     RetryStormDetector,
     SlowStepDetector,
     StepCountInflationDetector,
@@ -42,6 +43,7 @@ _DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
     "step_count_inflation":    StepCountInflationDetector,
     "cascading_tool_failure":  CascadingToolFailureDetector,
     "first_step_failure":      FirstStepFailureDetector,
+    "reasoning_stall":         ReasoningSpinDetector,
 }
 
 # Load config once at import time

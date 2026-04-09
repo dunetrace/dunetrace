@@ -47,6 +47,10 @@ default:
   first_step_failure:
     max_step: 2       # step index at or below which an error triggers
 
+  reasoning_stall:
+    ratio_threshold: 4.0  # LLM calls / tool calls ratio to trigger
+    min_llm_calls: 5      # ignore short runs with fewer LLM calls
+
 
 # ── Per-agent-category overrides ─────────────────────────────────────────────
 #
