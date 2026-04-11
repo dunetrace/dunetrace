@@ -1,4 +1,6 @@
 from dunetrace.client import Dunetrace, DunetraceClient
+from dunetrace.context import get_current_run
+from dunetrace.middleware import DunetraceASGIMiddleware, DunetraceWSGIMiddleware
 from dunetrace.models import RunState, FailureType, Severity
 from dunetrace.detectors import BaseDetector, TIER1_DETECTORS, run_detectors, PROMPT_INJECTION_DETECTOR
 
@@ -10,6 +12,9 @@ except PackageNotFoundError:
 __all__ = [
     "Dunetrace",
     "DunetraceClient",  # backwards-compatible alias
+    "get_current_run",
+    "DunetraceASGIMiddleware",
+    "DunetraceWSGIMiddleware",
     "RunState",
     "FailureType",
     "Severity",

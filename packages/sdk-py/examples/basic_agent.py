@@ -1,6 +1,9 @@
 """
-Minimal example — no framework needed. Good for verifying instrumentation
-before hooking up a real agent.
+Manual instrumentation example — full control over every event.
+
+For most agents, the @dt.agent() decorator in decorator_agent.py is simpler.
+Use this when you need fine-grained control or are integrating with a
+framework that doesn't have a dedicated middleware.
 
     pip install dunetrace
     python examples/basic_agent.py
@@ -8,6 +11,7 @@ before hooking up a real agent.
 Sends events to http://localhost:8001. Start the backend first:
     docker compose up
 """
+import os
 import time
 
 from dunetrace import Dunetrace
@@ -19,7 +23,8 @@ before answering. Do not answer from memory for factual queries.
 """
 TOOLS = ["web_search", "calculator", "doc_lookup"]
 
-dt = Dunetrace(endpoint="http://localhost:8001")
+ENDPOINT = os.getenv("DUNETRACE_ENDPOINT", "http://localhost:8001")
+dt = Dunetrace(endpoint=ENDPOINT)
 
 AGENT_ID = "example-agent"
 

@@ -40,9 +40,233 @@ dt.shutdown()
 
 ---
 
+## `@dt.agent()` decorator
+
+The minimal-change path for pure Python agents. Wraps a function in a `dt.run()` context, sets it as the active run for `get_current_run()`, and calls `run.final_answer()` on clean return.
+
+Works with both `def` and `async def` functions. Combine with `dt.auto_instrument()` to track OpenAI / Anthropic calls automatically.
+
+```python
+from dunetrace import Dunetrace
+
+dt = Dunetrace()
+dt.auto_instrument()
+
+@dt.agent("my-agent", model="gpt-4o")
+def run_agent(query: str) -> str:
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": query}]
+    )
+    return resp.choices[0].message.content
+
+run_agent("What is the capital of France?")
+dt.shutdown()
+```
+
+**Async agent:**
+
+```python
+@dt.agent("my-agent", model="claude-3-5-sonnet")
+async def run_agent(query: str) -> str:
+    resp = await anthropic_client.messages.create(
+        model="claude-3-5-sonnet-20241022",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": query}],
+    )
+    return resp.content[0].text
+```
+
+**Custom user_input extraction** — when the user query is not the first argument:
+
+```python
+@dt.agent("rag-agent", model="gpt-4o", input_from="question")
+def rag(context: str, question: str) -> str:
+    ...
+```
+
+**With manual tool instrumentation** inside a decorated function:
+
+```python
+from dunetrace import Dunetrace, get_current_run
+
+dt = Dunetrace()
+dt.auto_instrument()
+
+@dt.agent("my-agent", model="gpt-4o", tools=["db_query", "web_search"])
+def run_agent(query: str) -> str:
+    run = get_current_run()
+
+    run.tool_called("db_query", {"q": query})
+    result = db.fetch(query)
+    run.tool_responded("db_query", success=True, output_length=len(result))
+
+    resp = openai_client.chat.completions.create(...)  # auto-tracked
+    return resp.choices[0].message.content
+```
+
+**Decorator parameters:**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `agent_id` | required | Run label, appears in the dashboard |
+| `model` | `"unknown"` | Model name recorded on the run |
+| `tools` | `[]` | Tool list for `TOOL_AVOIDANCE` detection |
+| `system_prompt` | `""` | Used for deterministic agent version hash |
+| `input_from` | first arg | Name of the parameter to use as `user_input` |
+
+---
+
+## FastAPI / ASGI
+
+`DunetraceASGIMiddleware` opens a run for every HTTP or WebSocket request and sets it as the active context so `get_current_run()` works anywhere downstream in the same async task.
+
+```python
+from fastapi import FastAPI
+from dunetrace import Dunetrace, DunetraceASGIMiddleware, get_current_run
+
+dt = Dunetrace()
+dt.auto_instrument()
+
+app = FastAPI()
+app.add_middleware(
+    DunetraceASGIMiddleware,
+    dt=dt,
+    agent_id="my-api",
+    model="gpt-4o",
+)
+
+@app.post("/chat")
+async def chat(query: str):
+    run = get_current_run()                    # run opened by middleware
+
+    run.tool_called("db_lookup")
+    result = await db.get(query)
+    run.tool_responded("db_lookup", success=True, output_length=len(result))
+
+    resp = await openai_client.chat.completions.create(  # auto-tracked
+        model="gpt-4o", messages=[{"role": "user", "content": query}]
+    )
+    return resp.choices[0].message.content
+```
+
+**Starlette** — identical API:
+
+```python
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from dunetrace import Dunetrace, DunetraceASGIMiddleware
+
+dt = Dunetrace()
+app = Starlette(middleware=[
+    Middleware(DunetraceASGIMiddleware, dt=dt, agent_id="my-api"),
+])
+```
+
+The run is also available on `request.state.dunetrace_run` for Starlette/FastAPI `Request` objects.
+
+**Middleware parameters:**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `dt` | required | `Dunetrace` client instance |
+| `agent_id` | required | Run label |
+| `model` | `"unknown"` | Model name recorded on the run |
+| `tools` | `[]` | Tool list recorded on the run |
+
+---
+
+## Flask / WSGI
+
+`DunetraceWSGIMiddleware` wraps any WSGI app. One run per request, cleaned up automatically after the response is sent.
+
+```python
+from flask import Flask, request as flask_request
+from dunetrace import Dunetrace, DunetraceWSGIMiddleware, get_current_run
+
+dt = Dunetrace()
+dt.auto_instrument()
+
+app = Flask(__name__)
+app.wsgi_app = DunetraceWSGIMiddleware(app.wsgi_app, dt=dt, agent_id="my-api")
+
+@app.post("/chat")
+def chat():
+    run = get_current_run()
+    query = flask_request.json["query"]
+
+    resp = openai_client.chat.completions.create(  # auto-tracked
+        model="gpt-4o", messages=[{"role": "user", "content": query}]
+    )
+    return resp.choices[0].message.content
+```
+
+**Django:**
+
+```python
+# wsgi.py
+from dunetrace import Dunetrace, DunetraceWSGIMiddleware
+
+dt = Dunetrace()
+dt.auto_instrument()
+
+from django.core.wsgi import get_wsgi_application
+application = DunetraceWSGIMiddleware(get_wsgi_application(), dt=dt, agent_id="django-api")
+```
+
+The run is also available in `environ["dunetrace.run"]` for direct WSGI environ access.
+
+---
+
+## Auto-instrumentation
+
+`dt.auto_instrument()` patches supported AI framework clients at the class level so every LLM call made inside a `dt.run()` context (or inside a `@dt.agent()` function or middleware-wrapped request) is tracked automatically — no manual `run.llm_called()` / `run.llm_responded()` needed.
+
+**Supported frameworks:** `openai`, `anthropic`, `httpx`, `requests`.  
+Uninstalled frameworks are silently skipped. Calling `auto_instrument()` more than once is safe.
+
+```python
+dt.auto_instrument()                              # patch all installed frameworks
+dt.auto_instrument(["openai", "anthropic"])       # LLM clients only
+dt.auto_instrument(["httpx", "requests"])         # HTTP clients only
+```
+
+What gets captured automatically:
+
+**LLM calls** (`openai`, `anthropic`):
+- Model name, prompt + completion token counts, latency, finish reason
+- Output length + SHA-256 hash (raw text never transmitted)
+
+**HTTP calls** (`httpx`, `requests`):
+- Hostname used as tool name (e.g. `serpapi.com`, `api.stripe.com`)
+- Success / failure based on HTTP status code
+- Response `content-length`, latency
+- URL SHA-256 hash (raw URL never transmitted)
+
+---
+
+## `get_current_run()`
+
+Returns the active `RunContext` for the current async task or thread, or `None` if no run is active. Use this inside helpers to access the run without passing it through your call stack.
+
+```python
+from dunetrace import get_current_run
+
+def some_helper():
+    run = get_current_run()
+    if run:
+        run.tool_called("cache_lookup")
+        result = cache.get(key)
+        run.tool_responded("cache_lookup", success=result is not None)
+        return result
+```
+
+Works correctly with `@dt.agent()`, ASGI middleware, WSGI middleware, and `dt.run()` directly.
+
+---
+
 ## Manual instrumentation
 
-Use this when no native integration exists for your framework.
+Use `dt.run()` directly when you need full control over every event, or when no other integration fits.
 
 ```python
 from dunetrace import Dunetrace
@@ -63,6 +287,19 @@ with dt.run("my-agent", user_input=user_input, model="gpt-4o", tools=["search"])
 
 dt.shutdown()
 ```
+
+**`run` method reference:**
+
+| Method | When to call |
+|---|---|
+| `run.llm_called(model, prompt_tokens)` | Before each LLM API call |
+| `run.llm_responded(completion_tokens, latency_ms, finish_reason, ...)` | After LLM response received |
+| `run.tool_called(tool_name, args)` | Before each tool execution |
+| `run.tool_responded(tool_name, success, output_length, latency_ms, error)` | After tool returns |
+| `run.retrieval_called(index_name, query_hash)` | Before vector search |
+| `run.retrieval_responded(index_name, result_count, top_score, latency_ms)` | After retrieval returns |
+| `run.external_signal(signal_name, source, **meta)` | Rate limits, cache misses, upstream errors |
+| `run.final_answer()` | When agent produces its final output |
 
 ---
 
@@ -139,14 +376,6 @@ For deeper OTel internals (span structure, known gaps, parallel tool calls) see 
 
 ## Examples
 
-**Basic agent** (no framework, simulates tool loops, prompt injection, RAG failures):
-
-```bash
-cd packages/sdk-py
-pip install dunetrace
-python examples/basic_agent.py
-```
-
 **LangChain agent** (real OpenAI calls, auto-instrumented via callback):
 
 ```bash
@@ -167,4 +396,35 @@ python examples/langchain_agent.py
 SCENARIO=tool_loop python examples/langchain_agent.py
 ```
 
-Both examples send events to `http://localhost:8001` by default. Override with `DUNETRACE_ENDPOINT=http://your-host:8001`.
+**Decorator + auto-instrument** (pure Python agents):
+
+```bash
+pip install dunetrace
+python examples/decorator_agent.py
+```
+
+**Basic agent** (manual instrumentation, detectors, prompt injection):
+
+```bash
+python examples/basic_agent.py
+```
+
+All examples send events to `http://localhost:8001` by default. Override with `DUNETRACE_ENDPOINT=http://your-host:8001`.
+
+---
+
+## Tests
+
+The SDK test suite runs entirely offline (no backend, no real API keys):
+
+```bash
+cd packages/sdk-py
+python -m unittest discover -s tests -v
+```
+
+| Test file | What it covers |
+|---|---|
+| `tests/test_auto_instrument.py` | `auto_instrument()` for OpenAI, Anthropic, httpx, requests; `@dt.agent()` decorator (sync + async); ASGI + WSGI middleware; `get_current_run()` lifecycle |
+| `tests/test_client.py` | `dt.run()` context manager, event emission, privacy (no raw content), prompt injection detection, shutdown |
+| `tests/test_detectors.py` | All 15 structural detectors |
+| `tests/test_integrations/` | LangChain callback handler, OpenTelemetry exporter |

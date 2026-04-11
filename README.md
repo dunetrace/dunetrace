@@ -64,10 +64,7 @@ The database has no raw content column. This matters for enterprise teams with d
 
 ```bash
 git clone https://github.com/dunetrace/dunetrace
-cd dunetrace
-cp .env.example .env
-docker compose build
-docker compose up -d
+cd dunetrace && cp .env.example .env && docker compose build && docker compose up -d
 ```
 
 ### 2. Install the SDK
@@ -79,32 +76,15 @@ pip install 'dunetrace[langchain]'      # LangChain / LangGraph
 
 ### 3. Instrument your agent
 
-**LangChain / LangGraph**: add a callback handler (auto-captures all LLM calls, tool calls, and retrievals):
+| Integration | When to use |
+|---|---|
+| [LangChain / LangGraph](docs/integrations.md#langchain--langgraph) | LangChain agents and chains |
+| [`@dt.agent()` decorator](docs/integrations.md#dtagent-decorator) | Pure Python / custom agents |
+| [FastAPI / ASGI middleware](docs/integrations.md#fastapi--asgi) | FastAPI, Starlette |
+| [Flask / WSGI middleware](docs/integrations.md#flask--wsgi) | Flask, Django |
+| [Manual `dt.run()`](docs/integrations.md#manual-instrumentation) | Full control, any framework |
 
-```python
-from dunetrace import Dunetrace
-from dunetrace.integrations.langchain import DunetraceCallbackHandler
-
-dt = Dunetrace()
-callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
-
-result = agent.invoke(input, config={"callbacks": [callback]})
-dt.shutdown()
-```
-
-**Other frameworks**: wrap the run and emit events manually:
-
-```python
-from dunetrace import Dunetrace
-
-dt = Dunetrace()
-with dt.run("my-agent", user_input=user_input, model="gpt-4o", tools=["search"]) as run:
-    run.llm_called(...)
-    run.tool_called(...)
-    run.final_answer()
-```
-
-→ Full setup and examples: [docs/integrations.md](docs/integrations.md)
+→ [docs/integrations.md](docs/integrations.md)
 
 Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
@@ -157,7 +137,7 @@ Thresholds are configurable. → [docs/detectors.md](docs/detectors.md)
 ## Integrations
 
 - [LangChain / LangGraph](docs/integrations.md#langchain--langgraph)
-- [Manual instrumentation](docs/integrations.md#manual-instrumentation)
+- [Python agents & web frameworks](docs/integrations.md) — decorator, FastAPI, Flask, manual
 - [Grafana / Loki](docs/integrations.md#grafana--loki)
 - [OpenTelemetry](docs/integrations.md#opentelemetry)
 
@@ -192,6 +172,17 @@ Agent Code
 ---
 
 ## Running tests
+
+**SDK only** (no Docker required):
+
+```bash
+cd packages/sdk-py
+python -m unittest discover -s tests -v
+```
+
+Covers: `get_current_run()`, `@dt.agent()` decorator (sync + async), `auto_instrument()` for OpenAI / Anthropic / httpx / requests, ASGI middleware, WSGI middleware, context var lifecycle, privacy (no raw content in events), prompt injection detection.
+
+**Full suite** (requires Docker for backend services):
 
 ```bash
 PYTHONPATH=packages/sdk-py:services/explainer:services/alerts:services/detector:services/api:services/ingest \

@@ -5,6 +5,8 @@ All network I/O runs on a background drain thread so the agent is never blocked.
 from __future__ import annotations
 
 import datetime
+import functools
+import inspect
 import json
 import logging
 import sys
@@ -13,9 +15,10 @@ import urllib.request
 import urllib.error
 from contextlib import contextmanager
 from threading import Event, Lock, Thread
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from dunetrace.buffer import RingBuffer
+from dunetrace.context import _current_run
 from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
 from dunetrace.models import AgentEvent, EventType, hash_content, agent_version
 from dunetrace.run_context import RunContext
@@ -134,6 +137,7 @@ class Dunetrace:
             payload=payload,
         ))
 
+        _token = _current_run.set(ctx)
         try:
             yield ctx
             # Sync RunState fields detectors read before notifying the OTel exporter.
@@ -170,6 +174,108 @@ class Dunetrace:
                 },
             ))
             raise
+        finally:
+            _current_run.reset(_token)
+
+    def auto_instrument(self, frameworks: Optional[List[str]] = None) -> None:
+        """
+        Monkey-patch supported AI framework clients so that LLM calls made
+        inside any ``dt.run()`` context are tracked automatically — no manual
+        ``run.llm_called()`` / ``run.llm_responded()`` needed.
+
+        Supported frameworks: ``"openai"``, ``"anthropic"``.
+        Uninstalled frameworks are silently skipped.
+
+        :param frameworks: Subset to patch. ``None`` patches all installed ones.
+
+        Usage::
+
+            dt = Dunetrace(api_key="dt_live_...")
+            dt.auto_instrument()   # patch openai + anthropic if installed
+
+            with dt.run("my-agent", user_input=query) as run:
+                # openai/anthropic calls are now tracked automatically
+                response = openai_client.chat.completions.create(...)
+        """
+        from dunetrace.auto import auto_instrument as _auto_instrument
+        _auto_instrument(frameworks=frameworks)
+
+    def agent(
+        self,
+        agent_id:      str,
+        *,
+        model:         str              = "unknown",
+        tools:         Optional[List[str]] = None,
+        system_prompt: str              = "",
+        input_from:    Optional[str]    = None,
+    ) -> Callable:
+        """
+        Decorator that wraps a function in a ``dt.run()`` context.
+
+        Works with both sync and async functions. The first positional argument
+        is used as ``user_input`` by default; use *input_from* to name a
+        different parameter.
+
+        :param agent_id:     Name passed to ``dt.run()``.
+        :param model:        Model name recorded on the run.
+        :param tools:        Tool list recorded on the run.
+        :param system_prompt: Used for agent version hashing.
+        :param input_from:   Name of the parameter to use as ``user_input``.
+                             Defaults to the first positional argument.
+
+        Usage::
+
+            @dt.agent("my-agent", model="gpt-4o")
+            def run_agent(query: str) -> str:
+                resp = openai_client.chat.completions.create(...)  # auto-tracked
+                return resp.choices[0].message.content
+
+            # async works identically
+            @dt.agent("my-agent", model="claude-3-5-sonnet")
+            async def run_agent_async(query: str) -> str:
+                resp = await anthropic_client.messages.create(...)
+                return resp.content[0].text
+
+            # specify which argument is the user input
+            @dt.agent("rag-agent", model="gpt-4o", input_from="question")
+            def rag(context: str, question: str) -> str:
+                ...
+        """
+        _tools = tools or []
+
+        def decorator(fn: Callable) -> Callable:
+            if inspect.iscoroutinefunction(fn):
+                @functools.wraps(fn)
+                async def async_wrapper(*args, **kwargs):
+                    user_input = _extract_input(fn, args, kwargs, input_from)
+                    with self.run(
+                        agent_id,
+                        user_input=user_input,
+                        model=model,
+                        tools=_tools,
+                        system_prompt=system_prompt,
+                    ) as run:
+                        result = await fn(*args, **kwargs)
+                        run.final_answer()
+                        return result
+                return async_wrapper
+            else:
+                @functools.wraps(fn)
+                def sync_wrapper(*args, **kwargs):
+                    user_input = _extract_input(fn, args, kwargs, input_from)
+                    with self.run(
+                        agent_id,
+                        user_input=user_input,
+                        model=model,
+                        tools=_tools,
+                        system_prompt=system_prompt,
+                    ) as run:
+                        result = fn(*args, **kwargs)
+                        run.final_answer()
+                        return result
+                return sync_wrapper
+
+        return decorator
 
     def shutdown(self, timeout: float = 5.0) -> None:
         """Flush remaining events and stop the drain thread."""
@@ -263,3 +369,33 @@ class Dunetrace:
 
 # Backwards-compatible alias
 DunetraceClient = Dunetrace
+
+
+def _extract_input(fn: Callable, args: tuple, kwargs: dict, input_from: Optional[str]) -> str:
+    """
+    Pull the user_input string from a function call.
+
+    Priority:
+    1. ``input_from`` kwarg name if specified
+    2. First positional argument
+    3. Empty string (no input available)
+    """
+    try:
+        sig    = inspect.signature(fn)
+        params = list(sig.parameters.keys())
+
+        if input_from:
+            # Named parameter — check kwargs first, then positional by index
+            if input_from in kwargs:
+                return str(kwargs[input_from])
+            if input_from in params:
+                idx = params.index(input_from)
+                if idx < len(args):
+                    return str(args[idx])
+        elif args:
+            return str(args[0])
+        elif params and params[0] in kwargs:
+            return str(kwargs[params[0]])
+    except Exception:
+        pass
+    return ""
