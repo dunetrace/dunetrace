@@ -108,6 +108,8 @@ Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 ## Dashboard
 
 ![Dashboard overview](dashboard.png)
+![Analytics](analytics.png)
+![Agent details](agent_detail.png)
 
 The Mission Control dashboard is a live, API-driven single-page app served at **[http://localhost:3000](http://localhost:3000)**. It auto-refreshes every 15 seconds and requires no build step — static HTML fetching from the Customer API.
 
