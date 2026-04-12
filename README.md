@@ -76,23 +76,23 @@ Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 15 structural detectors run automatically against every completed run.
 
-| Detector | Severity |
-|---|---|
-| `TOOL_LOOP` — same tool called ≥3× in a 5-step window | HIGH |
-| `RETRY_STORM` — same tool fails 3+ times in a row | HIGH |
-| `TOOL_THRASHING` — agent alternates between exactly two tools | HIGH |
-| `LLM_TRUNCATION_LOOP` — `finish_reason=length` fires ≥2 times | HIGH |
-| `CASCADING_TOOL_FAILURE` — 3+ consecutive failures across 2+ tools | HIGH |
-| `EMPTY_LLM_RESPONSE` — zero-length output with `finish_reason=stop` | HIGH |
-| `CONTEXT_BLOAT` — prompt tokens grow 3× from first to last LLM call | MEDIUM |
-| `REASONING_STALL` — LLM:tool ratio ≥4× with no progress | MEDIUM |
-| `GOAL_ABANDONMENT` — tool use stops, then ≥4 consecutive LLM calls | MEDIUM |
-| `SLOW_STEP` — tool call >15s or LLM call >30s | MEDIUM/HIGH |
-| `RAG_EMPTY_RETRIEVAL` — retrieval returned 0 results but agent answered | MEDIUM |
-| `STEP_COUNT_INFLATION` — run used >2× the P75 step count for this agent | MEDIUM |
-| `FIRST_STEP_FAILURE` — error or empty output at step ≤2 | MEDIUM |
-| `TOOL_AVOIDANCE` — final answer given without calling available tools | MEDIUM |
-| `PROMPT_INJECTION_SIGNAL` — input matches known injection patterns | CRITICAL |
+| Detector                  | What it catches                                                    | Severity    |
+| ------------------------- | ------------------------------------------------------------------ | ----------- |
+| `TOOL_LOOP`               | Same tool called ≥3× in a 5-tool-call window                       | HIGH        |
+| `TOOL_THRASHING`          | Agent alternates between exactly two tools                         | HIGH        |
+| `LLM_TRUNCATION_LOOP`     | `finish_reason=length` fires ≥2 times                              | HIGH        |
+| `RETRY_STORM`             | Same tool fails 3+ times in a row                                  | HIGH        |
+| `EMPTY_LLM_RESPONSE`      | Model returned zero-length output with `finish_reason=stop`        | HIGH        |
+| `CASCADING_TOOL_FAILURE`  | 3+ consecutive failures across 2+ distinct tools                   | HIGH        |
+| `SLOW_STEP`               | Tool call >15s or LLM call >30s                                    | MEDIUM/HIGH |
+| `TOOL_AVOIDANCE`          | Final answer given without calling available tools                 | MEDIUM      |
+| `GOAL_ABANDONMENT`        | Tool use stops, then ≥4 consecutive LLM calls with no exit         | MEDIUM      |
+| `RAG_EMPTY_RETRIEVAL`     | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM      |
+| `CONTEXT_BLOAT`           | Prompt tokens grow 3× from first to last LLM call                  | MEDIUM      |
+| `STEP_COUNT_INFLATION`    | Run used >2× the P75 step count for this agent                     | MEDIUM      |
+| `FIRST_STEP_FAILURE`      | Error or empty output at step ≤2                                   | MEDIUM      |
+| `REASONING_STALL`         | LLM:tool-call ratio ≥4× — agent reasoning without acting           | MEDIUM      |
+| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns                 | CRITICAL    |
 
 All thresholds are configurable without code changes. → [docs/detectors.md](docs/detectors.md)
 
