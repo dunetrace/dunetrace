@@ -890,11 +890,20 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <div class="cb-sub" id="analytics-agents-sub">across all agents</div>
       </div>
     </div>
-    <div class="cost-banner" style="background:linear-gradient(135deg,rgba(229,62,62,0.06),rgba(229,62,62,0.02));border-color:rgba(229,62,62,0.2)">
-      <div><div class="cb-val" id="analytics-tokens-wasted" style="color:var(--red)">—</div></div>
-      <div>
-        <div class="cb-label">Est. tokens wasted on signal runs</div>
-        <div class="cb-sub" id="analytics-tokens-sub">step_count × 250 tk/step</div>
+    <div class="cost-banner" style="background:linear-gradient(135deg,rgba(46,184,114,0.08),rgba(46,184,114,0.02));border-color:rgba(46,184,114,0.25)">
+      <div><div class="cb-val" id="analytics-cost-saved" style="color:var(--green)">—</div></div>
+      <div style="flex:1">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+          <span class="cb-label" style="margin:0">Est. token cost saved this week</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4)">at $</span>
+          <input id="cost-rate-input" type="number" min="0.001" max="1000" step="0.001" value="0.010"
+            style="width:60px;background:var(--s3);border:1px solid var(--wire2);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:2px 5px;border-radius:3px;outline:none"
+            oninput="updateCostSaved()"
+            onfocus="this.style.borderColor='var(--green)'"
+            onblur="this.style.borderColor='var(--wire2)'">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4)">/1k tokens</span>
+        </div>
+        <div class="cb-sub" id="analytics-cost-sub" style="line-height:1.6">—</div>
       </div>
     </div>
   </div>
@@ -1121,6 +1130,7 @@ async function loadAll() {
     updateTrendDeltas();
     populateCompareDropdowns();
     updateConfigPreview();
+    updateCostSaved();
   } catch(e) {
     console.error('loadAll failed:', e);
   }
@@ -1312,9 +1322,7 @@ function renderAnalytics() {
   document.getElementById('analytics-critical-count').textContent = critTotal;
   document.getElementById('analytics-signal-rate').textContent    = rate;
   document.getElementById('analytics-agents-sub').textContent     = 'across ' + _agents.length + ' agent' + (_agents.length !== 1 ? 's' : '');
-  document.getElementById('analytics-tokens-wasted').textContent  = fmtTok(totalWasted);
-  document.getElementById('analytics-tokens-sub').textContent     =
-    sigRunIds.size + ' signal run' + (sigRunIds.size !== 1 ? 's' : '') + ' × avg steps × 250 tk/step';
+  updateCostSaved();
 
   // Top patterns — per-type wasted tokens
   const ftRunMap = {};   // ft → Set of run_ids
@@ -1362,6 +1370,45 @@ function renderAnalytics() {
         </tr>`;
       }).join('')
     : '<tr><td colspan="7" class="loading">no agents yet</td></tr>';
+}
+
+// ── Cost saved (live — recalculates when rate input changes) ──────────────────
+function updateCostSaved() {
+  const rateInput = document.getElementById('cost-rate-input');
+  const costPer1k = rateInput ? Math.max(0, parseFloat(rateInput.value) || 0) : COST_PER_1M_TK / 1000;
+
+  const now    = Date.now() / 1000;
+  const cut7d  = now - 7 * 86400;
+  const weekSigRunIds = new Set(_allSigs.filter(s => s.detected_at >= cut7d).map(s => s.run_id));
+  const weekRuns      = _allRuns.filter(r => weekSigRunIds.has(r.run_id));
+  const weekTokens    = weekRuns.reduce((sum, r) => sum + tokEst(r.step_count), 0);
+  const avgTk         = weekRuns.length ? Math.round(weekTokens / weekRuns.length) : 0;
+  const savedDollars  = weekTokens / 1000 * costPer1k;
+
+  const savedEl = document.getElementById('analytics-cost-saved');
+  const subEl   = document.getElementById('analytics-cost-sub');
+  if (!savedEl || !subEl) return;
+
+  if (weekSigRunIds.size === 0) {
+    savedEl.textContent = '$0.00';
+    subEl.textContent   = 'no signal runs this week';
+    return;
+  }
+
+  // Format dollar amount
+  let dollarStr;
+  if (savedDollars >= 1000)     dollarStr = '$' + (savedDollars / 1000).toFixed(1) + 'k';
+  else if (savedDollars >= 1)   dollarStr = '$' + savedDollars.toFixed(2);
+  else if (savedDollars >= 0.01) dollarStr = '$' + savedDollars.toFixed(3);
+  else                           dollarStr = '<$0.01';
+
+  savedEl.textContent = dollarStr;
+  subEl.innerHTML =
+    `<span style="color:var(--chalk2)">${weekSigRunIds.size} issue${weekSigRunIds.size !== 1 ? 's' : ''} stopped</span>` +
+    ` <span style="color:var(--chalk4)">×</span> ` +
+    `<span style="color:var(--chalk2)">avg ${fmtTok(avgTk)}</span>` +
+    ` <span style="color:var(--chalk4)">×</span> ` +
+    `<span style="color:var(--chalk2)">$${costPer1k.toFixed(3)}/1k tokens</span>`;
 }
 
 // ── Heatmap ───────────────────────────────────────────────────────────────────
@@ -2247,13 +2294,21 @@ function _cmpDiff(runA, sigsA, runB, sigsB) {
 }
 
 // ── Token helpers ─────────────────────────────────────────────────────────────
-const TK_PER_STEP = 250;  // rough estimate: tokens consumed per agent step
+const TK_PER_STEP    = 250;    // rough estimate: tokens consumed per agent step
+const COST_PER_1M_TK = 10.00;  // $ per 1M tokens (~$0.010/1k, blended mid-tier model)
 function tokEst(stepCount) { return (stepCount || 0) * TK_PER_STEP; }
 function fmtTok(n) {
   if (!n) return '0 tk';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M tk';
   if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k tk';
   return n + ' tk';
+}
+function fmtCost(tokens) {
+  const dollars = tokens / 1_000_000 * COST_PER_1M_TK;
+  if (dollars >= 1000) return '$' + (dollars / 1000).toFixed(1) + 'k';
+  if (dollars >= 1)    return '$' + dollars.toFixed(2);
+  if (dollars >= 0.01) return '$' + dollars.toFixed(3);
+  return '<$0.01';
 }
 
 // Returns estimated wasted tokens for a set of run_ids (runs that had signals)
