@@ -115,7 +115,7 @@ The Mission Control dashboard is a live, API-driven single-page app served at **
 
 | Page | What it shows |
 |---|---|
-| **Overview** | Four stat cards (Critical / High / Signals / Runs) with configurable trend deltas (↑↓ vs last hour / yesterday / last week). Risk Trend 24h bar chart (hourly signal count, colour-coded by intensity). Top failure patterns with ↑↓ trend arrows. Live run feed. |
+| **Overview** | Four stat cards (Critical / High / Signals / Runs) with configurable trend deltas (↑↓ vs last hour / yesterday / last week). Risk Trend 24h bar chart. Step Drift panel (24h sparkline vs 7-day baseline with WARNING ZONE badge). Failure Posture gauge (half-circle, needle at avg confidence). Top Failure Drivers ranked list (agent · type · wasted steps · confidence). Agent Signal Drift bars (24h vs 7d, red/amber/green). Top failure patterns with ↑↓ trend arrows. Live run feed. |
 | **All Runs** | Full run table — agent, signals, severity, failure types, duration, step count. Click any row to open run detail. |
 | **Alerts** | Signals grouped by failure type, expandable per group. Shadow signals rendered below with dashed border + SHADOW badge. |
 | **Analytics** | Cross-agent totals, top failure patterns, per-agent breakdown. |

@@ -437,6 +437,48 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 .delta-up{color:var(--red)}.delta-down{color:var(--green)}.delta-flat{color:var(--chalk4)}
 .stat-delta{font-family:'IBM Plex Mono',monospace;font-size:10px;margin-top:.5rem;min-height:14px}
 
+/* ── OPSMETER PANELS ── */
+.opsmeter-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem}
+
+/* Drift panel */
+.drift-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.75rem}
+.drift-delta{font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;margin-top:3px}
+.posture-badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:700;padding:3px 10px;border-radius:2px;letter-spacing:1px;text-align:center;margin-bottom:6px;display:block}
+.posture-badge.warn{background:rgba(229,62,62,0.12);color:var(--red);border:1px solid rgba(229,62,62,0.3)}
+.posture-badge.ok{background:var(--green-d);color:var(--green);border:1px solid rgba(46,184,114,0.25)}
+.drift-stat{display:flex;justify-content:space-between;align-items:center;padding:3px 0}
+.drift-stat-lbl{color:var(--chalk4);font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:.5px}
+.drift-stat-val{font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;color:var(--chalk2)}
+
+/* Top failure drivers */
+.driver-list{display:flex;flex-direction:column;gap:6px}
+.driver-item{display:flex;align-items:center;gap:10px;padding:9px 12px 9px 16px;background:var(--s2);border:1px solid var(--wire);border-radius:6px;position:relative;overflow:hidden;cursor:default;transition:border-color .15s}
+.driver-item:hover{border-color:var(--wire2)}
+.driver-bar{position:absolute;left:0;top:0;bottom:0;width:3px}
+.driver-rank{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4);width:14px;flex-shrink:0;text-align:center}
+.driver-info{flex:1;min-width:0}
+.driver-name{font-size:12px;font-weight:500;color:var(--chalk2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.driver-meta{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);margin-top:2px}
+.driver-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}
+.driver-conf{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600}
+.driver-sev{font-family:'IBM Plex Mono',monospace;font-size:8px;font-weight:700;padding:2px 6px;border-radius:2px;letter-spacing:.5px}
+
+/* Failure posture gauge */
+.gauge-wrap{display:flex;justify-content:center;margin:.75rem 0 .5rem}
+.posture-rows{display:flex;flex-direction:column;gap:8px;padding-top:.75rem;border-top:1px solid var(--wire)}
+.posture-row{display:flex;align-items:center;justify-content:space-between}
+.posture-row-lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)}
+.posture-row-val{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--chalk2)}
+
+/* Agent comparison bars */
+.vc-list{display:flex;flex-direction:column;gap:6px}
+.vc-item{display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--s2);border-radius:4px}
+.vc-name{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk3);width:110px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vc-bar-wrap{flex:1;height:6px;background:var(--wire);border-radius:3px;position:relative}
+.vc-zero-line{position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:var(--chalk4);opacity:.35}
+.vc-bar{height:100%;border-radius:3px;position:absolute;transition:width .4s}
+.vc-delta{font-family:'IBM Plex Mono',monospace;font-size:10px;width:52px;text-align:right;flex-shrink:0}
+
 /* Shadow signals */
 .shadow-sig-card{border-style:dashed !important;opacity:.8}
 .shadow-badge{display:inline-flex;align-items:center;font-family:'IBM Plex Mono',monospace;font-size:8px;font-weight:700;padding:2px 5px;border-radius:2px;background:rgba(74,158,222,0.1);color:var(--blue);border:1px dashed rgba(74,158,222,0.4);letter-spacing:.5px;flex-shrink:0}
@@ -630,6 +672,87 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="chart-card">
       <div class="chart-title mono">TOP FAILURE PATTERNS</div>
       <div class="failure-list" id="failure-list">
+        <div class="loading">loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── OPSMETER ROW 1: DRIFT + POSTURE ── -->
+  <div class="opsmeter-row">
+    <!-- Drift panel -->
+    <div class="chart-card">
+      <div class="drift-header">
+        <div>
+          <div class="chart-title mono">STEP DRIFT — 24H VS 7-DAY BASELINE</div>
+          <div class="drift-delta" id="drift-delta-val" style="color:var(--chalk4)">computing…</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-end">
+        <div style="flex:1;position:relative;height:72px">
+          <div id="drift-bars" style="display:flex;align-items:flex-end;gap:2px;height:100%"></div>
+          <div id="drift-baseline-line" style="display:none;position:absolute;left:0;right:0;border-top:1px dashed rgba(46,184,114,0.7);pointer-events:none"></div>
+        </div>
+        <div style="flex-shrink:0;width:124px;display:flex;flex-direction:column">
+          <span id="drift-badge" class="posture-badge ok">NORMAL</span>
+          <div class="drift-stat"><span class="drift-stat-lbl">24h avg steps</span><span class="drift-stat-val" id="drift-current">—</span></div>
+          <div class="drift-stat"><span class="drift-stat-lbl">7d baseline</span><span class="drift-stat-val" id="drift-baseline">—</span></div>
+          <div class="drift-stat"><span class="drift-stat-lbl">warn trigger</span><span class="drift-stat-val" id="drift-trigger">—</span></div>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px">
+        <span class="mono" style="font-size:9px;color:var(--chalk4)">24h ago</span>
+        <span class="mono" style="font-size:9px;color:var(--chalk4)">now</span>
+      </div>
+    </div>
+
+    <!-- Failure posture gauge -->
+    <div class="chart-card">
+      <div class="chart-title mono">FAILURE POSTURE</div>
+      <div class="gauge-wrap">
+        <svg width="140" height="75" viewBox="0 0 140 75" id="posture-gauge-svg">
+          <defs>
+            <linearGradient id="gauge-grad" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%"   stop-color="#2eb872"/>
+              <stop offset="50%"  stop-color="#d4920a"/>
+              <stop offset="100%" stop-color="#e53e3e"/>
+            </linearGradient>
+          </defs>
+          <!-- track -->
+          <path d="M 15 70 A 55 55 0 0 1 125 70" fill="none" stroke="rgba(30,48,80,0.9)" stroke-width="10" stroke-linecap="round"/>
+          <!-- fill -->
+          <path id="gauge-fill" d="M 15 70 A 55 55 0 0 1 125 70" fill="none" stroke="#2eb872" stroke-width="10" stroke-linecap="round" stroke-dasharray="0 173"/>
+          <!-- needle -->
+          <line id="gauge-needle" x1="70" y1="68" x2="70" y2="22" stroke="var(--chalk)" stroke-width="2" stroke-linecap="round" transform="rotate(-90 70 70)"/>
+          <circle cx="70" cy="70" r="4" fill="var(--s2)" stroke="var(--chalk2)" stroke-width="1.5"/>
+          <text x="8"   y="76" fill="#4a5568" font-family="IBM Plex Mono,monospace" font-size="9">LOW</text>
+          <text x="103" y="76" fill="#4a5568" font-family="IBM Plex Mono,monospace" font-size="9">HIGH</text>
+        </svg>
+      </div>
+      <div class="posture-rows">
+        <div class="posture-row"><span class="posture-row-lbl">daily signals (24h)</span><span class="posture-row-val" id="posture-daily-sigs">—</span></div>
+        <div class="posture-row"><span class="posture-row-lbl">avg confidence</span><span class="posture-row-val" id="posture-avg-conf">—</span></div>
+        <div class="posture-row"><span class="posture-row-lbl">false positive rate</span><span class="posture-row-val" id="posture-fp-rate" style="color:var(--green)">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── OPSMETER ROW 2: DRIVERS + AGENT COMPARISON ── -->
+  <div class="opsmeter-row">
+    <!-- Top failure drivers -->
+    <div class="chart-card">
+      <div class="chart-title mono">TOP FAILURE DRIVERS</div>
+      <div class="driver-list" id="driver-list">
+        <div class="loading">loading…</div>
+      </div>
+    </div>
+
+    <!-- Agent comparison -->
+    <div class="chart-card">
+      <div class="chart-title mono">AGENT SIGNAL DRIFT — 24H VS 7-DAY</div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);margin-bottom:.75rem">
+        bar shows signal-rate change from 7-day baseline · ← better &nbsp; worse →
+      </div>
+      <div class="vc-list" id="agent-comparison-list">
         <div class="loading">loading…</div>
       </div>
     </div>
@@ -1012,6 +1135,10 @@ function renderOverview() {
   document.getElementById('stat-agents-sub').textContent = _agents.length + ' agent' + (_agents.length !== 1 ? 's' : '');
 
   renderRiskTrend();
+  renderDriftPanel();
+  renderPostureGauge();
+  renderTopDrivers();
+  renderAgentComparison();
 
   // Top failure patterns
   const ftMap = {};
@@ -2071,6 +2198,221 @@ function _cmpDiff(runA, sigsA, runB, sigsB) {
   </table>
   ${newFts.length   ? `<div style="font-size:11px;color:var(--red);margin-bottom:.5rem">New in B: ${newFts.map(ftLabel).join(', ')}</div>` : ''}
   ${fixedFts.length ? `<div style="font-size:11px;color:var(--green)">Resolved in B: ${fixedFts.map(ftLabel).join(', ')}</div>` : ''}`;
+}
+
+// ── Drift panel ───────────────────────────────────────────────────────────────
+function renderDriftPanel() {
+  const now    = Date.now() / 1000;
+  const HOURS  = 24;
+  const SEC_7D = 7 * 86400;
+  const MAX_H  = 64;
+
+  // Bucket runs into 24 hourly slots
+  const runBuckets = Array.from({ length: HOURS }, () => []);
+  _allRuns.forEach(r => {
+    if (!r.step_count) return;
+    const age = now - r.started_at;
+    if (age < 0 || age >= HOURS * 3600) return;
+    const idx = HOURS - 1 - Math.floor(age / 3600);
+    if (idx >= 0 && idx < HOURS) runBuckets[idx].push(r.step_count);
+  });
+  const hourAvgs = runBuckets.map(b => b.length ? b.reduce((a, x) => a + x, 0) / b.length : null);
+
+  // 7-day baseline average step count
+  const baseRuns = _allRuns.filter(r => r.step_count && (now - r.started_at) < SEC_7D);
+  const baselineAvg = baseRuns.length ? baseRuns.reduce((a, r) => a + r.step_count, 0) / baseRuns.length : null;
+
+  // 24h average
+  const recent24 = _allRuns.filter(r => r.step_count && (now - r.started_at) < 86400);
+  const current24Avg = recent24.length ? recent24.reduce((a, r) => a + r.step_count, 0) / recent24.length : null;
+
+  // Delta display
+  const deltaEl   = document.getElementById('drift-delta-val');
+  const badgeEl   = document.getElementById('drift-badge');
+  const curEl     = document.getElementById('drift-current');
+  const baseEl    = document.getElementById('drift-baseline');
+  const trigEl    = document.getElementById('drift-trigger');
+
+  if (current24Avg !== null && baselineAvg !== null) {
+    const diff  = current24Avg - baselineAvg;
+    const pct   = baselineAvg > 0 ? diff / baselineAvg * 100 : 0;
+    const sign  = diff > 0 ? '+' : '';
+    const col   = diff > 0.5 ? 'var(--red)' : diff < -0.5 ? 'var(--green)' : 'var(--chalk4)';
+    if (deltaEl) deltaEl.innerHTML = `<span style="color:${col}">${sign}${diff.toFixed(1)} steps / ${sign}${pct.toFixed(1)}% vs 7d</span>`;
+    const isWarn = pct > 20;
+    if (badgeEl) { badgeEl.className = 'posture-badge ' + (isWarn ? 'warn' : 'ok'); badgeEl.textContent = isWarn ? 'WARNING ZONE' : 'NORMAL'; }
+    if (curEl)  curEl.textContent  = current24Avg.toFixed(1);
+    if (baseEl) baseEl.textContent = baselineAvg.toFixed(1);
+    if (trigEl) trigEl.textContent = (baselineAvg * 1.2).toFixed(1);
+  } else {
+    if (deltaEl) deltaEl.innerHTML = '<span style="color:var(--chalk4)">not enough data</span>';
+    if (curEl)   curEl.textContent  = current24Avg !== null ? current24Avg.toFixed(1) : '—';
+    if (baseEl)  baseEl.textContent = baselineAvg  !== null ? baselineAvg.toFixed(1)  : '—';
+    if (trigEl)  trigEl.textContent = '—';
+  }
+
+  // Sparkline bars
+  const barsEl = document.getElementById('drift-bars');
+  const lineEl  = document.getElementById('drift-baseline-line');
+  if (!barsEl) return;
+
+  const nonNull = hourAvgs.filter(v => v !== null);
+  const maxVal  = Math.max(...nonNull, baselineAvg || 0, 1);
+
+  barsEl.innerHTML = '';
+  hourAvgs.forEach((avg, i) => {
+    const h   = avg === null ? 2 : Math.max(4, Math.round((avg / maxVal) * MAX_H));
+    const isAbove = baselineAvg !== null && avg !== null && avg > baselineAvg * 1.2;
+    const isCur   = i === HOURS - 1;
+    const bg  = avg === null ? 'var(--s2)' : isAbove ? 'rgba(229,62,62,0.28)' : 'rgba(46,184,114,0.22)';
+    const brd = avg === null ? 'var(--wire)'
+      : isAbove ? `rgba(229,62,62,${isCur ? '1' : '0.7'})`
+      : `rgba(46,184,114,${isCur ? '0.9' : '0.55'})`;
+    const bar = document.createElement('div');
+    bar.style.cssText = `flex:1;height:${h}px;background:${bg};border:1px solid ${brd};border-radius:2px 2px 0 0;transition:height .4s`;
+    barsEl.appendChild(bar);
+  });
+
+  // Baseline dashed line position
+  if (lineEl && baselineAvg !== null) {
+    const pxFromBottom = Math.max(4, Math.round((baselineAvg / maxVal) * MAX_H));
+    lineEl.style.display = 'block';
+    lineEl.style.bottom  = pxFromBottom + 'px';
+  }
+}
+
+// ── Failure posture gauge ──────────────────────────────────────────────────────
+function renderPostureGauge() {
+  const now    = Date.now() / 1000;
+  const cut24  = now - 86400;
+  const daily  = _allSigs.filter(s => s.detected_at >= cut24).length;
+  const avgConf = _allSigs.length ? _allSigs.reduce((a, s) => a + s.confidence, 0) / _allSigs.length : 0;
+  const norm   = Math.min(1, Math.max(0, avgConf));
+
+  const dailyEl = document.getElementById('posture-daily-sigs');
+  const confEl  = document.getElementById('posture-avg-conf');
+  const fpEl    = document.getElementById('posture-fp-rate');
+  if (dailyEl) {
+    dailyEl.textContent = daily;
+    dailyEl.style.color = daily >= 10 ? 'var(--red)' : daily >= 5 ? 'var(--amber)' : 'var(--chalk2)';
+  }
+  if (confEl) {
+    confEl.textContent = avgConf.toFixed(2);
+    confEl.style.color = norm >= 0.75 ? 'var(--red)' : norm >= 0.5 ? 'var(--amber)' : 'var(--chalk2)';
+  }
+  if (fpEl) { fpEl.textContent = '0%'; fpEl.style.color = 'var(--green)'; }
+
+  // SVG gauge — half-circle arc: M 15 70 A 55 55 0 0 1 125 70
+  // Arc total length ≈ π × 55 ≈ 172.8
+  const ARC = Math.PI * 55;
+  const svg = document.getElementById('posture-gauge-svg');
+  if (!svg) return;
+  const fill   = svg.querySelector('#gauge-fill');
+  const needle = svg.querySelector('#gauge-needle');
+  if (fill) {
+    fill.setAttribute('stroke-dasharray', `${norm * ARC} ${ARC}`);
+    fill.setAttribute('stroke', norm >= 0.75 ? 'var(--red)' : norm >= 0.5 ? 'var(--amber)' : 'var(--green)');
+  }
+  if (needle) {
+    // Needle: -90° = left (low), +90° = right (high), pivot at (70,70)
+    const angle = -90 + norm * 180;
+    needle.setAttribute('transform', `rotate(${angle} 70 70)`);
+  }
+}
+
+// ── Top failure drivers ────────────────────────────────────────────────────────
+function renderTopDrivers() {
+  const listEl = document.getElementById('driver-list');
+  if (!listEl) return;
+  if (!_allSigs.length) { listEl.innerHTML = '<div class="loading">no signals yet</div>'; return; }
+
+  const groups = {};
+  _allSigs.forEach(s => {
+    const key = s.agent_id + '|' + s.failure_type;
+    if (!groups[key]) groups[key] = { agent: s.agent_id, ft: s.failure_type, sigs: [], severity: s.severity };
+    groups[key].sigs.push(s);
+    const ord = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+    if ((ord[s.severity] ?? 4) < (ord[groups[key].severity] ?? 4)) groups[key].severity = s.severity;
+  });
+
+  const sorted = Object.values(groups).sort((a, b) => b.sigs.length - a.sigs.length).slice(0, 5);
+
+  listEl.innerHTML = sorted.map((g, i) => {
+    const avgConf  = g.sigs.reduce((a, s) => a + s.confidence, 0) / g.sigs.length;
+    const color    = g.severity === 'CRITICAL' ? 'var(--purple)' : g.severity === 'HIGH' ? 'var(--red)' : g.severity === 'MEDIUM' ? 'var(--amber)' : 'var(--green)';
+    const sevBg    = g.severity === 'CRITICAL' ? 'var(--purple-d)' : g.severity === 'HIGH' ? 'var(--red-d)' : g.severity === 'MEDIUM' ? 'var(--amber-d)' : 'var(--green-d)';
+    const confCol  = avgConf >= 0.75 ? 'var(--red)' : avgConf >= 0.5 ? 'var(--amber)' : 'var(--green)';
+    const runIds   = [...new Set(g.sigs.map(s => s.run_id))];
+    const affected = runIds.map(id => _allRuns.find(r => r.run_id === id)).filter(Boolean);
+    const avgSteps = affected.length ? affected.reduce((a, r) => a + (r.step_count || 0), 0) / affected.length : 0;
+    const wastedSt = Math.round(avgSteps * runIds.length);
+
+    return `<div class="driver-item">
+      <div class="driver-bar" style="background:${color}"></div>
+      <span class="driver-rank">${i + 1}</span>
+      <div class="driver-info">
+        <div class="driver-name" title="${esc(g.agent)} · ${esc(g.ft)}">${esc(g.agent)} · ${esc(ftLabel(g.ft))}</div>
+        <div class="driver-meta">${g.sigs.length} signals · ${wastedSt} wasted steps · ${runIds.length} run${runIds.length !== 1 ? 's' : ''}</div>
+      </div>
+      <div class="driver-right">
+        <span class="driver-conf" style="color:${confCol}">${avgConf.toFixed(2)}</span>
+        <span class="driver-sev" style="background:${sevBg};color:${color}">${g.severity.slice(0, 4)}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Agent comparison bars ──────────────────────────────────────────────────────
+function renderAgentComparison() {
+  const listEl = document.getElementById('agent-comparison-list');
+  if (!listEl) return;
+  if (!_agents.length) { listEl.innerHTML = '<div class="loading">no agents yet</div>'; return; }
+
+  const now    = Date.now() / 1000;
+  const cut24  = now - 86400;
+  const cut7d  = now - 7 * 86400;
+
+  const items = _agents.map(a => {
+    const runs24  = (a._runs  || []).filter(r => r.started_at >= cut24);
+    const runs7d  = (a._runs  || []).filter(r => r.started_at >= cut7d);
+    const sigs24  = (a._signals || []).filter(s => s.detected_at >= cut24);
+    const sigs7d  = a._signals || [];
+
+    const rate24  = runs24.length > 0 ? sigs24.length / runs24.length : null;
+    const rate7d  = runs7d.length  > 0 ? sigs7d.length  / runs7d.length  : null;
+
+    let drift = null;
+    if (rate24 !== null && rate7d !== null && rate7d > 0)       drift = (rate24 - rate7d) / rate7d * 100;
+    else if (rate24 !== null && rate7d !== null && rate7d === 0 && sigs24.length > 0) drift = 100;
+    else if (rate24 !== null && rate7d === null)                 drift = 0; // new agent
+
+    return { agent: a.agent_id, drift, runs24: runs24.length, sigs24: sigs24.length };
+  });
+
+  const withData = items.filter(x => x.runs24 > 0);
+  if (!withData.length) { listEl.innerHTML = '<div class="loading">no runs in last 24h</div>'; return; }
+
+  withData.sort((a, b) => (b.drift ?? 0) - (a.drift ?? 0));
+  const maxAbs = Math.max(...withData.map(x => Math.abs(x.drift ?? 0)), 50);
+
+  listEl.innerHTML = withData.map(item => {
+    const d = item.drift;
+    const color = d === null ? 'var(--chalk4)' : d > 20 ? 'var(--red)' : d > 0 ? 'var(--amber)' : d < -5 ? 'var(--green)' : 'var(--chalk4)';
+    const halfPct = d !== null ? Math.min(Math.abs(d) / maxAbs * 50, 50) : 0;
+    const barLeft  = d !== null && d < 0 ? `${50 - halfPct}%` : '50%';
+    const barWidth = `${halfPct}%`;
+    const driftStr = d === null ? '—' : (d > 0 ? '+' : '') + d.toFixed(0) + '%';
+    const sub = `${item.sigs24}/${item.runs24}`;
+
+    return `<div class="vc-item">
+      <span class="vc-name" title="${esc(item.agent)}">${esc(item.agent)}</span>
+      <div class="vc-bar-wrap">
+        <div class="vc-zero-line"></div>
+        <div class="vc-bar" style="left:${barLeft};width:${barWidth};background:${color}"></div>
+      </div>
+      <span class="vc-delta" style="color:${color}">${esc(driftStr)}</span>
+    </div>`;
+  }).join('');
 }
 
 // ── Clock ─────────────────────────────────────────────────────────────────────

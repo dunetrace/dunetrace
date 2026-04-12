@@ -247,7 +247,7 @@ Auto-refreshes every 15 seconds. All data is computed client-side from the API r
 
 | Page | Data sources | Key behaviour |
 |---|---|---|
-| Overview | `/v1/agents` + per-agent runs + signals | Stat cards with configurable trend deltas (1h / 24h / 7d). Risk Trend bar chart (24 hourly buckets from `detected_at`). Top failure patterns with ↑↓ vs prior period. |
+| Overview | `/v1/agents` + per-agent runs + signals | Stat cards with configurable trend deltas (1h / 24h / 7d). Risk Trend bar chart (24 hourly buckets). **Step Drift panel** — 24-bar sparkline of avg step count per hour vs 7-day baseline; dashed green baseline line; WARNING ZONE badge when 24h avg exceeds baseline by >20%; current / baseline / trigger stats. **Failure Posture gauge** — half-circle SVG gauge with gradient fill and needle at avg confidence; rows for daily signals, avg confidence, false positive rate. **Top Failure Drivers** — ranked by signal count, grouped by agent + failure type; shows wasted steps estimate, avg confidence, severity. **Agent Signal Drift** — horizontal bar per agent showing 24h signal rate vs 7-day baseline, red/amber/green by direction. Top failure patterns with ↑↓ vs prior period. Live run feed. |
 | All Runs | Per-agent `/runs` | Sortable table; click any row to open run detail |
 | Alerts | Per-agent `/signals?include_shadow=true` | Live signals grouped by failure type. Shadow signals in a separate section with dashed border + SHADOW badge |
 | Analytics | `/v1/agents` | Cross-agent totals, top failure patterns, per-agent breakdown |
