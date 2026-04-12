@@ -21,9 +21,9 @@ AI agents fail in ways that traditional monitoring can't see.
 
 Your API returns 200. Your logs show no exceptions. But the agent called the same tool 12 times in a row, burned $X in tokens, and gave the user a wrong answer or no answer at all.
 
-These are **structural failures** — tool loops, context bloat, reasoning stalls. They happen inside the agent's decision loop, between the lines your existing monitoring covers. By the time a user reports a problem, the damage is already done.
+These are structural failures i.e. tool loops, context bloat, reasoning stalls etc. They happen inside the agent's decision loop, between the lines your existing monitoring covers. By the time a user reports a problem, the damage is already done.
 
-LangSmith/Langfuse answer "what happened?" after you already know something broke. OpenLLMetry gives you OTel spans across 40+ frameworks — great coverage, no behavioral detection.
+LangSmith/Langfuse answer "what happened?" after you already know something broke. OpenLLMetry gives you OTel spans across 40+ frameworks, great coverage, no behavioral detection.
 
 Dunetrace answers a different question: **"is something breaking right now?"**
 
@@ -68,7 +68,7 @@ Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 | API + docs   | [http://localhost:8002/docs](http://localhost:8002/docs) |
 | Ingest (SDK) | [http://localhost:8001](http://localhost:8001)           |
 
-→ [Full integration options](docs/integrations.md) — LangChain, FastAPI, Flask, OpenLLMetry, manual
+→ [Full integration options](docs/integrations.md): LangChain, FastAPI, Flask, OpenLLMetry, manual
 
 ---
 
@@ -104,17 +104,15 @@ All thresholds are configurable without code changes. → [docs/detectors.md](do
 ![Analytics](analytics.png)
 ![Agent details](agent_detail.png)
 
-Live single-page app at **[http://localhost:3000](http://localhost:3000)**. Auto-refreshes every 15s. No build step.
+Live dashboard at **[http://localhost:3000](http://localhost:3000)**. Auto-refreshes every 15s.
 
-8 pages: Overview · All Runs · Alerts · Analytics · Risk Heatmap · Agents · Compare Runs · Detectors
-
-→ [docs/dashboard.md](docs/dashboard.md) — page descriptions, run detail tabs, token waste estimates, shadow signals, data sources
+→ [docs/dashboard.md](docs/dashboard.md): page descriptions, run detail tabs, token waste estimates, shadow signals, data sources
 
 ---
 
 ## Privacy
 
-No raw content ever leaves your agent process. Every prompt, tool argument, and model output is SHA-256 hashed before transmission. The ingest API receives hashes, token counts, latency values, and call sequences — never plaintext.
+No raw content ever leaves your agent process. Every prompt, tool argument, and model output is SHA-256 hashed before transmission. The ingest API receives hashes, token counts, latency values, and call sequences, never plaintext.
 
 → [docs/architecture.md](docs/architecture.md) for the full privacy model and DB schema.
 
@@ -143,7 +141,7 @@ Agent Code
         └─► OTel exporter   (otel_exporter=… → Tempo / Honeycomb / Datadog)
 ```
 
-→ [docs/architecture.md](docs/architecture.md) — service internals, DB schema, OTel exporter, performance
+→ [docs/architecture.md](docs/architecture.md): service internals, DB schema, OTel exporter, performance
 
 ---
 
