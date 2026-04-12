@@ -683,7 +683,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="chart-card">
       <div class="drift-header">
         <div>
-          <div class="chart-title mono">STEP DRIFT — 24H VS 7-DAY BASELINE</div>
+          <div class="chart-title mono">TOKEN WASTE DRIFT — 24H VS 7-DAY BASELINE</div>
           <div class="drift-delta" id="drift-delta-val" style="color:var(--chalk4)">computing…</div>
         </div>
       </div>
@@ -694,7 +694,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         </div>
         <div style="flex-shrink:0;width:124px;display:flex;flex-direction:column">
           <span id="drift-badge" class="posture-badge ok">NORMAL</span>
-          <div class="drift-stat"><span class="drift-stat-lbl">24h avg steps</span><span class="drift-stat-val" id="drift-current">—</span></div>
+          <div class="drift-stat"><span class="drift-stat-lbl">24h wasted</span><span class="drift-stat-val" id="drift-current">—</span></div>
           <div class="drift-stat"><span class="drift-stat-lbl">7d baseline</span><span class="drift-stat-val" id="drift-baseline">—</span></div>
           <div class="drift-stat"><span class="drift-stat-lbl">warn trigger</span><span class="drift-stat-val" id="drift-trigger">—</span></div>
         </div>
@@ -882,11 +882,20 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- ── ANALYTICS PAGE ── -->
 <div id="page-analytics" class="page">
-  <div class="cost-banner">
-    <div><div class="cb-val" id="analytics-runs">—</div></div>
-    <div>
-      <div class="cb-label">Total runs monitored</div>
-      <div class="cb-sub" id="analytics-agents-sub">across all agents</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem">
+    <div class="cost-banner">
+      <div><div class="cb-val" id="analytics-runs">—</div></div>
+      <div>
+        <div class="cb-label">Total runs monitored</div>
+        <div class="cb-sub" id="analytics-agents-sub">across all agents</div>
+      </div>
+    </div>
+    <div class="cost-banner" style="background:linear-gradient(135deg,rgba(229,62,62,0.06),rgba(229,62,62,0.02));border-color:rgba(229,62,62,0.2)">
+      <div><div class="cb-val" id="analytics-tokens-wasted" style="color:var(--red)">—</div></div>
+      <div>
+        <div class="cb-label">Est. tokens wasted on signal runs</div>
+        <div class="cb-sub" id="analytics-tokens-sub">step_count × 250 tk/step</div>
+      </div>
     </div>
   </div>
 
@@ -916,9 +925,9 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="sec-head"><span class="sec-title">Top failure patterns across all agents</span></div>
   <div class="table-card">
     <table class="run-table">
-      <thead><tr><th>Pattern</th><th>Count</th><th>Agents affected</th></tr></thead>
+      <thead><tr><th>Pattern</th><th>Count</th><th>Agents affected</th><th>Est. tokens wasted</th></tr></thead>
       <tbody id="analytics-patterns-tbody">
-        <tr><td colspan="3" class="loading">loading…</td></tr>
+        <tr><td colspan="4" class="loading">loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -926,9 +935,9 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="sec-head"><span class="sec-title">Per-agent breakdown</span></div>
   <div class="table-card">
     <table class="run-table">
-      <thead><tr><th>Agent</th><th>Runs</th><th>Signals</th><th>Critical</th><th>High</th><th>Top pattern</th></tr></thead>
+      <thead><tr><th>Agent</th><th>Runs</th><th>Signals</th><th>Critical</th><th>High</th><th>Est. tokens wasted</th><th>Top pattern</th></tr></thead>
       <tbody id="analytics-agents-tbody">
-        <tr><td colspan="6" class="loading">loading…</td></tr>
+        <tr><td colspan="7" class="loading">loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -974,12 +983,12 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <div class="chart-title mono" style="margin-bottom:1rem">TOOL_LOOP</div>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
           <span style="font-size:12px;color:var(--chalk3);width:120px">Threshold</span>
-          <input type="range" min="2" max="10" value="3" style="flex:1" oninput="this.nextElementSibling.textContent=this.value">
+          <input id="cfg-toolloop-thresh" type="range" min="2" max="10" value="3" style="flex:1" oninput="this.nextElementSibling.textContent=this.value;updateConfigPreview()">
           <span class="mono" style="font-size:12px;color:var(--chalk2);width:20px">3</span>
         </div>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
           <span style="font-size:12px;color:var(--chalk3);width:120px">Window (steps)</span>
-          <input type="range" min="3" max="15" value="5" style="flex:1" oninput="this.nextElementSibling.textContent=this.value">
+          <input id="cfg-toolloop-window" type="range" min="3" max="15" value="5" style="flex:1" oninput="this.nextElementSibling.textContent=this.value;updateConfigPreview()">
           <span class="mono" style="font-size:12px;color:var(--chalk2);width:20px">5</span>
         </div>
       </div>
@@ -987,7 +996,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <div class="chart-title mono" style="margin-bottom:1rem">CONTEXT_BLOAT</div>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
           <span style="font-size:12px;color:var(--chalk3);width:120px">Growth factor</span>
-          <input type="range" min="1" max="10" value="3" style="flex:1" oninput="this.nextElementSibling.textContent=this.value+'×'">
+          <input id="cfg-bloat-factor" type="range" min="1" max="10" value="3" style="flex:1" oninput="this.nextElementSibling.textContent=this.value+'×';updateConfigPreview()">
           <span class="mono" style="font-size:12px;color:var(--chalk2);width:24px">3×</span>
         </div>
       </div>
@@ -995,24 +1004,30 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <div class="chart-title mono" style="margin-bottom:1rem">SLOW_STEP</div>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
           <span style="font-size:12px;color:var(--chalk3);width:120px">Tool latency</span>
-          <input type="range" min="5000" max="60000" value="15000" step="1000" style="flex:1" oninput="this.nextElementSibling.textContent=Math.round(this.value/1000)+'s'">
+          <input id="cfg-slow-tool" type="range" min="5000" max="60000" value="15000" step="1000" style="flex:1" oninput="this.nextElementSibling.textContent=Math.round(this.value/1000)+'s';updateConfigPreview()">
           <span class="mono" style="font-size:12px;color:var(--chalk2);width:28px">15s</span>
         </div>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
           <span style="font-size:12px;color:var(--chalk3);width:120px">LLM latency</span>
-          <input type="range" min="10000" max="120000" value="30000" step="1000" style="flex:1" oninput="this.nextElementSibling.textContent=Math.round(this.value/1000)+'s'">
+          <input id="cfg-slow-llm" type="range" min="10000" max="120000" value="30000" step="1000" style="flex:1" oninput="this.nextElementSibling.textContent=Math.round(this.value/1000)+'s';updateConfigPreview()">
           <span class="mono" style="font-size:12px;color:var(--chalk2);width:28px">30s</span>
         </div>
       </div>
       <div>
         <div class="chart-title mono" style="margin-bottom:1rem">ALERT THRESHOLD</div>
         <div style="display:flex;flex-direction:column;gap:8px">
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev" style="accent-color:var(--orange)"> LOW — all signals</label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev"> MEDIUM</label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk2);cursor:pointer"><input type="radio" name="minsev" checked style="accent-color:var(--orange)"> HIGH (default)</label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev"> CRITICAL only</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev" value="LOW"      onchange="updateConfigPreview()" style="accent-color:var(--orange)"> LOW — all signals</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev" value="MEDIUM"   onchange="updateConfigPreview()"> MEDIUM</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk2);cursor:pointer"><input type="radio" name="minsev" value="HIGH"     onchange="updateConfigPreview()" checked style="accent-color:var(--orange)"> HIGH (default)</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev" value="CRITICAL" onchange="updateConfigPreview()"> CRITICAL only</label>
         </div>
       </div>
+    </div>
+
+    <!-- Live preview -->
+    <div id="config-preview-wrap" style="margin-top:1.5rem;padding-top:1.25rem;border-top:1px solid var(--wire)">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--orange);letter-spacing:3px;text-transform:uppercase;margin-bottom:.75rem">Review</div>
+      <div id="config-preview" style="font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.8;color:var(--chalk4)">loading…</div>
     </div>
   </div>
 </div>
@@ -1105,6 +1120,7 @@ async function loadAll() {
     updateSidebarCounts();
     updateTrendDeltas();
     populateCompareDropdowns();
+    updateConfigPreview();
   } catch(e) {
     console.error('loadAll failed:', e);
   }
@@ -1244,15 +1260,19 @@ function renderAlerts() {
     const uniqRuns = [...new Set(sigs.map(s => s.run_id))];
     const agentId  = sigs[0]?.agent_id || '';
     const open     = topS === 'CRITICAL' || topS === 'HIGH' ? ' open' : '';
+    const wasted   = wastedTok(uniqRuns);
 
     const runItems = uniqRuns.slice(0, 6).map(rid => {
-      const s = sigs.filter(x => x.run_id === rid);
-      const c = Math.max(...s.map(x => x.confidence)).toFixed(2);
+      const s  = sigs.filter(x => x.run_id === rid);
+      const c  = Math.max(...s.map(x => x.confidence)).toFixed(2);
       const sv = topSev(s);
+      const r  = _allRuns.find(x => x.run_id === rid);
+      const tk = fmtTok(tokEst(r?.step_count));
       return `<div class="ag-run-item" onclick="showDetail('${esc(rid)}','${esc(agentId)}')">
         <span class="run-id">${shortId(rid)}</span>
         <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
-        <span style="margin-left:auto">conf ${c}</span>
+        <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--amber)">~${tk}</span>
+        <span style="margin-left:8px">conf ${c}</span>
         <span class="sev-badge sb-${sv.toLowerCase()}" style="margin-left:8px">${sv}</span>
       </div>`;
     }).join('');
@@ -1262,6 +1282,7 @@ function renderAlerts() {
         <div class="ag-sev" style="background:${color}"></div>
         <span class="ag-title">${ftLabel(ft)}</span>
         <span class="ag-count">${uniqRuns.length} run${uniqRuns.length !== 1 ? 's' : ''}</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--amber);margin-left:4px">~${fmtTok(wasted)} wasted</span>
         <span class="ag-time mono">${latStr}</span>
         <span class="ag-expand">${open ? 'collapse ↑' : 'expand ↓'}</span>
       </div>
@@ -1279,14 +1300,28 @@ function renderAnalytics() {
   const critTotal = _agents.reduce((n, a) => n + (a.critical_count || 0), 0);
   const rate      = runTotal ? (sigTotal / runTotal).toFixed(2) : '0.00';
 
-  document.getElementById('analytics-runs').textContent         = runTotal;
-  document.getElementById('analytics-agent-count').textContent  = _agents.length;
-  document.getElementById('analytics-signal-count').textContent = sigTotal;
-  document.getElementById('analytics-critical-count').textContent = critTotal;
-  document.getElementById('analytics-signal-rate').textContent  = rate;
-  document.getElementById('analytics-agents-sub').textContent   = 'across ' + _agents.length + ' agent' + (_agents.length !== 1 ? 's' : '');
+  // Total wasted tokens: runs that have at least one live signal
+  const sigRunIds = new Set(_allSigs.map(s => s.run_id));
+  const totalWasted = _allRuns
+    .filter(r => sigRunIds.has(r.run_id))
+    .reduce((sum, r) => sum + tokEst(r.step_count), 0);
 
-  // Top patterns
+  document.getElementById('analytics-runs').textContent           = runTotal;
+  document.getElementById('analytics-agent-count').textContent    = _agents.length;
+  document.getElementById('analytics-signal-count').textContent   = sigTotal;
+  document.getElementById('analytics-critical-count').textContent = critTotal;
+  document.getElementById('analytics-signal-rate').textContent    = rate;
+  document.getElementById('analytics-agents-sub').textContent     = 'across ' + _agents.length + ' agent' + (_agents.length !== 1 ? 's' : '');
+  document.getElementById('analytics-tokens-wasted').textContent  = fmtTok(totalWasted);
+  document.getElementById('analytics-tokens-sub').textContent     =
+    sigRunIds.size + ' signal run' + (sigRunIds.size !== 1 ? 's' : '') + ' × avg steps × 250 tk/step';
+
+  // Top patterns — per-type wasted tokens
+  const ftRunMap = {};   // ft → Set of run_ids
+  _allSigs.forEach(s => {
+    if (!ftRunMap[s.failure_type]) ftRunMap[s.failure_type] = new Set();
+    ftRunMap[s.failure_type].add(s.run_id);
+  });
   const ftMap = {};
   _agents.forEach(a => {
     Object.entries(a.failure_types || {}).forEach(([k, v]) => {
@@ -1297,25 +1332,36 @@ function renderAnalytics() {
   });
   const ptSorted = Object.entries(ftMap).sort((a, b) => b[1].count - a[1].count);
   document.getElementById('analytics-patterns-tbody').innerHTML = ptSorted.length
-    ? ptSorted.map(([ft, d]) =>
-        `<tr><td>${ftLabel(ft)}</td><td class="mono">${d.count}</td><td class="mono">${d.agents.size}</td></tr>`
-      ).join('')
-    : '<tr><td colspan="3" class="loading">no signals yet</td></tr>';
+    ? ptSorted.map(([ft, d]) => {
+        const wasted = wastedTok([...(ftRunMap[ft] || new Set())]);
+        return `<tr>
+          <td>${ftLabel(ft)}</td>
+          <td class="mono">${d.count}</td>
+          <td class="mono">${d.agents.size}</td>
+          <td class="mono" style="color:var(--amber)">${fmtTok(wasted)}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="4" class="loading">no signals yet</td></tr>';
 
   // Per-agent
   document.getElementById('analytics-agents-tbody').innerHTML = _agents.length
     ? _agents.map(a => {
         const top = Object.entries(a.failure_types || {}).sort((x,y) => y[1]-x[1])[0];
+        const agentSigRunIds = new Set((a._signals || []).map(s => s.run_id));
+        const agentWasted    = (a._runs || [])
+          .filter(r => agentSigRunIds.has(r.run_id))
+          .reduce((sum, r) => sum + tokEst(r.step_count), 0);
         return `<tr>
           <td>${esc(a.agent_id)}</td>
           <td class="mono">${a.run_count || 0}</td>
           <td class="mono">${a.signal_count || 0}</td>
           <td class="mono" style="color:var(--red)">${a.critical_count || 0}</td>
           <td class="mono" style="color:var(--orange)">${a.high_count || 0}</td>
+          <td class="mono" style="color:var(--amber)">${fmtTok(agentWasted)}</td>
           <td style="font-size:11px">${top ? ftLabel(top[0]) : '—'}</td>
         </tr>`;
       }).join('')
-    : '<tr><td colspan="6" class="loading">no agents yet</td></tr>';
+    : '<tr><td colspan="7" class="loading">no agents yet</td></tr>';
 }
 
 // ── Heatmap ───────────────────────────────────────────────────────────────────
@@ -2200,55 +2246,83 @@ function _cmpDiff(runA, sigsA, runB, sigsB) {
   ${fixedFts.length ? `<div style="font-size:11px;color:var(--green)">Resolved in B: ${fixedFts.map(ftLabel).join(', ')}</div>` : ''}`;
 }
 
-// ── Drift panel ───────────────────────────────────────────────────────────────
+// ── Token helpers ─────────────────────────────────────────────────────────────
+const TK_PER_STEP = 250;  // rough estimate: tokens consumed per agent step
+function tokEst(stepCount) { return (stepCount || 0) * TK_PER_STEP; }
+function fmtTok(n) {
+  if (!n) return '0 tk';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M tk';
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k tk';
+  return n + ' tk';
+}
+
+// Returns estimated wasted tokens for a set of run_ids (runs that had signals)
+function wastedTok(runIds) {
+  return runIds.reduce((sum, rid) => {
+    const r = _allRuns.find(x => x.run_id === rid);
+    return sum + tokEst(r?.step_count);
+  }, 0);
+}
+
+// ── Token waste drift panel ────────────────────────────────────────────────────
 function renderDriftPanel() {
   const now    = Date.now() / 1000;
   const HOURS  = 24;
   const SEC_7D = 7 * 86400;
   const MAX_H  = 64;
 
-  // Bucket runs into 24 hourly slots
-  const runBuckets = Array.from({ length: HOURS }, () => []);
+  // Build set of run_ids that have at least one live signal
+  const sigRunIds = new Set(_allSigs.map(s => s.run_id));
+
+  // Bucket wasted tokens (runs with signals) into 24 hourly slots
+  const hourWaste = Array(HOURS).fill(0);
   _allRuns.forEach(r => {
-    if (!r.step_count) return;
+    if (!sigRunIds.has(r.run_id)) return;
     const age = now - r.started_at;
     if (age < 0 || age >= HOURS * 3600) return;
     const idx = HOURS - 1 - Math.floor(age / 3600);
-    if (idx >= 0 && idx < HOURS) runBuckets[idx].push(r.step_count);
+    if (idx >= 0 && idx < HOURS) hourWaste[idx] += tokEst(r.step_count);
   });
-  const hourAvgs = runBuckets.map(b => b.length ? b.reduce((a, x) => a + x, 0) / b.length : null);
 
-  // 7-day baseline average step count
-  const baseRuns = _allRuns.filter(r => r.step_count && (now - r.started_at) < SEC_7D);
-  const baselineAvg = baseRuns.length ? baseRuns.reduce((a, r) => a + r.step_count, 0) / baseRuns.length : null;
+  // 7-day baseline: avg hourly token waste over last 7 days
+  const totalHours7d = SEC_7D / 3600;
+  let waste7d = 0;
+  _allRuns.forEach(r => {
+    if (!sigRunIds.has(r.run_id)) return;
+    const age = now - r.started_at;
+    if (age >= 0 && age < SEC_7D) waste7d += tokEst(r.step_count);
+  });
+  const baselineHrAvg = waste7d / totalHours7d;
 
-  // 24h average
-  const recent24 = _allRuns.filter(r => r.step_count && (now - r.started_at) < 86400);
-  const current24Avg = recent24.length ? recent24.reduce((a, r) => a + r.step_count, 0) / recent24.length : null;
+  // 24h total wasted tokens
+  const waste24h = hourWaste.reduce((a, b) => a + b, 0);
+  // baseline 24h equivalent
+  const baseline24h = baselineHrAvg * HOURS;
 
-  // Delta display
-  const deltaEl   = document.getElementById('drift-delta-val');
-  const badgeEl   = document.getElementById('drift-badge');
-  const curEl     = document.getElementById('drift-current');
-  const baseEl    = document.getElementById('drift-baseline');
-  const trigEl    = document.getElementById('drift-trigger');
+  const deltaEl = document.getElementById('drift-delta-val');
+  const badgeEl = document.getElementById('drift-badge');
+  const curEl   = document.getElementById('drift-current');
+  const baseEl  = document.getElementById('drift-baseline');
+  const trigEl  = document.getElementById('drift-trigger');
 
-  if (current24Avg !== null && baselineAvg !== null) {
-    const diff  = current24Avg - baselineAvg;
-    const pct   = baselineAvg > 0 ? diff / baselineAvg * 100 : 0;
-    const sign  = diff > 0 ? '+' : '';
-    const col   = diff > 0.5 ? 'var(--red)' : diff < -0.5 ? 'var(--green)' : 'var(--chalk4)';
-    if (deltaEl) deltaEl.innerHTML = `<span style="color:${col}">${sign}${diff.toFixed(1)} steps / ${sign}${pct.toFixed(1)}% vs 7d</span>`;
+  if (baseline24h > 0 || waste24h > 0) {
+    const diff = waste24h - baseline24h;
+    const pct  = baseline24h > 0 ? diff / baseline24h * 100 : (waste24h > 0 ? 100 : 0);
+    const sign = diff > 0 ? '+' : '';
+    const col  = diff > 0 ? 'var(--red)' : diff < 0 ? 'var(--green)' : 'var(--chalk4)';
+    if (deltaEl) deltaEl.innerHTML =
+      `<span style="color:${col}">${sign}${fmtTok(Math.abs(diff))} / ${sign}${pct.toFixed(1)}% vs 7d baseline</span>`;
     const isWarn = pct > 20;
     if (badgeEl) { badgeEl.className = 'posture-badge ' + (isWarn ? 'warn' : 'ok'); badgeEl.textContent = isWarn ? 'WARNING ZONE' : 'NORMAL'; }
-    if (curEl)  curEl.textContent  = current24Avg.toFixed(1);
-    if (baseEl) baseEl.textContent = baselineAvg.toFixed(1);
-    if (trigEl) trigEl.textContent = (baselineAvg * 1.2).toFixed(1);
+    if (curEl)  curEl.textContent  = fmtTok(waste24h);
+    if (baseEl) baseEl.textContent = fmtTok(Math.round(baseline24h));
+    if (trigEl) trigEl.textContent = fmtTok(Math.round(baseline24h * 1.2));
   } else {
-    if (deltaEl) deltaEl.innerHTML = '<span style="color:var(--chalk4)">not enough data</span>';
-    if (curEl)   curEl.textContent  = current24Avg !== null ? current24Avg.toFixed(1) : '—';
-    if (baseEl)  baseEl.textContent = baselineAvg  !== null ? baselineAvg.toFixed(1)  : '—';
+    if (deltaEl) deltaEl.innerHTML = '<span style="color:var(--chalk4)">no wasted-token data yet</span>';
+    if (curEl)   curEl.textContent  = '0 tk';
+    if (baseEl)  baseEl.textContent = '—';
     if (trigEl)  trigEl.textContent = '—';
+    if (badgeEl) { badgeEl.className = 'posture-badge ok'; badgeEl.textContent = 'NORMAL'; }
   }
 
   // Sparkline bars
@@ -2256,26 +2330,26 @@ function renderDriftPanel() {
   const lineEl  = document.getElementById('drift-baseline-line');
   if (!barsEl) return;
 
-  const nonNull = hourAvgs.filter(v => v !== null);
-  const maxVal  = Math.max(...nonNull, baselineAvg || 0, 1);
+  const maxVal = Math.max(...hourWaste, baselineHrAvg, 1);
 
   barsEl.innerHTML = '';
-  hourAvgs.forEach((avg, i) => {
-    const h   = avg === null ? 2 : Math.max(4, Math.round((avg / maxVal) * MAX_H));
-    const isAbove = baselineAvg !== null && avg !== null && avg > baselineAvg * 1.2;
+  hourWaste.forEach((waste, i) => {
+    const h   = waste === 0 ? 2 : Math.max(4, Math.round((waste / maxVal) * MAX_H));
+    const isAbove = waste > baselineHrAvg * 1.2;
     const isCur   = i === HOURS - 1;
-    const bg  = avg === null ? 'var(--s2)' : isAbove ? 'rgba(229,62,62,0.28)' : 'rgba(46,184,114,0.22)';
-    const brd = avg === null ? 'var(--wire)'
+    const bg  = waste === 0 ? 'var(--s2)' : isAbove ? 'rgba(229,62,62,0.28)' : 'rgba(46,184,114,0.22)';
+    const brd = waste === 0 ? 'var(--wire)'
       : isAbove ? `rgba(229,62,62,${isCur ? '1' : '0.7'})`
       : `rgba(46,184,114,${isCur ? '0.9' : '0.55'})`;
     const bar = document.createElement('div');
+    bar.title = fmtTok(waste) + ' wasted this hour';
     bar.style.cssText = `flex:1;height:${h}px;background:${bg};border:1px solid ${brd};border-radius:2px 2px 0 0;transition:height .4s`;
     barsEl.appendChild(bar);
   });
 
   // Baseline dashed line position
-  if (lineEl && baselineAvg !== null) {
-    const pxFromBottom = Math.max(4, Math.round((baselineAvg / maxVal) * MAX_H));
+  if (lineEl && baselineHrAvg > 0) {
+    const pxFromBottom = Math.max(4, Math.round((baselineHrAvg / maxVal) * MAX_H));
     lineEl.style.display = 'block';
     lineEl.style.bottom  = pxFromBottom + 'px';
   }
@@ -2343,16 +2417,15 @@ function renderTopDrivers() {
     const sevBg    = g.severity === 'CRITICAL' ? 'var(--purple-d)' : g.severity === 'HIGH' ? 'var(--red-d)' : g.severity === 'MEDIUM' ? 'var(--amber-d)' : 'var(--green-d)';
     const confCol  = avgConf >= 0.75 ? 'var(--red)' : avgConf >= 0.5 ? 'var(--amber)' : 'var(--green)';
     const runIds   = [...new Set(g.sigs.map(s => s.run_id))];
-    const affected = runIds.map(id => _allRuns.find(r => r.run_id === id)).filter(Boolean);
-    const avgSteps = affected.length ? affected.reduce((a, r) => a + (r.step_count || 0), 0) / affected.length : 0;
-    const wastedSt = Math.round(avgSteps * runIds.length);
+    const affected  = runIds.map(id => _allRuns.find(r => r.run_id === id)).filter(Boolean);
+    const wastedTks = affected.reduce((sum, r) => sum + tokEst(r.step_count), 0);
 
     return `<div class="driver-item">
       <div class="driver-bar" style="background:${color}"></div>
       <span class="driver-rank">${i + 1}</span>
       <div class="driver-info">
         <div class="driver-name" title="${esc(g.agent)} · ${esc(g.ft)}">${esc(g.agent)} · ${esc(ftLabel(g.ft))}</div>
-        <div class="driver-meta">${g.sigs.length} signals · ${wastedSt} wasted steps · ${runIds.length} run${runIds.length !== 1 ? 's' : ''}</div>
+        <div class="driver-meta">${g.sigs.length} signals · ~${fmtTok(wastedTks)} wasted · ${runIds.length} run${runIds.length !== 1 ? 's' : ''}</div>
       </div>
       <div class="driver-right">
         <span class="driver-conf" style="color:${confCol}">${avgConf.toFixed(2)}</span>
@@ -2413,6 +2486,78 @@ function renderAgentComparison() {
       <span class="vc-delta" style="color:${color}">${esc(driftStr)}</span>
     </div>`;
   }).join('');
+}
+
+// ── Config preview ────────────────────────────────────────────────────────────
+function updateConfigPreview() {
+  const el = document.getElementById('config-preview');
+  if (!el) return;
+
+  const SEV_ORDER = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
+  const SEV_COLOR = { LOW: 'var(--green)', MEDIUM: 'var(--amber)', HIGH: 'var(--red)', CRITICAL: 'var(--purple)' };
+
+  // Read alert threshold
+  const checkedRadio = document.querySelector('input[name="minsev"]:checked');
+  const minSev  = checkedRadio?.value || 'HIGH';
+  const minOrd  = SEV_ORDER[minSev] ?? 2;
+  const sevColor = SEV_COLOR[minSev] || 'var(--red)';
+
+  // Read slider values
+  const toolLoopThresh  = parseInt(document.getElementById('cfg-toolloop-thresh')?.value  || '3',  10);
+  const toolLoopWindow  = parseInt(document.getElementById('cfg-toolloop-window')?.value  || '5',  10);
+  const bloatFactor     = parseInt(document.getElementById('cfg-bloat-factor')?.value     || '3',  10);
+  const slowToolMs      = parseInt(document.getElementById('cfg-slow-tool')?.value        || '15000', 10);
+  const slowLlmMs       = parseInt(document.getElementById('cfg-slow-llm')?.value         || '30000', 10);
+
+  const totalRuns = _allRuns.length;
+  if (!totalRuns) {
+    el.innerHTML = '<span style="color:var(--chalk4)">No run data yet — load some runs first.</span>';
+    return;
+  }
+
+  // Count runs flagged at minSev or above using existing signals
+  const flaggedRunIds = new Set(
+    _allSigs
+      .filter(s => (SEV_ORDER[s.severity] ?? 0) >= minOrd)
+      .map(s => s.run_id)
+  );
+  const flagged = flaggedRunIds.size;
+  const pct     = Math.round(flagged / totalRuns * 100);
+
+  // Per-severity breakdown above threshold
+  const breakdown = ['CRITICAL','HIGH','MEDIUM','LOW']
+    .filter(s => SEV_ORDER[s] >= minOrd)
+    .map(s => {
+      const n = new Set(_allSigs.filter(x => x.severity === s).map(x => x.run_id)).size;
+      return n > 0 ? `<span style="color:${SEV_COLOR[s]}">${n} ${s}</span>` : null;
+    })
+    .filter(Boolean)
+    .join(' · ');
+
+  // Slider deviation notes
+  const notes = [];
+  if (toolLoopThresh !== 3)
+    notes.push(`TOOL_LOOP threshold ${toolLoopThresh < 3 ? 'lowered to ' + toolLoopThresh + ' (catches loops sooner)' : 'raised to ' + toolLoopThresh + ' (only catches persistent loops)'}`);
+  if (toolLoopWindow !== 5)
+    notes.push(`TOOL_LOOP window ${toolLoopWindow < 5 ? 'tightened to ' + toolLoopWindow + ' steps' : 'widened to ' + toolLoopWindow + ' steps'}`);
+  if (bloatFactor !== 3)
+    notes.push(`CONTEXT_BLOAT growth factor ${bloatFactor < 3 ? 'lowered to ' + bloatFactor + '× (more sensitive)' : 'raised to ' + bloatFactor + '× (less sensitive)'}`);
+  if (slowToolMs !== 15000)
+    notes.push(`SLOW_STEP tool trigger ${Math.round(slowToolMs/1000)}s (was 15s)`);
+  if (slowLlmMs !== 30000)
+    notes.push(`SLOW_STEP LLM trigger ${Math.round(slowLlmMs/1000)}s (was 30s)`);
+
+  const noteHtml = notes.length
+    ? `<div style="margin-top:.5rem;color:var(--amber)">⚠ pending detectors.yml change${notes.length > 1 ? 's' : ''}: ${notes.join(' · ')}</div>`
+    : '';
+
+  el.innerHTML =
+    `With current config, <span style="color:${sevColor};font-weight:600">${flagged} of ${totalRuns} past run${totalRuns !== 1 ? 's' : ''}</span> ` +
+    `would be flagged <span style="color:${sevColor};font-weight:600">${minSev}${minSev !== 'CRITICAL' ? ' or above' : ''}</span> ` +
+    `<span style="color:var(--chalk4)">(${pct}% of runs)</span>` +
+    (breakdown ? `<span style="color:var(--chalk4)"> — ${breakdown}</span>` : '') +
+    `.` +
+    noteHtml;
 }
 
 // ── Clock ─────────────────────────────────────────────────────────────────────
