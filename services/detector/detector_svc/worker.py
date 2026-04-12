@@ -9,6 +9,7 @@ import logging
 
 from dunetrace.detectors import run_detectors
 from dunetrace.models import FailureSignal, FailureType, Severity
+from dunetrace.risk_engine import RiskEngine
 from detector_svc.detectors import get_detectors
 
 from detector_svc.config import settings
@@ -72,6 +73,13 @@ async def process_run(
         inj = _injection_signal_from_events(events, run_id, agent_id, agent_version)
         if inj:
             signals.append(inj)
+
+        risk = RiskEngine().evaluate(signals, state)
+        logger.debug(
+            "RiskEngine. run_id=%s confidence=%.2f active=%d severity=%s scores=%s",
+            run_id, risk.confidence, risk.active_signals,
+            risk.severity or "normal", risk.scores,
+        )
     except Exception as exc:
         logger.error("Run processing failed. run_id=%s err=%s", run_id, exc)
         await mark_run_processed(run_id, agent_id, agent_version, trigger, 0)

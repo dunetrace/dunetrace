@@ -106,6 +106,7 @@ if _PYDANTIC:
         detected_at:      float
         evidence:         Dict[str, Any]
         alerted:          bool
+        shadow:           bool
         title:            str
         what:             str
         why_it_matters:   str
@@ -238,7 +239,7 @@ else:
         id: int; failure_type: str; severity: str
         run_id: str; agent_id: str; agent_version: str
         step_index: int; confidence: float; detected_at: float
-        evidence: Dict[str, Any]; alerted: bool
+        evidence: Dict[str, Any]; alerted: bool; shadow: bool
         title: str; what: str; why_it_matters: str
         evidence_summary: str; suggested_fixes: List[Dict[str, Any]]
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)

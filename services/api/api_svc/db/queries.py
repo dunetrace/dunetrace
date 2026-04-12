@@ -374,14 +374,17 @@ async def list_signals(
     limit: int,
     severity: Optional[str] = None,
     failure_type: Optional[str] = None,
+    include_shadow: bool = False,
 ) -> tuple[list, int]:
-    """List live signals for an agent with optional filters."""
+    """List signals for an agent with optional filters. By default only live (non-shadow) signals are returned; pass include_shadow=True to include shadow signals too."""
     if not _pool:
         return [], 0
 
     import json
 
-    where = ["agent_id = $1", "shadow = FALSE"]
+    where = ["agent_id = $1"]
+    if not include_shadow:
+        where.append("shadow = FALSE")
     params: list = [agent_id]
 
     if severity:
@@ -403,7 +406,7 @@ async def list_signals(
         rows = await conn.fetch(
             f"""
             SELECT id, failure_type, severity, run_id, agent_id, agent_version,
-                   step_index, confidence, detected_at, evidence, alerted
+                   step_index, confidence, detected_at, evidence, alerted, shadow
             FROM failure_signals
             WHERE {where_clause}
             ORDER BY detected_at DESC
@@ -451,6 +454,7 @@ async def list_signals(
             "detected_at":     detected_at,
             "evidence":        dict(evidence) if evidence else {},
             "alerted":         s["alerted"],
+            "shadow":          s["shadow"],
             "title":           exp.title if exp else s["failure_type"],
             "what":            exp.what if exp else "",
             "why_it_matters":  exp.why_it_matters if exp else "",

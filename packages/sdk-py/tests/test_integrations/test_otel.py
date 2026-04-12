@@ -6,17 +6,24 @@ All tests use the in-memory InMemorySpanExporter — no real OTLP endpoint neede
 from __future__ import annotations
 
 import time
+import unittest
 import uuid
 from typing import List
 
-import pytest
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import StatusCode
+try:
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import StatusCode
+    from dunetrace.integrations.otel import DunetraceOTelExporter, _trace_id, _root_span_id
+    from dunetrace.models import AgentEvent, EventType, RunState, FailureType, Severity
+    _OTEL_AVAILABLE = True
+except ImportError:
+    _OTEL_AVAILABLE = False
 
-from dunetrace.integrations.otel import DunetraceOTelExporter, _trace_id, _root_span_id
-from dunetrace.models import AgentEvent, EventType, RunState, FailureType, Severity
+# Skip the entire module when opentelemetry is not installed
+if not _OTEL_AVAILABLE:
+    raise unittest.SkipTest("opentelemetry not installed — skipping OTel exporter tests")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -455,7 +462,7 @@ class TestRetrievalSpan:
 
         spans = mem.get_finished_spans()
         ret_span = next(s for s in spans if s.name == "retrieval")
-        assert ret_span.attributes["dunetrace.top_score"] == pytest.approx(0.92)
+        assert abs(ret_span.attributes["dunetrace.top_score"] - 0.92) < 1e-6
 
     def test_retrieval_zero_results_sets_error_status(self):
         provider, mem = _make_provider()

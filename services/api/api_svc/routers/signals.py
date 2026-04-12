@@ -25,15 +25,17 @@ _VALID_FAILURE_TYPES = {
     summary="List failure signals for an agent",
 )
 async def get_signals(
-    agent_id:     str,
-    offset:       int           = Query(0, ge=0),
-    limit:        int           = Query(settings.PAGE_SIZE_DEFAULT, ge=1,
-                                        le=settings.PAGE_SIZE_MAX),
-    severity:     Optional[str] = Query(None,
+    agent_id:       str,
+    offset:         int           = Query(0, ge=0),
+    limit:          int           = Query(settings.PAGE_SIZE_DEFAULT, ge=1,
+                                          le=settings.PAGE_SIZE_MAX),
+    severity:       Optional[str] = Query(None,
         description="Filter by severity: LOW | MEDIUM | HIGH | CRITICAL"),
-    failure_type: Optional[str] = Query(None,
+    failure_type:   Optional[str] = Query(None,
         description="Filter by failure type e.g. TOOL_LOOP"),
-    _customer:    str           = Depends(require_customer),
+    include_shadow: bool          = Query(False,
+        description="Include shadow signals (stored but not alerted) in results"),
+    _customer:      str           = Depends(require_customer),
 ) -> SignalListResponse:
     if severity and severity.upper() not in _VALID_SEVERITIES:
         raise HTTPException(status_code=422,
@@ -41,7 +43,7 @@ async def get_signals(
     if failure_type and failure_type.upper() not in _VALID_FAILURE_TYPES:
         raise HTTPException(status_code=422,
             detail=f"Invalid failure_type {failure_type!r}. Valid: {sorted(_VALID_FAILURE_TYPES)}")
-    rows, total = await list_signals(agent_id, offset, limit, severity, failure_type)
+    rows, total = await list_signals(agent_id, offset, limit, severity, failure_type, include_shadow)
 
     def _ts(v):
         if v is None:

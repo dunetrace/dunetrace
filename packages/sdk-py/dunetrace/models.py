@@ -150,6 +150,30 @@ class RunState:
     baseline_p75_steps: Optional[float]    = None
 
 
+# ── Risk Score ────────────────────────────────────────────────────────────────
+
+@dataclass
+class RiskScore:
+    """
+    Aggregate run-level risk assessment produced by RiskEngine.
+
+    Captures the overall confidence that this run contains a behavioral failure,
+    along with the per-feature breakdown that explains why. Used by the alert
+    layer to gate, prioritize, and explain alerts — not a replacement for
+    individual FailureSignals.
+
+    :param confidence:     0.0–1.0. Probability the run contains a real failure.
+    :param active_signals: Number of feature dimensions that scored > 0.6.
+    :param scores:         Per-feature scores {loop, stagnation, token, retry, latency}.
+    :param severity:       Set only when a hard rule fired ("CRITICAL" | "HIGH").
+                           None for normal scored runs.
+    """
+    confidence:     float
+    active_signals: int
+    scores:         Dict[str, float]
+    severity:       Optional[str] = None
+
+
 # ── Failure Signal ─────────────────────────────────────────────────────────────
 
 @dataclass

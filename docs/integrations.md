@@ -2,6 +2,73 @@
 
 ---
 
+## OpenLLMetry / OTel receiver
+
+[OpenLLMetry](https://github.com/traceloop/openllmetry) instruments 40+ AI frameworks and emits standard OpenTelemetry spans with `gen_ai.*` semantic conventions. Dunetrace runs alongside it — add `DunetraceOTelReceiver` as a second exporter and get behavioral detection with zero changes to your agent code.
+
+### Instrumentation paths
+
+There are three ways to get data into Dunetrace. Which path you choose determines where raw content (prompts, completions, tool arguments) is hashed:
+
+| Path | How it works | Privacy boundary | When to use |
+|---|---|---|---|
+| **Path 1 — Native SDK** | SHA-256 hash in-process; only hashes + metadata leave the process | Strongest: raw content never leaves the agent | Building a new agent; you control the stack |
+| **Path 2 — OTel receiver, self-hosted** | Raw spans travel agent → self-hosted receiver over internal network; hashed at receiver boundary before persistence | Acceptable for most teams: raw content stays on internal network | Already instrumented with OpenLLMetry; self-hosted Dunetrace |
+| **Path 3 — OTel receiver, managed cloud** *(future)* | Raw spans would travel to an external service | Requires Path 1 (native SDK) or a customer-side hash proxy before cloud ingestion | Managed cloud endpoint |
+
+### Setup (Path 2)
+
+```bash
+pip install 'dunetrace[otel]'
+```
+
+```python
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from dunetrace import Dunetrace
+from dunetrace.integrations.otel_receiver import DunetraceOTelReceiver
+
+dt = Dunetrace(api_key="dt_live_...")
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))   # existing pipeline unchanged
+
+# Add Dunetrace as a second exporter — one line
+DunetraceOTelReceiver.attach(provider, dt, agent_id="my-agent")
+
+# OpenLLMetry instruments everything automatically
+from traceloop.sdk import Traceloop
+Traceloop.init(app_name="my-agent", tracer_provider=provider)
+```
+
+Each OTel trace becomes one Dunetrace run. Spans with `gen_ai.request.model` are translated to `llm_called` / `llm_responded` events. Spans with `gen_ai.tool.name` become `tool_called` / `tool_responded`. The full detector suite runs at trace completion and fires Slack alerts as normal.
+
+**Without OpenLLMetry** — any OTel pipeline emitting `gen_ai.*` spans works:
+
+```python
+from dunetrace.integrations.otel_receiver import DunetraceOTelReceiver
+
+receiver = DunetraceOTelReceiver(dt, agent_id="my-agent")
+provider.add_span_processor(SimpleSpanProcessor(receiver))
+```
+
+### gen_ai.* attributes
+
+| Attribute | Handling |
+|---|---|
+| `gen_ai.request.model` | Passed as-is (model name, not sensitive) |
+| `gen_ai.usage.prompt_tokens` | Passed as-is (integer count) |
+| `gen_ai.usage.completion_tokens` | Passed as-is (integer count) |
+| `gen_ai.completion.0.finish_reason` | Passed as-is (short string, e.g. `"stop"`) |
+| `gen_ai.tool.name` | Passed as-is (tool name) |
+| `gen_ai.prompt` | SHA-256 hashed at receiver boundary |
+| `gen_ai.completion` | SHA-256 hashed at receiver boundary |
+| `gen_ai.prompt.0.content` | SHA-256 hashed at receiver boundary |
+| `gen_ai.completion.0.content` | SHA-256 hashed at receiver boundary |
+
+---
+
 ## LangChain / LangGraph
 
 ```bash
@@ -42,31 +109,41 @@ dt.shutdown()
 
 ## `@dt.agent()` decorator
 
-The minimal-change path for pure Python agents. Wraps a function in a `dt.run()` context, sets it as the active run for `get_current_run()`, and calls `run.final_answer()` on clean return.
+Wraps a function in a `dt.run()` context, sets it as the active run for `get_current_run()`, calls `run.final_answer()` on clean return, and emits `RUN_ERRORED` if an exception escapes. Works with both `def` and `async def`.
 
-Works with both `def` and `async def` functions. Combine with `dt.auto_instrument()` to track OpenAI / Anthropic calls automatically.
+The recommended pattern is to call `dt.init()` once at startup and use `@dt.agent()` with no `agent_id` — it inherits the default set by `init()`:
 
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace()
-dt.auto_instrument()
+dt = Dunetrace(api_key="dt_live_...")
+dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests globally
 
-@dt.agent("my-agent", model="gpt-4o")
+@dt.agent()                    # agent_id="my-agent" inherited from init()
 def run_agent(query: str) -> str:
     resp = openai_client.chat.completions.create(
         model="gpt-4o", messages=[{"role": "user", "content": query}]
     )
-    return resp.choices[0].message.content
+    return resp.choices[0].message.content   # LLM call tracked automatically
 
 run_agent("What is the capital of France?")
 dt.shutdown()
 ```
 
-**Async agent:**
+**Explicit agent_id** — overrides the `dt.init()` default, useful for multi-agent apps:
 
 ```python
-@dt.agent("my-agent", model="claude-3-5-sonnet")
+@dt.agent("retriever-agent", model="gpt-4o-mini")
+def retrieve(query: str) -> list: ...
+
+@dt.agent("answer-agent", model="gpt-4o")
+def answer(context: str, query: str) -> str: ...
+```
+
+**Async** — identical API, no changes needed:
+
+```python
+@dt.agent(model="claude-3-5-sonnet-20241022")
 async def run_agent(query: str) -> str:
     resp = await anthropic_client.messages.create(
         model="claude-3-5-sonnet-20241022",
@@ -76,23 +153,19 @@ async def run_agent(query: str) -> str:
     return resp.content[0].text
 ```
 
-**Custom user_input extraction** — when the user query is not the first argument:
+**`input_from`** — when the user query is not the first argument:
 
 ```python
-@dt.agent("rag-agent", model="gpt-4o", input_from="question")
-def rag(context: str, question: str) -> str:
-    ...
+@dt.agent(model="gpt-4o", input_from="question")
+def rag(context: str, question: str) -> str: ...
 ```
 
-**With manual tool instrumentation** inside a decorated function:
+**Manual tool instrumentation** — for non-LLM steps (DB, cache, search):
 
 ```python
-from dunetrace import Dunetrace, get_current_run
+from dunetrace import get_current_run
 
-dt = Dunetrace()
-dt.auto_instrument()
-
-@dt.agent("my-agent", model="gpt-4o", tools=["db_query", "web_search"])
+@dt.agent(model="gpt-4o", tools=["db_query", "web_search"])
 def run_agent(query: str) -> str:
     run = get_current_run()
 
@@ -100,19 +173,19 @@ def run_agent(query: str) -> str:
     result = db.fetch(query)
     run.tool_responded("db_query", success=True, output_length=len(result))
 
-    resp = openai_client.chat.completions.create(...)  # auto-tracked
+    resp = openai_client.chat.completions.create(...)  # LLM auto-tracked
     return resp.choices[0].message.content
 ```
 
-**Decorator parameters:**
+**Parameters:**
 
 | Parameter | Default | Description |
 |---|---|---|
-| `agent_id` | required | Run label, appears in the dashboard |
+| `agent_id` | `dt.init()` default | Run label shown in the dashboard. Inherits from `dt.init()` if omitted. |
 | `model` | `"unknown"` | Model name recorded on the run |
-| `tools` | `[]` | Tool list for `TOOL_AVOIDANCE` detection |
+| `tools` | `[]` | Tool list used by `TOOL_AVOIDANCE` detector |
 | `system_prompt` | `""` | Used for deterministic agent version hash |
-| `input_from` | first arg | Name of the parameter to use as `user_input` |
+| `input_from` | first arg | Parameter name to use as `user_input` |
 
 ---
 

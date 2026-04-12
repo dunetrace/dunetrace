@@ -58,14 +58,15 @@ class Dunetrace:
         otel_exporter:     Optional[object] = None,
         debug:             bool = False,
     ) -> None:
-        self._ingest_url     = endpoint.rstrip("/") + "/v1/ingest" if endpoint else None
-        self._api_key        = api_key or ""
-        self._buffer         = RingBuffer[AgentEvent](maxsize=buffer_size)
-        self._stop_evt       = Event()
-        self._flush_interval = flush_interval_ms / 1000.0
-        self._emit_json      = emit_as_json
-        self._otel_exporter  = otel_exporter   # DunetraceOTelExporter or None
-        self._stdout_lock    = Lock()  # one JSON line per write, no interleaving
+        self._ingest_url        = endpoint.rstrip("/") + "/v1/ingest" if endpoint else None
+        self._api_key           = api_key or ""
+        self._buffer            = RingBuffer[AgentEvent](maxsize=buffer_size)
+        self._stop_evt          = Event()
+        self._flush_interval    = flush_interval_ms / 1000.0
+        self._emit_json         = emit_as_json
+        self._otel_exporter     = otel_exporter   # DunetraceOTelExporter or None
+        self._stdout_lock       = Lock()  # one JSON line per write, no interleaving
+        self._default_agent_id  = ""      # set by init()
 
         if debug:
             logging.basicConfig(level=logging.DEBUG)
@@ -177,6 +178,41 @@ class Dunetrace:
         finally:
             _current_run.reset(_token)
 
+    def init(
+        self,
+        agent_id:   str                    = "",
+        frameworks: Optional[List[str]]    = None,
+    ) -> "Dunetrace":
+        """
+        Primary entry point. Patches supported AI/HTTP clients globally and
+        sets a default agent ID used when ``@dt.agent()`` is called without
+        an explicit name.
+
+        Equivalent to ``dt.auto_instrument()`` but follows the familiar
+        ``init()`` convention (cf. ``Traceloop.init()``) and returns ``self``
+        for chaining.
+
+        Usage::
+
+            from dunetrace import Dunetrace
+
+            dt = Dunetrace(api_key="dt_live_...")
+            dt.init(agent_id="my-agent")
+
+            # All OpenAI / Anthropic / httpx / requests calls are now tracked.
+            # Use @dt.agent() or get_current_run() as normal.
+
+        :param agent_id:   Default label for runs started by ``@dt.agent()``
+                           when no explicit ``agent_id`` argument is given.
+        :param frameworks: Subset of frameworks to patch. ``None`` patches all
+                           installed ones (openai, anthropic, httpx, requests).
+        """
+        self._default_agent_id = agent_id
+        from dunetrace.auto import auto_instrument as _auto_instrument
+        _auto_instrument(frameworks=frameworks)
+        logger.debug("Dunetrace.init() agent_id=%r frameworks=%r", agent_id, frameworks)
+        return self
+
     def auto_instrument(self, frameworks: Optional[List[str]] = None) -> None:
         """
         Monkey-patch supported AI framework clients so that LLM calls made
@@ -202,7 +238,7 @@ class Dunetrace:
 
     def agent(
         self,
-        agent_id:      str,
+        agent_id:      str = "",
         *,
         model:         str              = "unknown",
         tools:         Optional[List[str]] = None,
@@ -241,6 +277,7 @@ class Dunetrace:
             def rag(context: str, question: str) -> str:
                 ...
         """
+        _agent_id = agent_id or self._default_agent_id or "agent"
         _tools = tools or []
 
         def decorator(fn: Callable) -> Callable:
@@ -249,7 +286,7 @@ class Dunetrace:
                 async def async_wrapper(*args, **kwargs):
                     user_input = _extract_input(fn, args, kwargs, input_from)
                     with self.run(
-                        agent_id,
+                        _agent_id,
                         user_input=user_input,
                         model=model,
                         tools=_tools,
@@ -264,7 +301,7 @@ class Dunetrace:
                 def sync_wrapper(*args, **kwargs):
                     user_input = _extract_input(fn, args, kwargs, input_from)
                     with self.run(
-                        agent_id,
+                        _agent_id,
                         user_input=user_input,
                         model=model,
                         tools=_tools,
@@ -328,7 +365,9 @@ class Dunetrace:
                 if self._ingest_url:
                     self._ship(batch)
             else:
-                time.sleep(self._flush_interval)
+                # Use Event.wait so shutdown() wakes the thread immediately
+                # instead of waiting up to flush_interval for time.sleep to expire.
+                self._stop_evt.wait(timeout=self._flush_interval)
 
         remaining = self._buffer.drain_all()
         if remaining and self._ingest_url:

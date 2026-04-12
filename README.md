@@ -1,4 +1,4 @@
-# Dunetrace
+# Dunetradece
 
 ![Dunetrace](dunetrace.png)
 
@@ -29,9 +29,13 @@ These are structural failures: tool loops, context bloat, reasoning stalls etc. 
 
 LangSmith/Langfuse are excellent but they answer "what happened?" after you already know something broke. You open the trace, investigate, find the problem.
 
+OpenLLMetry and traceAI give you OTel spans across 40+ frameworks — great instrumentation coverage, no behavioral detection.
+
 Dunetrace answers a different question: **"is something breaking right now?"**
 
 It watches the structural pattern of every run automatically and fires a Slack alert while the run is still in progress or within 15 seconds of completion.
+
+**Already using OpenLLMetry?** Dunetrace runs alongside it. Point your OTel spans at the Dunetrace receiver and get behavioral detection with no additional instrumentation. → [OpenLLMetry / OTel receiver](docs/integrations.md#openllmetry--otel-receiver)
 
 ## The solution
 
@@ -76,15 +80,18 @@ pip install 'dunetrace[langchain]'      # LangChain / LangGraph
 
 ### 3. Instrument your agent
 
-| Integration | When to use |
-|---|---|
-| [LangChain / LangGraph](docs/integrations.md#langchain--langgraph) | LangChain agents and chains |
-| [`@dt.agent()` decorator](docs/integrations.md#dtagent-decorator) | Pure Python / custom agents |
-| [FastAPI / ASGI middleware](docs/integrations.md#fastapi--asgi) | FastAPI, Starlette |
-| [Flask / WSGI middleware](docs/integrations.md#flask--wsgi) | Flask, Django |
-| [Manual `dt.run()`](docs/integrations.md#manual-instrumentation) | Full control, any framework |
+```python
+from dunetrace import Dunetrace
 
-→ [docs/integrations.md](docs/integrations.md)
+dt = Dunetrace(api_key="dt_live_...")
+dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests globally
+
+@dt.agent()                    # agent_id inherited from init()
+def run_agent(query: str) -> str:
+    ...                        # LLM + HTTP calls tracked automatically
+```
+
+→ [Full integration options](docs/integrations.md) — LangChain, FastAPI, Flask, OpenLLMetry, manual
 
 Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
@@ -102,9 +109,39 @@ Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ![Dashboard overview](dashboard.png)
 
-![Run detail panel](agentRun_detail.png)
+The Mission Control dashboard is a live, API-driven single-page app served at **[http://localhost:3000](http://localhost:3000)**. It auto-refreshes every 15 seconds and requires no build step — static HTML fetching from the Customer API.
 
-![Run graph](graph.png)
+### Pages
+
+| Page | What it shows |
+|---|---|
+| **Overview** | Four stat cards (Critical / High / Signals / Runs) with configurable trend deltas (↑↓ vs last hour / yesterday / last week). Risk Trend 24h bar chart (hourly signal count, colour-coded by intensity). Top failure patterns with ↑↓ trend arrows. Live run feed. |
+| **All Runs** | Full run table — agent, signals, severity, failure types, duration, step count. Click any row to open run detail. |
+| **Alerts** | Signals grouped by failure type, expandable per group. Shadow signals rendered below with dashed border + SHADOW badge. |
+| **Analytics** | Cross-agent totals, top failure patterns, per-agent breakdown. |
+| **Risk Heatmap** | Failure type × agent intensity grid. |
+| **Agents** | Per-agent health cards — failure rate %, dominant pattern, run / critical / high counts, last seen, ungraduated shadow signal count. |
+| **Compare Runs** | Side-by-side run comparison. Select any two runs from dropdowns — metrics, signals, and max confidence shown in both panels with a colour-coded delta table (new / resolved failure types highlighted). |
+| **Detectors** | Threshold sliders and alert level selector. |
+
+### Run detail
+
+Click any run to open the detail panel with three tabs:
+
+- **Analysis** — execution timeline (one node per step, loop detection), signal score cards with confidence bars, plain-English explanation + suggested fix
+- **Run graph** — SVG node graph: green = LLM call, orange = tool call (ok), red = looping tool call, blue = start/end. Loop clusters highlighted with a dashed red outline.
+- **Event log** — every event in chronological order, expandable to show full payload. Content fields are shown as SHA-256 hashes — no raw text stored.
+
+### Stat card info buttons
+
+Each stat card has an `ⓘ` button explaining the threshold for that severity level:
+
+| Card | Threshold |
+|---|---|
+| Critical | conf ≥ 0.85, or prompt injection / cascading failure regardless of confidence |
+| High | conf ≥ 0.70 — tool loops, retry storms, context bloat |
+| Signals | All four levels: CRITICAL ≥ 0.85 · HIGH ≥ 0.70 · MEDIUM ≥ 0.50 · LOW < 0.50 |
+| Total runs | Processed runs (clean + signal-bearing) counted within one 5s detector poll |
 
 ---
 

@@ -1,0 +1,2088 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dunetrace — Mission Control</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090f;
+  --s1:#0c1220;
+  --s2:#111b2d;
+  --s3:#162038;
+  --wire:#1e3050;
+  --wire2:#253d62;
+  --chalk:#f0ece4;
+  --chalk2:#c8c4bc;
+  --chalk3:#8a8478;
+  --chalk4:#4a5568;
+  --orange:#e8692a;
+  --orange-d:rgba(232,105,42,0.12);
+  --red:#e53e3e;
+  --red-d:rgba(229,62,62,0.1);
+  --amber:#d4920a;
+  --amber-d:rgba(212,146,10,0.1);
+  --green:#2eb872;
+  --green-d:rgba(46,184,114,0.08);
+  --purple:#9b72e8;
+  --purple-d:rgba(155,114,232,0.1);
+  --blue:#4a9ede;
+  --sidebar:220px;
+  --top:52px;
+}
+html,body{height:100%;background:var(--bg);color:var(--chalk2);font-family:'IBM Plex Sans',sans-serif;font-size:14px;line-height:1.5;overflow:hidden}
+.mono{font-family:'IBM Plex Mono',monospace}
+
+/* Grid bg */
+body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(30,48,80,0.15) 1px,transparent 1px),linear-gradient(90deg,rgba(30,48,80,0.15) 1px,transparent 1px);background-size:48px 48px;pointer-events:none;z-index:0}
+
+/* ── TOPBAR ── */
+#topbar{
+  position:fixed;top:0;left:0;right:0;height:var(--top);
+  background:rgba(7,9,15,0.96);backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--wire);
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 1.25rem;z-index:100;
+}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-mark{width:28px;height:28px;background:var(--s3);border:1px solid var(--wire2);border-radius:4px;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:700;color:var(--orange)}
+.brand-name{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:500;color:var(--chalk);letter-spacing:2px}
+.top-right{display:flex;align-items:center;gap:1rem}
+.live-badge{display:flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--green);letter-spacing:1px}
+.live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.top-time{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4)}
+
+/* ── SIDEBAR ── */
+#sidebar{
+  position:fixed;top:var(--top);left:0;bottom:0;
+  width:var(--sidebar);background:rgba(7,9,15,0.95);
+  border-right:1px solid var(--wire);
+  padding:1.25rem 0;z-index:50;
+  display:flex;flex-direction:column;
+}
+.sb-section{margin-bottom:1.5rem}
+.sb-label{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--orange);letter-spacing:3px;text-transform:uppercase;padding:0 1rem;margin-bottom:.5rem}
+.sb-item{
+  display:flex;align-items:center;gap:10px;
+  padding:7px 1rem;cursor:pointer;
+  font-size:12px;color:var(--chalk3);
+  border-left:2px solid transparent;
+  transition:all .15s;
+}
+.sb-item:hover{background:rgba(255,255,255,0.03);color:var(--chalk2)}
+.sb-item.active{color:var(--orange);border-left-color:var(--orange);background:var(--orange-d)}
+.sb-icon{width:14px;height:14px;flex-shrink:0;opacity:.6}
+.sb-item.active .sb-icon{opacity:1}
+.sb-count{margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:600;padding:1px 6px;border-radius:2px}
+.sc-red{background:var(--red-d);color:var(--red)}
+.sc-amber{background:var(--amber-d);color:var(--amber)}
+
+/* ── MAIN ── */
+#main{
+  position:fixed;top:var(--top);left:var(--sidebar);right:0;bottom:0;
+  overflow-y:auto;padding:1.5rem;z-index:1;
+}
+#main::-webkit-scrollbar{width:4px}
+#main::-webkit-scrollbar-track{background:transparent}
+#main::-webkit-scrollbar-thumb{background:var(--wire);border-radius:2px}
+
+/* ── PAGES ── */
+.page{display:none}
+.page.active{display:block}
+
+/* ── STAT CARDS ── */
+.stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:1.5rem}
+.stat-card{
+  background:var(--s1);border:1px solid var(--wire);border-radius:8px;
+  padding:1.25rem;position:relative;overflow:visible;
+  transition:border-color .2s;cursor:default;
+}
+.stat-card:hover{border-color:var(--wire2)}
+/* top colour bar — now a real child element so overflow:visible doesn't clip it */
+.stat-card-bar{position:absolute;top:0;left:0;right:0;height:2px;border-radius:8px 8px 0 0;pointer-events:none}
+.sc-critical .stat-card-bar{background:var(--red)}
+.sc-high     .stat-card-bar{background:var(--orange)}
+.sc-medium   .stat-card-bar{background:var(--amber)}
+.sc-ok       .stat-card-bar{background:var(--green)}
+.stat-label{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:2px;text-transform:uppercase;margin-bottom:.75rem;display:flex;align-items:center;gap:6px}
+
+/* Info button + tooltip */
+.info-btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;border-radius:50%;flex-shrink:0;
+  background:transparent;border:1px solid var(--chalk4);
+  color:var(--chalk4);font-size:8px;font-weight:700;
+  cursor:default;position:relative;
+  font-family:'IBM Plex Mono',monospace;line-height:1;
+  transition:border-color .15s,color .15s;
+  letter-spacing:0;text-transform:none;
+}
+.info-btn:hover{border-color:var(--blue);color:var(--blue)}
+.info-tip{
+  display:none;position:absolute;
+  top:calc(100% + 8px);left:0;
+  width:220px;
+  background:var(--s3);border:1px solid var(--wire2);
+  border-radius:6px;padding:10px 12px;
+  font-family:'IBM Plex Sans',sans-serif;font-size:11px;
+  color:var(--chalk2);line-height:1.65;
+  z-index:500;pointer-events:none;
+  box-shadow:0 8px 24px rgba(0,0,0,0.55);
+  letter-spacing:0;text-transform:none;white-space:normal;
+}
+.info-btn:hover .info-tip{display:block}
+.tip-row{display:flex;align-items:baseline;gap:6px;padding:2px 0}
+.tip-sev{font-family:'IBM Plex Mono',monospace;font-size:8px;font-weight:700;padding:1px 5px;border-radius:2px;flex-shrink:0;letter-spacing:.5px}
+.tip-desc{font-size:10px;color:var(--chalk3)}
+.stat-val{font-family:'IBM Plex Mono',monospace;font-size:2rem;font-weight:600;color:var(--chalk);line-height:1;margin-bottom:.25rem}
+.sc-critical .stat-val{color:var(--red)}
+.sc-high .stat-val{color:var(--orange)}
+.sc-medium .stat-val{color:var(--amber)}
+.sc-ok .stat-val{color:var(--green)}
+.stat-sub{font-size:11px;color:var(--chalk4)}
+.stat-delta{font-family:'IBM Plex Mono',monospace;font-size:10px;margin-top:.5rem}
+.delta-up{color:var(--red)}.delta-down{color:var(--green)}
+
+/* ── SECTION HEADER ── */
+.sec-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
+.sec-title{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3);letter-spacing:2px;text-transform:uppercase}
+.sec-action{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);cursor:pointer;transition:color .2s}
+.sec-action:hover{color:var(--chalk2)}
+
+/* ── MINI CHART ── */
+.chart-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem}
+.chart-card{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem}
+.chart-title{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);letter-spacing:1px;margin-bottom:1rem}
+.spark-wrap{position:relative;height:76px}
+.spark-bars{display:flex;align-items:flex-end;gap:6px;height:100%}
+.bar-col{flex:1;min-width:28px;max-width:80px;display:flex;flex-direction:column;align-items:center;gap:3px;height:100%;justify-content:flex-end}
+.bar-pct{font-family:'IBM Plex Mono',monospace;font-size:8px;font-weight:600;line-height:1}
+.bar{width:100%;border-radius:3px;transition:height .3s;min-height:4px}
+.bar-ok{background:rgba(46,184,114,0.22);border:1px solid rgba(46,184,114,0.55)}
+.bar-warn{background:rgba(232,105,42,0.22);border:1px solid rgba(232,105,42,0.55)}
+.bar-crit{background:rgba(212,146,10,0.25);border:1px solid rgba(212,146,10,0.6)}
+.bar-spike{background:rgba(229,62,62,0.28);border:1px solid rgba(229,62,62,0.8)}
+.spark-labels{display:flex;gap:6px;margin-top:4px}
+.spark-label{flex:1;min-width:28px;max-width:80px;font-family:'IBM Plex Mono',monospace;font-size:8px;color:var(--chalk4);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Failure list */
+.failure-list{display:flex;flex-direction:column;gap:8px}
+.failure-item{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 12px;
+  background:var(--s2);border:1px solid var(--wire);border-radius:6px;
+  cursor:pointer;transition:border-color .15s,background .15s;
+}
+.failure-item:hover{border-color:var(--wire2);background:var(--s3)}
+.fi-bar{width:3px;border-radius:1px;align-self:stretch;flex-shrink:0}
+.fi-name{font-size:13px;font-weight:500;color:var(--chalk2);flex:1}
+.fi-count{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4);margin-right:.5rem}
+.fi-pill{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:700;padding:2px 7px;border-radius:2px;letter-spacing:.5px}
+.fp-red{background:var(--red-d);color:var(--red)}
+.fp-amber{background:var(--amber-d);color:var(--amber)}
+.fi-trend{font-size:11px;color:var(--chalk4);font-family:'IBM Plex Mono',monospace}
+
+/* ── RUN TABLE ── */
+.run-table{width:100%;border-collapse:collapse}
+.run-table th{
+  text-align:left;padding:8px 12px;
+  font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);
+  letter-spacing:1.5px;text-transform:uppercase;
+  border-bottom:1px solid var(--wire2);
+}
+.run-table td{
+  padding:10px 12px;border-bottom:1px solid var(--wire);
+  font-size:12.5px;color:var(--chalk3);
+  vertical-align:middle;
+}
+.run-table tr:hover td{background:rgba(255,255,255,0.015);cursor:pointer}
+.run-table tr:last-child td{border-bottom:none}
+.run-id{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--blue)}
+.risk-bar-wrap{display:flex;align-items:center;gap:8px;width:110px}
+.risk-bar{height:4px;border-radius:2px;flex:1}
+.risk-val{font-family:'IBM Plex Mono',monospace;font-size:10px;width:32px;text-align:right}
+.sev-badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:700;padding:3px 8px;border-radius:2px;letter-spacing:.5px}
+.sb-critical{background:rgba(155,114,232,0.15);color:var(--purple)}
+.sb-high{background:var(--red-d);color:var(--red)}
+.sb-medium{background:var(--amber-d);color:var(--amber)}
+.sb-low{background:var(--green-d);color:var(--green)}
+.view-btn{
+  font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--chalk4);border:1px solid var(--wire);
+  background:transparent;padding:4px 10px;border-radius:3px;
+  cursor:pointer;transition:all .15s;
+}
+.view-btn:hover{border-color:var(--wire2);color:var(--chalk2)}
+
+/* ── RUN DETAIL ── */
+.run-detail-header{
+  background:var(--s1);border:1px solid var(--wire);border-radius:8px;
+  padding:1.5rem;margin-bottom:1.25rem;
+  display:flex;align-items:flex-start;gap:1.5rem;
+}
+.rdh-left{flex:1}
+.rdh-run-id{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4);margin-bottom:.5rem}
+.rdh-title{font-size:1.2rem;font-weight:600;color:var(--chalk);margin-bottom:.75rem}
+.rdh-meta{display:flex;gap:1.5rem;flex-wrap:wrap}
+.rdh-meta-item{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4)}
+.rdh-meta-item span{color:var(--chalk2)}
+.risk-score-big{text-align:right}
+.rsb-val{font-family:'IBM Plex Mono',monospace;font-size:2.5rem;font-weight:600;color:var(--red);line-height:1}
+.rsb-label{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:2px;margin-top:4px}
+
+/* ── DETAIL TABS ── */
+.detail-tabs{display:flex;gap:0;border-bottom:1px solid var(--wire);margin-bottom:1.25rem}
+.dtab{
+  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4);
+  padding:8px 18px;cursor:pointer;border-bottom:2px solid transparent;
+  margin-bottom:-1px;transition:color .15s,border-color .15s;
+  letter-spacing:.5px;
+}
+.dtab:hover{color:var(--chalk2)}
+.dtab.active{color:var(--orange);border-bottom-color:var(--orange)}
+.dtab-panel{display:none}
+.dtab-panel.active{display:block}
+
+/* Timeline */
+.timeline-wrap{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem;margin-bottom:1.25rem;overflow-x:auto}
+.timeline-steps{display:flex;align-items:flex-start;padding-bottom:.5rem;min-width:max-content}
+.ts-step{display:flex;flex-direction:column;align-items:center;min-width:80px}
+.ts-connector{height:2px;background:var(--wire);width:24px;margin-top:19px;flex-shrink:0}
+.ts-connector.bad{background:var(--red)}
+.ts-connector.warn{background:var(--amber)}
+.ts-node{
+  width:40px;height:40px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;
+  border:2px solid;margin-bottom:.5rem;position:relative;z-index:1;
+}
+.ts-ok{background:var(--green-d);border-color:var(--green);color:var(--green)}
+.ts-bad{background:var(--red-d);border-color:var(--red);color:var(--red)}
+.ts-warn{background:var(--amber-d);border-color:var(--amber);color:var(--amber)}
+.ts-label{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);text-align:center;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ts-sublabel{font-size:9px;color:var(--chalk4);text-align:center;margin-top:2px}
+.loop-badge{
+  position:absolute;top:-8px;right:-8px;
+  background:var(--red);color:white;
+  font-size:8px;font-weight:700;
+  padding:1px 4px;border-radius:2px;
+}
+
+/* Signal score grid */
+.signals-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.25rem}
+.signal-card{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem}
+.sig-name{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk3);letter-spacing:1px;margin-bottom:.75rem;display:flex;justify-content:space-between;align-items:center}
+.sig-score-val{font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600}
+.score-bar-track{height:6px;background:var(--wire);border-radius:3px;overflow:hidden}
+.score-bar-fill{height:100%;border-radius:3px;transition:width .5s}
+.score-high{background:var(--red)}
+.score-med{background:var(--amber)}
+.score-low{background:var(--green)}
+
+/* Explanation */
+.explain-card{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem;margin-bottom:1.25rem}
+.explain-title{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--orange);letter-spacing:2px;text-transform:uppercase;margin-bottom:1rem}
+.explain-text{font-size:13px;color:var(--chalk2);line-height:1.8;margin-bottom:1rem}
+.explain-list{display:flex;flex-direction:column;gap:6px;margin-bottom:1rem}
+.explain-item{display:flex;align-items:flex-start;gap:10px;font-size:13px;color:var(--chalk3)}
+.explain-bullet{width:6px;height:6px;border-radius:50%;background:var(--orange);margin-top:6px;flex-shrink:0}
+.fix-tag{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:11px;background:var(--green-d);border:1px solid rgba(46,184,114,0.2);color:var(--green);padding:4px 10px;border-radius:3px;margin-top:.5rem}
+
+/* Multi-signal boost indicator */
+.boost-indicator{
+  display:flex;align-items:center;gap:8px;
+  background:rgba(155,114,232,0.08);border:1px solid rgba(155,114,232,0.2);
+  border-radius:6px;padding:10px 14px;margin-bottom:1.25rem;
+  font-size:12px;color:var(--purple);
+}
+.boost-icon{font-size:14px}
+
+/* Actions */
+.actions-row{display:flex;gap:10px;flex-wrap:wrap}
+.act-btn{
+  display:flex;align-items:center;gap:7px;
+  padding:9px 16px;border-radius:5px;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;
+  cursor:pointer;border:1px solid;transition:all .15s;
+  letter-spacing:.3px;
+}
+.act-primary{background:var(--orange);border-color:var(--orange);color:white}
+.act-primary:hover{background:#bf521c}
+.act-secondary{background:transparent;border-color:var(--wire2);color:var(--chalk3)}
+.act-secondary:hover{border-color:var(--chalk4);color:var(--chalk2)}
+.act-danger{background:var(--red-d);border-color:rgba(229,62,62,0.3);color:var(--red)}
+.act-danger:hover{background:rgba(229,62,62,0.2)}
+
+/* Table card wrapper */
+.table-card{background:var(--s1);border:1px solid var(--wire);border-radius:8px;overflow:hidden;margin-bottom:1.25rem}
+
+/* Back btn */
+.back-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--chalk4);cursor:pointer;margin-bottom:1.25rem;
+  transition:color .15s;
+}
+.back-btn:hover{color:var(--chalk2)}
+
+/* Alert groups */
+.alert-group{background:var(--s1);border:1px solid var(--wire);border-radius:8px;overflow:hidden;margin-bottom:8px}
+.ag-header{
+  display:flex;align-items:center;gap:12px;
+  padding:12px 16px;cursor:pointer;
+  transition:background .15s;
+}
+.ag-header:hover{background:var(--s2)}
+.ag-sev{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.ag-title{font-size:13px;font-weight:500;color:var(--chalk2);flex:1}
+.ag-count{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)}
+.ag-time{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);margin-left:auto}
+.ag-expand{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);padding:3px 8px;border:1px solid var(--wire);border-radius:3px;flex-shrink:0}
+.ag-runs{border-top:1px solid var(--wire);padding:8px 16px;display:none}
+.ag-runs.open{display:block}
+.ag-run-item{padding:6px 0;border-bottom:1px solid var(--wire);display:flex;align-items:center;gap:10px;font-size:12px;color:var(--chalk3);cursor:pointer}
+.ag-run-item:hover{color:var(--chalk2)}
+.ag-run-item:last-child{border-bottom:none}
+
+/* Heatmap */
+.heatmap-grid{display:grid;grid-template-columns:140px repeat(3,1fr);gap:1px;background:var(--wire);border-radius:6px;overflow:hidden}
+.hm-cell{background:var(--s1);padding:10px 14px;font-size:11px;text-align:center}
+.hm-head{background:var(--s2);font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:1px;text-transform:uppercase;text-align:center}
+.hm-label{background:var(--s2);font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk3);text-align:left}
+.hm-0{background:var(--s1)}
+.hm-1{background:rgba(212,146,10,0.08)}
+.hm-2{background:rgba(212,146,10,0.2)}
+.hm-3{background:rgba(229,62,62,0.15)}
+.hm-4{background:rgba(229,62,62,0.3)}
+
+/* Cost banner */
+.cost-banner{
+  background:linear-gradient(135deg,var(--green-d),rgba(46,184,114,0.04));
+  border:1px solid rgba(46,184,114,0.2);border-radius:8px;
+  padding:1.25rem;margin-bottom:1.25rem;
+  display:flex;align-items:center;gap:1.5rem;
+}
+.cb-val{font-family:'IBM Plex Mono',monospace;font-size:2rem;font-weight:600;color:var(--green)}
+.cb-label{font-size:12px;color:var(--chalk3)}
+.cb-sub{font-size:11px;color:var(--chalk4);margin-top:2px}
+
+/* ── RUN GRAPH ── */
+.graph-wrap{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem;margin-bottom:1.25rem}
+.graph-legend{display:flex;gap:1.5rem;margin-bottom:1rem;flex-wrap:wrap}
+.gl-item{display:flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)}
+.gl-dot{width:10px;height:10px;border-radius:50%;border:2px solid}
+.graph-svg-wrap{overflow-x:auto;padding:8px 0}
+svg.run-graph{display:block}
+
+/* ── EVENT LOG ── */
+.event-log{background:var(--s1);border:1px solid var(--wire);border-radius:8px;overflow:hidden;margin-bottom:1.25rem}
+.event-log-header{
+  display:grid;grid-template-columns:40px 120px 90px 100px 1fr;
+  padding:8px 16px;border-bottom:1px solid var(--wire2);
+  font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:1.5px;text-transform:uppercase;
+}
+.event-row{
+  display:grid;grid-template-columns:40px 120px 90px 100px 1fr;
+  padding:9px 16px;border-bottom:1px solid var(--wire);
+  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3);
+  align-items:center;transition:background .1s;cursor:default;
+}
+.event-row:last-child{border-bottom:none}
+.event-row:hover{background:rgba(255,255,255,0.015)}
+.ev-step{color:var(--chalk4)}
+.ev-type{font-weight:500}
+.ev-type-run{color:var(--blue)}
+.ev-type-llm{color:var(--purple)}
+.ev-type-tool{color:var(--orange)}
+.ev-type-final{color:var(--green)}
+.ev-type-bad{color:var(--red)}
+.ev-time{color:var(--chalk4)}
+.ev-status{}
+.ev-payload{font-size:10px;color:var(--chalk4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ev-hash{color:var(--blue);font-size:10px}
+.ev-ok{color:var(--green)}
+.ev-warn{color:var(--amber)}
+.ev-err{color:var(--red)}
+.ev-details{
+  display:none;grid-column:1/-1;
+  background:var(--s2);border-top:1px solid var(--wire);
+  padding:12px 16px;font-size:11px;color:var(--chalk3);line-height:1.8;
+}
+.ev-kv{display:flex;gap:8px}
+.ev-k{color:var(--chalk4);min-width:140px}
+.ev-v{color:var(--chalk2)}
+
+/* Loading state */
+.loading{color:var(--chalk4);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:1rem;text-align:center}
+
+/* Fade in */
+.page.active > *{animation:fadeUp .3s ease both}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.page.active > *:nth-child(2){animation-delay:.05s}
+.page.active > *:nth-child(3){animation-delay:.1s}
+.page.active > *:nth-child(4){animation-delay:.15s}
+.page.active > *:nth-child(5){animation-delay:.2s}
+
+/* Input range */
+input[type=range]{accent-color:var(--orange);background:transparent}
+
+/* Trend window selector */
+.trend-controls{display:flex;align-items:center;gap:8px;margin-bottom:.75rem}
+.trend-lbl{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:2px;text-transform:uppercase}
+.trend-select{background:var(--s2);border:1px solid var(--wire2);color:var(--chalk3);font-family:'IBM Plex Mono',monospace;font-size:10px;padding:3px 8px;border-radius:3px;cursor:pointer}
+.trend-select:focus{outline:none;border-color:var(--orange)}
+.delta-up{color:var(--red)}.delta-down{color:var(--green)}.delta-flat{color:var(--chalk4)}
+.stat-delta{font-family:'IBM Plex Mono',monospace;font-size:10px;margin-top:.5rem;min-height:14px}
+
+/* Shadow signals */
+.shadow-sig-card{border-style:dashed !important;opacity:.8}
+.shadow-badge{display:inline-flex;align-items:center;font-family:'IBM Plex Mono',monospace;font-size:8px;font-weight:700;padding:2px 5px;border-radius:2px;background:rgba(74,158,222,0.1);color:var(--blue);border:1px dashed rgba(74,158,222,0.4);letter-spacing:.5px;flex-shrink:0}
+.shadow-section{margin-top:2rem;padding-top:1.5rem;border-top:1px dashed var(--wire2)}
+
+/* Agent health cards */
+.agent-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:1.5rem}
+.agent-card{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem;transition:border-color .2s;cursor:pointer}
+.agent-card:hover{border-color:var(--wire2)}
+.ac-top-bar{height:3px;border-radius:2px;margin-bottom:1rem}
+.ac-id{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--chalk);margin-bottom:.25rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ac-fail-rate{font-family:'IBM Plex Mono',monospace;font-size:2rem;font-weight:600;line-height:1;margin-bottom:.25rem}
+.ac-dominant{font-size:11px;color:var(--chalk4);margin-bottom:1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ac-stats-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding-top:.75rem;border-top:1px solid var(--wire)}
+.ac-stat{text-align:center}
+.ac-stat-val{font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:var(--chalk2)}
+.ac-stat-lbl{font-family:'IBM Plex Mono',monospace;font-size:8px;color:var(--chalk4);letter-spacing:1px;text-transform:uppercase;margin-top:2px}
+.ac-last{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);margin-top:.75rem}
+
+/* Run comparison */
+.compare-controls{display:flex;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;flex-wrap:wrap}
+.cmp-run-select{display:flex;flex-direction:column;gap:4px}
+.cmp-run-select label{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:1.5px;text-transform:uppercase}
+.cmp-select{background:var(--s2);border:1px solid var(--wire2);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:6px 10px;border-radius:4px;cursor:pointer;min-width:260px}
+.cmp-select:focus{outline:none;border-color:var(--orange)}
+.cmp-panels{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
+.cmp-panel{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem}
+.cmp-panel-title{font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;margin-bottom:.75rem;padding-bottom:.5rem;border-bottom:1px solid var(--wire)}
+.cmp-run-id{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--blue);margin-bottom:.25rem}
+.cmp-metrics-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:1rem 0}
+.cmp-metric{background:var(--s2);border:1px solid var(--wire);border-radius:4px;padding:8px}
+.cmp-metric-lbl{font-family:'IBM Plex Mono',monospace;font-size:8px;color:var(--chalk4);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}
+.cmp-metric-val{font-family:'IBM Plex Mono',monospace;font-size:16px;font-weight:600}
+.cmp-better{color:var(--green)}.cmp-worse{color:var(--red)}.cmp-neutral{color:var(--chalk)}
+.cmp-sigs-title{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:.5rem}
+.cmp-sig-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:3px;font-size:11px;margin-bottom:4px}
+.cmp-sig-live{background:var(--red-d);border:1px solid rgba(229,62,62,0.15)}
+.cmp-no-sigs{font-size:11px;color:var(--green);font-family:'IBM Plex Mono',monospace;padding:8px}
+.cmp-placeholder{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4);padding:2rem;text-align:center;background:var(--s1);border:1px solid var(--wire);border-radius:8px}
+</style>
+</head>
+<body>
+
+<!-- TOPBAR -->
+<div id="topbar">
+  <div class="brand">
+    <div class="brand-mark">D</div>
+    <span class="brand-name">DUNETRACE</span>
+  </div>
+  <div class="top-right">
+    <div class="live-badge"><div class="live-dot"></div>LIVE</div>
+    <div class="top-time mono" id="clock">00:00:00 UTC</div>
+  </div>
+</div>
+
+<!-- SIDEBAR -->
+<nav id="sidebar">
+  <div class="sb-section">
+    <div class="sb-label">Monitor</div>
+    <div class="sb-item active" onclick="nav('overview',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+      Overview
+      <span class="sb-count sc-red" id="badge-overview">—</span>
+    </div>
+    <div class="sb-item" onclick="nav('runs',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M2 8h9M2 12h6"/></svg>
+      All runs
+      <span class="sb-count sc-amber" id="badge-runs">—</span>
+    </div>
+    <div class="sb-item" onclick="nav('alerts',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2l1.4 2.8 3.1.45-2.25 2.19.53 3.1L8 9l-2.78 1.54.53-3.1L3.5 5.25l3.1-.45z"/></svg>
+      Alerts
+      <span class="sb-count sc-red" id="badge-alerts">—</span>
+    </div>
+  </div>
+  <div class="sb-section">
+    <div class="sb-label">Analyse</div>
+    <div class="sb-item" onclick="nav('analytics',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 12l3-4 3 2 3-5 3 3"/></svg>
+      Analytics
+    </div>
+    <div class="sb-item" onclick="nav('heatmap',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="4" height="4" rx=".5"/><rect x="6" y="1" width="4" height="4" rx=".5"/><rect x="11" y="1" width="4" height="4" rx=".5"/><rect x="1" y="6" width="4" height="4" rx=".5"/><rect x="6" y="6" width="4" height="4" rx=".5"/><rect x="11" y="6" width="4" height="4" rx=".5"/><rect x="1" y="11" width="4" height="4" rx=".5"/><rect x="6" y="11" width="4" height="4" rx=".5"/><rect x="11" y="11" width="4" height="4" rx=".5"/></svg>
+      Risk heatmap
+    </div>
+    <div class="sb-item" onclick="nav('agents',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5.5" cy="5" r="2.5"/><path d="M1 13c0-2.8 1.9-4.5 4.5-4.5S10 10.2 10 13"/><circle cx="12" cy="5" r="2"/><path d="M12 9.5c1.8.4 3 1.5 3 3.5"/></svg>
+      Agents
+      <span class="sb-count" id="badge-agents" style="background:var(--s3);color:var(--chalk4)">—</span>
+    </div>
+  </div>
+  <div class="sb-section">
+    <div class="sb-label">Debug</div>
+    <div class="sb-item" onclick="nav('compare',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 2h8M4 14h8M1 8h14M5 5l-3 3 3 3M11 5l3 3-3 3"/></svg>
+      Compare runs
+    </div>
+  </div>
+  <div class="sb-section">
+    <div class="sb-label">Configure</div>
+    <div class="sb-item" onclick="nav('config',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/></svg>
+      Detectors
+    </div>
+  </div>
+</nav>
+
+<!-- MAIN CONTENT -->
+<div id="main">
+
+<!-- ── OVERVIEW PAGE ── -->
+<div id="page-overview" class="page active">
+  <div class="trend-controls">
+    <span class="trend-lbl">Trend vs</span>
+    <select class="trend-select" id="trend-window" onchange="updateTrendDeltas()">
+      <option value="3600">last hour</option>
+      <option value="86400" selected>yesterday</option>
+      <option value="604800">last week</option>
+    </select>
+  </div>
+  <div class="stat-row">
+    <div class="stat-card sc-critical">
+      <div class="stat-card-bar"></div>
+      <div class="stat-label">Critical
+        <span class="info-btn">i<div class="info-tip">
+          <strong style="color:var(--red)">CRITICAL</strong><br>
+          Confidence ≥ 0.85, or specific high-risk patterns regardless of confidence.<br><br>
+          <span style="color:var(--chalk4);font-size:10px">Triggers: prompt injection, cascading tool failure, goal abandonment after repeated failures.</span><br><br>
+          Requires immediate investigation — agent is severely degraded.
+        </div></span>
+      </div>
+      <div class="stat-val" id="cnt-critical">—</div>
+      <div class="stat-sub">requires immediate action</div>
+      <div class="stat-delta" id="delta-critical"></div>
+    </div>
+    <div class="stat-card sc-high">
+      <div class="stat-card-bar"></div>
+      <div class="stat-label">High
+        <span class="info-btn">i<div class="info-tip">
+          <strong style="color:var(--orange)">HIGH</strong><br>
+          Confidence ≥ 0.70.<br><br>
+          <span style="color:var(--chalk4);font-size:10px">Triggers: tool loops, retry storms, context bloat, step count inflation above 2× baseline.</span><br><br>
+          Review within the hour — run quality is meaningfully degraded.
+        </div></span>
+      </div>
+      <div class="stat-val" id="cnt-high">—</div>
+      <div class="stat-sub">high confidence signals</div>
+      <div class="stat-delta" id="delta-high"></div>
+    </div>
+    <div class="stat-card sc-medium">
+      <div class="stat-card-bar"></div>
+      <div class="stat-label">Signals
+        <span class="info-btn">i<div class="info-tip" style="width:236px">
+          All live signals across all agents. Shadow signals excluded.<br><br>
+          <div class="tip-row"><span class="tip-sev" style="background:rgba(155,114,232,0.15);color:var(--purple)">CRITICAL</span><span class="tip-desc">conf ≥ 0.85 · immediate action</span></div>
+          <div class="tip-row"><span class="tip-sev" style="background:var(--red-d);color:var(--red)">HIGH</span><span class="tip-desc">conf ≥ 0.70 · review soon</span></div>
+          <div class="tip-row"><span class="tip-sev" style="background:var(--amber-d);color:var(--amber)">MEDIUM</span><span class="tip-desc">conf ≥ 0.50 · monitor</span></div>
+          <div class="tip-row"><span class="tip-sev" style="background:var(--green-d);color:var(--green)">LOW</span><span class="tip-desc">conf &lt; 0.50 · informational</span></div>
+        </div></span>
+      </div>
+      <div class="stat-val" id="cnt-signals">—</div>
+      <div class="stat-sub">total across all agents</div>
+      <div class="stat-delta" id="delta-signals"></div>
+    </div>
+    <div class="stat-card sc-ok">
+      <div class="stat-card-bar"></div>
+      <div class="stat-label">Total runs
+        <span class="info-btn">i<div class="info-tip">
+          Processed runs tracked end-to-end by DuneTrace.<br><br>
+          Includes both clean runs (no signals) and runs where detectors fired.<br><br>
+          <span style="color:var(--chalk4);font-size:10px">A run is counted once the detector worker processes it — typically within one poll interval (5s).</span>
+        </div></span>
+      </div>
+      <div class="stat-val" id="cnt-runs">—</div>
+      <div class="stat-sub" id="stat-agents-sub">loading…</div>
+    </div>
+  </div>
+
+  <div class="chart-row">
+    <div class="chart-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <div class="chart-title mono" style="margin-bottom:0">RISK TREND — LAST 24H</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)" id="risk-trend-total"></div>
+      </div>
+      <div id="risk-trend-bars" style="display:flex;align-items:flex-end;gap:2px;height:64px"></div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px">
+        <span class="mono" style="font-size:9px;color:var(--chalk4)">24h ago</span>
+        <span class="mono" style="font-size:9px;color:var(--chalk4)">now</span>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title mono">TOP FAILURE PATTERNS</div>
+      <div class="failure-list" id="failure-list">
+        <div class="loading">loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec-head">
+    <span class="sec-title">Live run feed</span>
+    <span class="sec-action" onclick="nav('runs',document.querySelector('[onclick*=runs]'))">view all →</span>
+  </div>
+  <div class="table-card">
+    <table class="run-table">
+      <thead>
+        <tr>
+          <th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th>
+          <th>Failure types</th><th>Duration</th><th>Steps</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="live-feed-tbody">
+        <tr><td colspan="8" class="loading">loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── RUN DETAIL PAGE ── -->
+<div id="page-detail" class="page">
+  <div class="back-btn" id="detail-back-btn" onclick="nav('overview',document.querySelector('[onclick*=overview]'))">← back to overview</div>
+
+  <div class="run-detail-header" id="detail-header">
+    <div class="rdh-left">
+      <div class="rdh-run-id mono" id="detail-run-id">loading…</div>
+      <div class="rdh-title" id="detail-title">—</div>
+      <div class="rdh-meta" id="detail-meta"></div>
+    </div>
+    <div class="risk-score-big">
+      <div class="rsb-val" id="detail-risk-val">—</div>
+      <div class="rsb-label">RISK SCORE</div>
+      <div style="margin-top:8px" id="detail-sev-badge"></div>
+    </div>
+  </div>
+
+  <div class="boost-indicator" id="detail-boost" style="display:none">
+    <span class="boost-icon">⚡</span>
+    <span id="detail-boost-text"></span>
+  </div>
+
+  <!-- TABS -->
+  <div class="detail-tabs">
+    <div class="dtab active" onclick="switchTab('analysis',this)">Analysis</div>
+    <div class="dtab" onclick="switchTab('graph',this)">Run graph</div>
+    <div class="dtab" onclick="switchTab('events',this)">Event log</div>
+  </div>
+
+  <!-- TAB: ANALYSIS -->
+  <div id="dtab-analysis" class="dtab-panel active">
+    <div class="timeline-wrap">
+      <div class="sec-head" style="margin-bottom:1rem"><span class="sec-title">Execution timeline</span></div>
+      <div class="timeline-steps" id="detail-timeline">
+        <div class="loading">loading…</div>
+      </div>
+    </div>
+    <div class="signals-grid" id="detail-signals-grid">
+      <div class="loading" style="grid-column:1/-1">loading…</div>
+    </div>
+    <div class="explain-card" id="detail-explain">
+      <div class="explain-title">Why this triggered</div>
+      <div class="explain-text" id="detail-explain-text">—</div>
+      <div class="explain-list" id="detail-explain-list"></div>
+    </div>
+    <div class="actions-row">
+      <button class="act-btn act-secondary" onclick="switchTab('events',document.querySelectorAll('.dtab')[2])">View event log</button>
+      <button class="act-btn act-secondary" onclick="switchTab('graph',document.querySelectorAll('.dtab')[1])">View run graph</button>
+    </div>
+  </div>
+
+  <!-- TAB: RUN GRAPH -->
+  <div id="dtab-graph" class="dtab-panel">
+    <div class="graph-wrap">
+      <div class="graph-legend">
+        <span class="gl-item"><span class="gl-dot" style="background:var(--green-d);border-color:var(--green)"></span>LLM call</span>
+        <span class="gl-item"><span class="gl-dot" style="background:var(--orange-d);border-color:var(--orange)"></span>Tool call (ok)</span>
+        <span class="gl-item"><span class="gl-dot" style="background:var(--red-d);border-color:var(--red)"></span>Tool call (loop)</span>
+        <span class="gl-item"><span class="gl-dot" style="background:var(--blue);border-color:var(--blue);opacity:.5"></span>Run start / end</span>
+      </div>
+      <div class="graph-svg-wrap">
+        <svg class="run-graph" id="run-graph-svg" width="900" height="320" viewBox="0 0 900 320"></svg>
+      </div>
+    </div>
+    <div class="explain-card" style="margin-top:0">
+      <div class="explain-title">Graph interpretation</div>
+      <div class="explain-text" id="detail-graph-text">Each node is one step. Edges show causation order — left to right. Red nodes are looping tool calls where the same args_hash was seen in a previous step.</div>
+    </div>
+  </div>
+
+  <!-- TAB: EVENT LOG -->
+  <div id="dtab-events" class="dtab-panel">
+    <div class="event-log">
+      <div class="event-log-header">
+        <div>Step</div>
+        <div>Event type</div>
+        <div>Offset</div>
+        <div>Status</div>
+        <div>Payload summary</div>
+      </div>
+      <div id="detail-event-rows">
+        <div class="loading">loading…</div>
+      </div>
+    </div>
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);margin-bottom:1.25rem">
+      ↑ click any row to expand payload · all content fields are SHA-256 hashed — no raw text stored
+    </div>
+    <div class="actions-row">
+      <button class="act-btn act-secondary" onclick="copyRunId()">Copy run_id</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── ALERTS PAGE ── -->
+<div id="page-alerts" class="page">
+  <div class="sec-head">
+    <span class="sec-title">Active signals — grouped by failure type</span>
+  </div>
+  <div id="alerts-container">
+    <div class="loading">loading…</div>
+  </div>
+</div>
+
+<!-- ── ANALYTICS PAGE ── -->
+<div id="page-analytics" class="page">
+  <div class="cost-banner">
+    <div><div class="cb-val" id="analytics-runs">—</div></div>
+    <div>
+      <div class="cb-label">Total runs monitored</div>
+      <div class="cb-sub" id="analytics-agents-sub">across all agents</div>
+    </div>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat-card" style="border-top:2px solid var(--blue)">
+      <div class="stat-label">Total agents</div>
+      <div class="stat-val" style="color:var(--chalk)" id="analytics-agent-count">—</div>
+      <div class="stat-sub">registered</div>
+    </div>
+    <div class="stat-card" style="border-top:2px solid var(--red)">
+      <div class="stat-label">Total signals</div>
+      <div class="stat-val" style="color:var(--chalk)" id="analytics-signal-count">—</div>
+      <div class="stat-sub">all time</div>
+    </div>
+    <div class="stat-card" style="border-top:2px solid var(--purple)">
+      <div class="stat-label">Critical signals</div>
+      <div class="stat-val" style="color:var(--chalk)" id="analytics-critical-count">—</div>
+      <div class="stat-sub">highest severity</div>
+    </div>
+    <div class="stat-card" style="border-top:2px solid var(--amber)">
+      <div class="stat-label">Signal rate</div>
+      <div class="stat-val" style="color:var(--chalk)" id="analytics-signal-rate">—</div>
+      <div class="stat-sub">signals per run</div>
+    </div>
+  </div>
+
+  <div class="sec-head"><span class="sec-title">Top failure patterns across all agents</span></div>
+  <div class="table-card">
+    <table class="run-table">
+      <thead><tr><th>Pattern</th><th>Count</th><th>Agents affected</th></tr></thead>
+      <tbody id="analytics-patterns-tbody">
+        <tr><td colspan="3" class="loading">loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sec-head"><span class="sec-title">Per-agent breakdown</span></div>
+  <div class="table-card">
+    <table class="run-table">
+      <thead><tr><th>Agent</th><th>Runs</th><th>Signals</th><th>Critical</th><th>High</th><th>Top pattern</th></tr></thead>
+      <tbody id="analytics-agents-tbody">
+        <tr><td colspan="6" class="loading">loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── HEATMAP PAGE ── -->
+<div id="page-heatmap" class="page">
+  <div class="sec-head"><span class="sec-title">Risk heatmap — failure type × agent</span></div>
+  <div class="table-card" style="padding:1.25rem">
+    <div id="heatmap-grid-wrap">
+      <div class="loading">loading…</div>
+    </div>
+    <div style="display:flex;gap:1rem;margin-top:1rem;flex-wrap:wrap">
+      <span style="font-size:11px;color:var(--chalk4)">intensity:</span>
+      <span style="font-size:11px;color:var(--chalk4)"><span style="display:inline-block;width:10px;height:10px;background:var(--s1);border:1px solid var(--wire);margin-right:4px;vertical-align:middle"></span>0</span>
+      <span style="font-size:11px;color:var(--chalk4)"><span style="display:inline-block;width:10px;height:10px;background:rgba(212,146,10,0.08);margin-right:4px;vertical-align:middle"></span>1–4</span>
+      <span style="font-size:11px;color:var(--chalk4)"><span style="display:inline-block;width:10px;height:10px;background:rgba(212,146,10,0.2);margin-right:4px;vertical-align:middle"></span>5–9</span>
+      <span style="font-size:11px;color:var(--chalk4)"><span style="display:inline-block;width:10px;height:10px;background:rgba(229,62,62,0.15);margin-right:4px;vertical-align:middle"></span>10–19</span>
+      <span style="font-size:11px;color:var(--chalk4)"><span style="display:inline-block;width:10px;height:10px;background:rgba(229,62,62,0.3);border:1px solid var(--red);margin-right:4px;vertical-align:middle"></span>20+</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── RUNS PAGE ── -->
+<div id="page-runs" class="page">
+  <div class="sec-head"><span class="sec-title">All runs</span></div>
+  <div class="table-card">
+    <table class="run-table">
+      <thead><tr><th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th><th>Failure types</th><th>Duration</th><th>Steps</th><th></th></tr></thead>
+      <tbody id="runs-tbody">
+        <tr><td colspan="8" class="loading">loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── CONFIG PAGE ── -->
+<div id="page-config" class="page">
+  <div class="sec-head"><span class="sec-title">Detector configuration</span></div>
+  <div class="table-card" style="padding:1.5rem">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem">
+      <div>
+        <div class="chart-title mono" style="margin-bottom:1rem">TOOL_LOOP</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
+          <span style="font-size:12px;color:var(--chalk3);width:120px">Threshold</span>
+          <input type="range" min="2" max="10" value="3" style="flex:1" oninput="this.nextElementSibling.textContent=this.value">
+          <span class="mono" style="font-size:12px;color:var(--chalk2);width:20px">3</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
+          <span style="font-size:12px;color:var(--chalk3);width:120px">Window (steps)</span>
+          <input type="range" min="3" max="15" value="5" style="flex:1" oninput="this.nextElementSibling.textContent=this.value">
+          <span class="mono" style="font-size:12px;color:var(--chalk2);width:20px">5</span>
+        </div>
+      </div>
+      <div>
+        <div class="chart-title mono" style="margin-bottom:1rem">CONTEXT_BLOAT</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
+          <span style="font-size:12px;color:var(--chalk3);width:120px">Growth factor</span>
+          <input type="range" min="1" max="10" value="3" style="flex:1" oninput="this.nextElementSibling.textContent=this.value+'×'">
+          <span class="mono" style="font-size:12px;color:var(--chalk2);width:24px">3×</span>
+        </div>
+      </div>
+      <div>
+        <div class="chart-title mono" style="margin-bottom:1rem">SLOW_STEP</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
+          <span style="font-size:12px;color:var(--chalk3);width:120px">Tool latency</span>
+          <input type="range" min="5000" max="60000" value="15000" step="1000" style="flex:1" oninput="this.nextElementSibling.textContent=Math.round(this.value/1000)+'s'">
+          <span class="mono" style="font-size:12px;color:var(--chalk2);width:28px">15s</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
+          <span style="font-size:12px;color:var(--chalk3);width:120px">LLM latency</span>
+          <input type="range" min="10000" max="120000" value="30000" step="1000" style="flex:1" oninput="this.nextElementSibling.textContent=Math.round(this.value/1000)+'s'">
+          <span class="mono" style="font-size:12px;color:var(--chalk2);width:28px">30s</span>
+        </div>
+      </div>
+      <div>
+        <div class="chart-title mono" style="margin-bottom:1rem">ALERT THRESHOLD</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev" style="accent-color:var(--orange)"> LOW — all signals</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev"> MEDIUM</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk2);cursor:pointer"><input type="radio" name="minsev" checked style="accent-color:var(--orange)"> HIGH (default)</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev"> CRITICAL only</label>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── AGENTS PAGE ── -->
+<div id="page-agents" class="page">
+  <div class="sec-head">
+    <span class="sec-title">Agent health overview</span>
+    <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)">failure rate = runs with ≥1 signal</span>
+  </div>
+  <div id="agents-grid" class="agent-cards">
+    <div class="loading">loading…</div>
+  </div>
+</div>
+
+<!-- ── COMPARE PAGE ── -->
+<div id="page-compare" class="page">
+  <div class="sec-head"><span class="sec-title">Compare runs — side by side</span></div>
+  <div class="compare-controls">
+    <div class="cmp-run-select">
+      <label>Run A — baseline</label>
+      <select class="cmp-select" id="cmp-run-a" onchange="renderCompare()">
+        <option value="">— select run —</option>
+      </select>
+    </div>
+    <div class="cmp-run-select">
+      <label>Run B — compare</label>
+      <select class="cmp-select" id="cmp-run-b" onchange="renderCompare()">
+        <option value="">— select run —</option>
+      </select>
+    </div>
+  </div>
+  <div id="compare-panels">
+    <div class="cmp-placeholder">Select two runs above to compare them side by side.</div>
+  </div>
+</div>
+
+</div><!-- /main -->
+
+<script>
+// ── Config ───────────────────────────────────────────────────────────────────
+const API = 'http://localhost:8002';
+const KEY = 'dt_dev_test';
+
+// ── State ────────────────────────────────────────────────────────────────────
+let _agents        = [];   // [{agent_id, run_count, signal_count, critical_count, high_count, failure_types, _runs, _signals, _shadowSignals}]
+let _allRuns       = [];   // flat list across agents
+let _allSigs       = [];   // live signals only
+let _allShadowSigs = [];   // shadow (not-yet-graduated) signals
+let _curRunId   = null;
+let _curAgentId = null;
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+async function apiFetch(path) {
+  const r = await fetch(API + path, { headers: { Authorization: 'Bearer ' + KEY } });
+  if (!r.ok) throw new Error(r.status + ' ' + path);
+  return r.json();
+}
+
+// ── Data loading ──────────────────────────────────────────────────────────────
+async function loadAll() {
+  try {
+    const agentsData = await apiFetch('/v1/agents?limit=50');
+    _agents = agentsData.agents || [];
+
+    await Promise.all(_agents.map(async a => {
+      try {
+        const [rd, sd] = await Promise.all([
+          apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/runs?limit=200'),
+          apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/signals?limit=500&include_shadow=true'),
+        ]);
+        a._runs          = rd.runs || [];
+        const allSigs    = sd.signals || [];
+        a._signals       = allSigs.filter(s => !s.shadow);
+        a._shadowSignals = allSigs.filter(s =>  s.shadow);
+      } catch(e) {
+        a._runs = []; a._signals = []; a._shadowSignals = [];
+      }
+    }));
+
+    _allRuns       = _agents.flatMap(a => a._runs.map(r => ({ ...r, _agentId: a.agent_id })));
+    _allSigs       = _agents.flatMap(a => a._signals);
+    _allShadowSigs = _agents.flatMap(a => a._shadowSignals);
+
+    renderOverview();
+    renderRuns();
+    renderAlerts();
+    renderAnalytics();
+    renderHeatmap();
+    updateSidebarCounts();
+    updateTrendDeltas();
+    populateCompareDropdowns();
+  } catch(e) {
+    console.error('loadAll failed:', e);
+  }
+}
+
+// ── Sidebar counts ────────────────────────────────────────────────────────────
+function updateSidebarCounts() {
+  const critTotal = _agents.reduce((n, a) => n + (a.critical_count || 0), 0);
+  const runsWithSigs = _allRuns.filter(r => r.has_signals).length;
+  const highPlus = _allSigs.filter(s => s.severity === 'HIGH' || s.severity === 'CRITICAL').length;
+  document.getElementById('badge-overview').textContent = critTotal || '0';
+  document.getElementById('badge-runs').textContent     = runsWithSigs || '0';
+  document.getElementById('badge-alerts').textContent   = highPlus || '0';
+  document.getElementById('badge-agents').textContent   = _agents.length || '0';
+}
+
+// ── Overview ──────────────────────────────────────────────────────────────────
+function renderOverview() {
+  const critTotal = _agents.reduce((n, a) => n + (a.critical_count || 0), 0);
+  const highTotal = _agents.reduce((n, a) => n + (a.high_count    || 0), 0);
+  const sigTotal  = _agents.reduce((n, a) => n + (a.signal_count  || 0), 0);
+  const runTotal  = _agents.reduce((n, a) => n + (a.run_count     || 0), 0);
+
+  document.getElementById('cnt-critical').textContent = critTotal;
+  document.getElementById('cnt-high').textContent     = highTotal;
+  document.getElementById('cnt-signals').textContent  = sigTotal;
+  document.getElementById('cnt-runs').textContent     = runTotal;
+  document.getElementById('stat-agents-sub').textContent = _agents.length + ' agent' + (_agents.length !== 1 ? 's' : '');
+
+  renderRiskTrend();
+
+  // Top failure patterns
+  const ftMap = {};
+  _agents.forEach(a => {
+    Object.entries(a.failure_types || {}).forEach(([k, v]) => {
+      ftMap[k] = (ftMap[k] || 0) + v;
+    });
+  });
+  const sorted = Object.entries(ftMap).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const fl = document.getElementById('failure-list');
+  if (!sorted.length) {
+    fl.innerHTML = '<div class="loading">no signals yet</div>';
+    return;
+  }
+  const now24 = Date.now() / 1000;
+  const cut24  = now24 - 86400;
+  const cut48  = now24 - 172800;
+  fl.innerHTML = sorted.map(([ft, cnt]) => {
+    const color   = ftColor(ft);
+    const sev     = ftSev(ft);
+    const cur24   = _allSigs.filter(s => s.failure_type === ft && s.detected_at >= cut24).length;
+    const prev24  = _allSigs.filter(s => s.failure_type === ft && s.detected_at >= cut48 && s.detected_at < cut24).length;
+    const diff    = cur24 - prev24;
+    const trendColor = diff > 0 ? 'var(--red)' : diff < 0 ? 'var(--green)' : 'var(--chalk4)';
+    const trendTxt   = diff > 0 ? '↑ ' + diff : diff < 0 ? '↓ ' + Math.abs(diff) : '—';
+    return `<div class="failure-item" onclick="nav('runs',document.querySelector('[onclick*=runs]'))">
+      <div class="fi-bar" style="background:${color}"></div>
+      <span class="fi-name">${ftLabel(ft)}</span>
+      <span class="fi-count">${cnt} signals</span>
+      <span class="fi-pill" style="background:${sev.bg};color:${sev.fg}">${sev.label}</span>
+      <span class="fi-trend" style="color:${trendColor}">${trendTxt}</span>
+    </div>`;
+  }).join('');
+
+  // Live run feed — most recent 8 runs with signals
+  const withSigs = _allRuns.filter(r => r.has_signals)
+    .sort((a, b) => b.started_at - a.started_at).slice(0, 8);
+  const noSigs   = _allRuns.filter(r => !r.has_signals)
+    .sort((a, b) => b.started_at - a.started_at).slice(0, Math.max(0, 8 - withSigs.length));
+  const feedRuns = [...withSigs, ...noSigs].slice(0, 8);
+
+  document.getElementById('live-feed-tbody').innerHTML = feedRuns.length
+    ? feedRuns.map(r => runRow(r)).join('')
+    : '<tr><td colspan="8" class="loading">no runs yet</td></tr>';
+}
+
+// ── All Runs ──────────────────────────────────────────────────────────────────
+function renderRuns() {
+  const sorted = [..._allRuns].sort((a, b) => b.started_at - a.started_at).slice(0, 100);
+  document.getElementById('runs-tbody').innerHTML = sorted.length
+    ? sorted.map(r => runRow(r)).join('')
+    : '<tr><td colspan="8" class="loading">no runs yet</td></tr>';
+}
+
+function runRow(r) {
+  const signals = _allSigs.filter(s => s.run_id === r.run_id);
+  const maxConf = signals.length ? Math.max(...signals.map(s => s.confidence)) : 0;
+  const sev     = signals.length ? topSev(signals) : null;
+  const dur     = (r.completed_at && r.started_at)
+    ? fmtDur(r.completed_at - r.started_at) : '—';
+  const fts     = [...new Set(signals.map(s => s.failure_type))].map(ftLabel).join(', ') || '—';
+  const agentId = r.agent_id || r._agentId || '';
+  const riskColor = maxConf >= 0.8 ? 'var(--red)' : maxConf >= 0.5 ? 'var(--amber)' : maxConf > 0 ? 'var(--orange)' : 'var(--green)';
+
+  return `<tr onclick="showDetail('${esc(r.run_id)}','${esc(agentId)}')">
+    <td><span class="run-id">${shortId(r.run_id)}</span></td>
+    <td>${esc(agentId)}</td>
+    <td class="mono">${signals.length}</td>
+    <td>${sev ? `<span class="sev-badge sb-${sev.toLowerCase()}">${sev}</span>` : '<span class="sev-badge sb-low">CLEAN</span>'}</td>
+    <td style="font-size:11px">${esc(fts)}</td>
+    <td class="mono">${dur}</td>
+    <td class="mono">${r.step_count || 0}</td>
+    <td><button class="view-btn" onclick="showDetail('${esc(r.run_id)}','${esc(agentId)}');event.stopPropagation()">View →</button></td>
+  </tr>`;
+}
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+function renderAlerts() {
+  // Group signals by failure_type
+  const groups = {};
+  _allSigs.forEach(s => {
+    if (!groups[s.failure_type]) groups[s.failure_type] = [];
+    groups[s.failure_type].push(s);
+  });
+
+  const sorted = Object.entries(groups).sort((a, b) => {
+    const sevOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+    const sa = Math.min(...a[1].map(s => sevOrder[s.severity] ?? 4));
+    const sb = Math.min(...b[1].map(s => sevOrder[s.severity] ?? 4));
+    return sa - sb || b[1].length - a[1].length;
+  });
+
+  if (!sorted.length) {
+    document.getElementById('alerts-container').innerHTML = '<div class="loading">no signals yet</div>';
+    return;
+  }
+
+  document.getElementById('alerts-container').innerHTML = sorted.map(([ft, sigs]) => {
+    const topS   = topSev(sigs);
+    const color  = sevToColor(topS);
+    const latest = Math.max(...sigs.map(s => s.detected_at));
+    const latStr = timeAgo(latest);
+    const uniqRuns = [...new Set(sigs.map(s => s.run_id))];
+    const agentId  = sigs[0]?.agent_id || '';
+    const open     = topS === 'CRITICAL' || topS === 'HIGH' ? ' open' : '';
+
+    const runItems = uniqRuns.slice(0, 6).map(rid => {
+      const s = sigs.filter(x => x.run_id === rid);
+      const c = Math.max(...s.map(x => x.confidence)).toFixed(2);
+      const sv = topSev(s);
+      return `<div class="ag-run-item" onclick="showDetail('${esc(rid)}','${esc(agentId)}')">
+        <span class="run-id">${shortId(rid)}</span>
+        <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
+        <span style="margin-left:auto">conf ${c}</span>
+        <span class="sev-badge sb-${sv.toLowerCase()}" style="margin-left:8px">${sv}</span>
+      </div>`;
+    }).join('');
+
+    return `<div class="alert-group">
+      <div class="ag-header" onclick="toggleGroup(this)">
+        <div class="ag-sev" style="background:${color}"></div>
+        <span class="ag-title">${ftLabel(ft)}</span>
+        <span class="ag-count">${uniqRuns.length} run${uniqRuns.length !== 1 ? 's' : ''}</span>
+        <span class="ag-time mono">${latStr}</span>
+        <span class="ag-expand">${open ? 'collapse ↑' : 'expand ↓'}</span>
+      </div>
+      <div class="ag-runs${open}">${runItems}</div>
+    </div>`;
+  }).join('');
+
+  renderShadowSection();
+}
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+function renderAnalytics() {
+  const runTotal  = _agents.reduce((n, a) => n + (a.run_count     || 0), 0);
+  const sigTotal  = _agents.reduce((n, a) => n + (a.signal_count  || 0), 0);
+  const critTotal = _agents.reduce((n, a) => n + (a.critical_count || 0), 0);
+  const rate      = runTotal ? (sigTotal / runTotal).toFixed(2) : '0.00';
+
+  document.getElementById('analytics-runs').textContent         = runTotal;
+  document.getElementById('analytics-agent-count').textContent  = _agents.length;
+  document.getElementById('analytics-signal-count').textContent = sigTotal;
+  document.getElementById('analytics-critical-count').textContent = critTotal;
+  document.getElementById('analytics-signal-rate').textContent  = rate;
+  document.getElementById('analytics-agents-sub').textContent   = 'across ' + _agents.length + ' agent' + (_agents.length !== 1 ? 's' : '');
+
+  // Top patterns
+  const ftMap = {};
+  _agents.forEach(a => {
+    Object.entries(a.failure_types || {}).forEach(([k, v]) => {
+      if (!ftMap[k]) ftMap[k] = { count: 0, agents: new Set() };
+      ftMap[k].count += v;
+      ftMap[k].agents.add(a.agent_id);
+    });
+  });
+  const ptSorted = Object.entries(ftMap).sort((a, b) => b[1].count - a[1].count);
+  document.getElementById('analytics-patterns-tbody').innerHTML = ptSorted.length
+    ? ptSorted.map(([ft, d]) =>
+        `<tr><td>${ftLabel(ft)}</td><td class="mono">${d.count}</td><td class="mono">${d.agents.size}</td></tr>`
+      ).join('')
+    : '<tr><td colspan="3" class="loading">no signals yet</td></tr>';
+
+  // Per-agent
+  document.getElementById('analytics-agents-tbody').innerHTML = _agents.length
+    ? _agents.map(a => {
+        const top = Object.entries(a.failure_types || {}).sort((x,y) => y[1]-x[1])[0];
+        return `<tr>
+          <td>${esc(a.agent_id)}</td>
+          <td class="mono">${a.run_count || 0}</td>
+          <td class="mono">${a.signal_count || 0}</td>
+          <td class="mono" style="color:var(--red)">${a.critical_count || 0}</td>
+          <td class="mono" style="color:var(--orange)">${a.high_count || 0}</td>
+          <td style="font-size:11px">${top ? ftLabel(top[0]) : '—'}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="6" class="loading">no agents yet</td></tr>';
+}
+
+// ── Heatmap ───────────────────────────────────────────────────────────────────
+function renderHeatmap() {
+  // rows = failure types, cols = agents
+  const ftSet = new Set();
+  _agents.forEach(a => Object.keys(a.failure_types || {}).forEach(k => ftSet.add(k)));
+  const fts = [...ftSet].sort();
+
+  if (!fts.length || !_agents.length) {
+    document.getElementById('heatmap-grid-wrap').innerHTML = '<div class="loading">no data yet</div>';
+    return;
+  }
+
+  const cols = Math.min(5, _agents.length); // show up to 5 agents
+  const visAgents = _agents.slice(0, cols);
+
+  const gridCss = `grid-template-columns:160px repeat(${cols},1fr)`;
+  let html = `<div class="heatmap-grid" style="${gridCss};display:grid;gap:1px;background:var(--wire);border-radius:6px;overflow:hidden">`;
+  html += '<div class="hm-cell hm-head"></div>';
+  visAgents.forEach(a => {
+    html += `<div class="hm-cell hm-head" title="${esc(a.agent_id)}">${esc(a.agent_id.split('-')[0])}</div>`;
+  });
+  fts.forEach(ft => {
+    html += `<div class="hm-cell hm-label">${ftLabel(ft)}</div>`;
+    visAgents.forEach(a => {
+      const v = (a.failure_types || {})[ft] || 0;
+      const cls = v === 0 ? 'hm-0' : v < 5 ? 'hm-1' : v < 10 ? 'hm-2' : v < 20 ? 'hm-3' : 'hm-4';
+      const col = v >= 20 ? 'var(--red)' : v >= 10 ? 'var(--orange)' : v > 0 ? 'var(--amber)' : 'var(--chalk4)';
+      html += `<div class="hm-cell ${cls}"><span style="color:${col};font-family:'IBM Plex Mono',monospace;font-size:12px">${v}</span></div>`;
+    });
+  });
+  html += '</div>';
+  document.getElementById('heatmap-grid-wrap').innerHTML = html;
+}
+
+// ── Run detail ────────────────────────────────────────────────────────────────
+async function showDetail(runId, agentId) {
+  _curRunId   = runId;
+  _curAgentId = agentId;
+
+  nav('detail', null);
+
+  // Reset tabs
+  document.querySelectorAll('.dtab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.dtab').forEach(t => t.classList.remove('active'));
+  document.getElementById('dtab-analysis').classList.add('active');
+  document.querySelectorAll('.dtab')[0].classList.add('active');
+
+  // Reset graph
+  const svg = document.getElementById('run-graph-svg');
+  svg.innerHTML = '';
+  delete svg.dataset.drawn;
+
+  // Show loading state
+  document.getElementById('detail-run-id').textContent = 'loading ' + shortId(runId) + '…';
+  document.getElementById('detail-title').textContent  = '—';
+  document.getElementById('detail-meta').innerHTML     = '';
+  document.getElementById('detail-risk-val').textContent = '—';
+  document.getElementById('detail-sev-badge').innerHTML  = '';
+  document.getElementById('detail-boost').style.display  = 'none';
+  document.getElementById('detail-timeline').innerHTML    = '<div class="loading">loading…</div>';
+  document.getElementById('detail-signals-grid').innerHTML = '<div class="loading" style="grid-column:1/-1">loading…</div>';
+  document.getElementById('detail-event-rows').innerHTML   = '<div class="loading">loading…</div>';
+
+  try {
+    const [runData, sigsData] = await Promise.all([
+      apiFetch('/v1/runs/' + encodeURIComponent(runId)),
+      apiFetch('/v1/agents/' + encodeURIComponent(agentId) + '/signals?limit=500'),
+    ]);
+    const events  = runData.events || [];
+    const signals = (sigsData.signals || []).filter(s => s.run_id === runId);
+    renderRunDetail(runData, events, signals);
+  } catch(e) {
+    document.getElementById('detail-run-id').textContent = 'Error loading run: ' + e.message;
+  }
+}
+
+function renderRunDetail(run, events, signals) {
+  const dur = (run.completed_at && run.started_at)
+    ? fmtDur(run.completed_at - run.started_at) : '—';
+  const started = new Date(run.started_at * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  const maxConf = signals.length ? Math.max(...signals.map(s => s.confidence)) : 0;
+  const sev     = signals.length ? topSev(signals) : null;
+  const startEvt = events.find(e => e.event_type === 'run.started');
+  const model   = startEvt?.payload?.model || run.agent_version || '—';
+  const fts     = [...new Set(signals.map(s => s.failure_type))];
+
+  // Header
+  document.getElementById('detail-run-id').textContent =
+    run.run_id + ' · ' + run.agent_id + ' · ' + started;
+  document.getElementById('detail-title').textContent  =
+    fts.length ? fts.map(ftLabel).join(' + ') : 'Clean run — no signals fired';
+
+  document.getElementById('detail-meta').innerHTML = [
+    ['Duration', dur],
+    ['Steps', run.step_count || events.length],
+    ['Model', model],
+    ['Agent', run.agent_id],
+    ['Signals', signals.length],
+  ].map(([k, v]) => `<div class="rdh-meta-item">${k} <span>${esc(String(v))}</span></div>`).join('');
+
+  const riskColor = maxConf >= 0.8 ? 'var(--red)' : maxConf >= 0.5 ? 'var(--amber)' : 'var(--green)';
+  document.getElementById('detail-risk-val').textContent = maxConf ? maxConf.toFixed(2) : '0.00';
+  document.getElementById('detail-risk-val').style.color = riskColor;
+
+  if (sev) {
+    document.getElementById('detail-sev-badge').innerHTML =
+      `<span class="sev-badge sb-${sev.toLowerCase()}">${sev}</span>`;
+  }
+
+  // Boost indicator
+  const boostEl = document.getElementById('detail-boost');
+  if (signals.length >= 2) {
+    boostEl.style.display = 'flex';
+    document.getElementById('detail-boost-text').innerHTML =
+      `<strong>Multi-signal active</strong> — ${signals.length} signals fired on this run`;
+  }
+
+  // Timeline
+  renderTimeline(events, signals);
+
+  // Signal score cards
+  renderSignalCards(signals);
+
+  // Explanation
+  renderExplain(signals);
+
+  // Event log
+  renderEventLog(events, run.started_at);
+
+  // Store events for graph
+  const svg = document.getElementById('run-graph-svg');
+  svg._events  = events;
+  svg._signals = signals;
+}
+
+function renderTimeline(events, signals) {
+  // Summarise into steps: one node per unique step_index, taking primary event type
+  const stepMap = {};
+  events.forEach(e => {
+    const s = e.step_index;
+    if (!stepMap[s]) stepMap[s] = { step: s, types: [], payload: {} };
+    stepMap[s].types.push(e.event_type);
+    Object.assign(stepMap[s].payload, e.payload || {});
+  });
+
+  const loopTools = detectLoops(events);
+  const steps = Object.values(stepMap).sort((a, b) => a.step - b.step);
+
+  const html = steps.map((st, i) => {
+    const isLoop   = st.types.includes('tool.called') &&
+      loopTools.has(st.payload?.tool_name + ':' + st.payload?.args_hash);
+    const isLLM    = st.types.some(t => t.startsWith('llm.'));
+    const isFail   = st.types.includes('tool.responded') && st.payload?.success === false;
+    const isStart  = st.types.includes('run.started');
+    const isEnd    = st.types.includes('run.completed') || st.types.includes('run.final_answer');
+    const isTool   = st.types.includes('tool.called');
+
+    const cls  = isLoop || isFail ? 'ts-bad' : isLLM ? 'ts-warn' : 'ts-ok';
+    const lbl  = isStart ? 'START' : isEnd ? 'END' : isTool
+      ? (st.payload?.tool_name || 'tool').slice(0, 8)
+      : isLLM ? 'LLM' : st.types[0]?.split('.')[0] || '?';
+    const sub  = isLoop ? 'loop ⟳' : isFail ? 'failed' :
+      isLLM && st.payload?.prompt_tokens ? st.payload.prompt_tokens + ' tk' : '';
+    const badge = isLoop ? '<span class="loop-badge">⟳</span>' : '';
+    const conn  = i < steps.length - 1
+      ? `<div class="ts-connector${isLoop || isFail ? ' bad' : ''}"></div>` : '';
+
+    return `<div class="ts-step">
+      <div class="ts-node ${cls}">${String(st.step).padStart(2,'0')}${badge}</div>
+      <div class="ts-label">${esc(lbl)}</div>
+      ${sub ? `<div class="ts-sublabel">${esc(sub)}</div>` : ''}
+    </div>${conn}`;
+  }).join('');
+
+  document.getElementById('detail-timeline').innerHTML = html || '<div class="loading">no events</div>';
+}
+
+function renderSignalCards(signals) {
+  const grid = document.getElementById('detail-signals-grid');
+  if (!signals.length) {
+    grid.innerHTML = `<div class="signal-card" style="grid-column:1/-1;text-align:center;color:var(--green)">
+      <div class="sig-name" style="justify-content:center">NO SIGNALS FIRED</div>
+      <div style="font-size:13px;color:var(--chalk4);margin-top:.5rem">This run completed without triggering any detectors.</div>
+    </div>`;
+    return;
+  }
+
+  grid.innerHTML = signals.map(s => {
+    const c    = s.confidence;
+    const cls  = c >= 0.8 ? 'score-high' : c >= 0.5 ? 'score-med' : 'score-low';
+    const col  = c >= 0.8 ? 'var(--red)'  : c >= 0.5 ? 'var(--amber)' : 'var(--green)';
+    const evid = evidenceSummary(s);
+    return `<div class="signal-card">
+      <div class="sig-name">${esc(s.failure_type)} <span class="sig-score-val" style="color:${col}">${c.toFixed(2)}</span></div>
+      <div class="score-bar-track"><div class="score-bar-fill ${cls}" style="width:${Math.round(c*100)}%"></div></div>
+      <div style="font-size:11px;color:var(--chalk4);margin-top:6px">${esc(evid)}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderExplain(signals) {
+  if (!signals.length) {
+    document.getElementById('detail-explain-text').textContent = 'No signals fired on this run.';
+    document.getElementById('detail-explain-list').innerHTML = '';
+    return;
+  }
+
+  const topSig = signals.sort((a, b) => b.confidence - a.confidence)[0];
+  document.getElementById('detail-explain-text').innerHTML =
+    topSig.what ? esc(topSig.what) : `This run triggered ${signals.length} signal${signals.length>1?'s':''}.`;
+
+  const items = signals.map(s =>
+    `<div class="explain-item"><div class="explain-bullet"></div>${esc(s.evidence_summary || s.what || s.failure_type)}</div>`
+  ).join('');
+  document.getElementById('detail-explain-list').innerHTML = items;
+
+  const fix = topSig.suggested_fixes?.[0]?.description;
+  if (fix) {
+    document.getElementById('detail-explain-list').innerHTML +=
+      `<div class="fix-tag">→ ${esc(fix)}</div>`;
+  }
+}
+
+function renderEventLog(events, startTs) {
+  const rows = events.map(e => {
+    const offset = startTs ? '+' + fmtDur(e.timestamp - startTs) : '';
+    const p      = e.payload || {};
+    const typeCls = e.event_type.startsWith('run.')  ? 'ev-type-run'  :
+                    e.event_type.startsWith('llm.')  ? 'ev-type-llm'  :
+                    e.event_type.startsWith('tool.') ? 'ev-type-tool' :
+                    e.event_type.includes('final')   ? 'ev-type-final': '';
+    const status  = statusCell(e);
+    const payload = payloadSummary(e);
+    const kvs     = Object.entries(p).map(([k, v]) =>
+      `<div class="ev-kv"><span class="ev-k">${esc(k)}</span><span class="ev-v">${esc(String(v))}</span></div>`
+    ).join('');
+
+    return `<div class="event-row-wrap" onclick="toggleEvent(this,event)">
+      <div class="event-row">
+        <div class="ev-step">${e.step_index}</div>
+        <div class="ev-type ${typeCls}">${esc(e.event_type)}</div>
+        <div class="ev-time">${esc(offset)}</div>
+        <div>${status}</div>
+        <div class="ev-payload">${payload}</div>
+      </div>
+      <div class="ev-details" style="display:none">${kvs}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('detail-event-rows').innerHTML = rows || '<div class="loading">no events</div>';
+}
+
+// ── Run Graph (SVG) ───────────────────────────────────────────────────────────
+function drawGraph() {
+  const svg = document.getElementById('run-graph-svg');
+  if (svg.dataset.drawn) return;
+  svg.dataset.drawn = '1';
+
+  const events  = svg._events  || [];
+  const signals = svg._signals || [];
+  if (!events.length) {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', '450'); t.setAttribute('y', '160');
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('fill', '#4a5568');
+    t.setAttribute('font-family', "'IBM Plex Mono',monospace");
+    t.setAttribute('font-size', '12');
+    t.textContent = 'No events recorded';
+    svg.appendChild(t);
+    return;
+  }
+
+  const W = 900, H = 320;
+  const ns = 'http://www.w3.org/2000/svg';
+
+  function el(tag, attrs, text) {
+    const e = document.createElementNS(ns, tag);
+    Object.entries(attrs).forEach(([k, v]) => e.setAttribute(k, v));
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  // Build step summary (one node per step_index)
+  const stepMap = {};
+  events.forEach(e => {
+    const s = e.step_index;
+    if (!stepMap[s]) stepMap[s] = { step: s, types: [], payload: {} };
+    stepMap[s].types.push(e.event_type);
+    Object.assign(stepMap[s].payload, e.payload || {});
+  });
+  const steps = Object.values(stepMap).sort((a, b) => a.step - b.step);
+  const loopSet = detectLoops(events);
+
+  const R = 22;
+  const total = steps.length;
+  const spacing = Math.min(90, Math.max(60, (W - 80) / Math.max(total, 1)));
+  const startX = 50;
+  const midY = H / 2;
+
+  // Map step → node position
+  const nodes = steps.map((st, i) => {
+    const isLoop = st.types.includes('tool.called') &&
+      loopSet.has(st.payload?.tool_name + ':' + st.payload?.args_hash);
+    const isLLM   = st.types.some(t => t.startsWith('llm.'));
+    const isStart = st.types.includes('run.started');
+    const isEnd   = st.types.includes('run.completed') || st.types.includes('run.final_answer');
+    const isTool  = st.types.includes('tool.called');
+    const isFail  = st.types.includes('tool.responded') && st.payload?.success === false;
+
+    const type = isStart || isEnd ? 'start'
+      : isLoop   ? 'bad'
+      : isFail   ? 'bad'
+      : isLLM    ? 'llm'
+      : isTool   ? 'ok'
+      : 'ok';
+
+    const label = isStart ? 'START' : isEnd ? 'END'
+      : isTool ? (st.payload?.tool_name || 'tool').slice(0, 6)
+      : isLLM  ? 'LLM' : '?';
+
+    const sub = isLLM && st.payload?.prompt_tokens ? st.payload.prompt_tokens + 'tk' : '';
+
+    // Alternate loop nodes up/down
+    const yOff = (isLoop && i % 2 === 0) ? -60 : (isLoop && i % 2 === 1) ? 60 : 0;
+
+    return { id: String(st.step), x: startX + i * spacing, y: midY + yOff, type, label, sub, isLoop };
+  });
+
+  const nodeMap = Object.fromEntries(nodes.map(n => [n.id, n]));
+
+  const C = {
+    ok:    { stroke: '#2eb872', fill: 'rgba(46,184,114,0.1)'   },
+    bad:   { stroke: '#e53e3e', fill: 'rgba(229,62,62,0.12)'   },
+    llm:   { stroke: '#9b72e8', fill: 'rgba(155,114,232,0.1)'  },
+    start: { stroke: '#4a9ede', fill: 'rgba(74,158,222,0.12)'  },
+  };
+
+  // Defs
+  const defs = el('defs', {});
+  ['norm','bad','warn'].forEach(k => {
+    const m = el('marker', { id:'arr-'+k, markerWidth:'8', markerHeight:'8', refX:'6', refY:'3', orient:'auto' });
+    const col = k === 'bad' ? '#e53e3e' : k === 'warn' ? '#d4920a' : '#253d62';
+    m.appendChild(el('path', { d:'M0,0 L0,6 L8,3 z', fill: col }));
+    defs.appendChild(m);
+  });
+  svg.appendChild(defs);
+
+  // Loop highlight
+  const loopNodes = nodes.filter(n => n.isLoop);
+  if (loopNodes.length) {
+    const lxs = loopNodes.map(n => n.x);
+    const lys = loopNodes.map(n => n.y);
+    const lx = Math.min(...lxs) - 36, ly = Math.min(...lys) - 36;
+    const lw = Math.max(...lxs) - lx + 72, lh = Math.max(...lys) - ly + 72;
+    svg.appendChild(el('rect', { x:lx, y:ly, width:lw, height:lh, rx:'10',
+      fill:'rgba(229,62,62,0.05)', stroke:'rgba(229,62,62,0.2)',
+      'stroke-width':'1', 'stroke-dasharray':'4 3' }));
+    svg.appendChild(el('text', { x:lx+6, y:ly+13, fill:'rgba(229,62,62,0.5)',
+      'font-family':"'IBM Plex Mono',monospace", 'font-size':'9', 'letter-spacing':'1' }, 'LOOP'));
+  }
+
+  // Edges between consecutive nodes
+  for (let i = 0; i < nodes.length - 1; i++) {
+    const a = nodes[i], b = nodes[i+1];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.sqrt(dx*dx + dy*dy) || 1;
+    const ox = dx/len * R, oy = dy/len * R;
+    const bad = b.isLoop || (b.type === 'bad');
+    svg.appendChild(el('path', {
+      d: `M${a.x+ox},${a.y+oy} L${b.x-ox},${b.y-oy}`,
+      stroke: bad ? '#e53e3e' : '#253d62',
+      fill:'none', 'stroke-width': bad ? '1.5' : '1',
+      'marker-end': `url(#arr-${bad ? 'bad' : 'norm'})`,
+    }));
+  }
+
+  // Back-edge for loop nodes back to their first occurrence
+  nodes.filter(n => n.isLoop).forEach(n => {
+    const firstLoop = nodes.find(x => x !== n && x.isLoop && x.label === n.label);
+    if (firstLoop) {
+      const cy = Math.max(n.y, firstLoop.y) + 55;
+      svg.appendChild(el('path', {
+        d: `M${n.x},${n.y+R} C${n.x},${cy} ${firstLoop.x},${cy} ${firstLoop.x},${firstLoop.y+R}`,
+        stroke:'#e53e3e', fill:'none', 'stroke-width':'1',
+        'stroke-dasharray':'4 3', 'marker-end':'url(#arr-bad)',
+      }));
+    }
+  });
+
+  // Nodes
+  nodes.forEach(n => {
+    const c = C[n.type] || C.ok;
+    const g = el('g', { transform:`translate(${n.x},${n.y})` });
+    if (n.isLoop) g.appendChild(el('circle', { r:R+8, fill:'rgba(229,62,62,0.05)', cx:'0', cy:'0' }));
+    g.appendChild(el('circle', { r:R, cx:'0', cy:'0', fill:c.fill, stroke:c.stroke, 'stroke-width':'1.5' }));
+    g.appendChild(el('text', { x:'0', y:n.sub?'-4':'0', 'text-anchor':'middle', 'dominant-baseline':'middle',
+      fill:c.stroke, 'font-family':"'IBM Plex Mono',monospace", 'font-size':'8', 'font-weight':'600' }, n.label));
+    if (n.sub) g.appendChild(el('text', { x:'0', y:'8', 'text-anchor':'middle', 'dominant-baseline':'middle',
+      fill:'rgba(200,196,188,0.4)', 'font-family':"'IBM Plex Mono',monospace", 'font-size':'7' }, n.sub));
+    svg.appendChild(g);
+  });
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function detectLoops(events) {
+  // Returns Set of "tool_name:args_hash" combos that appear 3+ times
+  const counts = {};
+  events.filter(e => e.event_type === 'tool.called').forEach(e => {
+    const key = (e.payload?.tool_name || '') + ':' + (e.payload?.args_hash || '');
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  return new Set(Object.entries(counts).filter(([,v]) => v >= 3).map(([k]) => k));
+}
+
+function statusCell(e) {
+  const p = e.payload || {};
+  if (e.event_type === 'run.started')   return '<span class="ev-ok">✓ started</span>';
+  if (e.event_type === 'run.completed') return '<span class="ev-ok">✓ done</span>';
+  if (e.event_type === 'run.final_answer') return '<span class="ev-warn">final_answer</span>';
+  if (e.event_type === 'tool.responded')
+    return p.success === false ? '<span class="ev-err">✗ fail</span>' : '<span class="ev-ok">✓</span>';
+  if (e.event_type === 'llm.responded')
+    return `<span class="${p.finish_reason === 'stop' ? 'ev-ok' : 'ev-warn'}">${esc(p.finish_reason || '—')}</span>`;
+  return '—';
+}
+
+function payloadSummary(e) {
+  const p = e.payload || {};
+  const parts = [];
+  if (p.model)              parts.push('model=' + esc(p.model));
+  if (p.tool_name)          parts.push('tool=' + esc(p.tool_name));
+  if (p.prompt_tokens)      parts.push('prompt_tokens=' + p.prompt_tokens);
+  if (p.completion_tokens)  parts.push('completion_tokens=' + p.completion_tokens);
+  if (p.latency_ms != null) parts.push('latency=' + p.latency_ms + 'ms');
+  if (p.output_length)      parts.push('output_len=' + p.output_length);
+  if (p.input_hash)         parts.push('input_hash=<span class="ev-hash">' + esc(p.input_hash.slice(0,8)) + '</span>');
+  if (p.args_hash)          parts.push('args_hash=<span class="ev-hash">' + esc(p.args_hash.slice(0,8)) + '</span>');
+  if (p.output_hash && p.output_hash.length > 0)
+    parts.push('output_hash=<span class="ev-hash">' + esc(p.output_hash.slice(0,8)) + '</span>');
+  return parts.join(' · ') || '—';
+}
+
+function evidenceSummary(signal) {
+  if (signal.evidence_summary) return signal.evidence_summary;
+  const ev = signal.evidence || {};
+  if (ev.tool && ev.count)     return ev.tool + ' called ' + ev.count + '× in ' + (ev.window || ev.count) + '-step window';
+  if (ev.matched_pattern_count) return ev.matched_pattern_count + ' injection pattern' + (ev.matched_pattern_count>1?'s':'') + ' matched';
+  if (ev.result_count != null) return 'retrieval returned ' + ev.result_count + ' results';
+  return 'confidence ' + (signal.confidence * 100).toFixed(0) + '%';
+}
+
+function topSev(sigs) {
+  const order = ['CRITICAL','HIGH','MEDIUM','LOW'];
+  for (const s of order) {
+    if (sigs.some(x => x.severity === s)) return s;
+  }
+  return sigs[0]?.severity || 'LOW';
+}
+
+function sevToColor(sev) {
+  return { CRITICAL:'#9b72e8', HIGH:'#e53e3e', MEDIUM:'#d4920a', LOW:'#2eb872' }[sev] || '#4a5568';
+}
+
+function ftColor(ft) {
+  if (ft.includes('INJECTION')) return 'var(--purple)';
+  if (ft.includes('LOOP'))      return 'var(--red)';
+  if (ft.includes('RETRY') || ft.includes('STORM')) return 'var(--orange)';
+  if (ft.includes('BLOAT') || ft.includes('INFLATION')) return 'var(--amber)';
+  return 'var(--blue)';
+}
+
+function ftSev(ft) {
+  if (ft.includes('INJECTION')) return { label:'CRIT', bg:'var(--purple-d)', fg:'var(--purple)' };
+  if (ft.includes('LOOP'))      return { label:'HIGH', bg:'var(--red-d)',    fg:'var(--red)'    };
+  return { label:'MED', bg:'var(--amber-d)', fg:'var(--amber)' };
+}
+
+function ftLabel(ft) {
+  return ft.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function shortId(id) {
+  if (!id) return '—';
+  return id.length > 13 ? id.slice(0, 8) + '…' : id;
+}
+
+function fmtDur(sec) {
+  if (sec == null || sec < 0) return '—';
+  if (sec < 1)    return Math.round(sec * 1000) + 'ms';
+  if (sec < 60)   return sec.toFixed(1) + 's';
+  return (sec / 60).toFixed(1) + 'm';
+}
+
+function timeAgo(ts) {
+  const sec = Date.now() / 1000 - ts;
+  if (sec < 60)   return Math.round(sec)     + 's ago';
+  if (sec < 3600) return Math.round(sec/60)  + 'min ago';
+  return Math.round(sec/3600) + 'h ago';
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function copyRunId() {
+  if (_curRunId) navigator.clipboard?.writeText(_curRunId).catch(() => {});
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function nav(id, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.sb-item').forEach(s => s.classList.remove('active'));
+  const page = document.getElementById('page-' + id);
+  if (page) page.classList.add('active');
+  if (el)   el.classList.add('active');
+  if (id === 'heatmap') renderHeatmap();
+  if (id === 'agents')  renderAgents();
+}
+
+// ── Detail tabs ───────────────────────────────────────────────────────────────
+function switchTab(id, el) {
+  document.querySelectorAll('.dtab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.dtab').forEach(t => t.classList.remove('active'));
+  document.getElementById('dtab-' + id).classList.add('active');
+  el.classList.add('active');
+  if (id === 'graph') drawGraph();
+}
+
+// ── Alert groups ──────────────────────────────────────────────────────────────
+function toggleGroup(header) {
+  const runs = header.nextElementSibling;
+  const btn  = header.querySelector('.ag-expand');
+  runs.classList.toggle('open');
+  btn.textContent = runs.classList.contains('open') ? 'collapse ↑' : 'expand ↓';
+}
+
+// ── Event log rows ────────────────────────────────────────────────────────────
+function toggleEvent(wrap, evt) {
+  if (evt && evt.target.closest('.ev-details')) return;
+  const detail = wrap.querySelector('.ev-details');
+  if (!detail) return;
+  const open = detail.style.display !== 'none';
+  detail.style.display = open ? 'none' : 'grid';
+}
+
+// ── Risk trend chart ─────────────────────────────────────────────────────────
+function renderRiskTrend() {
+  const barsEl  = document.getElementById('risk-trend-bars');
+  const axisEl  = document.getElementById('risk-trend-axis');
+  const totalEl = document.getElementById('risk-trend-total');
+  if (!barsEl) return;
+
+  const HOURS  = 24;
+  const now    = Date.now() / 1000;
+  const buckets = Array(HOURS).fill(0);   // index 0 = 24h ago, index 23 = current hour
+
+  _allSigs.forEach(s => {
+    const age = now - s.detected_at;
+    if (age < 0 || age >= HOURS * 3600) return;
+    const idx = HOURS - 1 - Math.floor(age / 3600);
+    if (idx >= 0 && idx < HOURS) buckets[idx]++;
+  });
+
+  const maxVal  = Math.max(...buckets, 1);
+  const total24 = buckets.reduce((a, b) => a + b, 0);
+  const avg     = total24 / HOURS;
+  const MAX_H   = 64;
+
+  if (totalEl) {
+    totalEl.textContent = total24 + ' signal' + (total24 !== 1 ? 's' : '') + ' today';
+  }
+
+  // Bars
+  barsEl.innerHTML = '';
+  buckets.forEach((count, i) => {
+    const h = count === 0 ? 2 : Math.max(4, Math.round((count / maxVal) * MAX_H));
+    const isCurrent = i === HOURS - 1;
+
+    let bg, border;
+    if (count === 0) {
+      bg = 'var(--s2)'; border = 'var(--wire)';
+    } else if (count > avg * 2.5 || count >= 5) {
+      bg = 'rgba(229,62,62,0.28)'; border = 'rgba(229,62,62,' + (isCurrent ? '1' : '0.7') + ')';
+    } else if (count > avg * 1.5 || count >= 3) {
+      bg = 'rgba(212,146,10,0.26)'; border = 'rgba(212,146,10,' + (isCurrent ? '1' : '0.65') + ')';
+    } else {
+      bg = 'rgba(46,184,114,0.22)'; border = 'rgba(46,184,114,' + (isCurrent ? '0.9' : '0.55') + ')';
+    }
+
+    // Current hour: brighter top edge
+    const radius = isCurrent ? '3px 3px 0 0' : '2px 2px 0 0';
+    const outline = isCurrent ? ';box-shadow:0 -2px 6px rgba(74,158,222,0.25)' : '';
+
+    const bar = document.createElement('div');
+    bar.style.cssText = `flex:1;height:${h}px;background:${bg};border:1px solid ${border};border-radius:${radius};transition:height .4s${outline}`;
+
+    const hrsAgo = HOURS - 1 - i;
+    const labelTime = hrsAgo === 0 ? 'now' : ('-' + hrsAgo + 'h');
+    const d = new Date((now - hrsAgo * 3600) * 1000);
+    const hhmm = d.getUTCHours().toString().padStart(2, '0') + ':00';
+    bar.title = hhmm + ' (' + labelTime + '): ' + count + ' signal' + (count !== 1 ? 's' : '');
+
+    barsEl.appendChild(bar);
+  });
+
+}
+
+// ── Trend deltas ──────────────────────────────────────────────────────────────
+function updateTrendDeltas() {
+  const windowSecs = parseInt(document.getElementById('trend-window')?.value || '86400', 10);
+  const now = Date.now() / 1000;
+  const curStart  = now - windowSecs;
+  const prevStart = curStart - windowSecs;
+
+  function delta(sigs, filterFn) {
+    const cur  = sigs.filter(s => s.detected_at >= curStart  && filterFn(s)).length;
+    const prev = sigs.filter(s => s.detected_at >= prevStart && s.detected_at < curStart && filterFn(s)).length;
+    return { cur, prev, diff: cur - prev };
+  }
+
+  const dCrit = delta(_allSigs, s => s.severity === 'CRITICAL');
+  const dHigh = delta(_allSigs, s => s.severity === 'HIGH');
+  const dSig  = delta(_allSigs, () => true);
+
+  const label = windowSecs === 3600 ? 'vs last hour' : windowSecs === 86400 ? 'vs yesterday' : 'vs last week';
+
+  function renderDelta(id, d) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (d.prev === 0 && d.cur === 0) {
+      el.innerHTML = '<span class="delta-flat">— no baseline data</span>';
+      return;
+    }
+    const sign = d.diff > 0 ? '+' : '';
+    const cls  = d.diff > 0 ? 'delta-up' : d.diff < 0 ? 'delta-down' : 'delta-flat';
+    el.innerHTML = `<span class="${cls}">${sign}${d.diff}</span> <span style="color:var(--chalk4)">${label}</span>`;
+  }
+
+  renderDelta('delta-critical', dCrit);
+  renderDelta('delta-high',     dHigh);
+  renderDelta('delta-signals',  dSig);
+}
+
+// ── Agent health cards ────────────────────────────────────────────────────────
+function renderAgents() {
+  const grid = document.getElementById('agents-grid');
+  if (!grid) return;
+  if (!_agents.length) {
+    grid.innerHTML = '<div class="loading">no agents yet</div>';
+    return;
+  }
+  grid.innerHTML = _agents.map(a => {
+    const totalRuns = a.run_count || a._runs?.length || 0;
+    const failRuns  = a._runs ? a._runs.filter(r => r.has_signals).length : 0;
+    const failRate  = totalRuns ? Math.round(failRuns / totalRuns * 100) : 0;
+    const dominant  = Object.entries(a.failure_types || {}).sort((x, y) => y[1] - x[1])[0];
+    const lastSeen  = a.last_seen ? timeAgo(a.last_seen) : '—';
+    const color     = failRate >= 50 ? 'var(--red)' : failRate >= 25 ? 'var(--amber)' : failRate >= 10 ? 'var(--orange)' : 'var(--green)';
+    const shadowCnt = a._shadowSignals?.length || 0;
+    return `<div class="agent-card" onclick="nav('runs',document.querySelector('[onclick*=runs]'))">
+      <div class="ac-top-bar" style="background:${color}"></div>
+      <div class="ac-id" title="${esc(a.agent_id)}">${esc(a.agent_id)}</div>
+      <div class="ac-fail-rate" style="color:${color}">${failRate}%</div>
+      <div class="ac-dominant">${dominant ? ftLabel(dominant[0]) + ' dominant' : 'no failures yet'}</div>
+      <div class="ac-stats-row">
+        <div class="ac-stat">
+          <div class="ac-stat-val">${totalRuns}</div>
+          <div class="ac-stat-lbl">Runs</div>
+        </div>
+        <div class="ac-stat">
+          <div class="ac-stat-val" style="color:var(--red)">${a.critical_count || 0}</div>
+          <div class="ac-stat-lbl">Critical</div>
+        </div>
+        <div class="ac-stat">
+          <div class="ac-stat-val" style="color:var(--orange)">${a.high_count || 0}</div>
+          <div class="ac-stat-lbl">High</div>
+        </div>
+      </div>
+      ${shadowCnt ? `<div style="margin-top:.75rem;display:flex;align-items:center;gap:6px">
+        <span class="shadow-badge">SHADOW</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)">${shadowCnt} ungraduated signal${shadowCnt!==1?'s':''}</span>
+      </div>` : ''}
+      <div class="ac-last">last seen ${esc(lastSeen)}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Shadow signal section (appended to alerts page) ───────────────────────────
+function renderShadowSection() {
+  if (!_allShadowSigs.length) return;
+  const container = document.getElementById('alerts-container');
+  if (!container) return;
+
+  const groups = {};
+  _allShadowSigs.forEach(s => {
+    if (!groups[s.failure_type]) groups[s.failure_type] = [];
+    groups[s.failure_type].push(s);
+  });
+
+  const sorted = Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
+
+  container.insertAdjacentHTML('beforeend', `<div class="shadow-section">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--blue);letter-spacing:3px;text-transform:uppercase;display:flex;align-items:center;gap:8px">
+        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--blue)"></span>
+        Shadow signals — stored, not alerted
+      </div>
+      <span class="shadow-badge" style="font-size:10px;padding:3px 8px">${_allShadowSigs.length} total</span>
+    </div>
+    <div style="font-size:11px;color:var(--chalk4);margin-bottom:1rem;line-height:1.7">
+      These detectors fired but are in shadow mode — they're being evaluated for precision before graduation.
+      Add a detector to <code style="font-family:'IBM Plex Mono',monospace;color:var(--blue)">LIVE_DETECTORS</code> to start alerting.
+    </div>
+    ${sorted.map(([ft, sigs]) => {
+      const uniqRuns = [...new Set(sigs.map(s => s.run_id))];
+      const agentId  = sigs[0]?.agent_id || '';
+      const latest   = Math.max(...sigs.map(s => s.detected_at));
+      const runItems = uniqRuns.slice(0, 5).map(rid => {
+        const s = sigs.filter(x => x.run_id === rid);
+        const c = Math.max(...s.map(x => x.confidence)).toFixed(2);
+        return `<div class="ag-run-item" onclick="showDetail('${esc(rid)}','${esc(agentId)}')">
+          <span class="run-id">${shortId(rid)}</span>
+          <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
+          <span style="margin-left:auto">conf ${c}</span>
+          <span class="shadow-badge" style="margin-left:8px">SHADOW</span>
+        </div>`;
+      }).join('');
+      return `<div class="alert-group shadow-sig-card">
+        <div class="ag-header" onclick="toggleGroup(this)">
+          <div class="ag-sev" style="background:var(--blue);outline:1px dashed var(--blue);outline-offset:1px"></div>
+          <span class="ag-title">${ftLabel(ft)}</span>
+          <span class="shadow-badge" style="margin-left:6px">SHADOW</span>
+          <span class="ag-count" style="margin-left:8px">${uniqRuns.length} run${uniqRuns.length !== 1 ? 's' : ''}</span>
+          <span class="ag-time mono">${timeAgo(latest)}</span>
+          <span class="ag-expand">expand ↓</span>
+        </div>
+        <div class="ag-runs">${runItems}</div>
+      </div>`;
+    }).join('')}
+  </div>`);
+}
+
+// ── Compare runs ──────────────────────────────────────────────────────────────
+function populateCompareDropdowns() {
+  const selA = document.getElementById('cmp-run-a');
+  const selB = document.getElementById('cmp-run-b');
+  if (!selA || !selB) return;
+  const valA = selA.value, valB = selB.value;
+  const opts = [..._allRuns]
+    .sort((a, b) => b.started_at - a.started_at)
+    .slice(0, 150)
+    .map(r => {
+      const sigs = _allSigs.filter(s => s.run_id === r.run_id);
+      const tag  = sigs.length ? ` [${topSev(sigs)}]` : ' [CLEAN]';
+      const aid  = r.agent_id || r._agentId || '';
+      return `<option value="${esc(r.run_id)}">${esc(shortId(r.run_id))} · ${esc(aid)}${tag}</option>`;
+    }).join('');
+  const blank = '<option value="">— select run —</option>';
+  selA.innerHTML = blank + opts;
+  selB.innerHTML = blank + opts;
+  if (valA) selA.value = valA;
+  if (valB) selB.value = valB;
+}
+
+function renderCompare() {
+  const idA    = document.getElementById('cmp-run-a')?.value;
+  const idB    = document.getElementById('cmp-run-b')?.value;
+  const panels = document.getElementById('compare-panels');
+  if (!panels) return;
+  if (!idA || !idB) {
+    panels.innerHTML = '<div class="cmp-placeholder">Select two runs above to compare them side by side.</div>';
+    return;
+  }
+  if (idA === idB) {
+    panels.innerHTML = '<div class="cmp-placeholder">Select two different runs to compare.</div>';
+    return;
+  }
+  const runA  = _allRuns.find(r => r.run_id === idA);
+  const runB  = _allRuns.find(r => r.run_id === idB);
+  if (!runA || !runB) return;
+  const sigsA = _allSigs.filter(s => s.run_id === idA);
+  const sigsB = _allSigs.filter(s => s.run_id === idB);
+
+  panels.innerHTML = `<div class="cmp-panels">
+    ${_cmpPanel(runA, sigsA, 'A — Baseline', null, null)}
+    ${_cmpPanel(runB, sigsB, 'B — Compare', runA, sigsA)}
+  </div>
+  <div class="table-card" style="padding:1.25rem;margin-top:1.25rem">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);letter-spacing:2px;text-transform:uppercase;margin-bottom:1rem">Diff summary</div>
+    ${_cmpDiff(runA, sigsA, runB, sigsB)}
+  </div>`;
+}
+
+function _cmpPanel(run, sigs, label, baseRun, baseSigs) {
+  const dur    = run.completed_at && run.started_at ? fmtDur(run.completed_at - run.started_at) : '—';
+  const agentId = run.agent_id || run._agentId || '';
+  const sev    = sigs.length ? topSev(sigs) : null;
+  const maxConf = sigs.length ? Math.max(...sigs.map(s => s.confidence)) : 0;
+
+  function metric(lbl, val, baseVal, higherIsBad) {
+    let cls = 'cmp-neutral';
+    if (baseRun && baseVal != null && val !== '—' && baseVal !== '—') {
+      const numVal  = parseFloat(String(val));
+      const numBase = parseFloat(String(baseVal));
+      if (!isNaN(numVal) && !isNaN(numBase) && numVal !== numBase) {
+        const worse = higherIsBad ? numVal > numBase : numVal < numBase;
+        cls = worse ? 'cmp-worse' : 'cmp-better';
+      }
+    }
+    return `<div class="cmp-metric">
+      <div class="cmp-metric-lbl">${lbl}</div>
+      <div class="cmp-metric-val ${cls}">${esc(String(val))}</div>
+    </div>`;
+  }
+
+  const stepsBase = baseRun?.step_count || null;
+  const sigsBase  = baseSigs?.length ?? null;
+
+  return `<div class="cmp-panel">
+    <div class="cmp-panel-title" style="color:${sev ? sevToColor(sev) : 'var(--green)'}">${esc(label)}</div>
+    <div class="cmp-run-id">${esc(run.run_id)}</div>
+    <div style="font-size:12px;color:var(--chalk3);margin:.25rem 0 .75rem">${esc(agentId)} · ${run.agent_version ? esc(run.agent_version.slice(0,8)) : '—'}</div>
+    <div class="cmp-metrics-grid">
+      ${metric('Steps', run.step_count || 0, stepsBase, true)}
+      ${metric('Duration', dur, null, true)}
+      ${metric('Signals', sigs.length, sigsBase, true)}
+      ${metric('Max confidence', sigs.length ? maxConf.toFixed(2) : '0.00', null, true)}
+    </div>
+    <div>
+      <div class="cmp-sigs-title">Signals fired</div>
+      ${sigs.length
+        ? sigs.map(s => `<div class="cmp-sig-row cmp-sig-live">
+            <span class="sev-badge sb-${s.severity.toLowerCase()}">${s.severity}</span>
+            <span style="flex:1;font-family:'IBM Plex Mono',monospace;font-size:10px">${esc(s.failure_type)}</span>
+            <span style="color:var(--chalk4);font-family:'IBM Plex Mono',monospace;font-size:10px">conf ${s.confidence.toFixed(2)}</span>
+          </div>`).join('')
+        : `<div class="cmp-no-sigs">✓ clean — no signals fired</div>`
+      }
+    </div>
+    <div style="margin-top:1rem">
+      <button class="view-btn" onclick="showDetail('${esc(run.run_id)}','${esc(agentId)}');event.stopPropagation()">Open full detail →</button>
+    </div>
+  </div>`;
+}
+
+function _cmpDiff(runA, sigsA, runB, sigsB) {
+  const durA = runA.completed_at && runA.started_at ? runA.completed_at - runA.started_at : null;
+  const durB = runB.completed_at && runB.started_at ? runB.completed_at - runB.started_at : null;
+
+  const rows = [
+    { lbl: 'Steps',        a: runA.step_count || 0, b: runB.step_count || 0, higherIsBad: true },
+    { lbl: 'Signals',      a: sigsA.length,          b: sigsB.length,          higherIsBad: true },
+    { lbl: 'Duration',     a: durA ? fmtDur(durA) : '—', b: durB ? fmtDur(durB) : '—', rawDiff: durA && durB ? durB - durA : null, higherIsBad: true },
+  ];
+
+  const newFts   = [...new Set(sigsB.map(s => s.failure_type))].filter(ft => !sigsA.some(s => s.failure_type === ft));
+  const fixedFts = [...new Set(sigsA.map(s => s.failure_type))].filter(ft => !sigsB.some(s => s.failure_type === ft));
+
+  const tableRows = rows.map(r => {
+    const diff = r.rawDiff != null ? r.rawDiff : (typeof r.a === 'number' && typeof r.b === 'number' ? r.b - r.a : null);
+    let cls = '', diffStr = '—';
+    if (diff != null) {
+      cls     = diff === 0 ? 'delta-flat' : r.higherIsBad ? (diff > 0 ? 'cmp-worse' : 'cmp-better') : (diff > 0 ? 'cmp-better' : 'cmp-worse');
+      diffStr = (diff > 0 ? '+' : '') + (r.rawDiff != null ? fmtDur(Math.abs(diff)) * (diff < 0 ? -1 : 1) : diff);
+      if (r.rawDiff != null) diffStr = (diff > 0 ? '+' : '') + fmtDur(Math.abs(diff));
+    }
+    return `<tr>
+      <td style="color:var(--chalk4)">${esc(r.lbl)}</td>
+      <td class="mono">${esc(String(r.a))}</td>
+      <td class="mono">${esc(String(r.b))}</td>
+      <td class="mono ${cls}">${esc(String(diffStr))}</td>
+    </tr>`;
+  }).join('');
+
+  return `<table class="run-table" style="margin-bottom:1rem">
+    <thead><tr><th>Metric</th><th>Run A</th><th>Run B</th><th>Delta</th></tr></thead>
+    <tbody>${tableRows}</tbody>
+  </table>
+  ${newFts.length   ? `<div style="font-size:11px;color:var(--red);margin-bottom:.5rem">New in B: ${newFts.map(ftLabel).join(', ')}</div>` : ''}
+  ${fixedFts.length ? `<div style="font-size:11px;color:var(--green)">Resolved in B: ${fixedFts.map(ftLabel).join(', ')}</div>` : ''}`;
+}
+
+// ── Clock ─────────────────────────────────────────────────────────────────────
+function tick() {
+  const now = new Date();
+  document.getElementById('clock').textContent = now.toUTCString().slice(17, 25) + ' UTC';
+}
+tick(); setInterval(tick, 1000);
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+loadAll();
+setInterval(loadAll, 15000);
+</script>
+</body>
+</html>

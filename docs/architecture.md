@@ -50,16 +50,19 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 ┌──────────────────────────────────────────────────────────────┐
 │                  Customer API  :8002                         │
 │                                                             │
-│   GET /v1/agents         GET /v1/runs/{id}                  │
-│   GET /v1/agents/{id}/runs    GET /v1/agents/{id}/signals   │
+│   GET /v1/agents                  GET /v1/runs/{id}         │
+│   GET /v1/agents/{id}/runs        GET /v1/runs/{id}/events  │
+│   GET /v1/agents/{id}/signals     GET /v1/agents/{id}/insights│
 │   Read-only · bearer token auth · explains signals inline   │
 └──────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
 │                  Dashboard  :3000                            │
 │                                                             │
-│   Static HTML/JSX served by nginx (Docker)                  │
-│   Fetches live data from Customer API · auto-refreshes 10s  │
+│   Static HTML served by nginx (Docker)                      │
+│   Fetches live data from Customer API · auto-refreshes 15s  │
+│   Pages: Overview · Runs · Alerts · Analytics · Heatmap     │
+│          Agents · Compare runs · Detectors                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -213,6 +216,54 @@ A read-only FastAPI service. Powers the dashboard and any customer integrations.
 - All signal responses include the full explanation (title, what, why, fixes)
 - Pagination via `offset` / `limit` query params
 
+**Endpoint reference:**
+
+| Endpoint | Description |
+|---|---|
+| `GET /v1/agents` | List all agents with run counts, signal counts, critical/high counts, and failure type breakdown |
+| `GET /v1/agents/{id}/runs` | Paginated run list for an agent — summary fields only (no events) |
+| `GET /v1/agents/{id}/signals` | Paginated signal list with full explanations. Accepts `severity`, `failure_type`, `include_shadow` filters |
+| `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution |
+| `GET /v1/runs/{id}` | Full run detail — metadata, all events, all signals with explanations |
+| `GET /health` | Service health check — returns `{"status":"ok","db":"ok"}` |
+
+**Signal endpoints** accept an optional `include_shadow` query parameter:
+
+```
+GET /v1/agents/{id}/signals?include_shadow=true
+```
+
+When `include_shadow=false` (default), only live signals (`shadow = FALSE`) are returned — the same set that triggers alerts. When `true`, shadow signals are included and each signal object contains a `shadow: bool` field. The dashboard fetches with `include_shadow=true` and renders shadow signals separately with a dashed border + SHADOW badge in the Alerts page.
+
+---
+
+### Dashboard (port 3000)
+
+A single-page HTML app served by nginx (Docker). No build step — plain HTML/CSS/JS fetching from the Customer API with `Authorization: Bearer <api_key>`.
+
+Auto-refreshes every 15 seconds. All data is computed client-side from the API responses (no server-side rendering).
+
+**Pages:**
+
+| Page | Data sources | Key behaviour |
+|---|---|---|
+| Overview | `/v1/agents` + per-agent runs + signals | Stat cards with configurable trend deltas (1h / 24h / 7d). Risk Trend bar chart (24 hourly buckets from `detected_at`). Top failure patterns with ↑↓ vs prior period. |
+| All Runs | Per-agent `/runs` | Sortable table; click any row to open run detail |
+| Alerts | Per-agent `/signals?include_shadow=true` | Live signals grouped by failure type. Shadow signals in a separate section with dashed border + SHADOW badge |
+| Analytics | `/v1/agents` | Cross-agent totals, top failure patterns, per-agent breakdown |
+| Risk Heatmap | `/v1/agents` (failure_types field) | Failure type × agent intensity grid |
+| Agents | `/v1/agents` + per-agent runs | Health cards: failure rate %, dominant pattern, run/signal counts, shadow signal count |
+| Compare Runs | Per-agent runs + signals | Side-by-side panel for any two runs — metrics diff, signal diff, new/resolved failure types |
+| Detectors | Static | Threshold sliders (UI only; edit `detectors.yml` to apply) |
+
+**Run detail panel** (opened from any run row) fetches `/v1/runs/{id}` and per-agent signals, then renders three tabs:
+
+- **Analysis** — step timeline, signal score cards, plain-English explanation + suggested fix from the explain layer
+- **Run graph** — SVG node graph built from raw events: green = LLM, orange = tool (ok), red = looping tool call, blue = start/end. Loop clusters highlighted with dashed outline.
+- **Event log** — all events in order, expandable to full payload. Content fields shown as SHA-256 hashes.
+
+**Shadow signal rendering** — the dashboard fetches all signals with `?include_shadow=true` and splits them client-side: `shadow=false` signals feed the normal alert groups; `shadow=true` signals feed the shadow section in Alerts and the shadow count badge on agent health cards.
+
 ---
 
 ## Database Schema
@@ -245,8 +296,8 @@ CREATE TABLE failure_signals (
     confidence     REAL        NOT NULL,
     evidence       JSONB       NOT NULL,
     detected_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    shadow         BOOLEAN     NOT NULL DEFAULT TRUE,
-    alerted        BOOLEAN     NOT NULL DEFAULT FALSE
+    shadow         BOOLEAN     NOT NULL DEFAULT TRUE,   -- TRUE = stored-only (not alerted); FALSE = live
+    alerted        BOOLEAN     NOT NULL DEFAULT FALSE   -- set to TRUE after alerts worker delivers
 );
 
 -- Prevents detector from reprocessing completed runs

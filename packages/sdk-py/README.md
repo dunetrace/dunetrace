@@ -33,9 +33,9 @@ dt.shutdown()
 from dunetrace import Dunetrace
 
 dt = Dunetrace()
-dt.auto_instrument()   # patches openai, anthropic, httpx, requests
+dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests globally
 
-@dt.agent("my-agent", model="gpt-4o")
+@dt.agent(model="gpt-4o")      # agent_id inherited from init()
 def run_agent(query: str) -> str:
     return openai_client.chat.completions.create(...).choices[0].message.content
 ```

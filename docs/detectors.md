@@ -68,6 +68,19 @@ LIVE_DETECTORS: set[str] = {
 
 This lets you validate a new detector against real traffic before it pages anyone.
 
+### Shadow signals in the dashboard
+
+The **Alerts** page surfaces shadow signals in a dedicated section below the live alert groups. Shadow signals are rendered with a dashed border, reduced opacity, and a `SHADOW` badge so they're visually distinct from alerted signals. The section only appears when at least one shadow signal exists.
+
+The API exposes shadow signals via `?include_shadow=true` on the signals endpoint. Each signal object includes a `shadow: bool` field:
+
+```bash
+curl "http://localhost:8002/v1/agents/my-agent/signals?include_shadow=true" \
+  -H "Authorization: Bearer dt_dev_test"
+```
+
+Use this to evaluate detector precision before graduating — compare shadow signal rate against run outcomes manually, then promote to `LIVE_DETECTORS` when confidence is high enough.
+
 ---
 
 ## How detection works
