@@ -71,6 +71,23 @@ BEGIN
         ALTER TABLE failure_signals ADD COLUMN shadow BOOLEAN NOT NULL DEFAULT TRUE;
     END IF;
 END $$;
+
+-- Persistent issue tracking: one row per (agent_id, failure_type) pair.
+-- status: open | resolved | reopened
+-- clean_runs_since: consecutive runs with no signal of this type (reset to 0 on each hit).
+-- Resolved when clean_runs_since reaches CLEAN_RUNS_THRESHOLD (default 5).
+CREATE TABLE IF NOT EXISTS issues (
+    id               BIGSERIAL    PRIMARY KEY,
+    agent_id         TEXT         NOT NULL,
+    failure_type     TEXT         NOT NULL,
+    status           TEXT         NOT NULL DEFAULT 'open',
+    first_seen       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    last_seen        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    resolved_at      TIMESTAMPTZ,
+    affected_runs    INTEGER      NOT NULL DEFAULT 1,
+    clean_runs_since INTEGER      NOT NULL DEFAULT 0,
+    UNIQUE (agent_id, failure_type)
+);
 """
 
 # Detectors that have graduated out of shadow mode.
@@ -286,3 +303,107 @@ async def mark_run_processed(run_id: str, agent_id: str, agent_version: str,
             """,
             run_id, agent_id, agent_version, trigger, signal_count,
         )
+
+
+# ── Issue persistence ──────────────────────────────────────────────────────────
+
+CLEAN_RUNS_THRESHOLD = 5  # consecutive clean runs before an issue is marked resolved
+
+
+async def upsert_fired_issues(agent_id: str, fired_types: list[str]) -> None:
+    """For each failure type that fired this run: open a new issue or reopen/update an existing one."""
+    if not fired_types or not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO issues (agent_id, failure_type, status, affected_runs, clean_runs_since)
+            VALUES ($1, $2, 'open', 1, 0)
+            ON CONFLICT (agent_id, failure_type) DO UPDATE
+                SET last_seen        = NOW(),
+                    affected_runs    = issues.affected_runs + 1,
+                    clean_runs_since = 0,
+                    status           = CASE
+                        WHEN issues.status = 'resolved' THEN 'reopened'
+                        ELSE issues.status
+                    END,
+                    resolved_at      = CASE
+                        WHEN issues.status = 'resolved' THEN NULL
+                        ELSE issues.resolved_at
+                    END
+            """,
+            [(agent_id, ft) for ft in fired_types],
+        )
+
+
+async def advance_clean_runs(agent_id: str, fired_types: list[str]) -> None:
+    """For open/reopened issues that did NOT fire this run: increment clean counter, resolve if threshold reached."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE issues
+            SET clean_runs_since = clean_runs_since + 1,
+                status      = CASE
+                    WHEN clean_runs_since + 1 >= $3 THEN 'resolved'
+                    ELSE status
+                END,
+                resolved_at = CASE
+                    WHEN clean_runs_since + 1 >= $3 THEN NOW()
+                    ELSE resolved_at
+                END
+            WHERE agent_id    = $1
+              AND status      IN ('open', 'reopened')
+              AND ($2::text[] IS NULL OR failure_type != ALL($2::text[]))
+            """,
+            agent_id,
+            fired_types or None,
+            CLEAN_RUNS_THRESHOLD,
+        )
+
+
+async def list_issues(agent_id: str, status: Optional[str] = None) -> list[dict]:
+    """Return issues for an agent, optionally filtered by status."""
+    if not _pool:
+        return []
+
+    def _ts(v):
+        if v is None:
+            return None
+        return v.timestamp() if hasattr(v, "timestamp") else float(v)
+
+    where = "WHERE agent_id = $1"
+    params: list = [agent_id]
+    if status:
+        params.append(status.lower())
+        where += f" AND status = ${len(params)}"
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT id, agent_id, failure_type, status,
+                   first_seen, last_seen, resolved_at,
+                   affected_runs, clean_runs_since
+            FROM issues
+            {where}
+            ORDER BY
+                CASE status WHEN 'open' THEN 0 WHEN 'reopened' THEN 1 ELSE 2 END,
+                last_seen DESC
+            """,
+            *params,
+        )
+    return [
+        {
+            "id":               r["id"],
+            "agent_id":         r["agent_id"],
+            "failure_type":     r["failure_type"],
+            "status":           r["status"],
+            "first_seen":       _ts(r["first_seen"]),
+            "last_seen":        _ts(r["last_seen"]),
+            "resolved_at":      _ts(r["resolved_at"]),
+            "affected_runs":    r["affected_runs"],
+            "clean_runs_since": r["clean_runs_since"],
+        }
+        for r in rows
+    ]

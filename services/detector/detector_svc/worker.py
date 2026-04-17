@@ -24,6 +24,8 @@ from detector_svc.db import (
     init_pool,
     mark_run_processed,
     write_signals,
+    upsert_fired_issues,
+    advance_clean_runs,
 )
 from detector_svc.run_builder import build_run_state
 
@@ -90,6 +92,15 @@ async def process_run(
         is_live = signal.failure_type.value in LIVE_DETECTORS
         written = await write_signals([signal], shadow=not is_live)
         count += written
+
+    # Issue persistence: track open/resolved lifecycle per (agent_id, failure_type)
+    fired_types = [s.failure_type.value for s in signals if s.failure_type.value in LIVE_DETECTORS]
+    try:
+        if fired_types:
+            await upsert_fired_issues(agent_id, fired_types)
+        await advance_clean_runs(agent_id, fired_types)
+    except Exception as exc:
+        logger.warning("Issue tracking failed for run_id=%s: %s", run_id, exc)
 
     await mark_run_processed(run_id, agent_id, agent_version, trigger, count)
     return count

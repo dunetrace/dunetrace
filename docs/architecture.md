@@ -33,7 +33,7 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 │                      Postgres                                │
 │                                                             │
 │   events           failure_signals   processed_runs         │
-│   api_keys                                                  │
+│   api_keys         issues            digest_log             │
 └────────┬───────────────────────────────────────┬────────────┘
          │  polls every 5s                        │  polls every 10s
          ▼                                        ▼
@@ -175,7 +175,8 @@ A background polling loop that runs every 5 seconds. It is the only process that
 3. Reconstructs `RunState` by fetching and replaying all events for each run
 4. Runs 14 Tier 1 detectors against the `RunState`. `PROMPT_INJECTION_SIGNAL` is handled separately — the SDK detects injection on raw input before hashing and embeds evidence in the `run.started` payload; the worker extracts it from there rather than running the detector on `RunState`
 5. Writes any `FailureSignal` rows to Postgres
-6. Marks the run as processed
+6. Updates the `issues` table: UPSERTs an issue row for each live signal fired (`upsert_fired_issues`) and increments the clean-run counter for any open issues that did not fire this run (`advance_clean_runs`). An issue auto-resolves after 5 consecutive clean runs. Issue tracking failures are caught and logged — they do not affect run processing.
+7. Marks the run as processed
 
 Signals are written with `shadow=TRUE` unless the detector is in `LIVE_DETECTORS`.
 
@@ -203,6 +204,7 @@ A background polling loop that runs every 10 seconds. It is the only process tha
 4. Formats for Slack (Block Kit) or webhook (signed JSON)
 5. Posts via HTTP with exponential backoff retry (up to 3 attempts)
 6. Marks signals as `alerted=TRUE` only after at least one destination succeeds
+7. After each poll cycle, calls `send_weekly_digest()` — checks whether it's the configured day/hour, whether a digest was already sent within the last 6 days (via `digest_log`), and if so, fetches 7-day aggregate data and sends a Slack Block Kit summary. Digest errors are caught and logged — they do not affect signal delivery.
 
 **At-least-once delivery:** If the worker crashes between sending and marking, the signal will be re-sent on restart. Receivers should treat `(run_id, failure_type, detected_at)` as the idempotency key.
 
@@ -225,6 +227,7 @@ A read-only FastAPI service. Powers the dashboard and any customer integrations.
 | `GET /v1/agents/{id}/runs` | Paginated run list for an agent — summary fields only (no events) |
 | `GET /v1/agents/{id}/signals` | Paginated signal list with full explanations. Accepts `severity`, `failure_type`, `include_shadow` filters |
 | `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution. Also returns `failure_rates` (daily affected/total per failure type) and `systemic_patterns` (7-day rate + `is_systemic` flag for each failure type) — the data powering the Health Record panel |
+| `GET /v1/agents/{id}/issues` | Open/resolved issue list for an agent. Accepts optional `status` filter (`open`, `resolved`, `reopened`). Returns id, failure_type, status, first_seen, last_seen, resolved_at, affected_runs, clean_runs_since |
 | `GET /v1/runs/{id}` | Full run detail — metadata, all events, all signals with explanations |
 | `GET /health` | Service health check — returns `{"status":"ok","db":"ok"}` |
 
@@ -318,6 +321,27 @@ CREATE TABLE api_keys (
     customer_id    TEXT        NOT NULL,
     active         BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Cross-run issue tracker: one row per (agent_id, failure_type) pair
+CREATE TABLE issues (
+    id               BIGSERIAL    PRIMARY KEY,
+    agent_id         TEXT         NOT NULL,
+    failure_type     TEXT         NOT NULL,
+    status           TEXT         NOT NULL DEFAULT 'open',   -- open | resolved | reopened
+    first_seen       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    last_seen        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    resolved_at      TIMESTAMPTZ,
+    affected_runs    INTEGER      NOT NULL DEFAULT 1,
+    clean_runs_since INTEGER      NOT NULL DEFAULT 0,
+    UNIQUE (agent_id, failure_type)
+);
+
+-- Prevents weekly digest from re-sending within a 6-day window
+CREATE TABLE digest_log (
+    id          BIGSERIAL    PRIMARY KEY,
+    digest_type TEXT         NOT NULL DEFAULT 'weekly',
+    sent_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 ```
 

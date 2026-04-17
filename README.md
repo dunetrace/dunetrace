@@ -96,7 +96,11 @@ No raw content ever leaves your agent process. Every prompt, tool argument, and 
 
 ## Alerts
 
-Slack and generic webhook (PagerDuty, Linear, custom).
+Slack and generic webhook (PagerDuty, Linear, custom). Each alert includes a rate context line — first occurrence, recurring, or systemic (≥10% of runs affected).
+
+**Issue tracking** — the detector automatically maintains an `issues` table: one row per `(agent_id, failure_type)` pair with open/resolved/reopened status. Issues auto-resolve after 5 consecutive clean runs and reopen if the failure recurs. Query via `GET /v1/agents/{id}/issues`.
+
+**Weekly digest** — opt-in Slack summary sent every Monday at 9am UTC: top failure types, top agents by signal volume, systemic patterns, and issue open/resolve counts. Enable with `DIGEST_ENABLED=true`.
 
 ![Slack alert](slack-alert.png)
 

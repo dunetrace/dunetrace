@@ -516,3 +516,10 @@ The alerts service test suite is in `services/alerts/tests/`:
 |---|---|
 | `tests/test_worker.py` | `poll_once()` integration: signal fetch, mark-alerted, skip-already-alerted, deliver |
 | `tests/test_rate_context.py` | `_rate_context_text()` helper (systemic / first-occurrence / recurring branches, edge cases); `format_slack()` block ordering with rate context; `poll_once()` with mocked `fetch_signal_rate_context` |
+| `tests/test_digest.py` | `should_send_digest()` day/hour guards; `format_digest_slack()` Block Kit structure (header, totals, failure types, systemic patterns, issue counts, dashboard button, colour, pct rounding, no-failures path); `send_weekly_digest()` all skip/send/fail paths |
+
+The detector service test suite is in `services/detector/tests/`:
+
+| Test file | What it covers |
+|---|---|
+| `tests/test_issues.py` | `upsert_fired_issues()` noop/pool-None/executemany correctness; `advance_clean_runs()` noop/params/empty-fired-passes-None/threshold constant; worker integration (upsert called when signals fire, advance called on clean run, tracking failure doesn't break `process_run`); `list_issues()` empty/fields/status-filter/no-filter |

@@ -700,6 +700,52 @@ async def agent_hourly_pattern(agent_id: str) -> list:
     ]
 
 
+async def list_issues(agent_id: str, status: Optional[str] = None) -> list:
+    """Return persistent issues for an agent, ordered: open → reopened → resolved, then by last_seen desc."""
+    if not _pool:
+        return []
+
+    def _ts(v):
+        if v is None:
+            return None
+        return v.timestamp() if hasattr(v, "timestamp") else float(v)
+
+    where = "WHERE agent_id = $1"
+    params: list = [agent_id]
+    if status:
+        params.append(status.lower())
+        where += f" AND status = ${len(params)}"
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT id, agent_id, failure_type, status,
+                   first_seen, last_seen, resolved_at,
+                   affected_runs, clean_runs_since
+            FROM issues
+            {where}
+            ORDER BY
+                CASE status WHEN 'open' THEN 0 WHEN 'reopened' THEN 1 ELSE 2 END,
+                last_seen DESC
+            """,
+            *params,
+        )
+    return [
+        {
+            "id":               r["id"],
+            "agent_id":         r["agent_id"],
+            "failure_type":     r["failure_type"],
+            "status":           r["status"],
+            "first_seen":       _ts(r["first_seen"]),
+            "last_seen":        _ts(r["last_seen"]),
+            "resolved_at":      _ts(r["resolved_at"]),
+            "affected_runs":    int(r["affected_runs"]),
+            "clean_runs_since": int(r["clean_runs_since"]),
+        }
+        for r in rows
+    ]
+
+
 async def agent_failure_rates(agent_id: str) -> list:
     """Daily failure rate per failure_type over 30 days — affected_runs / total_runs.
     Returns: [{failure_type, day (ISO str), total_runs, affected_runs, rate}]."""

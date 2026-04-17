@@ -50,6 +50,12 @@ class Settings:
 
     LOG_LEVEL:         str   = os.getenv("LOG_LEVEL", "INFO")
 
+    # Weekly digest
+    DIGEST_ENABLED:    bool  = os.getenv("DIGEST_ENABLED", "true").lower() == "true"
+    DIGEST_DAY:        int   = int(os.getenv("DIGEST_DAY", "0"))    # 0=Monday … 6=Sunday
+    DIGEST_HOUR:       int   = int(os.getenv("DIGEST_HOUR", "9"))   # UTC hour to send
+    DASHBOARD_URL:     str   = os.getenv("DASHBOARD_URL", "https://app.dunetrace.io")
+
     @property
     def slack_enabled(self) -> bool:
         return bool(self.SLACK_WEBHOOK_URL)
@@ -57,6 +63,10 @@ class Settings:
     @property
     def webhook_enabled(self) -> bool:
         return bool(self.WEBHOOK_URL)
+
+    @property
+    def digest_enabled(self) -> bool:
+        return self.DIGEST_ENABLED and bool(self.SLACK_WEBHOOK_URL)
 
 
 settings = Settings()

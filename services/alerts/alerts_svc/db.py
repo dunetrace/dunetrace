@@ -77,6 +77,174 @@ async def mark_alerted_batch(signal_ids: list[int]) -> None:
         )
 
 
+async def ensure_digest_schema() -> None:
+    """Create digest_log table if it doesn't exist."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS digest_log (
+                id          BIGSERIAL    PRIMARY KEY,
+                digest_type TEXT         NOT NULL DEFAULT 'weekly',
+                sent_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+
+
+async def was_digest_sent_recently(within_days: int = 6) -> bool:
+    """True if a weekly digest was sent within the last `within_days` days."""
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT 1 FROM digest_log
+            WHERE digest_type = 'weekly'
+              AND sent_at >= NOW() - ($1 || ' days')::INTERVAL
+            LIMIT 1
+            """,
+            str(within_days),
+        )
+    return row is not None
+
+
+async def log_digest_sent() -> None:
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO digest_log (digest_type) VALUES ('weekly')"
+        )
+
+
+async def fetch_weekly_digest_data() -> dict[str, Any]:
+    """Aggregate the last 7 days of signal + run + issue data for the weekly digest."""
+    if not _pool:
+        return {}
+    async with _pool.acquire() as conn:
+        # Total runs and signals across all agents in the last 7 days
+        totals = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(DISTINCT pr.run_id)              AS total_runs,
+                COUNT(DISTINCT pr.agent_id)            AS total_agents,
+                COUNT(DISTINCT fs.id)                  AS total_signals
+            FROM processed_runs pr
+            LEFT JOIN failure_signals fs
+                ON fs.run_id = pr.run_id AND fs.shadow = FALSE
+            WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
+            """
+        )
+
+        # Top failure types by affected run count
+        top_failures = await conn.fetch(
+            """
+            SELECT
+                fs.failure_type,
+                COUNT(DISTINCT fs.run_id)::int  AS affected_runs,
+                COUNT(DISTINCT pr.run_id)::int  AS total_runs,
+                ROUND(
+                    COUNT(DISTINCT fs.run_id)::numeric
+                    / NULLIF(COUNT(DISTINCT pr.run_id), 0), 3
+                )                               AS rate
+            FROM processed_runs pr
+            JOIN failure_signals fs
+                ON fs.run_id = pr.run_id AND fs.shadow = FALSE
+            WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
+            GROUP BY fs.failure_type
+            ORDER BY affected_runs DESC
+            LIMIT 5
+            """
+        )
+
+        # Top agents by signal volume with dominant failure type
+        top_agents = await conn.fetch(
+            """
+            WITH agent_signals AS (
+                SELECT
+                    pr.agent_id,
+                    COUNT(DISTINCT fs.id)      AS signal_count,
+                    COUNT(DISTINCT pr.run_id)  AS run_count
+                FROM processed_runs pr
+                JOIN failure_signals fs
+                    ON fs.run_id = pr.run_id AND fs.shadow = FALSE
+                WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
+                GROUP BY pr.agent_id
+            ),
+            dominant AS (
+                SELECT DISTINCT ON (pr.agent_id)
+                    pr.agent_id,
+                    fs.failure_type
+                FROM processed_runs pr
+                JOIN failure_signals fs
+                    ON fs.run_id = pr.run_id AND fs.shadow = FALSE
+                WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
+                GROUP BY pr.agent_id, fs.failure_type
+                ORDER BY pr.agent_id, COUNT(*) DESC
+            )
+            SELECT a.agent_id, a.signal_count, a.run_count, d.failure_type AS dominant_failure
+            FROM agent_signals a
+            JOIN dominant d ON d.agent_id = a.agent_id
+            ORDER BY a.signal_count DESC
+            LIMIT 5
+            """
+        )
+
+        # Systemic patterns: failure types at ≥10% of runs per agent in last 7 days
+        systemic = await conn.fetch(
+            """
+            SELECT
+                pr.agent_id,
+                fs.failure_type,
+                COUNT(DISTINCT pr.run_id)::int  AS total_runs,
+                COUNT(DISTINCT fs.run_id)::int  AS affected_runs,
+                ROUND(
+                    COUNT(DISTINCT fs.run_id)::numeric
+                    / NULLIF(COUNT(DISTINCT pr.run_id), 0), 3
+                )                               AS rate
+            FROM processed_runs pr
+            JOIN failure_signals fs
+                ON fs.run_id = pr.run_id AND fs.shadow = FALSE
+            WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
+            GROUP BY pr.agent_id, fs.failure_type
+            HAVING ROUND(
+                COUNT(DISTINCT fs.run_id)::numeric
+                / NULLIF(COUNT(DISTINCT pr.run_id), 0), 3
+            ) >= 0.10
+            ORDER BY rate DESC
+            LIMIT 10
+            """
+        )
+
+        # Issues opened and resolved this week
+        issues_opened = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM issues
+            WHERE first_seen >= NOW() - INTERVAL '7 days'
+            """
+        ) or 0
+
+        issues_resolved = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM issues
+            WHERE resolved_at >= NOW() - INTERVAL '7 days'
+            """
+        ) or 0
+
+    return {
+        "total_runs":      int(totals["total_runs"] or 0),
+        "total_agents":    int(totals["total_agents"] or 0),
+        "total_signals":   int(totals["total_signals"] or 0),
+        "top_failures":    [dict(r) for r in top_failures],
+        "top_agents":      [dict(r) for r in top_agents],
+        "systemic":        [dict(r) for r in systemic],
+        "issues_opened":   int(issues_opened),
+        "issues_resolved": int(issues_resolved),
+    }
+
+
 async def fetch_signal_rate_context(agent_id: str, failure_type: str) -> dict[str, Any]:
     """Return 7-day rate context for a failure_type on this agent.
     Used to distinguish systemic patterns from one-off alerts in Slack messages.

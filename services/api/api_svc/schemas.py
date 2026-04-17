@@ -186,6 +186,21 @@ if _PYDANTIC:
         failure_rates:     List[FailureRatePoint]
         systemic_patterns: List[SystemicPattern]
 
+    class Issue(_Model):
+        id:               int
+        agent_id:         str
+        failure_type:     str
+        status:           str           # open | resolved | reopened
+        first_seen:       float
+        last_seen:        float
+        resolved_at:      Optional[float]
+        affected_runs:    int
+        clean_runs_since: int
+
+    class IssueListResponse(_Model):
+        issues: List[Issue]
+        total:  int
+
 else:
     # Stdlib dataclass fallback (sandbox / testing)
     from dataclasses import dataclass, field

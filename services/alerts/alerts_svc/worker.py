@@ -29,7 +29,8 @@ from explainer_svc.models import Explanation
 from alerts_svc.formatters.slack   import format_slack
 from alerts_svc.formatters.webhook import build_signed_request      # type: ignore
 from alerts_svc.sender  import send_slack, send_webhook, SendResult
-from alerts_svc.db      import init_pool, close_pool, fetch_unalerted_signals, mark_alerted_batch, fetch_signal_rate_context
+from alerts_svc.db      import init_pool, close_pool, fetch_unalerted_signals, mark_alerted_batch, fetch_signal_rate_context, ensure_digest_schema
+from alerts_svc.digest  import send_weekly_digest
 from alerts_svc.config  import settings, SEVERITY_ORDER
 
 logging.basicConfig(
@@ -171,6 +172,7 @@ async def poll_once() -> tuple[int, int]:
 
 async def run_worker() -> None:
     await init_pool()
+    await ensure_digest_schema()
 
     enabled = []
     if settings.slack_enabled:
@@ -200,6 +202,11 @@ async def run_worker() -> None:
                     logger.info("Cycle: found=%d delivered=%d", found, delivered)
             except Exception as exc:
                 logger.error("Poll cycle error: %s", exc)
+
+            try:
+                await send_weekly_digest()
+            except Exception as exc:
+                logger.error("Digest cycle error: %s", exc)
 
             await asyncio.sleep(settings.POLL_INTERVAL)
     except asyncio.CancelledError:

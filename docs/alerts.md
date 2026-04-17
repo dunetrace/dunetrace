@@ -79,6 +79,32 @@ If the worker crashes between sending and marking, the signal will be re-sent on
 
 ---
 
+## Weekly digest
+
+A weekly summary sent to Slack every Monday at 9am UTC (configurable). Covers the past 7 days:
+
+- Top 5 failure types by affected run count (with %)
+- Top 5 agents by signal volume (with dominant failure type)
+- Systemic patterns — failure types affecting ≥10% of runs per agent
+- Issues opened and resolved this week
+- Dashboard button
+
+Enable by adding to your `.env`:
+
+```bash
+DIGEST_ENABLED=true
+DASHBOARD_URL=https://your-dashboard-url
+# Optional overrides (defaults shown)
+DIGEST_DAY=0          # 0=Monday … 6=Sunday
+DIGEST_HOUR=9         # UTC hour
+```
+
+The digest also requires `SLACK_WEBHOOK_URL` to be set — it uses the same Slack destination as alert delivery.
+
+Delivery is deduplicated via a `digest_log` table. If a digest was sent within the last 6 days, it will not send again even if the worker restarts. If there were no runs in the last 7 days, the digest is skipped but the sent timestamp is still logged (so it won't retry until the following week).
+
+---
+
 ## Shadow mode
 
 Signals in shadow mode are stored and visible in the dashboard but never delivered to Slack or webhooks. See [detectors.md](detectors.md#shadow-mode) for how to promote a detector to live.
