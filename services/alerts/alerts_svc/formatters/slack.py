@@ -9,6 +9,25 @@ _SEVERITY_EMOJI  = {"CRITICAL": ":red_circle:", "HIGH": ":large_orange_circle:",
 _DASHBOARD_BASE  = os.getenv("DASHBOARD_URL", "https://app.dunetrace.io")
 
 
+def _rate_context_text(explanation: Explanation) -> str:
+    """Build a one-line rate context string for the Slack message, or empty string if unavailable."""
+    rc = getattr(explanation, "rate_context", {})
+    if not rc:
+        return ""
+    total    = rc.get("total_runs", 0)
+    affected = rc.get("affected_runs", 0)
+    rate     = rc.get("rate", 0.0)
+    systemic = rc.get("is_systemic", False)
+    pct      = f"{round(rate * 100)}%"
+
+    if systemic:
+        return f":warning: *Systemic pattern* — {affected}/{total} runs affected ({pct} of runs in the last 7 days)"
+    elif affected == 1:
+        return f":information_source: First occurrence of this pattern in the last 7 days"
+    else:
+        return f":bar_chart: {affected}/{total} runs affected ({pct}) in the last 7 days"
+
+
 def format_slack(explanation: Explanation) -> dict:
     """Block Kit payload for Slack Incoming Webhook."""
     severity = explanation.severity
@@ -16,6 +35,7 @@ def format_slack(explanation: Explanation) -> dict:
     emoji    = _SEVERITY_EMOJI.get(severity, ":white_circle:")
     conf_pct = explanation.confidence_pct()
     dashboard_url = f"{_DASHBOARD_BASE}/runs/{explanation.run_id}"
+    rate_text = _rate_context_text(explanation)
 
     blocks = [
         {
@@ -36,6 +56,12 @@ def format_slack(explanation: Explanation) -> dict:
             }],
         },
         {"type": "divider"},
+    ]
+
+    if rate_text:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": rate_text}})
+
+    blocks += [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*What happened*\n{explanation.what}"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*Why it matters*\n{explanation.why_it_matters}"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*Evidence*\n```{explanation.evidence_summary}```"}},

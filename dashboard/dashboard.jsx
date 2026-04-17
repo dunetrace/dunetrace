@@ -156,6 +156,7 @@ function Dashboard() {
   const [runDetailLoading, setRunDetailLoading] = useState(false);
   const [timelineExpanded, setTimelineExpanded] = useState(false);
   const [graphRunId,       setGraphRunId]       = useState(null);
+  const [insights,         setInsights]         = useState(null);
   const PAGE_SIZE = 15;
 
   // Deep-link: /runs/<run_id> from Slack alert → auto-open that run
@@ -183,17 +184,19 @@ function Dashboard() {
     return () => clearInterval(t);
   }, [loadAgents]);
 
-  // Load runs + signals when agent selected
+  // Load runs + signals + insights when agent selected
   const loadAgentData = useCallback(async (agentId) => {
-    if (!agentId) { setRuns([]); setSignals([]); return; }
+    if (!agentId) { setRuns([]); setSignals([]); setInsights(null); return; }
     setLoading(true);
     try {
-      const [rd, sd] = await Promise.all([
+      const [rd, sd, id] = await Promise.all([
         apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/runs?limit=200`),
         apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/signals?limit=500`),
+        apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/insights`).catch(() => null),
       ]);
-      setRuns(rd.runs    || []);
+      setRuns(rd.runs       || []);
       setSignals(sd.signals || []);
+      setInsights(id        || null);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   }, []);
@@ -203,6 +206,7 @@ function Dashboard() {
     setSelectedDay(null);
     setRunsPage(0);
     setRunDetail(null);
+    setInsights(null);
     loadAgentData(selectedAgent);
   }, [selectedAgent, loadAgentData]);
 
@@ -411,6 +415,29 @@ function Dashboard() {
             </div>
           )}
 
+          {/* Systemic patterns — agent view only */}
+          {selectedAgent && insights?.systemic_patterns?.filter(p => p.is_systemic).length > 0 && (
+            <div style={{ background: `${C.red}11`, border: `1px solid ${C.red}33`, borderRadius: 6, padding: 12 }}>
+              <div style={{ fontSize: 9, color: C.red, letterSpacing: "0.15em", marginBottom: 8, fontWeight: 700 }}>
+                SYSTEMIC PATTERNS
+              </div>
+              {insights.systemic_patterns.filter(p => p.is_systemic).map(p => (
+                <div key={p.failure_type} style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                    <span style={{ fontSize: 10, color: C.text }}>{p.failure_type.replace(/_/g, " ")}</span>
+                    <span style={{ fontSize: 10, color: C.red, fontWeight: 700 }}>
+                      {Math.round(p.rate * 100)}% of runs
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 9, color: C.textD }}>
+                    {p.affected_runs}/{p.total_runs} runs · 7 days
+                  </div>
+                  <MiniBar value={p.rate * 100} max={100} color={C.red} width={248} height={4} />
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Signal breakdown */}
           <div>
             <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.15em", marginBottom: 8 }}>
@@ -438,8 +465,59 @@ function Dashboard() {
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
 
           {selectedAgent ? (
-            /* ── Agent view: heatmap + runs table ── */
+            /* ── Agent view: health record + heatmap + runs table ── */
             <>
+              {/* ── Health record: failure rate trends ── */}
+              {insights && (insights.systemic_patterns?.length > 0 || insights.failure_rates?.length > 0) && (
+                <div style={{
+                  padding: "14px 20px",
+                  borderBottom: `1px solid ${C.border}`,
+                  background: C.surface,
+                }}>
+                  <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.15em", marginBottom: 10 }}>
+                    STRUCTURAL HEALTH RECORD — 30 DAYS
+                  </div>
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    {(insights.systemic_patterns || []).map(p => {
+                      const isSys  = p.is_systemic;
+                      const color  = isSys ? C.red : p.rate > 0.05 ? C.yellow : C.textM;
+                      // Build a 30-day sparkline from failure_rates for this type
+                      const pts    = (insights.failure_rates || [])
+                        .filter(r => r.failure_type === p.failure_type)
+                        .sort((a, b) => a.day < b.day ? -1 : 1)
+                        .map(r => Math.round(r.rate * 100));
+                      return (
+                        <div key={p.failure_type} style={{
+                          background: isSys ? `${C.red}11` : C.surfaceB,
+                          border: `1px solid ${isSys ? C.red + "44" : C.border}`,
+                          borderRadius: 6, padding: "10px 12px", minWidth: 160,
+                        }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                            <span style={{ fontSize: 9, color: isSys ? C.red : C.textM, fontWeight: isSys ? 700 : 400 }}>
+                              {p.failure_type.replace(/_/g, " ")}
+                            </span>
+                            {isSys && (
+                              <span style={{ fontSize: 8, color: C.red, background: `${C.red}22`, padding: "1px 5px", borderRadius: 3 }}>
+                                SYSTEMIC
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 18, fontWeight: 700, color, marginBottom: 4 }}>
+                            {Math.round(p.rate * 100)}%
+                          </div>
+                          <div style={{ fontSize: 9, color: C.textD, marginBottom: pts.length > 1 ? 6 : 0 }}>
+                            {p.affected_runs}/{p.total_runs} runs · 7d
+                          </div>
+                          {pts.length > 1 && (
+                            <Sparkline values={pts} color={color} w={136} h={20} />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Calendar heatmap */}
               {days.length > 0 && (
                 <div style={{
@@ -621,7 +699,7 @@ function Dashboard() {
                 borderBottom: `1px solid ${C.border}`,
                 background: C.surface, borderRadius: "6px 6px 0 0",
               }}>
-                {["AGENT", "RUNS", "SIGNALS", "HIGH", "LAST SEEN", "FAILURE TYPES"].map(h => (
+                {["AGENT", "RUNS", "SIGNALS", "HIGH", "LAST SEEN", "FAILURE TYPES", ""].map(h => (
                   <div key={h} style={{ fontSize: 9, color: C.textD, letterSpacing: "0.12em" }}>{h}</div>
                 ))}
               </div>
@@ -629,7 +707,7 @@ function Dashboard() {
                 <div key={a.agent_id} onClick={() => selectAgent(a.agent_id)}
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "220px 70px 80px 70px 90px 1fr",
+                    gridTemplateColumns: "220px 70px 80px 70px 90px 1fr 80px",
                     padding: "10px 12px",
                     borderBottom: `1px solid ${C.border}22`,
                     background: C.surfaceB, cursor: "pointer", alignItems: "center",
@@ -655,6 +733,15 @@ function Dashboard() {
                         border: `1px solid ${C.orange}44`, fontFamily: "monospace",
                       }}>{ft.replace(/_/g, " ")} ×{cnt}</span>
                     ))}
+                  </div>
+                  <div>
+                    {a.signal_count > 0 && (
+                      <span style={{
+                        fontSize: 9, padding: "2px 6px", borderRadius: 3,
+                        background: `${C.textD}22`, color: C.textD,
+                        fontFamily: "monospace",
+                      }}>health →</span>
+                    )}
                   </div>
                 </div>
               ))}

@@ -161,12 +161,30 @@ if _PYDANTIC:
         signal_count: int
         signal_rate:  float
 
+    class FailureRatePoint(_Model):
+        failure_type:  str
+        day:           str
+        total_runs:    int
+        affected_runs: int
+        rate:          float
+
+    class SystemicPattern(_Model):
+        failure_type:  str
+        total_runs:    int
+        affected_runs: int
+        rate:          float
+        first_seen:    Optional[float]
+        last_seen:     Optional[float]
+        is_systemic:   bool
+
     class AgentInsights(_Model):
-        input_patterns: List[InputHashPattern]
-        signal_trends:  List[SignalTrendPoint]
-        versions:       List[VersionStat]
-        time_to_tool:   TimeToFirstTool
-        hourly_pattern: List[HourlyPatternPoint]
+        input_patterns:    List[InputHashPattern]
+        signal_trends:     List[SignalTrendPoint]
+        versions:          List[VersionStat]
+        time_to_tool:      TimeToFirstTool
+        hourly_pattern:    List[HourlyPatternPoint]
+        failure_rates:     List[FailureRatePoint]
+        systemic_patterns: List[SystemicPattern]
 
 else:
     # Stdlib dataclass fallback (sandbox / testing)
@@ -254,4 +272,15 @@ else:
         status: str = "ok"
         version: str = "0.1.0"
         db: str = "unknown"
+
+    @dataclass
+    class FailureRatePoint:
+        failure_type: str; day: str; total_runs: int; affected_runs: int; rate: float
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class SystemicPattern:
+        failure_type: str; total_runs: int; affected_runs: int
+        rate: float; first_seen: Optional[float]; last_seen: Optional[float]; is_systemic: bool
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)

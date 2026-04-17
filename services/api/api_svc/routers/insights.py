@@ -14,6 +14,8 @@ from api_svc.db.queries import (
     agent_version_stats,
     agent_time_to_first_tool,
     agent_hourly_pattern,
+    agent_failure_rates,
+    agent_systemic_patterns,
 )
 from api_svc.schemas import (
     AgentInsights,
@@ -22,6 +24,8 @@ from api_svc.schemas import (
     VersionStat,
     TimeToFirstTool,
     HourlyPatternPoint,
+    FailureRatePoint,
+    SystemicPattern,
 )
 
 router = APIRouter(tags=["Insights"])
@@ -36,12 +40,14 @@ async def get_insights(
     agent_id:  str,
     _customer: str = Depends(require_customer),
 ) -> AgentInsights:
-    (patterns, trends, versions, ttt, hourly) = await asyncio.gather(
+    (patterns, trends, versions, ttt, hourly, rates, systemic) = await asyncio.gather(
         agent_input_hash_patterns(agent_id),
         agent_signal_recurrence(agent_id),
         agent_version_stats(agent_id),
         agent_time_to_first_tool(agent_id),
         agent_hourly_pattern(agent_id),
+        agent_failure_rates(agent_id),
+        agent_systemic_patterns(agent_id),
     )
     return AgentInsights(
         input_patterns=[InputHashPattern(**r) for r in patterns],
@@ -49,4 +55,6 @@ async def get_insights(
         versions=[VersionStat(**r) for r in versions],
         time_to_tool=TimeToFirstTool(**ttt),
         hourly_pattern=[HourlyPatternPoint(**r) for r in hourly],
+        failure_rates=[FailureRatePoint(**r) for r in rates],
+        systemic_patterns=[SystemicPattern(**r) for r in systemic],
     )

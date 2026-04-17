@@ -198,10 +198,11 @@ Why no LLM? Three reasons: latency (templates are instant), cost (zero per-signa
 A background polling loop that runs every 10 seconds. It is the only process that sends external notifications.
 
 1. Fetches unalerted signals (`shadow=FALSE AND alerted=FALSE`)
-2. Calls `explain()` on each signal
-3. Formats for Slack (Block Kit) or webhook (signed JSON)
-4. Posts via HTTP with exponential backoff retry (up to 3 attempts)
-5. Marks signals as `alerted=TRUE` only after at least one destination succeeds
+2. Fetches rate context for each signal via `fetch_signal_rate_context(agent_id, failure_type)` — concurrent `asyncio.gather` call, one per signal
+3. Calls `explain(signal, rate_context=...)` on each signal — rate context is attached to the `Explanation` and rendered as a one-line summary in the Slack alert
+4. Formats for Slack (Block Kit) or webhook (signed JSON)
+5. Posts via HTTP with exponential backoff retry (up to 3 attempts)
+6. Marks signals as `alerted=TRUE` only after at least one destination succeeds
 
 **At-least-once delivery:** If the worker crashes between sending and marking, the signal will be re-sent on restart. Receivers should treat `(run_id, failure_type, detected_at)` as the idempotency key.
 
@@ -223,7 +224,7 @@ A read-only FastAPI service. Powers the dashboard and any customer integrations.
 | `GET /v1/agents` | List all agents with run counts, signal counts, critical/high counts, and failure type breakdown |
 | `GET /v1/agents/{id}/runs` | Paginated run list for an agent — summary fields only (no events) |
 | `GET /v1/agents/{id}/signals` | Paginated signal list with full explanations. Accepts `severity`, `failure_type`, `include_shadow` filters |
-| `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution |
+| `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution. Also returns `failure_rates` (daily affected/total per failure type) and `systemic_patterns` (7-day rate + `is_systemic` flag for each failure type) — the data powering the Health Record panel |
 | `GET /v1/runs/{id}` | Full run detail — metadata, all events, all signals with explanations |
 | `GET /health` | Service health check — returns `{"status":"ok","db":"ok"}` |
 

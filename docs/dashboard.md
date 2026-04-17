@@ -13,7 +13,7 @@ The Mission Control dashboard is a live, API-driven single-page app served at **
 | **Alerts** | Signals grouped by failure type. Each group header shows run count and estimated wasted tokens. Expandable per group with per-run confidence and token estimates. Shadow signals rendered below with dashed border + SHADOW badge. |
 | **Analytics** | Estimated token cost saved this week (configurable $/1k rate). Cross-agent totals. Top failure patterns with per-type token waste. Per-agent breakdown with estimated wasted tokens. |
 | **Risk Heatmap** | Failure type × agent intensity grid. |
-| **Agents** | Per-agent health cards — failure rate %, dominant pattern, run / critical / high counts, last seen, ungraduated shadow signal count. |
+| **Agents** | Per-agent health cards — failure rate %, dominant pattern, run / critical / high counts, last seen, ungraduated shadow signal count. Each agent card links to a **Health Record** panel showing failure rate per failure type over 30 days: a sparkline of daily rate, a `SYSTEMIC` badge when ≥10% of runs in the last 7 days were affected, and a 7-day affected/total count. Powered by `GET /v1/agents/{id}/insights` (`failure_rates` + `systemic_patterns`). |
 | **Compare Runs** | Side-by-side run comparison. Select any two runs from dropdowns — metrics, signals, and max confidence shown in both panels with a colour-coded delta table (new / resolved failure types highlighted). |
 | **Detectors** | Threshold sliders and alert level selector. Live review panel: "with current config, N of M past runs would be flagged HIGH or above (N% of runs)" — recomputes on every change. |
 

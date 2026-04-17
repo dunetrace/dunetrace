@@ -698,3 +698,97 @@ async def agent_hourly_pattern(agent_id: str) -> list:
         }
         for r in rows
     ]
+
+
+async def agent_failure_rates(agent_id: str) -> list:
+    """Daily failure rate per failure_type over 30 days — affected_runs / total_runs.
+    Returns: [{failure_type, day (ISO str), total_runs, affected_runs, rate}]."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                fs.failure_type,
+                DATE_TRUNC('day', pr.processed_at AT TIME ZONE 'UTC')::date AS day,
+                COUNT(DISTINCT pr.run_id)::int  AS total_runs,
+                COUNT(DISTINCT fs.run_id)::int  AS affected_runs,
+                ROUND(
+                    COUNT(DISTINCT fs.run_id)::numeric
+                    / NULLIF(COUNT(DISTINCT pr.run_id), 0),
+                    3
+                ) AS rate
+            FROM processed_runs pr
+            JOIN failure_signals fs
+                ON fs.run_id    = pr.run_id
+                AND fs.agent_id = pr.agent_id
+                AND fs.shadow   = FALSE
+            WHERE pr.agent_id = $1
+              AND pr.processed_at >= NOW() - INTERVAL '30 days'
+            GROUP BY fs.failure_type, day
+            ORDER BY day DESC, affected_runs DESC
+            LIMIT 300
+            """,
+            agent_id,
+        )
+    return [
+        {
+            "failure_type":  r["failure_type"],
+            "day":           str(r["day"]),
+            "total_runs":    int(r["total_runs"]),
+            "affected_runs": int(r["affected_runs"]),
+            "rate":          float(r["rate"] or 0),
+        }
+        for r in rows
+    ]
+
+
+async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -> list:
+    """Failure types firing on >= rate_threshold of runs in the last 7 days.
+    Returns: [{failure_type, total_runs, affected_runs, rate, first_seen, last_seen, is_systemic}]."""
+    if not _pool:
+        return []
+
+    def _ts(v):
+        if v is None:
+            return None
+        return v.timestamp() if hasattr(v, "timestamp") else float(v)
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                fs.failure_type,
+                COUNT(DISTINCT pr.run_id)::int  AS total_runs,
+                COUNT(DISTINCT fs.run_id)::int  AS affected_runs,
+                ROUND(
+                    COUNT(DISTINCT fs.run_id)::numeric
+                    / NULLIF(COUNT(DISTINCT pr.run_id), 0),
+                    3
+                )                               AS rate,
+                MIN(fs.detected_at)             AS first_seen,
+                MAX(fs.detected_at)             AS last_seen
+            FROM processed_runs pr
+            JOIN failure_signals fs
+                ON fs.run_id    = pr.run_id
+                AND fs.agent_id = pr.agent_id
+                AND fs.shadow   = FALSE
+            WHERE pr.agent_id = $1
+              AND pr.processed_at >= NOW() - INTERVAL '7 days'
+            GROUP BY fs.failure_type
+            ORDER BY rate DESC
+            """,
+            agent_id,
+        )
+    return [
+        {
+            "failure_type":  r["failure_type"],
+            "total_runs":    int(r["total_runs"]),
+            "affected_runs": int(r["affected_runs"]),
+            "rate":          float(r["rate"] or 0),
+            "first_seen":    _ts(r["first_seen"]),
+            "last_seen":     _ts(r["last_seen"]),
+            "is_systemic":   float(r["rate"] or 0) >= rate_threshold,
+        }
+        for r in rows
+    ]

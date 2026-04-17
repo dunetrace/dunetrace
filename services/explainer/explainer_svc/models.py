@@ -39,6 +39,9 @@ class Explanation:
     detected_at:      float
     evidence:         Dict[str, Any] = field(default_factory=dict)
 
+    # Cross-run rate context (optional — populated by alert worker, not by explain())
+    rate_context:     Dict[str, Any] = field(default_factory=dict)
+
     def confidence_pct(self) -> str:
         return f"{int(self.confidence * 100)}%"
 

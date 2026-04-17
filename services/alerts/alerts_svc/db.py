@@ -75,3 +75,47 @@ async def mark_alerted_batch(signal_ids: list[int]) -> None:
             """,
             signal_ids,
         )
+
+
+async def fetch_signal_rate_context(agent_id: str, failure_type: str) -> dict[str, Any]:
+    """Return 7-day rate context for a failure_type on this agent.
+    Used to distinguish systemic patterns from one-off alerts in Slack messages.
+    Returns: {total_runs, affected_runs, rate, is_systemic}. Empty dict on error."""
+    if not _pool:
+        return {}
+    try:
+        async with _pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(DISTINCT pr.run_id)::int AS total_runs,
+                    COUNT(DISTINCT fs.run_id)::int AS affected_runs,
+                    ROUND(
+                        COUNT(DISTINCT fs.run_id)::numeric
+                        / NULLIF(COUNT(DISTINCT pr.run_id), 0),
+                        3
+                    ) AS rate
+                FROM processed_runs pr
+                JOIN failure_signals fs
+                    ON fs.run_id    = pr.run_id
+                    AND fs.agent_id = pr.agent_id
+                    AND fs.shadow   = FALSE
+                    AND fs.failure_type = $2
+                WHERE pr.agent_id = $1
+                  AND pr.processed_at >= NOW() - INTERVAL '7 days'
+                """,
+                agent_id,
+                failure_type,
+            )
+        if not row or row["total_runs"] == 0:
+            return {}
+        rate = float(row["rate"] or 0)
+        return {
+            "total_runs":    int(row["total_runs"]),
+            "affected_runs": int(row["affected_runs"]),
+            "rate":          rate,
+            "is_systemic":   rate >= 0.10,
+        }
+    except Exception as exc:
+        logger.warning("fetch_signal_rate_context failed: %s", exc)
+        return {}

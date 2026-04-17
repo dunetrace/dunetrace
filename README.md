@@ -21,13 +21,9 @@ AI agents fail in ways that traditional monitoring can't see.
 
 Your API returns 200. Your logs show no exceptions. But the agent called the same tool 12 times in a row, burned $X in tokens, and gave the user a wrong answer or no answer at all.
 
-These are structural failures i.e. tool loops, context bloat, reasoning stalls etc. They happen inside the agent's decision loop, between the lines your existing monitoring covers. By the time a user reports a problem, the damage is already done.
+LangSmith/Langfuse answer "what happened?" after you already know something broke. Dunetrace answers a different question: **"is something breaking right now?"**
 
-LangSmith/Langfuse answer "what happened?" after you already know something broke. OpenLLMetry gives you OTel spans across 40+ frameworks, great coverage, no behavioral detection.
-
-Dunetrace answers a different question: **"is something breaking right now?"**
-
-It watches the structural pattern of every run and fires a Slack alert while the run is still in progress or within 15 seconds of completion.
+It watches the structural pattern of every run and fires a Slack alert within 15 seconds of completion.
 
 ---
 
@@ -68,33 +64,13 @@ Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 | API + docs   | [http://localhost:8002/docs](http://localhost:8002/docs) |
 | Ingest (SDK) | [http://localhost:8001](http://localhost:8001)           |
 
-→ [Full integration options](docs/integrations.md): LangChain, FastAPI, Flask, OpenLLMetry, manual
-
 ---
 
 ## What it detects
 
-15 structural detectors run automatically against every completed run.
+15 structural detectors run automatically on every completed run — tool loops, retry storms, context bloat, reasoning stalls, goal abandonment, prompt injection, and more. Each signal includes a plain-English explanation and a suggested fix. Alerts include rate context: whether this is a first occurrence, recurring pattern, or systemic issue affecting ≥10% of runs.
 
-| Detector                  | What it catches                                                    | Severity    |
-| ------------------------- | ------------------------------------------------------------------ | ----------- |
-| `TOOL_LOOP`               | Same tool called ≥3× in a 5-tool-call window                       | HIGH        |
-| `TOOL_THRASHING`          | Agent alternates between exactly two tools                         | HIGH        |
-| `LLM_TRUNCATION_LOOP`     | `finish_reason=length` fires ≥2 times                              | HIGH        |
-| `RETRY_STORM`             | Same tool fails 3+ times in a row                                  | HIGH        |
-| `EMPTY_LLM_RESPONSE`      | Model returned zero-length output with `finish_reason=stop`        | HIGH        |
-| `CASCADING_TOOL_FAILURE`  | 3+ consecutive failures across 2+ distinct tools                   | HIGH        |
-| `SLOW_STEP`               | Tool call >15s or LLM call >30s                                    | MEDIUM/HIGH |
-| `TOOL_AVOIDANCE`          | Final answer given without calling available tools                 | MEDIUM      |
-| `GOAL_ABANDONMENT`        | Tool use stops, then ≥4 consecutive LLM calls with no exit         | MEDIUM      |
-| `RAG_EMPTY_RETRIEVAL`     | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM      |
-| `CONTEXT_BLOAT`           | Prompt tokens grow 3× from first to last LLM call                  | MEDIUM      |
-| `STEP_COUNT_INFLATION`    | Run used >2× the P75 step count for this agent                     | MEDIUM      |
-| `FIRST_STEP_FAILURE`      | Error or empty output at step ≤2                                   | MEDIUM      |
-| `REASONING_STALL`         | LLM:tool-call ratio ≥4× — agent reasoning without acting           | MEDIUM      |
-| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns                 | CRITICAL    |
-
-All thresholds are configurable without code changes. → [docs/detectors.md](docs/detectors.md)
+→ [docs/detectors.md](docs/detectors.md): full detector reference, thresholds, shadow mode
 
 ---
 
@@ -106,15 +82,15 @@ All thresholds are configurable without code changes. → [docs/detectors.md](do
 
 Live dashboard at **[http://localhost:3000](http://localhost:3000)**. Auto-refreshes every 15s.
 
-→ [docs/dashboard.md](docs/dashboard.md): page descriptions, run detail tabs, token waste estimates, shadow signals, data sources
+→ [docs/dashboard.md](docs/dashboard.md)
 
 ---
 
 ## Privacy
 
-No raw content ever leaves your agent process. Every prompt, tool argument, and model output is SHA-256 hashed before transmission. The ingest API receives hashes, token counts, latency values, and call sequences, never plaintext.
+No raw content ever leaves your agent process. Every prompt, tool argument, and model output is SHA-256 hashed before transmission.
 
-→ [docs/architecture.md](docs/architecture.md) for the full privacy model and DB schema.
+→ [docs/architecture.md](docs/architecture.md)
 
 ---
 
@@ -125,6 +101,14 @@ Slack and generic webhook (PagerDuty, Linear, custom).
 ![Slack alert](slack-alert.png)
 
 → [docs/alerts.md](docs/alerts.md)
+
+---
+
+## Integrations
+
+- [Custom Python agent — decorator, middleware, manual](docs/integrate-custom-python-agent.md)
+- [LangChain / LangGraph](docs/integrate-langchain-agent.md)
+- [FastAPI / Flask / ASGI / WSGI / OpenTelemetry / Loki](docs/integrations.md)
 
 ---
 
@@ -141,30 +125,17 @@ Agent Code
         └─► OTel exporter   (otel_exporter=… → Tempo / Honeycomb / Datadog)
 ```
 
-→ [docs/architecture.md](docs/architecture.md): service internals, DB schema, OTel exporter, performance
-
----
-
-## Integrations
-
-- [LangChain / LangGraph](docs/integrations.md#langchain--langgraph)
-- [FastAPI / Flask / ASGI / WSGI](docs/integrations.md)
-- [Grafana / Loki](docs/integrations.md#grafana--loki)
-- [OpenTelemetry / OpenLLMetry](docs/integrations.md#opentelemetry)
+→ [docs/architecture.md](docs/architecture.md)
 
 ---
 
 ## Running tests
 
 ```bash
-# SDK only (no Docker required)
-cd packages/sdk-py && python -m unittest discover -s tests -v
-
-# Full suite (requires Docker)
-PYTHONPATH=packages/sdk-py:services/explainer:services/alerts:services/detector:services/api:services/ingest \
-  python -m pytest packages/sdk-py/tests/ services/explainer/tests/ services/detector/tests/ \
-    services/alerts/tests/ services/api/tests/ services/ingest/tests/ \
-  --asyncio-mode=auto -v
+# SDK + services (no Docker required)
+PYTHONPATH=packages/sdk-py:services/explainer:services/alerts:services/detector \
+  python -m pytest packages/sdk-py/tests/ services/explainer/tests/ \
+    services/detector/tests/ services/alerts/tests/ -q
 ```
 
 ---

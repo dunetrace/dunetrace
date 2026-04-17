@@ -100,15 +100,16 @@ class ToolLoopDetector(BaseDetector):
                     step_index=window[-1].step_index,
                     confidence=0.95,
                     evidence={
-                        "tool":          tool,
-                        "count":         len(all_calls),
-                        "window":        self.WINDOW,
-                        "first_step":    all_calls[0].step_index,
-                        "last_step":     all_calls[-1].step_index,
-                        "args_hashes":   args_hashes,
+                        "tool":           tool,
+                        "count":          len(all_calls),
+                        "window":         self.WINDOW,
+                        "first_step":     all_calls[0].step_index,
+                        "last_step":      all_calls[-1].step_index,
+                        "step_indices":   [c.step_index for c in all_calls],
+                        "args_hashes":    args_hashes,
                         "args_identical": unique_hashes == 1,
-                        "args_similar":  unique_hashes <= 2,
-                        "success_rate":  success_rate,
+                        "args_similar":   unique_hashes <= 2,
+                        "success_rate":   success_rate,
                     },
                 )
         return None
@@ -237,9 +238,12 @@ class GoalAbandonmentDetector(BaseDetector):
                 step_index=state.current_step,
                 confidence=0.70,
                 evidence={
-                    "stall_steps":       self.STALL_STEPS,
-                    "last_tool_step":    state.tool_calls[-1].step_index,
-                    "current_step":      state.current_step,
+                    "stall_steps":           self.STALL_STEPS,
+                    "last_tool_step":        state.tool_calls[-1].step_index,
+                    "last_tool_used":        state.tool_calls[-1].tool_name,
+                    "current_step":          state.current_step,
+                    "steps_since_last_tool": state.current_step - state.tool_calls[-1].step_index,
+                    "stall_event_sequence":  [e.event_type.value for e in recent],
                 },
             )
         return None
@@ -392,10 +396,12 @@ class LlmTruncationLoopDetector(BaseDetector):
             step_index=state.current_step,
             confidence=0.90,
             evidence={
-                "truncation_count":      len(truncated),
-                "total_llm_calls":       len(state.llm_calls),
-                "first_truncation_step": truncated[0].step_index,
-                "last_truncation_step":  truncated[-1].step_index,
+                "truncation_count":            len(truncated),
+                "total_llm_calls":             len(state.llm_calls),
+                "first_truncation_step":       truncated[0].step_index,
+                "last_truncation_step":        truncated[-1].step_index,
+                "token_counts_at_truncation":  [c.prompt_tokens for c in truncated if c.prompt_tokens is not None],
+                "models":                      sorted({c.model for c in truncated if c.model}),
             },
         )
 
@@ -453,12 +459,16 @@ class ContextBloatDetector(BaseDetector):
             step_index=state.current_step,
             confidence=0.80,
             evidence={
-                "first_tokens":    first_tokens,
-                "last_tokens":     last_tokens,
-                "growth_factor":   round(growth, 2),
-                "llm_call_count":  len(calls_with_tokens),
-                "first_call_step": calls_with_tokens[0].step_index,
-                "last_call_step":  calls_with_tokens[-1].step_index,
+                "first_tokens":          first_tokens,
+                "last_tokens":           last_tokens,
+                "growth_factor":         round(growth, 2),
+                "llm_call_count":        len(calls_with_tokens),
+                "first_call_step":       calls_with_tokens[0].step_index,
+                "last_call_step":        calls_with_tokens[-1].step_index,
+                "token_growth_sequence": [
+                    {"step": c.step_index, "tokens": c.prompt_tokens}
+                    for c in calls_with_tokens
+                ],
             },
         )
 
@@ -644,7 +654,9 @@ class RetryStormDetector(BaseDetector):
                 "consecutive_fails":   best_count,
                 "threshold":           self.THRESHOLD,
                 "first_fail_step":     best_streak[0].step_index,
+                "step_indices":        [tc.step_index for tc in best_streak],
                 "args_identical":      args_identical,
+                "error_hashes":        error_hashes,
                 "failure_reason_hash": failure_reason_hash,
                 "reason_identical":    reason_identical,
             },
@@ -892,6 +904,15 @@ class ReasoningSpinDetector(BaseDetector):
         if ratio < self.RATIO_THRESHOLD:
             return None
 
+        action_events = [
+            e for e in state.events
+            if e.event_type.value.startswith("llm.called") or e.event_type.value.startswith("tool.called")
+        ]
+        event_sequence = [
+            "llm" if e.event_type.value.startswith("llm.") else "tool"
+            for e in action_events
+        ]
+
         return FailureSignal(
             failure_type=FailureType.REASONING_STALL,
             severity=Severity.MEDIUM,
@@ -905,6 +926,7 @@ class ReasoningSpinDetector(BaseDetector):
                 "tool_calls":     tool_count,
                 "ratio":          round(ratio, 2),
                 "threshold":      self.RATIO_THRESHOLD,
+                "event_sequence": event_sequence,
             },
         )
 

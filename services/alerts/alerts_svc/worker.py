@@ -29,7 +29,7 @@ from explainer_svc.models import Explanation
 from alerts_svc.formatters.slack   import format_slack
 from alerts_svc.formatters.webhook import build_signed_request      # type: ignore
 from alerts_svc.sender  import send_slack, send_webhook, SendResult
-from alerts_svc.db      import init_pool, close_pool, fetch_unalerted_signals, mark_alerted_batch
+from alerts_svc.db      import init_pool, close_pool, fetch_unalerted_signals, mark_alerted_batch, fetch_signal_rate_context
 from alerts_svc.config  import settings, SEVERITY_ORDER
 
 logging.basicConfig(
@@ -106,12 +106,23 @@ async def poll_once() -> tuple[int, int]:
 
     logger.info("Found %d unalerted signal(s)", len(rows))
 
-    # Build explanations first (fast, synchronous)
-    work: list[tuple[int, Explanation]] = []
+    # Build explanations (synchronous) + fetch rate context (async) concurrently
+    signals_by_row = []
     for row in rows:
         try:
-            signal      = _row_to_signal(row)
-            explanation = explain(signal)
+            signals_by_row.append((row, _row_to_signal(row)))
+        except Exception as exc:
+            logger.error("Failed to reconstruct signal for signal_id=%d: %s", row["id"], exc)
+
+    rate_contexts = await asyncio.gather(*[
+        fetch_signal_rate_context(row["agent_id"], row["failure_type"])
+        for row, _ in signals_by_row
+    ])
+
+    work: list[tuple[int, Explanation]] = []
+    for (row, signal), rate_ctx in zip(signals_by_row, rate_contexts):
+        try:
+            explanation = explain(signal, rate_context=rate_ctx)
             work.append((row["id"], explanation))
         except Exception as exc:
             logger.error("Failed to build explanation for signal_id=%d: %s", row["id"], exc)

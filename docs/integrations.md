@@ -500,4 +500,19 @@ python -m unittest discover -s tests -v
 | `tests/test_auto_instrument.py` | `auto_instrument()` for OpenAI, Anthropic, httpx, requests; `@dt.agent()` decorator (sync + async); ASGI + WSGI middleware; `get_current_run()` lifecycle |
 | `tests/test_client.py` | `dt.run()` context manager, event emission, privacy (no raw content), prompt injection detection, shutdown |
 | `tests/test_detectors.py` | All 15 structural detectors |
+| `tests/test_detectors_evidence.py` | Enriched evidence fields on all detectors: `step_indices`, `args_identical`, `args_similar`, `success_rate` (ToolLoop); `stall_event_sequence` (GoalAbandonment); `token_counts_at_truncation`, `models` (LlmTruncationLoop); `token_growth_sequence` (ContextBloat); `error_hashes`, `reason_identical` (RetryStorm); `event_sequence` (ReasoningSpin); `coincident_signals` (SlowStep) |
 | `tests/test_integrations/` | LangChain callback handler, OpenTelemetry exporter |
+
+The explainer service has its own test suite in `services/explainer/tests/`:
+
+| Test file | What it covers |
+|---|---|
+| `tests/test_explainer.py` | Core `explain()` templates for all 15 failure types |
+| `tests/test_explainer_new.py` | Enriched evidence interpolation in explanation text (growth curves, stall sequences, token counts, model lists); `rate_context` attach/detach on `Explanation`; edge cases for count keys and singular/plural formatting |
+
+The alerts service test suite is in `services/alerts/tests/`:
+
+| Test file | What it covers |
+|---|---|
+| `tests/test_worker.py` | `poll_once()` integration: signal fetch, mark-alerted, skip-already-alerted, deliver |
+| `tests/test_rate_context.py` | `_rate_context_text()` helper (systemic / first-occurrence / recurring branches, edge cases); `format_slack()` block ordering with rate context; `poll_once()` with mocked `fetch_signal_rate_context` |

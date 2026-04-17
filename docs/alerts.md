@@ -21,7 +21,19 @@ Get a webhook URL from [api.slack.com/messaging/webhooks](https://api.slack.com/
 docker compose up -d --force-recreate alerts
 ```
 
-Each Slack alert includes: failure type, severity, what happened, why it matters, and a concrete code fix targeted at the specific failure pattern detected.
+Each Slack alert includes: failure type, severity, what happened, why it matters, a concrete code fix targeted at the specific failure pattern detected, and a one-line rate context summary showing how common this pattern is for the agent.
+
+### Rate context in Slack alerts
+
+The rate context line appears above the "What happened" block and describes how often this failure type has affected recent runs for the same agent:
+
+| Condition | Message |
+|---|---|
+| First time this failure type has appeared (last 7 days) | `:information_source: First occurrence of this pattern in the last 7 days` |
+| Recurring but not yet systemic | `:bar_chart: 5/20 runs affected (25%) in the last 7 days` |
+| Systemic (≥10% of runs in last 7 days affected) | `:warning: *Systemic pattern* — 8/12 runs affected (67% of runs in the last 7 days)` |
+
+Rate context is computed per `(agent_id, failure_type)` pair at alert time from the `failure_signals` table. If the lookup fails (e.g. DB contention), the signal is still delivered without a rate context line.
 
 ---
 
@@ -40,7 +52,7 @@ The webhook payload:
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "1.0",
   "event": "signal.detected",
   "run_id": "...",
   "agent_id": "...",

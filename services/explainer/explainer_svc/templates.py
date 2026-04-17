@@ -168,7 +168,7 @@ def explain_tool_thrashing(signal: FailureSignal) -> Explanation:
     ev    = signal.evidence
     toolA = ev.get("tool_a", "tool_A")
     toolB = ev.get("tool_b", "tool_B")
-    count = ev.get("oscillation_count", "?")
+    count = ev.get("count", ev.get("oscillation_count", "?"))
 
     return Explanation(
         **_base(signal),
@@ -297,9 +297,11 @@ def explain_tool_avoidance(signal: FailureSignal) -> Explanation:
 # GOAL_ABANDONMENT
 
 def explain_goal_abandonment(signal: FailureSignal) -> Explanation:
-    ev           = signal.evidence
-    stall_steps  = ev.get("stall_steps", "?")
-    last_tool    = ev.get("last_tool_used", "unknown")
+    ev                  = signal.evidence
+    stall_steps         = ev.get("stall_steps", "?")
+    last_tool           = ev.get("last_tool_used", "unknown")
+    steps_since_tool    = ev.get("steps_since_last_tool")
+    stall_seq           = ev.get("stall_event_sequence", [])
 
     return Explanation(
         **_base(signal),
@@ -319,9 +321,10 @@ def explain_goal_abandonment(signal: FailureSignal) -> Explanation:
         ),
         evidence_summary=(
             f"Last tool call was `{last_tool}` at step "
-            f"{signal.step_index - stall_steps}. "
-            f"No tool calls in the following {stall_steps} steps. "
-            f"Confidence: {int(signal.confidence * 100)}%."
+            f"{ev.get('last_tool_step', signal.step_index - (steps_since_tool or stall_steps))}. "
+            f"No tool calls in the following {steps_since_tool or stall_steps} steps"
+            + (f" — event sequence: {' → '.join(e.replace('llm.', 'llm').replace('tool.', 'tool') for e in stall_seq)}." if stall_seq else ".")
+            + f" Confidence: {int(signal.confidence * 100)}%."
         ),
         suggested_fixes=[
             CodeFix(
@@ -539,6 +542,10 @@ def explain_llm_truncation_loop(signal: FailureSignal) -> Explanation:
     total          = ev.get("total_llm_calls", "?")
     first_step     = ev.get("first_truncation_step", "?")
     last_step      = ev.get("last_truncation_step", "?")
+    token_counts   = ev.get("token_counts_at_truncation", [])
+    models         = ev.get("models", [])
+    token_note     = (f" Prompt tokens at truncation: {' → '.join(str(t) for t in token_counts)}." if token_counts else "")
+    model_note     = (f" Model{'s' if len(models) > 1 else ''}: {', '.join(models)}." if models else "")
 
     return Explanation(
         **_base(signal),
@@ -559,8 +566,8 @@ def explain_llm_truncation_loop(signal: FailureSignal) -> Explanation:
         ),
         evidence_summary=(
             f"finish_reason='length' fired {count} time{'s' if count != 1 else ''} "
-            f"across {total} LLM calls. "
-            f"First truncation at step {first_step}, last at step {last_step}. "
+            f"across {total} LLM calls (steps {first_step}–{last_step})."
+            f"{token_note}{model_note} "
             f"Confidence: {int(signal.confidence * 100)}%."
         ),
         suggested_fixes=[
@@ -628,6 +635,9 @@ def explain_context_bloat(signal: FailureSignal) -> Explanation:
     call_count  = ev.get("llm_call_count", "?")
     first_step  = ev.get("first_call_step", "?")
     last_step   = ev.get("last_call_step", "?")
+    seq         = ev.get("token_growth_sequence", [])
+    # Build a compact growth curve string if sequence available: "500→1200→3100→8400"
+    growth_curve = "→".join(str(p["tokens"]) for p in seq) if seq else f"{first}→{last}"
 
     return Explanation(
         **_base(signal),
@@ -649,8 +659,8 @@ def explain_context_bloat(signal: FailureSignal) -> Explanation:
             "Both outcomes produce bad responses without a clear error signal."
         ),
         evidence_summary=(
-            f"Prompt tokens: {first} at step {first_step} → {last} at step {last_step} "
-            f"({growth}× growth over {call_count} LLM calls). "
+            f"Token growth: {growth_curve} ({growth}× over {call_count} LLM calls, "
+            f"steps {first_step}–{last_step}). "
             f"Confidence: {int(signal.confidence * 100)}%."
         ),
         suggested_fixes=[

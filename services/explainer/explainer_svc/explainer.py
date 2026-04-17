@@ -21,21 +21,30 @@ from explainer_svc.templates import TEMPLATES
 logger = logging.getLogger("dunetrace.explainer")
 
 
-def explain(signal: FailureSignal) -> Explanation:
-    """Produce a human-readable Explanation from a FailureSignal. Returns a fallback for unknown failure types rather than raising — the caller should never crash on explain()."""
+def explain(signal: FailureSignal, rate_context: dict | None = None) -> Explanation:
+    """Produce a human-readable Explanation from a FailureSignal. Returns a fallback for unknown failure types rather than raising — the caller should never crash on explain().
+
+    rate_context: optional dict from fetch_signal_rate_context() with keys
+    {total_runs, affected_runs, rate, is_systemic}. Attached to the Explanation
+    so alert formatters can include trend context in Slack messages.
+    """
     template = TEMPLATES.get(signal.failure_type)
 
     if template is None:
         logger.warning("No template for failure_type=%s — using fallback",
                        signal.failure_type)
-        return _fallback(signal)
+        exp = _fallback(signal)
+    else:
+        try:
+            exp = template(signal)
+        except Exception as exc:
+            logger.error("Template failed for %s: %s — using fallback",
+                         signal.failure_type, exc)
+            exp = _fallback(signal)
 
-    try:
-        return template(signal)
-    except Exception as exc:
-        logger.error("Template failed for %s: %s — using fallback",
-                     signal.failure_type, exc)
-        return _fallback(signal)
+    if rate_context:
+        exp.rate_context = rate_context
+    return exp
 
 
 def _fallback(signal: FailureSignal) -> Explanation:
