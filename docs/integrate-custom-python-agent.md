@@ -334,12 +334,18 @@ Run your agent once, then check:
 
 1. **Dashboard** (`http://your-dashboard:3000`) — the run should appear within 15 seconds
 2. **Runs API** — `GET http://your-ingest:8002/v1/runs?agent_id=my-production-agent`
-3. **Alerts** — trigger a known failure pattern (e.g., call the same tool 4+ times) and confirm Slack fires
+3. **Alerts** — trigger the built-in failure scenarios to confirm signals fire and Slack alerts:
 
-For local testing before pointing at production:
+```bash
+SCENARIO=failures python examples/decorator_agent.py
+```
+
+This runs three agents that intentionally trigger `TOOL_LOOP`, `RETRY_STORM`, and `RAG_EMPTY_RETRIEVAL`. Each signal should appear in the dashboard within ~15 seconds and fire a Slack alert if configured.
+
+For local testing before pointing at production, omit the `api_key` parameter entirely — the backend accepts unauthenticated requests in dev mode:
 
 ```python
-dt = Dunetrace(endpoint="http://localhost:8001", api_key=None)  # dev mode, no key needed
+dt = Dunetrace(endpoint="http://localhost:8001")  # dev mode, no key needed
 ```
 
 ---

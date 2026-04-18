@@ -474,6 +474,9 @@ SCENARIO=tool_loop python examples/langchain_agent.py
 ```bash
 pip install dunetrace
 python examples/decorator_agent.py
+
+# Force failure scenarios (TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL):
+SCENARIO=failures python examples/decorator_agent.py
 ```
 
 **Basic agent** (manual instrumentation, detectors, prompt injection):
@@ -482,7 +485,7 @@ python examples/decorator_agent.py
 python examples/basic_agent.py
 ```
 
-All examples send events to `http://localhost:8001` by default. Override with `DUNETRACE_ENDPOINT=http://your-host:8001`.
+All examples send events to `http://localhost:8001` by default and require no API key in dev mode. Override the endpoint with `DUNETRACE_ENDPOINT=http://your-host:8001`.
 
 ---
 

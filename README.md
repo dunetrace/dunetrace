@@ -48,12 +48,19 @@ pip install 'dunetrace[langchain]'      # LangChain / LangGraph
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace(api_key="dt_live_...")
-dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests globally
+dt = Dunetrace()               # no api_key needed for local dev
+dt.init(agent_id="my-agent")  # patches openai, anthropic, httpx, requests globally
 
 @dt.agent()
 def run_agent(query: str) -> str:
     ...                        # LLM + HTTP calls tracked automatically
+```
+
+To verify signals fire end-to-end, run the built-in failure scenarios:
+
+```bash
+SCENARIO=failures python examples/decorator_agent.py   # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
+SCENARIO=tool_loop python examples/langchain_agent.py  # TOOL_LOOP via LangChain callback
 ```
 
 Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
@@ -68,7 +75,7 @@ Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ## What it detects
 
-15 structural detectors run automatically on every completed run — tool loops, retry storms, context bloat, reasoning stalls, goal abandonment, prompt injection, and more. Each signal includes a plain-English explanation and a suggested fix. Alerts include rate context: whether this is a first occurrence, recurring pattern, or systemic issue affecting ≥10% of runs.
+15 structural detectors run automatically on every completed run i.e. tool loops, retry storms, context bloat, reasoning stalls, goal abandonment, prompt injection, and more. Each signal includes a plain-English explanation and a suggested fix. Alerts include rate context: whether this is a first occurrence, recurring pattern, or systemic issue affecting ≥10% of runs.
 
 → [docs/detectors.md](docs/detectors.md): full detector reference, thresholds, shadow mode
 
@@ -96,11 +103,7 @@ No raw content ever leaves your agent process. Every prompt, tool argument, and 
 
 ## Alerts
 
-Slack and generic webhook (PagerDuty, Linear, custom). Each alert includes a rate context line — first occurrence, recurring, or systemic (≥10% of runs affected).
-
-**Issue tracking** — the detector automatically maintains an `issues` table: one row per `(agent_id, failure_type)` pair with open/resolved/reopened status. Issues auto-resolve after 5 consecutive clean runs and reopen if the failure recurs. Query via `GET /v1/agents/{id}/issues`.
-
-**Weekly digest** — opt-in Slack summary sent every Monday at 9am UTC: top failure types, top agents by signal volume, systemic patterns, and issue open/resolve counts. Enable with `DIGEST_ENABLED=true`.
+Slack and generic webhook (PagerDuty, Linear, custom).
 
 ![Slack alert](slack-alert.png)
 
@@ -110,7 +113,7 @@ Slack and generic webhook (PagerDuty, Linear, custom). Each alert includes a rat
 
 ## Integrations
 
-- [Custom Python agent — decorator, middleware, manual](docs/integrate-custom-python-agent.md)
+- [Custom Python agent - decorator, middleware, manual](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
 - [FastAPI / Flask / ASGI / WSGI / OpenTelemetry / Loki](docs/integrations.md)
 

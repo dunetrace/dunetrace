@@ -88,6 +88,8 @@ callback = DunetraceCallbackHandler(
 
 ### LangGraph (create_react_agent)
 
+> **Note:** In LangGraph V1.0+, `create_react_agent` emits a deprecation warning when imported from `langgraph.prebuilt`. This does not affect functionality — it will be removed in V2.0.
+
 ```python
 from langchain_openai import ChatOpenAI
 from langchain.tools import tool
@@ -284,12 +286,18 @@ Run your agent once, then check:
 
 1. **Dashboard** (`http://your-dashboard:3000`) — the run should appear within 15 seconds
 2. **Runs API** — `GET http://your-ingest:8002/v1/runs?agent_id=my-langchain-agent`
-3. **Simulate a tool loop** — force your agent to call the same tool 4+ times and confirm a Slack alert fires
+3. **Simulate a tool loop** — use the built-in scenario to confirm signals fire end-to-end:
 
-For local testing before pointing at production:
+```bash
+SCENARIO=tool_loop python examples/langchain_agent.py
+```
+
+This calls `web_search` six times in one run, which triggers `TOOL_LOOP` (threshold: 3 calls in a 5-call window). The signal should appear in the dashboard within ~15 seconds.
+
+For local testing before pointing at production, omit the `api_key` parameter — the backend accepts unauthenticated requests in dev mode:
 
 ```python
-dt = Dunetrace(endpoint="http://localhost:8001", api_key=None)  # dev mode, no key required
+dt = Dunetrace(endpoint="http://localhost:8001")  # dev mode, no key required
 ```
 
 ---
