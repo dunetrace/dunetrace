@@ -14,13 +14,16 @@ What does transmit: model names, token counts, latencies, tool names, finish rea
 
 ## Prerequisites
 
-- Dunetrace backend running and accessible (self-hosted via Docker Compose, or cloud endpoint)
-- Access to the Dunetrace Postgres instance to create an API key
+- Dunetrace backend running (`docker compose up -d`)
 - Python 3.11+
+
+> **Local dev — no API key needed.** The backend runs in dev mode by default (`ENV=dev`) and accepts requests without any API key. Skip Step 1 entirely when testing on localhost. API keys are only required for production deployments.
 
 ---
 
-## Step 1: Generate an API Key
+## Step 1: Generate an API Key (production only)
+
+Skip this step if you are testing locally — the backend accepts unauthenticated requests in dev mode.
 
 API keys are stored in the `api_keys` table in Postgres. There is no UI for this yet — insert a row directly.
 
@@ -52,8 +55,6 @@ To revoke a key:
 ```sql
 UPDATE api_keys SET active = FALSE WHERE key = 'dt_live_...';
 ```
-
-> **Dev mode:** When running locally with `AUTH_MODE=dev`, any key prefixed `dt_dev_` is accepted without a database lookup. Use `dt_live_` keys only for production.
 
 ---
 
@@ -395,16 +396,21 @@ Hashing happens in-process. Raw content never leaves your agent.
 
 ## Quick-Start Checklist
 
-- [ ] Generate an API key via `INSERT INTO api_keys ...` in Postgres
+**Local dev**
+- [ ] `docker compose up -d`
 - [ ] `pip install dunetrace`
-- [ ] Instantiate `Dunetrace(endpoint=..., api_key=...)`
+- [ ] `Dunetrace(endpoint="http://localhost:8001")` — no api_key needed
 - [ ] Call `dt.init(agent_id="...")` and `dt.auto_instrument()`
 - [ ] Wrap agent entry point (decorator, middleware, or `dt.run()`)
 - [ ] Add manual `run.tool_called()` / `run.tool_responded()` for non-LLM steps
 - [ ] Call `dt.shutdown()` on process exit (or register with `atexit`)
+- [ ] Run `SCENARIO=failures python examples/decorator_agent.py` to verify signals fire
+
+**Production**
+- [ ] Generate an API key via `INSERT INTO api_keys ...` in Postgres
+- [ ] `Dunetrace(endpoint="https://your-ingest", api_key="dt_live_...")`
 - [ ] Set `SLACK_WEBHOOK_URL` on the server
 - [ ] Tune `detectors.yml` thresholds if needed
-- [ ] Test locally against `http://localhost:8001` before production rollout
 
 ---
 

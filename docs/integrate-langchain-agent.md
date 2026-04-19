@@ -26,9 +26,10 @@ Sub-chains (tool nodes, LLM nodes, retriever nodes) are automatically attributed
 
 ## Prerequisites
 
-- Dunetrace backend running and accessible
-- An API key in the `api_keys` table (see [Step 1 in the main integration guide](./integrate-custom-python-agent.md))
+- Dunetrace backend running (`docker compose up -d`)
 - Python 3.11+
+
+> **Local dev — no API key needed.** The backend accepts requests without any API key when running locally. API keys are only required for production deployments — see [the main integration guide](./integrate-custom-python-agent.md#step-1-generate-an-api-key-production-only).
 
 ---
 
@@ -58,14 +59,15 @@ Instantiate `DunetraceCallbackHandler` once at startup and reuse it across all i
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
 
-dt = Dunetrace(
-    endpoint="https://your-dunetrace-ingest",  # or http://localhost:8001 locally
-    api_key="dt_live_...",
-)
+# Local dev — no api_key needed
+dt = Dunetrace(endpoint="http://localhost:8001")
+
+# Production
+# dt = Dunetrace(endpoint="https://your-dunetrace-ingest", api_key="dt_live_...")
 
 callback = DunetraceCallbackHandler(
     dt,
-    agent_id="my-langchain-agent",   # must match the agent_id in your api_keys row
+    agent_id="my-langchain-agent",
     system_prompt=SYSTEM_PROMPT,     # used to compute agent version hash
     model="gpt-4o",                  # declared model for this agent
     tools=["web_search", "calculator"],  # tool names for detector context
@@ -182,7 +184,7 @@ SYSTEM_PROMPT = (
 
 dt = Dunetrace(
     endpoint=os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8001"),
-    api_key=os.environ.get("DUNETRACE_API_KEY"),
+    api_key=os.environ.get("DUNETRACE_API_KEY", ""),  # omit for local dev
 )
 atexit.register(dt.shutdown)
 

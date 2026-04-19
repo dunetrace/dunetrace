@@ -116,8 +116,9 @@ The recommended pattern is to call `dt.init()` once at startup and use `@dt.agen
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace(api_key="dt_live_...")
-dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests globally
+dt = Dunetrace()               # no api_key needed for local dev
+# dt = Dunetrace(api_key="dt_live_...")  # production
+dt.init(agent_id="my-agent")  # patches openai, anthropic, httpx, requests globally
 
 @dt.agent()                    # agent_id="my-agent" inherited from init()
 def run_agent(query: str) -> str:
