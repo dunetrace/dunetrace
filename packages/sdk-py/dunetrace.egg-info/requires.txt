@@ -1,0 +1,14 @@
+
+[dev]
+pytest>=7
+pytest-cov
+mypy
+ruff
+
+[langchain]
+langchain>=1.0
+langgraph>=0.2
+
+[otel]
+opentelemetry-api>=1.20
+opentelemetry-sdk>=1.20
