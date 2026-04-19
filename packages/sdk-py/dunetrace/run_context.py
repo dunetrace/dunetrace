@@ -34,9 +34,10 @@ class RunContext:
         available_tools: list,
         input_text_hash: str,
         parent_run_id:   Optional[str] = None,
+        run_id:          Optional[str] = None,
     ) -> None:
         self._client       = client
-        self.run_id        = str(uuid.uuid4())
+        self.run_id        = run_id or str(uuid.uuid4())
         self.agent_id      = agent_id
         self.agent_version = agent_version
         self.step          = 0

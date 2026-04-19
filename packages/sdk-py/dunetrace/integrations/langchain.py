@@ -41,6 +41,7 @@ except ImportError:
     _LANGCHAIN_AVAILABLE = False
     BaseCallbackHandler = object  # type: ignore[assignment,misc]
 
+from dunetrace.context import _current_run
 from dunetrace.models import hash_content, agent_version as calc_version
 
 if TYPE_CHECKING:
@@ -63,6 +64,7 @@ class _RunCtx:
     children:        Set[str]       = field(default_factory=set)   # child lc_run_ids
     start_time:      float          = field(default_factory=time.time)
     child_steps:     Dict[str, int] = field(default_factory=dict)  # lc_run_id → step_index at call time
+    ctx_token:       Any            = field(default=None, repr=False)  # _current_run reset token
 
 
 class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
@@ -164,6 +166,18 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             with self._lock:
                 self._runs[lc_run_id]      = ctx
                 self._lc_parent[lc_run_id] = lc_run_id
+
+            # Expose the active run via get_current_run() for tool callbacks.
+            from dunetrace.run_context import RunContext
+            run_ctx = RunContext(
+                client=self._client,
+                agent_id=self._agent_id,
+                agent_version=self._version,
+                available_tools=self._tools,
+                input_text_hash="",
+                run_id=ctx.run_id,
+            )
+            ctx.ctx_token = _current_run.set(run_ctx)
 
             user_input = str(inputs.get("input", ""))
             if not user_input and "messages" in inputs:
@@ -470,6 +484,8 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             if ctx:
                 for child_id in ctx.children:
                     self._lc_parent.pop(child_id, None)
+        if ctx and ctx.ctx_token is not None:
+            _current_run.reset(ctx.ctx_token)
 
     def _sweep_stale(self) -> None:
         """Remove runs that started more than _STALE_RUN_SECS ago and never completed.
