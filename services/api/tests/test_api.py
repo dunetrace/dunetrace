@@ -62,6 +62,7 @@ def make_signal_row(**kw) -> dict:
         "detected_at":    kw.get("detected_at",    NOW),
         "evidence":       kw.get("evidence",       {"tool": "web_search", "count": 5, "window": 5}),
         "alerted":        kw.get("alerted",        True),
+        "shadow":         kw.get("shadow",         False),
         "title":          kw.get("title",          "Tool loop detected"),
         "what":           kw.get("what",           "Agent looped."),
         "why_it_matters": kw.get("why_it_matters", "Burns tokens."),

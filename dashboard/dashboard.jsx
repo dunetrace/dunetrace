@@ -156,7 +156,10 @@ function Dashboard() {
   const [runDetailLoading, setRunDetailLoading] = useState(false);
   const [timelineExpanded, setTimelineExpanded] = useState(false);
   const [graphRunId,       setGraphRunId]       = useState(null);
-  const [insights,         setInsights]         = useState(null);
+  const [insights,              setInsights]              = useState(null);
+  const [selectedFailureType,   setSelectedFailureType]   = useState(null);
+  const [failurePattern,        setFailurePattern]        = useState(null);
+  const [failurePatternLoading, setFailurePatternLoading] = useState(false);
   const PAGE_SIZE = 15;
 
   // Deep-link: /runs/<run_id> from Slack alert → auto-open that run
@@ -207,8 +210,33 @@ function Dashboard() {
     setRunsPage(0);
     setRunDetail(null);
     setInsights(null);
+    setSelectedFailureType(null);
+    setFailurePattern(null);
     loadAgentData(selectedAgent);
   }, [selectedAgent, loadAgentData]);
+
+  // Fetch failure pattern when a failure type is clicked
+  const loadFailurePattern = useCallback(async (agentId, failureType) => {
+    if (!agentId || !failureType) { setFailurePattern(null); return; }
+    setFailurePatternLoading(true);
+    try {
+      const d = await apiFetch(
+        `/v1/agents/${encodeURIComponent(agentId)}/failure-patterns/${encodeURIComponent(failureType)}`
+      );
+      setFailurePattern(d);
+    } catch (e) { console.error(e); setFailurePattern(null); }
+    finally { setFailurePatternLoading(false); }
+  }, []);
+
+  const handleFailureTypeClick = useCallback((failureType) => {
+    if (selectedFailureType === failureType) {
+      setSelectedFailureType(null);
+      setFailurePattern(null);
+    } else {
+      setSelectedFailureType(failureType);
+      loadFailurePattern(selectedAgent, failureType);
+    }
+  }, [selectedAgent, selectedFailureType, loadFailurePattern]);
 
   // Fetch full run detail (events + signals) when a run is selected
   useEffect(() => {
@@ -422,9 +450,12 @@ function Dashboard() {
                 SYSTEMIC PATTERNS
               </div>
               {insights.systemic_patterns.filter(p => p.is_systemic).map(p => (
-                <div key={p.failure_type} style={{ marginBottom: 8 }}>
+                <div key={p.failure_type} style={{ marginBottom: 8, cursor: "pointer" }}
+                  onClick={() => handleFailureTypeClick(p.failure_type)}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
-                    <span style={{ fontSize: 10, color: C.text }}>{p.failure_type.replace(/_/g, " ")}</span>
+                    <span style={{ fontSize: 10, color: selectedFailureType === p.failure_type ? C.red : C.text, fontWeight: selectedFailureType === p.failure_type ? 700 : 400 }}>
+                      {p.failure_type.replace(/_/g, " ")}
+                    </span>
                     <span style={{ fontSize: 10, color: C.red, fontWeight: 700 }}>
                       {Math.round(p.rate * 100)}% of runs
                     </span>
@@ -448,9 +479,12 @@ function Dashboard() {
               : (() => {
                   const maxV = Math.max(...topFailures.map(e => e[1]), 1);
                   return topFailures.map(([sig, cnt]) => (
-                    <div key={sig} style={{ marginBottom: 8 }}>
+                    <div key={sig} style={{ marginBottom: 8, cursor: selectedAgent ? "pointer" : "default" }}
+                      onClick={() => selectedAgent && handleFailureTypeClick(sig)}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                        <span style={{ fontSize: 10, color: C.textM }}>{sig.replace(/_/g, " ")}</span>
+                        <span style={{ fontSize: 10, color: selectedFailureType === sig ? C.orange : C.textM, fontWeight: selectedFailureType === sig ? 700 : 400 }}>
+                          {sig.replace(/_/g, " ")}
+                        </span>
                         <span style={{ fontSize: 10, color: C.orange, fontWeight: 700 }}>{cnt}</span>
                       </div>
                       <MiniBar value={cnt} max={maxV} color={C.orange} width={248} height={4} />
@@ -515,6 +549,156 @@ function Dashboard() {
                       );
                     })}
                   </div>
+                </div>
+              )}
+
+              {/* ── Why is this happening? — failure pattern deep-dive ── */}
+              {selectedFailureType && (
+                <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}`, background: C.surface }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                    <div>
+                      <span style={{ fontSize: 9, color: C.textD, letterSpacing: "0.15em" }}>WHY IS THIS HAPPENING? — </span>
+                      <span style={{ fontSize: 9, color: C.orange, letterSpacing: "0.15em", fontWeight: 700 }}>
+                        {selectedFailureType.replace(/_/g, " ")}
+                      </span>
+                    </div>
+                    <button onClick={() => { setSelectedFailureType(null); setFailurePattern(null); }}
+                      style={{ background: "none", border: `1px solid ${C.border}`, color: C.textM, borderRadius: 4, padding: "2px 10px", cursor: "pointer", fontSize: 10, fontFamily: "inherit" }}>
+                      ✕ close
+                    </button>
+                  </div>
+
+                  {failurePatternLoading && (
+                    <div style={{ fontSize: 10, color: C.textD }}>Loading pattern data…</div>
+                  )}
+
+                  {!failurePatternLoading && failurePattern && (() => {
+                    const fp = failurePattern;
+                    const ov = fp.overview;
+                    const sd = fp.step_distribution;
+                    return (
+                      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+
+                        {/* Overview card */}
+                        <div style={{ background: C.surfaceB, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 14px", minWidth: 160 }}>
+                          <div style={{ fontSize: 9, color: C.textD, marginBottom: 6 }}>OVERVIEW</div>
+                          <div style={{ fontSize: 22, fontWeight: 700, color: C.orange, marginBottom: 2 }}>
+                            {Math.round(ov.rate * 100)}%
+                          </div>
+                          <div style={{ fontSize: 9, color: C.textD, marginBottom: 6 }}>
+                            {ov.affected_runs}/{ov.total_runs} runs affected
+                          </div>
+                          <div style={{ fontSize: 9, color: C.textD, marginBottom: 2 }}>
+                            avg confidence: <span style={{ color: C.text }}>{Math.round(ov.avg_confidence * 100)}%</span>
+                          </div>
+                          <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
+                            {Object.entries(ov.severity_breakdown).filter(([,v]) => v > 0).map(([sev, cnt]) => (
+                              <span key={sev} style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: sev === "CRITICAL" ? `${C.red}22` : sev === "HIGH" ? `${C.orange}22` : `${C.textD}22`, color: sev === "CRITICAL" ? C.red : sev === "HIGH" ? C.orange : C.textD }}>
+                                {sev} {cnt}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Step distribution */}
+                        {sd.p50 != null && (
+                          <div style={{ background: C.surfaceB, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 14px", minWidth: 140 }}>
+                            <div style={{ fontSize: 9, color: C.textD, marginBottom: 6 }}>FIRES AT STEP</div>
+                            <div style={{ fontSize: 22, fontWeight: 700, color: C.text, marginBottom: 2 }}>~{Math.round(sd.p50)}</div>
+                            <div style={{ fontSize: 9, color: C.textD }}>median (P50)</div>
+                            <div style={{ fontSize: 9, color: C.textD, marginTop: 6 }}>
+                              P25 <span style={{ color: C.text }}>{Math.round(sd.p25 ?? 0)}</span>
+                              {"  ·  "}
+                              P75 <span style={{ color: C.text }}>{Math.round(sd.p75 ?? 0)}</span>
+                            </div>
+                            <div style={{ fontSize: 9, color: C.textD, marginTop: 2 }}>
+                              avg <span style={{ color: C.text }}>{sd.avg_step?.toFixed(1)}</span>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Evidence aggregates */}
+                        {fp.evidence_aggregates.length > 0 && (
+                          <div style={{ background: C.surfaceB, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 14px", minWidth: 180 }}>
+                            <div style={{ fontSize: 9, color: C.textD, marginBottom: 6 }}>EVIDENCE PATTERNS</div>
+                            {fp.evidence_aggregates.slice(0, 3).map((ev, i) => (
+                              <div key={i} style={{ marginBottom: 6, paddingBottom: 6, borderBottom: i < Math.min(fp.evidence_aggregates.length, 3) - 1 ? `1px solid ${C.border}` : "none" }}>
+                                {ev.tool && <div style={{ fontSize: 10, color: C.text, fontWeight: 600, marginBottom: 2 }}>{ev.tool}</div>}
+                                {ev.index_name && <div style={{ fontSize: 10, color: C.text, fontWeight: 600, marginBottom: 2 }}>{ev.index_name}</div>}
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                  {ev.avg_count != null && <span style={{ fontSize: 9, color: C.textD }}>avg calls: <span style={{ color: C.orange }}>{ev.avg_count}</span></span>}
+                                  {ev.avg_consecutive_fails != null && <span style={{ fontSize: 9, color: C.textD }}>consec fails: <span style={{ color: C.red }}>{ev.avg_consecutive_fails}</span></span>}
+                                  {ev.args_identical_rate != null && <span style={{ fontSize: 9, color: C.textD }}>same args: <span style={{ color: C.text }}>{Math.round(ev.args_identical_rate * 100)}%</span></span>}
+                                  {ev.avg_growth_factor != null && <span style={{ fontSize: 9, color: C.textD }}>token growth: <span style={{ color: C.orange }}>{ev.avg_growth_factor}×</span></span>}
+                                  {ev.avg_duration_ms != null && <span style={{ fontSize: 9, color: C.textD }}>avg duration: <span style={{ color: C.text }}>{(ev.avg_duration_ms / 1000).toFixed(1)}s</span></span>}
+                                  {ev.avg_ratio != null && <span style={{ fontSize: 9, color: C.textD }}>ratio: <span style={{ color: C.orange }}>{ev.avg_ratio}×</span></span>}
+                                  {ev.avg_top_score != null && <span style={{ fontSize: 9, color: C.textD }}>top score: <span style={{ color: C.text }}>{ev.avg_top_score}</span></span>}
+                                  {ev.avg_stall_steps != null && <span style={{ fontSize: 9, color: C.textD }}>stall steps: <span style={{ color: C.text }}>{ev.avg_stall_steps}</span></span>}
+                                  {ev.avg_inflation_ratio != null && <span style={{ fontSize: 9, color: C.textD }}>inflation: <span style={{ color: C.orange }}>{ev.avg_inflation_ratio}×</span></span>}
+                                </div>
+                                <div style={{ fontSize: 9, color: C.textD, marginTop: 2 }}>
+                                  {ev.sample_count} signal{ev.sample_count !== 1 ? "s" : ""}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Co-occurring failures */}
+                        {fp.co_occurring.length > 0 && (
+                          <div style={{ background: C.surfaceB, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 14px", minWidth: 160 }}>
+                            <div style={{ fontSize: 9, color: C.textD, marginBottom: 6 }}>CO-OCCURS WITH</div>
+                            {fp.co_occurring.slice(0, 5).map(c => (
+                              <div key={c.failure_type} style={{ marginBottom: 5 }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                                  <span style={{ fontSize: 9, color: C.textM }}>{c.failure_type.replace(/_/g, " ")}</span>
+                                  <span style={{ fontSize: 9, color: C.orange, fontWeight: 700 }}>{Math.round(c.co_rate * 100)}%</span>
+                                </div>
+                                <MiniBar value={c.co_rate * 100} max={100} color={C.orange} width={140} height={3} />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* 14-day trend */}
+                        {fp.daily_trend.length > 0 && (() => {
+                          const trendVals = fp.daily_trend.map(d => Math.round(d.rate * 100));
+                          return (
+                            <div style={{ background: C.surfaceB, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 14px", minWidth: 160 }}>
+                              <div style={{ fontSize: 9, color: C.textD, marginBottom: 6 }}>14-DAY TREND</div>
+                              <Sparkline values={trendVals} color={C.orange} w={140} h={32} />
+                              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+                                <span style={{ fontSize: 8, color: C.textD }}>{fp.daily_trend[0]?.day?.slice(5)}</span>
+                                <span style={{ fontSize: 8, color: C.textD }}>{fp.daily_trend[fp.daily_trend.length - 1]?.day?.slice(5)}</span>
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {/* Top runs */}
+                        {fp.top_runs.length > 0 && (
+                          <div style={{ background: C.surfaceB, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 14px", minWidth: 200 }}>
+                            <div style={{ fontSize: 9, color: C.textD, marginBottom: 6 }}>HIGHEST CONFIDENCE RUNS</div>
+                            {fp.top_runs.map(r => (
+                              <div key={r.run_id} style={{ marginBottom: 6, cursor: "pointer" }}
+                                onClick={() => setSelectedRun({ run_id: r.run_id })}>
+                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 1 }}>
+                                  <span style={{ fontSize: 9, color: C.blue, textDecoration: "underline" }}>
+                                    {r.run_id.slice(0, 8)}…
+                                  </span>
+                                  <span style={{ fontSize: 9, color: r.severity === "CRITICAL" ? C.red : C.orange, fontWeight: 700 }}>
+                                    {Math.round(r.confidence * 100)}%
+                                  </span>
+                                </div>
+                                <div style={{ fontSize: 8, color: C.textD }}>step {r.step_index} · {r.severity}</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 

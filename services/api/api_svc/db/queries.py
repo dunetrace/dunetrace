@@ -838,3 +838,257 @@ async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -
         }
         for r in rows
     ]
+
+
+async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
+    """
+    Cross-run deep-dive for one failure type.
+
+    Returns overview stats, step distribution, evidence aggregates,
+    14-day daily trend, co-occurring failure types, and top affected runs.
+    """
+    if not _pool:
+        return {}
+
+    async with _pool.acquire() as conn:
+        # 1. Overview
+        overview_row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(DISTINCT run_id)                          AS affected_runs,
+                ROUND(AVG(confidence)::numeric, 3)              AS avg_confidence,
+                MIN(detected_at)                                AS first_seen,
+                MAX(detected_at)                                AS last_seen,
+                COUNT(*) FILTER (WHERE severity = 'CRITICAL')  AS critical_count,
+                COUNT(*) FILTER (WHERE severity = 'HIGH')       AS high_count,
+                COUNT(*) FILTER (WHERE severity = 'MEDIUM')     AS medium_count,
+                COUNT(*) FILTER (WHERE severity = 'LOW')        AS low_count
+            FROM failure_signals
+            WHERE agent_id    = $1
+              AND failure_type = $2
+              AND shadow       = FALSE
+            """,
+            agent_id, failure_type,
+        )
+
+        total_row = await conn.fetchrow(
+            "SELECT COUNT(DISTINCT run_id) AS total FROM processed_runs WHERE agent_id = $1",
+            agent_id,
+        )
+
+        # 2. Step distribution (where in the run does this fire)
+        step_row = await conn.fetchrow(
+            """
+            SELECT
+                PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY step_index) AS p25,
+                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY step_index) AS p50,
+                PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY step_index) AS p75,
+                ROUND(AVG(step_index)::numeric, 1)                        AS avg_step
+            FROM failure_signals
+            WHERE agent_id    = $1
+              AND failure_type = $2
+              AND shadow       = FALSE
+            """,
+            agent_id, failure_type,
+        )
+
+        # 3. Evidence aggregates — extract the most useful keys per failure type
+        evidence_rows = await conn.fetch(
+            """
+            SELECT
+                -- Tool-based failures (TOOL_LOOP, RETRY_STORM, CASCADING_TOOL_FAILURE)
+                evidence->>'tool'                                        AS tool,
+
+                -- Loop / repetition
+                ROUND(AVG((evidence->>'count')::numeric), 1)            AS avg_count,
+                ROUND(AVG((evidence->>'consecutive_fails')::numeric), 1) AS avg_consecutive_fails,
+                ROUND(AVG(
+                    CASE WHEN evidence->>'args_identical' = 'true' THEN 1.0 ELSE 0.0 END
+                ), 2)                                                    AS args_identical_rate,
+
+                -- Context / token growth
+                ROUND(AVG((evidence->>'growth_factor')::numeric), 2)    AS avg_growth_factor,
+                ROUND(AVG((evidence->>'first_tokens')::numeric), 0)     AS avg_first_tokens,
+                ROUND(AVG((evidence->>'last_tokens')::numeric), 0)      AS avg_last_tokens,
+
+                -- Slow step
+                ROUND(AVG((evidence->>'duration_ms')::numeric), 0)      AS avg_duration_ms,
+                ROUND(AVG((evidence->>'threshold_ms')::numeric), 0)     AS avg_threshold_ms,
+                ROUND(AVG((evidence->>'ratio')::numeric), 2)            AS avg_ratio,
+
+                -- RAG
+                evidence->>'index_name'                                  AS index_name,
+                ROUND(AVG((evidence->>'top_score')::numeric), 3)        AS avg_top_score,
+                ROUND(AVG((evidence->>'result_count')::numeric), 1)     AS avg_result_count,
+
+                -- Step count inflation
+                ROUND(AVG((evidence->>'inflation_ratio')::numeric), 2)  AS avg_inflation_ratio,
+                ROUND(AVG((evidence->>'baseline_p75')::numeric), 1)     AS avg_baseline_p75,
+
+                -- Reasoning / goal abandonment
+                ROUND(AVG((evidence->>'stall_steps')::numeric), 1)      AS avg_stall_steps,
+
+                COUNT(*) AS sample_count
+            FROM failure_signals
+            WHERE agent_id    = $1
+              AND failure_type = $2
+              AND shadow       = FALSE
+            GROUP BY
+                evidence->>'tool',
+                evidence->>'index_name'
+            ORDER BY sample_count DESC
+            LIMIT 10
+            """,
+            agent_id, failure_type,
+        )
+
+        # 4. Daily trend (14 days)
+        trend_rows = await conn.fetch(
+            """
+            WITH days AS (
+                SELECT generate_series(
+                    DATE_TRUNC('day', NOW() - INTERVAL '13 days'),
+                    DATE_TRUNC('day', NOW()),
+                    INTERVAL '1 day'
+                )::date AS day
+            ),
+            daily_affected AS (
+                SELECT
+                    DATE_TRUNC('day', detected_at AT TIME ZONE 'UTC')::date AS day,
+                    COUNT(DISTINCT run_id) AS affected_runs
+                FROM failure_signals
+                WHERE agent_id    = $1
+                  AND failure_type = $2
+                  AND shadow       = FALSE
+                  AND detected_at >= NOW() - INTERVAL '14 days'
+                GROUP BY 1
+            ),
+            daily_total AS (
+                SELECT
+                    DATE_TRUNC('day', processed_at AT TIME ZONE 'UTC')::date AS day,
+                    COUNT(DISTINCT run_id) AS total_runs
+                FROM processed_runs
+                WHERE agent_id    = $1
+                  AND processed_at >= NOW() - INTERVAL '14 days'
+                GROUP BY 1
+            )
+            SELECT
+                d.day,
+                COALESCE(da.affected_runs, 0)  AS affected_runs,
+                COALESCE(dt.total_runs, 0)     AS total_runs,
+                CASE WHEN COALESCE(dt.total_runs, 0) > 0
+                     THEN ROUND(COALESCE(da.affected_runs, 0)::numeric / dt.total_runs, 3)
+                     ELSE 0 END                AS rate
+            FROM days d
+            LEFT JOIN daily_affected da ON da.day = d.day
+            LEFT JOIN daily_total    dt ON dt.day = d.day
+            ORDER BY d.day
+            """,
+            agent_id, failure_type,
+        )
+
+        # 5. Co-occurring failure types (same runs, last 30 days)
+        co_rows = await conn.fetch(
+            """
+            WITH affected AS (
+                SELECT DISTINCT run_id
+                FROM failure_signals
+                WHERE agent_id    = $1
+                  AND failure_type = $2
+                  AND shadow       = FALSE
+                  AND detected_at >= NOW() - INTERVAL '30 days'
+            )
+            SELECT
+                fs.failure_type,
+                COUNT(DISTINCT fs.run_id)                                              AS co_count,
+                ROUND(COUNT(DISTINCT fs.run_id)::numeric / COUNT(DISTINCT a.run_id), 3) AS co_rate
+            FROM affected a
+            JOIN failure_signals fs ON fs.run_id = a.run_id
+            WHERE fs.agent_id    = $1
+              AND fs.failure_type != $2
+              AND fs.shadow       = FALSE
+            GROUP BY fs.failure_type
+            ORDER BY co_rate DESC
+            LIMIT 8
+            """,
+            agent_id, failure_type,
+        )
+
+        # 6. Top affected runs (highest confidence, most recent)
+        run_rows = await conn.fetch(
+            """
+            SELECT
+                run_id,
+                confidence,
+                severity,
+                step_index,
+                detected_at,
+                evidence
+            FROM failure_signals
+            WHERE agent_id    = $1
+              AND failure_type = $2
+              AND shadow       = FALSE
+            ORDER BY confidence DESC, detected_at DESC
+            LIMIT 5
+            """,
+            agent_id, failure_type,
+        )
+
+    total_runs    = int(total_row["total"] or 0)
+    affected_runs = int(overview_row["affected_runs"] or 0)
+
+    return {
+        "failure_type": failure_type,
+        "overview": {
+            "affected_runs":  affected_runs,
+            "total_runs":     total_runs,
+            "rate":           round(affected_runs / total_runs, 3) if total_runs else 0.0,
+            "avg_confidence": float(overview_row["avg_confidence"] or 0),
+            "first_seen":     _ts(overview_row["first_seen"]),
+            "last_seen":      _ts(overview_row["last_seen"]),
+            "severity_breakdown": {
+                "CRITICAL": int(overview_row["critical_count"] or 0),
+                "HIGH":     int(overview_row["high_count"] or 0),
+                "MEDIUM":   int(overview_row["medium_count"] or 0),
+                "LOW":      int(overview_row["low_count"] or 0),
+            },
+        },
+        "step_distribution": {
+            "p25":      float(step_row["p25"])      if step_row["p25"]      is not None else None,
+            "p50":      float(step_row["p50"])      if step_row["p50"]      is not None else None,
+            "p75":      float(step_row["p75"])      if step_row["p75"]      is not None else None,
+            "avg_step": float(step_row["avg_step"]) if step_row["avg_step"] is not None else None,
+        },
+        "evidence_aggregates": [
+            {k: v for k, v in dict(r).items() if v is not None}
+            for r in evidence_rows
+        ],
+        "daily_trend": [
+            {
+                "day":           str(r["day"]),
+                "affected_runs": int(r["affected_runs"]),
+                "total_runs":    int(r["total_runs"]),
+                "rate":          float(r["rate"] or 0),
+            }
+            for r in trend_rows
+        ],
+        "co_occurring": [
+            {
+                "failure_type": r["failure_type"],
+                "co_count":     int(r["co_count"]),
+                "co_rate":      float(r["co_rate"] or 0),
+            }
+            for r in co_rows
+        ],
+        "top_runs": [
+            {
+                "run_id":      r["run_id"],
+                "confidence":  float(r["confidence"]),
+                "severity":    r["severity"],
+                "step_index":  int(r["step_index"]),
+                "detected_at": _ts(r["detected_at"]),
+                "evidence":    dict(r["evidence"]),
+            }
+            for r in run_rows
+        ],
+    }

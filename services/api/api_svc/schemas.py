@@ -201,6 +201,51 @@ if _PYDANTIC:
         issues: List[Issue]
         total:  int
 
+    # Failure pattern models
+
+    class FailureOverview(_Model):
+        affected_runs:      int
+        total_runs:         int
+        rate:               float
+        avg_confidence:     float
+        first_seen:         Optional[float]
+        last_seen:          Optional[float]
+        severity_breakdown: Dict[str, int]
+
+    class StepDistribution(_Model):
+        p25:      Optional[float]
+        p50:      Optional[float]
+        p75:      Optional[float]
+        avg_step: Optional[float]
+
+    class DailyTrendPoint(_Model):
+        day:           str
+        affected_runs: int
+        total_runs:    int
+        rate:          float
+
+    class CoOccurring(_Model):
+        failure_type: str
+        co_count:     int
+        co_rate:      float
+
+    class TopRun(_Model):
+        run_id:      str
+        confidence:  float
+        severity:    str
+        step_index:  int
+        detected_at: Optional[float]
+        evidence:    Dict[str, Any]
+
+    class FailurePatternAnalysis(_Model):
+        failure_type:        str
+        overview:            FailureOverview
+        step_distribution:   StepDistribution
+        evidence_aggregates: List[Dict[str, Any]]
+        daily_trend:         List[DailyTrendPoint]
+        co_occurring:        List[CoOccurring]
+        top_runs:            List[TopRun]
+
 else:
     # Stdlib dataclass fallback (sandbox / testing)
     from dataclasses import dataclass, field

@@ -13,9 +13,28 @@ The Mission Control dashboard is a live, API-driven single-page app served at **
 | **Alerts** | Signals grouped by failure type. Each group header shows run count and estimated wasted tokens. Expandable per group with per-run confidence and token estimates. Shadow signals rendered below with dashed border + SHADOW badge. |
 | **Analytics** | Estimated token cost saved this week (configurable $/1k rate). Cross-agent totals. Top failure patterns with per-type token waste. Per-agent breakdown with estimated wasted tokens. |
 | **Risk Heatmap** | Failure type × agent intensity grid. |
-| **Agents** | Per-agent health cards — failure rate %, dominant pattern, run / critical / high counts, last seen, ungraduated shadow signal count. Each agent card links to a **Health Record** panel showing failure rate per failure type over 30 days: a sparkline of daily rate, a `SYSTEMIC` badge when ≥10% of runs in the last 7 days were affected, and a 7-day affected/total count. Powered by `GET /v1/agents/{id}/insights` (`failure_rates` + `systemic_patterns`). |
+| **Agents** | Per-agent health cards — failure rate %, dominant pattern, run / critical / high counts, last seen, ungraduated shadow signal count. Each agent card links to a **Health Record** panel showing failure rate per failure type over 30 days: a sparkline of daily rate, a `SYSTEMIC` badge when ≥10% of runs in the last 7 days were affected, and a 7-day affected/total count. Powered by `GET /v1/agents/{id}/insights` (`failure_rates` + `systemic_patterns`). Clicking any failure type in the sidebar opens the **Why is this happening?** deep-dive panel (see below). |
 | **Compare Runs** | Side-by-side run comparison. Select any two runs from dropdowns — metrics, signals, and max confidence shown in both panels with a colour-coded delta table (new / resolved failure types highlighted). |
 | **Detectors** | Threshold sliders and alert level selector. Live review panel: "with current config, N of M past runs would be flagged HIGH or above (N% of runs)" — recomputes on every change. |
+
+---
+
+## Why is this happening?
+
+Clicking any failure type in the **Signal Breakdown** or **Systemic Patterns** sidebar opens a cross-run deep-dive panel inline. Click the same item again or ✕ to dismiss.
+
+The panel shows six sections for the selected failure type:
+
+| Section | What it answers |
+|---|---|
+| **Overview** | Affected runs / total runs, rate, avg confidence, severity breakdown (CRITICAL / HIGH / MEDIUM / LOW), first and last seen |
+| **Fires at step** | P25 / P50 / P75 / avg step index where the failure fires — answers "does this happen early or late in runs?" |
+| **Evidence patterns** | Aggregated evidence fields from detector output: which tool loops most, avg call count, same-args rate, token growth factor, avg step duration vs threshold, avg RAG top score, avg stall steps, inflation ratio |
+| **Co-occurs with** | Other failure types that fire in the same runs, ranked by co-occurrence rate — surfaces systemic failure clusters |
+| **14-day trend** | Daily sparkline of affected_runs / rate — answers "is this getting worse, better, or stable?" |
+| **Highest confidence runs** | Five example runs with the highest confidence for this failure type — each row is clickable and opens the run detail panel |
+
+Powered by `GET /v1/agents/{agent_id}/failure-patterns/{failure_type}`.
 
 ---
 
@@ -70,4 +89,6 @@ All data is computed client-side from the Customer API. No server-side rendering
 | Overview, Alerts, Analytics, Heatmap, Agents | `GET /v1/agents` + per-agent `/runs` + `/signals?include_shadow=true` |
 | All Runs, Compare Runs | Same cached data, no extra calls |
 | Run detail | `GET /v1/runs/{id}` (events + signals) |
+| Agent view (health record + runs) | `GET /v1/agents/{id}/runs` + `/signals` + `/insights` |
+| Why is this happening? panel | `GET /v1/agents/{id}/failure-patterns/{failure_type}` |
 | Detectors | Static — edits require updating `detectors.yml` and restarting the detector service |

@@ -216,6 +216,30 @@ print(result["messages"][-1].content)
 
 ---
 
+## Accessing the Run Inside Tool Functions
+
+`get_current_run()` returns the active `RunContext` inside any LangChain tool callback — useful for emitting infrastructure signals (rate limits, cache misses) without plumbing the run object through your call stack.
+
+```python
+from dunetrace import get_current_run
+
+@tool
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    run = get_current_run()
+
+    # Emit an infrastructure signal without advancing the step counter
+    if rate_limited():
+        run.external_signal("rate_limit", source="serpapi")
+
+    result = do_search(query)
+    return result
+```
+
+`get_current_run()` returns `None` when called outside an active run — always guard with `if run:`.
+
+---
+
 ## RAG Agents (Retriever Auto-Instrumentation)
 
 If your agent uses a LangChain retriever, retrieval events are captured automatically — no extra code needed.

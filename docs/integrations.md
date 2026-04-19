@@ -2,6 +2,143 @@
 
 ---
 
+## TypeScript / Node.js
+
+No SDK required — send events directly to the ingest HTTP endpoint from any TypeScript or JavaScript agent. Node 18+ (built-in `fetch`).
+
+### Environment variables
+
+```bash
+DUNETRACE_ENDPOINT=http://localhost:8001   # or your hosted ingest URL
+DUNETRACE_API_KEY=                         # empty for self-hosted, set for cloud
+```
+
+### Minimal client
+
+```typescript
+import { randomUUID } from "crypto";
+
+const ENDPOINT = process.env.DUNETRACE_ENDPOINT ?? "http://localhost:8001";
+const API_KEY  = process.env.DUNETRACE_API_KEY  ?? "";
+
+type EventType =
+  | "run.started" | "run.completed" | "run.errored"
+  | "llm.called"  | "llm.responded"
+  | "tool.called" | "tool.responded"
+  | "retrieval.called" | "retrieval.responded"
+  | "external.signal";
+
+interface AgentEvent {
+  event_type:    EventType;
+  run_id:        string;
+  agent_id:      string;
+  agent_version: string;
+  step_index:    number;
+  timestamp:     number;             // Unix seconds (float)
+  payload:       Record<string, unknown>;
+  parent_run_id?: string | null;
+}
+
+class DunetraceRun {
+  readonly runId = randomUUID();
+  private step   = 0;
+  private events: AgentEvent[] = [];
+
+  constructor(private readonly agentId: string, private readonly version: string) {}
+
+  private emit(type: EventType, payload: Record<string, unknown>) {
+    this.step++;
+    this.events.push({
+      event_type: type, run_id: this.runId, agent_id: this.agentId,
+      agent_version: this.version, step_index: this.step,
+      timestamp: Date.now() / 1000, payload,
+    });
+  }
+
+  llmCalled(model: string, promptTokens = 0) {
+    this.emit("llm.called", { model, prompt_tokens: promptTokens });
+  }
+  llmResponded(opts: { completionTokens?: number; latencyMs?: number; finishReason?: string }) {
+    this.emit("llm.responded", {
+      completion_tokens: opts.completionTokens ?? 0,
+      latency_ms: opts.latencyMs ?? 0,
+      finish_reason: opts.finishReason ?? "stop",
+    });
+  }
+  toolCalled(toolName: string, args: Record<string, unknown> = {}) {
+    this.emit("tool.called", { tool_name: toolName, args_hash: JSON.stringify(args) });
+  }
+  toolResponded(toolName: string, success: boolean, outputLength = 0) {
+    this.emit("tool.responded", { tool_name: toolName, success, output_length: outputLength });
+  }
+  finalAnswer() {
+    this.emit("run.completed", { exit_reason: "final_answer", total_steps: this.step });
+  }
+  getEvents() { return this.events; }
+}
+
+class Dunetrace {
+  async run(
+    agentId: string,
+    opts: { model?: string; tools?: string[] },
+    fn: (run: DunetraceRun) => Promise<void>,
+  ) {
+    const version = opts.model ?? "unknown";
+    const run     = new DunetraceRun(agentId, version);
+    const start: AgentEvent = {
+      event_type: "run.started", run_id: run.runId, agent_id: agentId,
+      agent_version: version, step_index: 0, timestamp: Date.now() / 1000,
+      payload: { model: opts.model ?? "unknown", tools: opts.tools ?? [] },
+    };
+    try {
+      await fn(run);
+    } catch (err) {
+      await this.flush(agentId, [start, ...run.getEvents(), {
+        event_type: "run.errored", run_id: run.runId, agent_id: agentId,
+        agent_version: version, step_index: 999, timestamp: Date.now() / 1000,
+        payload: { error_type: (err as Error).name },
+      }]);
+      throw err;
+    }
+    await this.flush(agentId, [start, ...run.getEvents()]);
+  }
+
+  private async flush(agentId: string, events: AgentEvent[]) {
+    await fetch(`${ENDPOINT}/v1/ingest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: API_KEY, agent_id: agentId, events }),
+    });
+  }
+}
+```
+
+### Usage
+
+```typescript
+const dt = new Dunetrace();
+
+await dt.run("my-ts-agent", { model: "gpt-4o", tools: ["web_search"] }, async (run) => {
+  run.llmCalled("gpt-4o", 150);
+  // ... call your LLM here ...
+  run.llmResponded({ completionTokens: 30, latencyMs: 120, finishReason: "tool_calls" });
+
+  run.toolCalled("web_search", { query: "latest AI news" });
+  // ... call your tool here ...
+  run.toolResponded("web_search", true, 512);
+
+  run.llmCalled("gpt-4o", 400);
+  run.llmResponded({ completionTokens: 120, latencyMs: 95, finishReason: "stop" });
+  run.finalAnswer();
+});
+```
+
+Runs appear in the dashboard alongside Python agents under the same `agent_id`.
+
+For a full step-by-step guide including error handling, RAG, infrastructure signals, and a full API reference, see [integrate-typescript-agent.md](./integrate-typescript-agent.md).
+
+---
+
 ## OpenLLMetry / OTel receiver
 
 [OpenLLMetry](https://github.com/traceloop/openllmetry) instruments 40+ AI frameworks and emits standard OpenTelemetry spans with `gen_ai.*` semantic conventions. Dunetrace runs alongside it — add `DunetraceOTelReceiver` as a second exporter and get behavioral detection with zero changes to your agent code.

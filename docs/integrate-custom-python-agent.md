@@ -423,4 +423,12 @@ Within ~15 seconds of each run, Dunetrace:
 3. **Trends** — the dashboard Health Record panel shows failure rate per failure type over 30 days, a 7-day systemic pattern flag (≥10% of runs affected), and a sparkline showing rate over time
 4. **Alerts** — Slack messages include a one-line rate context: "First occurrence", "5/20 runs affected (25%)", or "Systemic pattern — 8/12 runs affected (67%)"
 
+**Cross-run pattern analysis** — the dashboard "Why is this happening?" panel (click any failure type in the sidebar) shows a deep-dive for that failure type across all runs:
+
+```
+GET /v1/agents/{agent_id}/failure-patterns/{failure_type}
+```
+
+Returns: affected/total runs + rate, avg confidence, severity breakdown, step distribution (P25/P50/P75 where the failure fires), aggregated evidence (which tool loops, token growth rate, avg duration, etc.), co-occurring failure types, 14-day daily trend, and five highest-confidence example runs.
+
 The Health Record is available at `GET /v1/agents/{id}/insights` — it returns `failure_rates` (daily affected/total per failure type) and `systemic_patterns` (7-day rate + `is_systemic` flag).
