@@ -24,9 +24,11 @@ jobs:
         working-directory: packages/sdk-py
         run: |
           pip install build
+          rm -rf dist/
           python -m build
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: packages/sdk-py/dist/
+          skip-existing: true
