@@ -55,13 +55,18 @@ dt.init(agent_id="my-agent")  # patches openai, anthropic, httpx, requests globa
 def run_agent(query: str) -> str:
     ...                        # LLM + HTTP calls tracked automatically
 ```
+## Examples
 
 To verify signals fire end-to-end, run the examples with built-in failure scenarios:
 
 ```bash
 cd packages/sdk-py
-SCENARIO=failures python examples/decorator_agent.py   # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
+
+python examples/basic_agent.py # No LLM calls
+
 SCENARIO=tool_loop python examples/langchain_agent.py  # TOOL_LOOP via LangChain callback
+
+SCENARIO=failures python examples/decorator_agent.py   # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
 ```
 
 Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
