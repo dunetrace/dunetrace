@@ -21,7 +21,7 @@ AI agents fail in ways that traditional monitoring can't see.
 
 Your API returns 200. Your logs show no exceptions. But the agent called the same tool 12 times in a row, burned $X in tokens, and gave the user a wrong answer or no answer at all.
 
-LangSmith/Langfuse answer "what happened?" after you already know something broke. Dunetrace answers a different question: **"is something breaking right now?"**
+LangSmith/Langfuse answer "what happened?" after you already know something broke. Dunetrace answers a different question: **"is something breaking right now?"** — and if you're already running Langfuse, it can pull your trace context to explain *why*.
 
 It watches the structural pattern of every run and fires a Slack alert within 15 seconds of completion.
 
@@ -39,8 +39,9 @@ cd dunetrace && cp .env.example .env && docker compose build && docker compose u
 ### 2. Install the SDK
 
 ```bash
-pip install dunetrace                    # any framework
-pip install 'dunetrace[langchain]'      # LangChain / LangGraph
+pip install dunetrace                              # any framework
+pip install 'dunetrace[langchain]'                # LangChain / LangGraph
+pip install 'dunetrace[langchain,langfuse]'       # + Langfuse deep analysis
 ```
 
 ### 3. Instrument your agent
@@ -67,6 +68,8 @@ python examples/basic_agent.py # No LLM calls
 SCENARIO=tool_loop python examples/langchain_agent.py  # TOOL_LOOP via LangChain callback
 
 SCENARIO=failures python examples/decorator_agent.py   # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
+
+SCENARIO=tool_loop python examples/langfuse_agent.py   # TOOL_LOOP + Langfuse explain
 ```
 
 Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
@@ -119,8 +122,9 @@ Slack and generic webhook (PagerDuty, Linear, custom).
 
 ## Integrations
 
-- [Custom Python agent - decorator, middleware, manual](docs/integrate-custom-python-agent.md)
+- [Custom Python agent — decorator, middleware, manual](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
+- [Langfuse — connect traces for deep root-cause analysis](docs/integrations.md#langfuse)
 - [FastAPI / Flask / ASGI / WSGI / OpenTelemetry / Loki](docs/integrations.md)
 
 ---

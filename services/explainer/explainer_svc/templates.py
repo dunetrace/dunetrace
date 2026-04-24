@@ -130,14 +130,26 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
             ),
         )
 
+    wasted_tokens = ev.get("wasted_tokens")
+    if wasted_tokens:
+        cost_usd = wasted_tokens * 15.0 / 1_000_000
+        token_cost_str = (
+            f"{wasted_tokens:,} wasted tokens ≈ ${cost_usd:.2f} at gpt-4o pricing — "
+        )
+    else:
+        token_cost_str = (
+            f"A {window}-step loop at typical gpt-4o pricing costs roughly "
+            f"${window * 0.03:.2f}–${window * 0.06:.2f} — "
+        )
+
     return Explanation(
         **_base(signal),
         title=f"Tool loop detected: `{tool}` called {count}× in {step_range}",
         what=what,
         why_it_matters=(
             f"Looping agents burn tokens and cost money without producing value. "
-            f"A {window}-step loop at typical GPT-4o pricing costs roughly "
-            f"${window * 0.03:.2f}–${window * 0.06:.2f} with nothing to show for it. "
+            f"{token_cost_str}"
+            f"with nothing to show for it. "
             f"Users waiting on a response will time out or give up."
         ),
         evidence_summary=(

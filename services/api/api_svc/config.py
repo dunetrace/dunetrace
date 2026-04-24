@@ -14,6 +14,7 @@ def _load_dotenv(path: str = ".env") -> None:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, val = line.partition("=")
+                val = val.split("#")[0]  # strip inline comments
                 os.environ.setdefault(key.strip(), val.strip())
     except FileNotFoundError:
         pass
@@ -31,6 +32,19 @@ class Settings:
     AUTH_MODE: str = os.getenv("AUTH_MODE", "dev")
     PAGE_SIZE_DEFAULT: int = int(os.getenv("PAGE_SIZE_DEFAULT", "50"))
     PAGE_SIZE_MAX: int = int(os.getenv("PAGE_SIZE_MAX", "500"))
+
+    # Langfuse integration
+    LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+    LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+    # LLM for explain endpoint (Anthropic preferred; falls back to OpenAI)
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+
+    @property
+    def langfuse_configured(self) -> bool:
+        return bool(self.LANGFUSE_PUBLIC_KEY and self.LANGFUSE_SECRET_KEY)
 
     @property
     def is_dev(self) -> bool:

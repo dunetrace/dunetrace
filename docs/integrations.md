@@ -244,6 +244,122 @@ dt.shutdown()
 
 ---
 
+## Langfuse
+
+If you are already running Langfuse alongside Dunetrace, you can connect the two so that when Dunetrace detects a failure it pulls the full Langfuse trace and asks an LLM to explain the specific root cause.
+
+**What you get:** when a `TOOL_LOOP`, `GOAL_ABANDONMENT`, or any other signal fires, the dashboard shows an **"Explain with Langfuse ↗"** button. Clicking it fetches the agent's execution trace from Langfuse, builds a prompt from the signal evidence + trace inputs/outputs, and returns a plain-English explanation with a specific fix.
+
+### Prerequisites
+
+- Langfuse account (cloud or self-hosted) with a project and API keys
+- One LLM API key for the analysis call (`ANTHROPIC_API_KEY` preferred, `OPENAI_API_KEY` accepted as fallback)
+
+### 1. Install
+
+```bash
+pip install 'dunetrace[langchain,langfuse]'
+# The API backend also needs: httpx, anthropic (or openai) — included in services/api/requirements.txt
+```
+
+### 2. Add credentials to `.env`
+
+```bash
+# Langfuse
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com   # omit for cloud; set for self-hosted
+
+# LLM for explain endpoint (Anthropic preferred, OpenAI fallback)
+ANTHROPIC_API_KEY=sk-ant-...
+# OPENAI_API_KEY=sk-...
+```
+
+Restart the API container after editing `.env`:
+
+```bash
+docker compose up -d api
+```
+
+### 3. Run both callbacks together
+
+The `DunetraceCallbackHandler.last_run_id` property exposes the Dunetrace run ID for the most recently completed invocation. Langfuse's `last_trace_id` gives you its corresponding trace ID. Pass `last_trace_id` to the explain endpoint so the two systems can join on the same run.
+
+```python
+import uuid as uuid_mod
+from dunetrace import Dunetrace
+from dunetrace.integrations.langchain import DunetraceCallbackHandler
+from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler  # v4+
+
+dt = Dunetrace()
+dt_cb = DunetraceCallbackHandler(dt, agent_id="my-agent", model="gpt-4o-mini", tools=["web_search"])
+lf_cb = LangfuseCallbackHandler()  # reads LANGFUSE_* from env
+
+result = agent.invoke(
+    {"messages": [("human", query)]},
+    config={"callbacks": [dt_cb, lf_cb]},
+)
+
+dt.shutdown(timeout=5)
+
+import langfuse as lf_module
+lf_module.get_client().flush()  # ensure trace is uploaded before querying
+
+# IDs for the join:
+dt_run_id   = dt_cb.last_run_id          # e.g. "b5ed23be-e4f0-43bc-..."
+lf_trace_id = lf_cb.last_trace_id        # e.g. "b5ed23bee4f043bc..."  (same UUID, no dashes)
+```
+
+> **Langfuse v4 trace ID format:** Langfuse v4 uses OTel-style 32-character hex IDs (no dashes). The Dunetrace API strips dashes automatically when querying Langfuse, so `dt_run_id` and `lf_trace_id` represent the same run even though their formats differ.
+
+### 4. Call the explain endpoint
+
+```bash
+POST /v1/signals/{signal_id}/explain
+Content-Type: application/json
+Authorization: Bearer <your-key>
+
+{
+  "langfuse_trace_id": "b5ed23bee4f043bc8625914223875508"
+}
+```
+
+If `langfuse_trace_id` is omitted the endpoint falls back to the signal's own `run_id` (works when Dunetrace and Langfuse happen to share the same trace ID).
+
+Response:
+
+```json
+{
+  "explanation": "The agent called web_search 6 times with identical arguments...",
+  "source": "langfuse",
+  "signal_id": 344
+}
+```
+
+### 5. Full working example
+
+```bash
+LANGFUSE_PUBLIC_KEY=pk-lf-... \
+LANGFUSE_SECRET_KEY=sk-lf-... \
+ANTHROPIC_API_KEY=sk-ant-... \
+SCENARIO=tool_loop python packages/sdk-py/examples/langfuse_agent.py
+```
+
+See [`packages/sdk-py/examples/langfuse_agent.py`](../packages/sdk-py/examples/langfuse_agent.py) for the complete runnable script.
+
+### How the trace lookup works
+
+1. Signal fires → `run_id` stored in Postgres  
+2. Dashboard calls `POST /v1/signals/{id}/explain` with `langfuse_trace_id`  
+3. API fetches `GET /api/public/traces/{traceId}` from Langfuse (retries up to 4× to handle ingestion lag)  
+4. Builds a prompt: signal evidence + system prompt + relevant span inputs/outputs  
+5. Calls Anthropic Haiku (or GPT-4o-mini as fallback) — max 300 tokens  
+6. Returns the explanation to the dashboard
+
+The Langfuse trace is never stored — fetched, analysed, discarded.
+
+---
+
 ## `@dt.agent()` decorator
 
 Wraps a function in a `dt.run()` context, sets it as the active run for `get_current_run()`, calls `run.final_answer()` on clean return, and emits `RUN_ERRORED` if an exception escapes. Works with both `def` and `async def`.

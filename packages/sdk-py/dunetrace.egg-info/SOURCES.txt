@@ -23,4 +23,5 @@ tests/test_auto_instrument.py
 tests/test_buffer.py
 tests/test_client.py
 tests/test_detectors.py
+tests/test_detectors_evidence.py
 tests/test_risk_engine.py

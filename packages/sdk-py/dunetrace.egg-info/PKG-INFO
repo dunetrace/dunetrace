@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: dunetrace
-Version: 0.3.6
+Version: 0.3.8
 Summary: Behavioral observability for AI agents
 Author-email: Dunetrace <dunetrace@gmail.com>
 License: Apache-2.0
@@ -21,6 +21,8 @@ Description-Content-Type: text/markdown
 Provides-Extra: langchain
 Requires-Dist: langchain>=1.0; extra == "langchain"
 Requires-Dist: langgraph>=0.2; extra == "langchain"
+Provides-Extra: langfuse
+Requires-Dist: langfuse>=2.0; extra == "langfuse"
 Provides-Extra: otel
 Requires-Dist: opentelemetry-api>=1.20; extra == "otel"
 Requires-Dist: opentelemetry-sdk>=1.20; extra == "otel"

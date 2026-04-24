@@ -328,6 +328,54 @@ dt = Dunetrace(endpoint="http://localhost:8001")  # dev mode, no key required
 
 ---
 
+## Connect Langfuse for Deep Analysis
+
+If you run Langfuse alongside Dunetrace, you can wire them together so that when a signal fires the dashboard offers an **"Explain with Langfuse ↗"** button that pulls the actual trace and produces a specific root-cause explanation.
+
+### How the IDs align
+
+`DunetraceCallbackHandler` sets its `run_id` from the LangChain root `run_id` (the UUID that LangGraph assigns to the top-level chain). Langfuse v4 independently uses the same LangChain root `run_id` as its `trace_id`, but in 32-character hex format (no dashes). They represent the same run:
+
+| System | ID format | Example |
+|--------|-----------|---------|
+| Dunetrace `run_id` | UUID with dashes | `b5ed23be-e4f0-43bc-8625-...` |
+| Langfuse `trace_id` | 32-char hex, no dashes | `b5ed23bee4f043bc8625...` |
+
+The Dunetrace API normalises the format automatically when querying Langfuse.
+
+### Access both IDs after a run
+
+```python
+from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler  # v4+
+
+lf_cb = LangfuseCallbackHandler()   # reads LANGFUSE_* from env
+result = agent.invoke(
+    {"messages": [("human", query)]},
+    config={"callbacks": [dt_callback, lf_cb]},
+)
+
+dt.shutdown(timeout=5)
+import langfuse as lf_module
+lf_module.get_client().flush()      # ensure trace is uploaded
+
+dt_run_id   = dt_callback.last_run_id   # Dunetrace run ID
+lf_trace_id = lf_cb.last_trace_id       # Langfuse trace ID
+```
+
+### Call the explain endpoint
+
+```bash
+POST /v1/signals/{signal_id}/explain
+Authorization: Bearer <key>
+Content-Type: application/json
+
+{"langfuse_trace_id": "<lf_trace_id>"}
+```
+
+See [docs/integrations.md#langfuse](integrations.md#langfuse) for full setup — credentials, `.env` vars, and the complete runnable example.
+
+---
+
 ## Troubleshooting
 
 **No runs appear in the dashboard**

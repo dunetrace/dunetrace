@@ -368,6 +368,76 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
 
 # ── Signals ───────────────────────────────────────────────────────────────────
 
+async def get_signal_by_id(signal_id: int) -> Optional[dict]:
+    """Fetch a single signal row by primary key. Returns None if not found."""
+    if not _pool:
+        return None
+
+    import json
+
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, failure_type, severity, run_id, agent_id, agent_version,
+                   step_index, confidence, detected_at, evidence, alerted, shadow
+            FROM failure_signals
+            WHERE id = $1
+            """,
+            signal_id,
+        )
+
+    if row is None:
+        return None
+
+    evidence = row["evidence"]
+    if isinstance(evidence, str):
+        evidence = json.loads(evidence)
+
+    detected_at = row["detected_at"]
+    if hasattr(detected_at, "timestamp"):
+        detected_at = detected_at.timestamp()
+
+    try:
+        fs = FailureSignal(
+            failure_type=FailureType(row["failure_type"]),
+            severity=Severity(row["severity"]),
+            run_id=row["run_id"],
+            agent_id=row["agent_id"],
+            agent_version=row["agent_version"],
+            step_index=row["step_index"],
+            confidence=row["confidence"],
+            evidence=dict(evidence) if evidence else {},
+            detected_at=detected_at,
+        )
+        exp = explain(fs)
+    except Exception as exc:
+        logger.error("Explain failed signal %d: %s", signal_id, exc)
+        exp = None
+
+    return {
+        "id":               row["id"],
+        "failure_type":     row["failure_type"],
+        "severity":         row["severity"],
+        "run_id":           row["run_id"],
+        "agent_id":         row["agent_id"],
+        "agent_version":    row["agent_version"],
+        "step_index":       row["step_index"],
+        "confidence":       row["confidence"],
+        "detected_at":      detected_at,
+        "evidence":         dict(evidence) if evidence else {},
+        "alerted":          row["alerted"],
+        "shadow":           row["shadow"],
+        "title":            exp.title           if exp else row["failure_type"],
+        "what":             exp.what            if exp else "",
+        "why_it_matters":   exp.why_it_matters  if exp else "",
+        "evidence_summary": exp.evidence_summary if exp else "",
+        "suggested_fixes": [
+            {"description": f.description, "language": f.language, "code": f.code}
+            for f in (exp.suggested_fixes if exp else [])
+        ],
+    }
+
+
 async def list_signals(
     agent_id: str,
     offset: int,

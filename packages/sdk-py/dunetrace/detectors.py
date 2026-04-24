@@ -91,6 +91,14 @@ class ToolLoopDetector(BaseDetector):
                     sum(1 for c in calls_with_result if c.success) / len(calls_with_result)
                     if calls_with_result else None
                 )
+                first_step = all_calls[0].step_index
+                last_step  = all_calls[-1].step_index
+                loop_steps = set(range(first_step + 1, last_step + 1))
+                wasted_tokens = sum(
+                    lc.prompt_tokens
+                    for lc in state.llm_calls
+                    if lc.step_index in loop_steps and lc.prompt_tokens is not None
+                ) or None
                 return FailureSignal(
                     failure_type=FailureType.TOOL_LOOP,
                     severity=Severity.HIGH,
@@ -103,13 +111,14 @@ class ToolLoopDetector(BaseDetector):
                         "tool":           tool,
                         "count":          len(all_calls),
                         "window":         self.WINDOW,
-                        "first_step":     all_calls[0].step_index,
-                        "last_step":      all_calls[-1].step_index,
+                        "first_step":     first_step,
+                        "last_step":      last_step,
                         "step_indices":   [c.step_index for c in all_calls],
                         "args_hashes":    args_hashes,
                         "args_identical": unique_hashes == 1,
                         "args_similar":   unique_hashes <= 2,
                         "success_rate":   success_rate,
+                        "wasted_tokens":  wasted_tokens,
                     },
                 )
         return None

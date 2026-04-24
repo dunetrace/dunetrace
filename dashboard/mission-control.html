@@ -821,6 +821,11 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <div class="explain-title">Why this triggered</div>
       <div class="explain-text" id="detail-explain-text">—</div>
       <div class="explain-list" id="detail-explain-list"></div>
+      <div id="langfuse-explain-row" style="display:none;margin-top:.75rem;display:flex;align-items:center;gap:.75rem">
+        <button class="act-btn act-secondary" id="langfuse-explain-btn" onclick="explainWithLangfuse()" style="font-size:12px;padding:5px 12px">Explain with Langfuse ↗</button>
+        <span id="langfuse-explain-status" style="display:none;font-size:12px;color:var(--chalk3)">analyzing…</span>
+      </div>
+      <div id="langfuse-explain-result" style="display:none;margin-top:1rem;font-size:13px;color:var(--chalk2);line-height:1.8;border-top:1px solid var(--wire);padding-top:1rem"></div>
     </div>
     <div class="actions-row">
       <button class="act-btn act-secondary" onclick="switchTab('events',document.querySelectorAll('.dtab')[2])">View event log</button>
@@ -1611,7 +1616,18 @@ function renderSignalCards(signals) {
   }).join('');
 }
 
+let _explainSignalId = null;
+
 function renderExplain(signals) {
+  const explainRow    = document.getElementById('langfuse-explain-row');
+  const explainResult = document.getElementById('langfuse-explain-result');
+
+  // Reset Langfuse panel on each run load
+  explainRow.style.display = 'none';
+  explainResult.style.display = 'none';
+  explainResult.innerHTML = '';
+  _explainSignalId = null;
+
   if (!signals.length) {
     document.getElementById('detail-explain-text').textContent = 'No signals fired on this run.';
     document.getElementById('detail-explain-list').innerHTML = '';
@@ -1631,6 +1647,40 @@ function renderExplain(signals) {
   if (fix) {
     document.getElementById('detail-explain-list').innerHTML +=
       `<div class="fix-tag">→ ${esc(fix)}</div>`;
+  }
+
+  _explainSignalId = topSig.id;
+  explainRow.style.display = 'flex';
+}
+
+async function explainWithLangfuse() {
+  if (!_explainSignalId) return;
+  const btn    = document.getElementById('langfuse-explain-btn');
+  const status = document.getElementById('langfuse-explain-status');
+  const result = document.getElementById('langfuse-explain-result');
+
+  btn.disabled = true;
+  status.style.display = '';
+  result.style.display = 'none';
+  result.innerHTML = '';
+
+  try {
+    const r = await fetch(`${API}/v1/signals/${_explainSignalId}/explain`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + KEY, 'Content-Type': 'application/json' },
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      result.innerHTML = `<span style="color:var(--red)">${esc(data.detail || 'Analysis failed.')}</span>`;
+    } else {
+      result.innerHTML = esc(data.explanation);
+    }
+  } catch (e) {
+    result.innerHTML = `<span style="color:var(--red)">Analysis unavailable. Try again.</span>`;
+  } finally {
+    btn.disabled = false;
+    status.style.display = 'none';
+    result.style.display = '';
   }
 }
 

@@ -412,6 +412,13 @@ Hashing happens in-process. Raw content never leaves your agent.
 - [ ] Set `SLACK_WEBHOOK_URL` on the server
 - [ ] Tune `detectors.yml` thresholds if needed
 
+**Langfuse deep analysis (optional)**
+- [ ] Add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `ANTHROPIC_API_KEY` to `.env`
+- [ ] Restart the API container: `docker compose up -d api`
+- [ ] Pass `LangfuseCallbackHandler()` alongside `DunetraceCallbackHandler` in `config={"callbacks": [...]}`
+- [ ] Click "Explain with Langfuse ↗" on any signal in the dashboard
+- [ ] See [docs/integrations.md#langfuse](integrations.md#langfuse) for the full setup guide
+
 ---
 
 ## What happens after a run completes
@@ -419,7 +426,7 @@ Hashing happens in-process. Raw content never leaves your agent.
 Within ~15 seconds of each run, Dunetrace:
 
 1. **Detects** — 15 structural detectors run against the reconstructed run state
-2. **Explains** — each signal produces a plain-English title, cause, and fix using deterministic templates (no LLM)
+2. **Explains** — each signal produces a plain-English title, cause, and fix using deterministic templates (no LLM); if Langfuse is connected, clicking "Explain with Langfuse ↗" in the dashboard fetches the full trace and returns an LLM-generated root-cause specific to that run
 3. **Trends** — the dashboard Health Record panel shows failure rate per failure type over 30 days, a 7-day systemic pattern flag (≥10% of runs affected), and a sparkline showing rate over time
 4. **Alerts** — Slack messages include a one-line rate context: "First occurrence", "5/20 runs affected (25%)", or "Systemic pattern — 8/12 runs affected (67%)"
 

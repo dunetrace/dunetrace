@@ -107,6 +107,11 @@ services:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       AUTH_MODE: dev
       PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/api
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

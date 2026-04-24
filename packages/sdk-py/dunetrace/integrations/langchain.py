@@ -100,9 +100,15 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
         self._tools    = tools or []
 
         # Per-invocation state, keyed by LangChain root run_id.
-        self._lock:      Lock                  = Lock()
-        self._runs:      Dict[str, _RunCtx]    = {}   # root_lc_run_id → ctx
-        self._lc_parent: Dict[str, str]        = {}   # any_lc_run_id  → root_lc_run_id
+        self._lock:        Lock                  = Lock()
+        self._runs:        Dict[str, _RunCtx]    = {}   # root_lc_run_id → ctx
+        self._lc_parent:   Dict[str, str]        = {}   # any_lc_run_id  → root_lc_run_id
+        self._last_run_id: Optional[str]         = None  # Dunetrace run_id of the last completed root run
+
+    @property
+    def last_run_id(self) -> Optional[str]:
+        """Dunetrace run_id of the most recently completed root invocation."""
+        return self._last_run_id
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -161,8 +167,9 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             # Prune stale runs before adding a new one.
             self._sweep_stale()
 
-            # New root invocation.
-            ctx = _RunCtx(run_id=str(uuid.uuid4()))
+            # New root invocation — use the LangChain run_id so it matches
+            # the Langfuse trace_id for the same run.
+            ctx = _RunCtx(run_id=lc_run_id or str(uuid.uuid4()))
             with self._lock:
                 self._runs[lc_run_id]      = ctx
                 self._lc_parent[lc_run_id] = lc_run_id
@@ -211,6 +218,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 "total_steps":     ctx.step,
                 "tool_call_count": ctx.tool_call_count,
             })
+            self._last_run_id = ctx.run_id
             self._cleanup(lc_run_id)
         except Exception as exc:
             logger.warning("Dunetrace: on_chain_end failed: %s", exc)
