@@ -2,7 +2,7 @@
 
 ![Dunetrace](dunetrace.png)
 
-### Runtime observability for AI agents
+### Real time anomaly detection layer for AI agents.
 
 **Detect structural failures automatically. Alert before your users do.**
 
