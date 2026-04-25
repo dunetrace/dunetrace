@@ -371,6 +371,7 @@ function Dashboard() {
           fixContent:            res.fix_content,
           fixType:               res.fix_type,
           applyBlocked:          res.apply_blocked,
+          source:                res.source,
           langfusePromptName:    res.langfuse_prompt_name,
           langfusePromptVersion: res.langfuse_prompt_version,
         },
@@ -1149,19 +1150,7 @@ function Dashboard() {
                                 </div>
                               )}
 
-                              {/* LLM root cause (shown after explain) */}
-                              {exSt.rootCause && (
-                                <div style={{
-                                  fontSize: 10, color: C.text, lineHeight: 1.6,
-                                  background: "rgba(0,0,0,0.3)", borderRadius: 4,
-                                  padding: "8px 10px", marginTop: 6, marginBottom: 6,
-                                }}>
-                                  <span style={{ color: C.orange, fontSize: 9, letterSpacing: "0.08em" }}>ROOT CAUSE  </span>
-                                  {exSt.rootCause}
-                                </div>
-                              )}
-
-                              {/* Static fix (before explain) */}
+                              {/* Static fix (collapsed, only before explain) */}
                               {!exSt.rootCause && s.suggested_fixes?.[0] && (
                                 <details style={{ marginTop: 6 }}>
                                   <summary style={{ fontSize: 9, color: col, cursor: "pointer", opacity: 0.8, userSelect: "none" }}>
@@ -1177,33 +1166,8 @@ function Dashboard() {
                                 </details>
                               )}
 
-                              {/* LLM fix text (shown after explain) */}
-                              {exSt.rootCause && llmFix && (() => {
-                                const isCodeChange = exSt.fixType === "code_change";
-                                const isSecuritySignal = exSt.fixType === "no_auto_apply";
-                                const label = isCodeChange
-                                  ? "CODE CHANGE NEEDED"
-                                  : isSecuritySignal
-                                    ? "SECURITY FIX (review manually)"
-                                    : "SUGGESTED FIX";
-                                const borderColor = isCodeChange ? C.yellow : isSecuritySignal ? C.red : C.green;
-                                const textColor   = isCodeChange ? "#fde68a" : isSecuritySignal ? "#fca5a5" : "#86efac";
-                                return (
-                                  <div style={{
-                                    fontSize: 10, color: textColor,
-                                    background: "rgba(0,0,0,0.4)", borderRadius: 4,
-                                    padding: "8px 10px", marginBottom: 6,
-                                    borderLeft: `2px solid ${borderColor}`,
-                                  }}>
-                                    <span style={{ color: borderColor, fontSize: 9, letterSpacing: "0.08em" }}>{label}  </span>
-                                    {llmFix}
-                                  </div>
-                                );
-                              })()}
-
-                              {/* Action buttons row */}
+                              {/* Action bar — always visible, anchors the card bottom */}
                               <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
-                                {/* Explain button */}
                                 {!exSt.rootCause && !exSt.loading && (
                                   <button
                                     onClick={() => handleExplain(s.id)}
@@ -1220,8 +1184,6 @@ function Dashboard() {
                                 {exSt.error && (
                                   <span style={{ fontSize: 9, color: C.red }}>{exSt.error}</span>
                                 )}
-
-                                {/* Copy fix */}
                                 {bestFix && (
                                   <button
                                     onClick={() => handleCopyFix(s.id, bestFix)}
@@ -1235,8 +1197,6 @@ function Dashboard() {
                                     }}
                                   >{copyFeedback[s.id] ? "Copied ✓" : "Copy fix"}</button>
                                 )}
-
-                                {/* Apply via Langfuse — only for prompt_addition fixes with a managed prompt */}
                                 {!exSt.applyBlocked && exSt.langfusePromptName && llmFix && !apSt.version && !apSt.loading && (
                                   <button
                                     onClick={() => setApplyConfirm({
@@ -1252,33 +1212,61 @@ function Dashboard() {
                                     }}
                                   >Apply via Langfuse</button>
                                 )}
-                                {apSt.loading && (
-                                  <span style={{ fontSize: 9, color: C.textD }}>applying…</span>
-                                )}
+                                {apSt.loading && <span style={{ fontSize: 9, color: C.textD }}>applying…</span>}
                                 {apSt.version && (
-                                  <a
-                                    href={apSt.url} target="_blank" rel="noopener noreferrer"
-                                    style={{
-                                      fontSize: 9, color: C.green,
-                                      textDecoration: "none", borderBottom: `1px solid ${C.green}44`,
-                                    }}
-                                  >Applied as v{apSt.version} in Langfuse ↗</a>
+                                  <a href={apSt.url} target="_blank" rel="noopener noreferrer"
+                                    style={{ fontSize: 9, color: C.green, textDecoration: "none", borderBottom: `1px solid ${C.green}44` }}>
+                                    Applied as v{apSt.version} in Langfuse ↗
+                                  </a>
                                 )}
-                                {apSt.error && (
-                                  <span style={{ fontSize: 9, color: C.red }}>{apSt.error}</span>
-                                )}
-
-                                {/* Contextual note when apply is unavailable */}
-                                {exSt.rootCause && !apSt.version && !apSt.loading && (() => {
-                                  if (exSt.fixType === "no_auto_apply")
-                                    return <span style={{ fontSize: 9, color: C.red, fontStyle: "italic" }}>Security signal — review and apply manually.</span>;
-                                  if (exSt.fixType === "code_change")
-                                    return <span style={{ fontSize: 9, color: C.textD, fontStyle: "italic" }}>Code/infra fix — cannot apply via Langfuse.</span>;
-                                  if (!exSt.langfusePromptName)
-                                    return <span style={{ fontSize: 9, color: C.textD, fontStyle: "italic" }}>To auto-apply, manage prompts through Langfuse.</span>;
-                                  return null;
-                                })()}
+                                {apSt.error && <span style={{ fontSize: 9, color: C.red }}>{apSt.error}</span>}
                               </div>
+
+                              {/* Results — expand downward below the action bar */}
+                              {exSt.rootCause && (
+                                <div style={{ marginTop: 8 }}>
+                                  <div style={{
+                                    fontSize: 10, color: C.text, lineHeight: 1.6,
+                                    background: "rgba(0,0,0,0.3)", borderRadius: 4,
+                                    padding: "8px 10px", marginBottom: 4,
+                                  }}>
+                                    <span style={{ color: C.orange, fontSize: 9, letterSpacing: "0.08em" }}>ROOT CAUSE  </span>
+                                    {exSt.rootCause}
+                                  </div>
+                                  {exSt.source === "signal_only" && (
+                                    <div style={{ fontSize: 9, color: C.textD, marginBottom: 4, fontStyle: "italic" }}>
+                                      No Langfuse trace found — analysis based on signal evidence only.
+                                    </div>
+                                  )}
+                                  {llmFix && (() => {
+                                    const isCode     = exSt.fixType === "code_change";
+                                    const isSecurity = exSt.fixType === "no_auto_apply";
+                                    const label       = isCode ? "CODE CHANGE NEEDED" : isSecurity ? "SECURITY FIX (review manually)" : "SUGGESTED FIX";
+                                    const border      = isCode ? C.yellow : isSecurity ? C.red : C.green;
+                                    const textCol     = isCode ? "#fde68a" : isSecurity ? "#fca5a5" : "#86efac";
+                                    return (
+                                      <div style={{
+                                        fontSize: 10, color: textCol,
+                                        background: "rgba(0,0,0,0.4)", borderRadius: 4,
+                                        padding: "8px 10px", borderLeft: `2px solid ${border}`,
+                                        marginBottom: 4,
+                                      }}>
+                                        <span style={{ color: border, fontSize: 9, letterSpacing: "0.08em" }}>{label}  </span>
+                                        {llmFix}
+                                      </div>
+                                    );
+                                  })()}
+                                  {!apSt.version && !apSt.loading && (() => {
+                                    if (exSt.fixType === "no_auto_apply")
+                                      return <span style={{ fontSize: 9, color: C.red, fontStyle: "italic" }}>Security signal — review and apply manually.</span>;
+                                    if (exSt.fixType === "code_change")
+                                      return <span style={{ fontSize: 9, color: C.textD, fontStyle: "italic" }}>Code/infra fix — apply manually.</span>;
+                                    if (!exSt.langfusePromptName)
+                                      return <span style={{ fontSize: 9, color: C.textD, fontStyle: "italic" }}>To auto-apply, manage prompts through Langfuse.</span>;
+                                    return null;
+                                  })()}
+                                </div>
+                              )}
 
                               <div style={{ fontSize: 9, color: C.textD, marginTop: 6 }}>
                                 step {s.step_index} · confidence {Math.round(s.confidence * 100)}%

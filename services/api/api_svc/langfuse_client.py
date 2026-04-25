@@ -73,9 +73,13 @@ def _extract_system_prompt(obs_input: Any) -> Optional[str]:
     return None
 
 
-async def fetch_langfuse_trace(trace_id: str) -> Dict[str, Any]:
+async def fetch_langfuse_trace(trace_id: str, max_retries: int = 3) -> Dict[str, Any]:
     """
     Fetch a Langfuse trace by ID, including all observations.
+
+    max_retries controls how many times to retry on 404 before giving up.
+    Set to 0 for signals older than ~5 minutes — the trace is either there or not.
+    Set to 3 (default) for freshly completed runs where Langfuse may still be ingesting.
 
     Returns the full trace dict. Raises ValueError on missing credentials,
     LookupError if the trace doesn't exist, httpx.HTTPStatusError on other errors.
@@ -103,16 +107,17 @@ async def fetch_langfuse_trace(trace_id: str) -> Dict[str, Any]:
     }
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        # Langfuse ingests asynchronously — retry a few times on 404
-        # before giving up, to handle the common case of a freshly flushed trace.
-        for attempt in range(4):
+        # Retry on 404 only for fresh traces — Langfuse ingests asynchronously
+        # and a just-flushed trace may not be queryable immediately.
+        # For older signals max_retries=0, so we do exactly one attempt.
+        for attempt in range(max_retries + 1):
             resp = await client.get(
                 f"{base_url}/api/public/traces/{lf_trace_id}",
                 headers=headers,
             )
             if resp.status_code != 404:
                 break
-            if attempt < 3:
+            if attempt < max_retries:
                 await asyncio.sleep(3 * (attempt + 1))
 
         if resp.status_code == 404:

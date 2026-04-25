@@ -111,19 +111,26 @@ async def explain_signal(
     from api_svc.langfuse_client import (
         fetch_langfuse_trace, build_explain_prompt, _detect_langfuse_prompt,
     )
+    import time as _time
     trace_lookup_id = body.langfuse_trace_id or signal["run_id"]
+    # Only retry on 404 for fresh signals — Langfuse ingests asynchronously so a
+    # trace flushed seconds ago may not be queryable yet. For anything older than
+    # 5 minutes the trace is either there or not; retrying just adds 18s of latency.
+    signal_age_s = _time.time() - (signal.get("detected_at") or 0)
+    max_retries  = 3 if signal_age_s < 300 else 0
+
+    trace = {}
+    source = "signal_only"
     try:
-        trace = await fetch_langfuse_trace(trace_lookup_id)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        trace  = await fetch_langfuse_trace(trace_lookup_id, max_retries=max_retries)
+        source = "langfuse"
+    except LookupError:
+        logger.info("Trace %s not in Langfuse; falling back to signal-only analysis", trace_lookup_id)
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
         logger.warning("Langfuse fetch failed for run %s: %s", signal["run_id"], exc)
-        raise HTTPException(
-            status_code=502,
-            detail="Could not connect to Langfuse. Check your API key and host.",
-        )
+        # Non-fatal: degrade to signal-only rather than failing the whole request
 
     failure_type = signal["failure_type"]
     user_prompt  = await build_explain_prompt(signal, trace)
@@ -146,7 +153,7 @@ async def explain_signal(
 
     return {
         "signal_id":               signal_id,
-        "source":                  "langfuse",
+        "source":                  source,
         "root_cause":              llm_result["root_cause"],
         "fix_content":             llm_result["fix_content"],
         "fix_type":                fix_type,
@@ -341,8 +348,14 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         )
         raw = resp.choices[0].message.content
 
+    # Strip markdown code fences (model sometimes wraps JSON in ```json...```)
+    raw_clean = raw.strip()
+    if raw_clean.startswith("```"):
+        lines = raw_clean.splitlines()
+        raw_clean = "\n".join(lines[1:-1]).strip() if len(lines) > 2 else raw_clean
+
     try:
-        parsed = _json.loads(raw)
+        parsed = _json.loads(raw_clean)
         if isinstance(parsed, dict) and "root_cause" in parsed:
             return {
                 "root_cause":  str(parsed.get("root_cause",  "")),

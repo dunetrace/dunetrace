@@ -1616,7 +1616,9 @@ function renderSignalCards(signals) {
   }).join('');
 }
 
-let _explainSignalId = null;
+let _explainSignalId   = null;
+let _explainStaticCode = null;   // suggested_fixes[0].code from the signal
+let _explainStaticLang = 'python';
 
 function renderExplain(signals) {
   const explainRow    = document.getElementById('langfuse-explain-row');
@@ -1626,7 +1628,8 @@ function renderExplain(signals) {
   explainRow.style.display = 'none';
   explainResult.style.display = 'none';
   explainResult.innerHTML = '';
-  _explainSignalId = null;
+  _explainSignalId   = null;
+  _explainStaticCode = null;
 
   if (!signals.length) {
     document.getElementById('detail-explain-text').textContent = 'No signals fired on this run.';
@@ -1643,10 +1646,14 @@ function renderExplain(signals) {
   ).join('');
   document.getElementById('detail-explain-list').innerHTML = items;
 
-  const fix = topSig.suggested_fixes?.[0]?.description;
-  if (fix) {
+  const fix = topSig.suggested_fixes?.[0];
+  if (fix?.description) {
     document.getElementById('detail-explain-list').innerHTML +=
-      `<div class="fix-tag">→ ${esc(fix)}</div>`;
+      `<div class="fix-tag">→ ${esc(fix.description)}</div>`;
+  }
+  if (fix?.code) {
+    _explainStaticCode = fix.code;
+    _explainStaticLang = fix.language || 'python';
   }
 
   _explainSignalId = topSig.id;
@@ -1673,7 +1680,49 @@ async function explainWithLangfuse() {
     if (!r.ok) {
       result.innerHTML = `<span style="color:var(--red)">${esc(data.detail || 'Analysis failed.')}</span>`;
     } else {
-      result.innerHTML = esc(data.explanation);
+      const rootCause  = data.root_cause  || '';
+      const fixContent = data.fix_content || '';
+      const fixType    = data.fix_type    || 'prompt_addition';
+      const source     = data.source      || 'langfuse';
+
+      const sourceNote = source === 'signal_only'
+        ? `<div style="font-size:11px;color:var(--chalk4);margin-top:4px;font-style:italic">No Langfuse trace found — analysis based on signal evidence only.</div>`
+        : '';
+
+      const fixLabel = fixType === 'code_change'    ? 'CODE CHANGE NEEDED'
+                     : fixType === 'no_auto_apply'  ? 'SECURITY FIX (review manually)'
+                     :                                'SUGGESTED FIX';
+      const fixColor = fixType === 'code_change'    ? 'var(--amber)'
+                     : fixType === 'no_auto_apply'  ? 'var(--red)'
+                     :                                'var(--green)';
+
+      // For prompt_addition: show fix_content as a diff line to add to the system prompt
+      // For code_change / no_auto_apply: show fix_content as a description + static code block
+      let fixHtml = '';
+      if (fixContent) {
+        if (fixType === 'prompt_addition') {
+          fixHtml = `
+            <div style="margin-top:.75rem">
+              <div style="font-size:10px;color:${fixColor};letter-spacing:.08em;font-family:'IBM Plex Mono',monospace;margin-bottom:6px">${esc(fixLabel)}</div>
+              <pre style="background:#0a1a0a;border:1px solid rgba(46,184,114,0.25);border-radius:4px;padding:10px 14px;font-size:12px;line-height:1.7;overflow-x:auto;white-space:pre-wrap"><span style="color:var(--green)">+</span> <span style="color:#a8f0c0">${esc(fixContent)}</span></pre>
+            </div>`;
+        } else {
+          fixHtml = `
+            <div style="margin-top:.75rem;padding:8px 12px;border-left:2px solid ${fixColor};background:rgba(0,0,0,0.3);border-radius:4px;font-size:12px">
+              <span style="color:${fixColor};font-size:10px;letter-spacing:.08em;font-family:'IBM Plex Mono',monospace">${esc(fixLabel)}&nbsp;&nbsp;</span>${esc(fixContent)}
+            </div>`;
+        }
+      }
+
+      // Static code block from suggested_fixes[0].code (always show if available)
+      const codeHtml = _explainStaticCode
+        ? `<div style="margin-top:.75rem">
+             <div style="font-size:10px;color:var(--chalk4);letter-spacing:.08em;font-family:'IBM Plex Mono',monospace;margin-bottom:6px">CODE CHANGE · ${esc(_explainStaticLang)}</div>
+             <pre style="background:rgba(0,0,0,0.5);border:1px solid var(--wire);border-radius:4px;padding:10px 14px;font-size:11px;line-height:1.7;overflow-x:auto;color:#86efac;white-space:pre">${esc(_explainStaticCode)}</pre>
+           </div>`
+        : '';
+
+      result.innerHTML = esc(rootCause) + sourceNote + fixHtml + codeHtml;
     }
   } catch (e) {
     result.innerHTML = `<span style="color:var(--red)">Analysis unavailable. Try again.</span>`;

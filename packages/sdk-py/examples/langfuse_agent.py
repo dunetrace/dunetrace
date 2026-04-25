@@ -187,10 +187,27 @@ async def fetch_and_explain(dt_run_id: Optional[str], lf_trace_id: Optional[str]
             print(f"\nExplain failed ({explain_resp.status_code}): {detail}")
             return
 
-        explanation = explain_resp.json().get("explanation", "")
-        print(f"\nLangfuse-backed explanation:")
+        data         = explain_resp.json()
+        root_cause   = data.get("root_cause", "")
+        fix_content  = data.get("fix_content", "")
+        fix_type     = data.get("fix_type", "")
+        apply_blocked= data.get("apply_blocked", True)
+        prompt_name  = data.get("langfuse_prompt_name")
+        source       = data.get("source", "langfuse")
+
+        source_note = "" if source == "langfuse" else "  [signal-only — no Langfuse trace]"
+        print(f"\nRoot cause:{source_note}")
         print(f"{'─'*60}")
-        print(explanation)
+        print(root_cause)
+        print(f"\nFix ({fix_type}):")
+        print(f"  {fix_content}")
+        if not apply_blocked and prompt_name:
+            print(f"\n  → Apply via Langfuse: POST /v1/signals/{signal_id}/apply-fix")
+            print(f"    prompt_name={prompt_name!r}")
+        elif fix_type == "no_auto_apply":
+            print("\n  → Security signal: review manually before applying.")
+        elif apply_blocked:
+            print("\n  → Code/infra fix: apply manually.")
         print(f"{'─'*60}")
 
 

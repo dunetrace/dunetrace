@@ -211,6 +211,7 @@ def s_llm_truncation() -> str:
     return rid
 
 def s_context_bloat() -> str:
+    """CONTEXT_BLOAT: last_tokens (2200) > MIN_LAST_TOKENS (2000), growth 22× > 3.0."""
     rid = mk("bloat")
     ingest(AGENT_ID, rid, [
         ev("run.started",   rid, AGENT_ID, 0),
@@ -219,10 +220,10 @@ def s_context_bloat() -> str:
            {"finish_reason": "stop", "prompt_tokens": 100, "output_length": 50}),
         ev("llm.called",    rid, AGENT_ID, 2, {"model": "test"}),
         ev("llm.responded", rid, AGENT_ID, 2,
-           {"finish_reason": "stop", "prompt_tokens": 200, "output_length": 50}),
+           {"finish_reason": "stop", "prompt_tokens": 800, "output_length": 50}),
         ev("llm.called",    rid, AGENT_ID, 3, {"model": "test"}),
         ev("llm.responded", rid, AGENT_ID, 3,
-           {"finish_reason": "stop", "prompt_tokens": 320, "output_length": 50}),
+           {"finish_reason": "stop", "prompt_tokens": 2200, "output_length": 50}),
         ev("run.completed", rid, AGENT_ID, 3, {"exit_reason": "completed"}),
     ])
     return rid
@@ -245,13 +246,16 @@ def s_retry_storm() -> str:
         ev("run.started",    rid, AGENT_ID, 0),
         ev("tool.called",    rid, AGENT_ID, 1,
            {"tool_name": "payment_api", "args_hash": "h1"}),
-        ev("tool.responded", rid, AGENT_ID, 1, {"success": False}),
+        ev("tool.responded", rid, AGENT_ID, 1,
+           {"tool_name": "payment_api", "success": False}),
         ev("tool.called",    rid, AGENT_ID, 2,
            {"tool_name": "payment_api", "args_hash": "h2"}),
-        ev("tool.responded", rid, AGENT_ID, 2, {"success": False}),
+        ev("tool.responded", rid, AGENT_ID, 2,
+           {"tool_name": "payment_api", "success": False}),
         ev("tool.called",    rid, AGENT_ID, 3,
            {"tool_name": "payment_api", "args_hash": "h3"}),
-        ev("tool.responded", rid, AGENT_ID, 3, {"success": False}),
+        ev("tool.responded", rid, AGENT_ID, 3,
+           {"tool_name": "payment_api", "success": False}),
         ev("run.completed",  rid, AGENT_ID, 3, {"exit_reason": "error"}),
     ])
     return rid
@@ -273,13 +277,16 @@ def s_cascading_failure() -> str:
         ev("run.started",    rid, AGENT_ID, 0),
         ev("tool.called",    rid, AGENT_ID, 1,
            {"tool_name": "db",     "args_hash": "h1"}),
-        ev("tool.responded", rid, AGENT_ID, 1, {"success": False}),
+        ev("tool.responded", rid, AGENT_ID, 1,
+           {"tool_name": "db",     "success": False}),
         ev("tool.called",    rid, AGENT_ID, 2,
            {"tool_name": "search", "args_hash": "h2"}),
-        ev("tool.responded", rid, AGENT_ID, 2, {"success": False}),
+        ev("tool.responded", rid, AGENT_ID, 2,
+           {"tool_name": "search", "success": False}),
         ev("tool.called",    rid, AGENT_ID, 3,
            {"tool_name": "db",     "args_hash": "h3"}),
-        ev("tool.responded", rid, AGENT_ID, 3, {"success": False}),
+        ev("tool.responded", rid, AGENT_ID, 3,
+           {"tool_name": "db",     "success": False}),
         ev("run.errored",    rid, AGENT_ID, 3),
     ])
     return rid
