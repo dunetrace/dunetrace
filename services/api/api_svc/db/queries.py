@@ -23,6 +23,23 @@ _pool = None
 
 # ── Pool lifecycle ─────────────────────────────────────────────────────────────
 
+_FIXES_DDL = """
+CREATE TABLE IF NOT EXISTS fixes (
+    id                    BIGSERIAL PRIMARY KEY,
+    run_id                TEXT        NOT NULL,
+    signal_id             BIGINT      NOT NULL,
+    fix_content           TEXT        NOT NULL,
+    fix_type              TEXT        NOT NULL DEFAULT 'prompt_addition',
+    applied_via           TEXT        NOT NULL,
+    langfuse_prompt_name  TEXT,
+    langfuse_version      INTEGER,
+    applied_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_fixes_signal_id ON fixes(signal_id);
+CREATE INDEX IF NOT EXISTS idx_fixes_run_id    ON fixes(run_id, applied_at DESC);
+"""
+
+
 async def init_pool() -> None:
     global _pool
     if asyncpg is None:
@@ -33,6 +50,8 @@ async def init_pool() -> None:
         max_size=10,
         command_timeout=15,
     )
+    async with _pool.acquire() as conn:
+        await conn.execute(_FIXES_DDL)
     logger.info("DB pool ready")
 
 
@@ -1161,4 +1180,91 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
             }
             for r in run_rows
         ],
+    }
+
+
+async def record_fix(
+    signal_id: int,
+    run_id: str,
+    fix_content: str,
+    applied_via: str,
+    langfuse_prompt_name: Optional[str] = None,
+    langfuse_version: Optional[int] = None,
+) -> Optional[int]:
+    """Insert a fix record and return its id. Returns None if pool unavailable."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO fixes (run_id, signal_id, fix_content, applied_via,
+                               langfuse_prompt_name, langfuse_version)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+            """,
+            run_id, signal_id, fix_content, applied_via,
+            langfuse_prompt_name, langfuse_version,
+        )
+    return int(row["id"]) if row else None
+
+
+async def get_signal_fix_status(
+    agent_id: str,
+    failure_type: str,
+    signal_id: int,
+) -> dict:
+    """
+    Check whether the most recent fix for a signal has reduced recurrence.
+
+    Looks up the earliest fix for signal_id, then counts runs and signal
+    recurrences on the same agent+failure_type after that fix was applied.
+    """
+    if not _pool:
+        return {}
+
+    async with _pool.acquire() as conn:
+        fix_row = await conn.fetchrow(
+            """
+            SELECT applied_at, langfuse_prompt_name, langfuse_version, applied_via
+            FROM fixes WHERE signal_id = $1
+            ORDER BY applied_at ASC LIMIT 1
+            """,
+            signal_id,
+        )
+        if not fix_row:
+            return {"fix_applied": False}
+
+        applied_at = fix_row["applied_at"]
+
+        runs_after = await conn.fetchval(
+            """
+            SELECT COUNT(DISTINCT run_id) FROM events
+            WHERE agent_id = $1 AND received_at > $2
+            """,
+            agent_id, applied_at,
+        )
+        recurrences = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM failure_signals
+            WHERE agent_id = $1 AND failure_type = $2 AND detected_at > $3
+            """,
+            agent_id, failure_type, applied_at,
+        )
+
+    rec = int(recurrences or 0)
+    runs = int(runs_after or 0)
+    return {
+        "fix_applied":           True,
+        "applied_at":            applied_at.timestamp() if applied_at else None,
+        "applied_via":           fix_row["applied_via"],
+        "langfuse_prompt_name":  fix_row["langfuse_prompt_name"],
+        "langfuse_version":      fix_row["langfuse_version"],
+        "runs_after_fix":        runs,
+        "recurrences_after_fix": rec,
+        "verdict": (
+            "verified"    if runs >= 10 and rec == 0 else
+            "likely_fixed" if runs >= 5  and rec == 0 else
+            "still_occurring" if rec > 0 else
+            "insufficient_data"
+        ),
     }

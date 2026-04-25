@@ -97,6 +97,21 @@ CREATE TABLE IF NOT EXISTS api_keys (
     active      BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS fixes (
+    id                    BIGSERIAL PRIMARY KEY,
+    run_id                TEXT        NOT NULL,
+    signal_id             BIGINT      NOT NULL,
+    fix_content           TEXT        NOT NULL,
+    fix_type              TEXT        NOT NULL DEFAULT 'prompt_addition',
+    applied_via           TEXT        NOT NULL,
+    langfuse_prompt_name  TEXT,
+    langfuse_version      INTEGER,
+    applied_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_fixes_signal_id ON fixes(signal_id);
+CREATE INDEX IF NOT EXISTS idx_fixes_run_id    ON fixes(run_id, applied_at DESC);
 """
 
 

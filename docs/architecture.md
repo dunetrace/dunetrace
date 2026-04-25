@@ -229,6 +229,10 @@ A read-only FastAPI service. Powers the dashboard and any customer integrations.
 | `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution. Also returns `failure_rates` (daily affected/total per failure type) and `systemic_patterns` (7-day rate + `is_systemic` flag for each failure type) — the data powering the Health Record panel |
 | `GET /v1/agents/{id}/issues` | Open/resolved issue list for an agent. Accepts optional `status` filter (`open`, `resolved`, `reopened`). Returns id, failure_type, status, first_seen, last_seen, resolved_at, affected_runs, clean_runs_since |
 | `GET /v1/runs/{id}` | Full run detail — metadata, all events, all signals with explanations |
+| `POST /v1/signals/{id}/explain` | Fetch Langfuse trace, run LLM analysis, return `root_cause`, `fix_content`, `fix_type`, `apply_blocked`, and `langfuse_prompt_name`. Requires `LANGFUSE_*` and `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in env |
+| `POST /v1/signals/{id}/apply-fix` | Append `fix_content` to the named Langfuse prompt and publish a new version. Records the fix in the `fixes` table. Blocked for `PROMPT_INJECTION_SIGNAL` (returns 403) |
+| `POST /v1/signals/{id}/record-copy` | Record a clipboard-path fix in the `fixes` table without writing to Langfuse |
+| `GET /v1/signals/{id}/fix-status` | Return fix history and recurrence verdict (`verified / likely_fixed / still_occurring / insufficient_data`) |
 | `GET /health` | Service health check — returns `{"status":"ok","db":"ok"}` |
 
 **Signal endpoints** accept an optional `include_shadow` query parameter:
@@ -342,6 +346,19 @@ CREATE TABLE digest_log (
     id          BIGSERIAL    PRIMARY KEY,
     digest_type TEXT         NOT NULL DEFAULT 'weekly',
     sent_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- Records every autofix action (clipboard copy or Langfuse apply)
+CREATE TABLE fixes (
+    id                    BIGSERIAL    PRIMARY KEY,
+    run_id                TEXT         NOT NULL,
+    signal_id             BIGINT       NOT NULL,
+    fix_content           TEXT         NOT NULL,
+    fix_type              TEXT         NOT NULL DEFAULT 'prompt_addition',
+    applied_via           TEXT         NOT NULL,   -- 'langfuse' or 'clipboard'
+    langfuse_prompt_name  TEXT,                    -- null when applied_via='clipboard'
+    langfuse_version      INTEGER,                 -- new version number after apply
+    applied_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 ```
 

@@ -86,6 +86,8 @@ Then open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 15 structural detectors run automatically on every completed run i.e. tool loops, retry storms, context bloat, reasoning stalls, goal abandonment, prompt injection, and more. Each signal includes a plain-English explanation and a suggested fix. Alerts include rate context: whether this is a first occurrence, recurring pattern, or systemic issue affecting ≥10% of runs.
 
+If you are running Langfuse alongside Dunetrace, click **Explain +** on any signal in the dashboard. Dunetrace fetches the full trace, extracts the system prompt in use, and asks an LLM for the specific root cause and fix. For behavioral failures (tool loops, goal abandonment, etc.) it also offers one-click **Apply via Langfuse** to create a new prompt version. Fix effectiveness is tracked automatically — the dashboard shows whether recurrence dropped after the fix was applied.
+
 → [docs/detectors.md](docs/detectors.md): full detector reference, thresholds, shadow mode
 
 ---
@@ -124,7 +126,7 @@ Slack and generic webhook (PagerDuty, Linear, custom).
 
 - [Custom Python agent - decorator, middleware, manual](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
-- [Langfuse - connect traces for deep root-cause analysis](docs/integrations.md#langfuse)
+- [Langfuse - connect traces for deep root-cause analysis and one-click autofix](docs/integrations.md#langfuse)
 - [FastAPI / Flask / ASGI / WSGI / OpenTelemetry / Loki](docs/integrations.md)
 
 ---

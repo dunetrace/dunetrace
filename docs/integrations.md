@@ -324,19 +324,90 @@ Authorization: Bearer <your-key>
 }
 ```
 
-If `langfuse_trace_id` is omitted the endpoint falls back to the signal's own `run_id` (works when Dunetrace and Langfuse happen to share the same trace ID).
+If `langfuse_trace_id` is omitted the endpoint falls back to the signal's own `run_id` (works when Dunetrace and Langfuse share the same trace ID).
 
 Response:
 
 ```json
 {
-  "explanation": "The agent called web_search 6 times with identical arguments...",
+  "signal_id": 344,
   "source": "langfuse",
-  "signal_id": 344
+  "root_cause": "The agent re-issued the same search query because the system prompt contains no instruction to track previous queries...",
+  "fix_content": "Do not repeat a search query you have already executed in this run.",
+  "fix_type": "prompt_addition",
+  "apply_blocked": false,
+  "langfuse_prompt_name": "research-agent-prompt",
+  "langfuse_prompt_version": 3
 }
 ```
 
-### 5. Full working example
+**`fix_type`** classifies the recommended fix:
+
+| `fix_type` | Meaning | `apply_blocked` |
+|---|---|---|
+| `prompt_addition` | One sentence to append to the system prompt | `false` — apply button shown |
+| `code_change` | Code or infrastructure fix needed (CONTEXT_BLOAT, SLOW_STEP, etc.) | `true` — apply button hidden |
+| `no_auto_apply` | Security signal (PROMPT_INJECTION_SIGNAL) — never auto-apply | `true` — blocked at API level |
+
+**`langfuse_prompt_name`** is `null` when the trace's system prompt was a hardcoded string rather than a Langfuse-managed prompt. The apply button only appears when this field is non-null and `apply_blocked` is false.
+
+### 5. Apply a fix to a managed prompt
+
+When `langfuse_prompt_name` is returned and `apply_blocked` is false, you can apply the fix directly to Langfuse:
+
+```bash
+POST /v1/signals/{signal_id}/apply-fix
+Content-Type: application/json
+Authorization: Bearer <your-key>
+
+{
+  "fix_content": "Do not repeat a search query you have already executed in this run.",
+  "langfuse_prompt_name": "research-agent-prompt"
+}
+```
+
+Response:
+
+```json
+{
+  "fix_id": 12,
+  "signal_id": 344,
+  "new_version": 4,
+  "prompt_url": "https://cloud.langfuse.com/prompts/research-agent-prompt",
+  "old_text": "You are a research assistant...",
+  "new_text": "You are a research assistant...\n\nDo not repeat a search query..."
+}
+```
+
+The fix is appended to the current prompt text and published as a new version. The dashboard shows "Applied as v4 in Langfuse ↗" with a link.
+
+### 6. Track fix effectiveness
+
+After applying a fix, check whether the failure type has recurred:
+
+```bash
+GET /v1/signals/{signal_id}/fix-status
+Authorization: Bearer <your-key>
+```
+
+Response:
+
+```json
+{
+  "fix_applied": true,
+  "applied_at": 1745000000.0,
+  "applied_via": "langfuse",
+  "langfuse_prompt_name": "research-agent-prompt",
+  "langfuse_version": 4,
+  "runs_after_fix": 23,
+  "recurrences_after_fix": 0,
+  "verdict": "verified"
+}
+```
+
+Verdicts: `verified` (≥10 runs, 0 recurrences), `likely_fixed` (≥5 runs, 0 recurrences), `still_occurring`, `insufficient_data`.
+
+### 7. Full working example
 
 ```bash
 LANGFUSE_PUBLIC_KEY=pk-lf-... \
@@ -349,12 +420,14 @@ See [`packages/sdk-py/examples/langfuse_agent.py`](../packages/sdk-py/examples/l
 
 ### How the trace lookup works
 
-1. Signal fires → `run_id` stored in Postgres  
-2. Dashboard calls `POST /v1/signals/{id}/explain` with `langfuse_trace_id`  
-3. API fetches `GET /api/public/traces/{traceId}` from Langfuse (retries up to 4× to handle ingestion lag)  
-4. Builds a prompt: signal evidence + system prompt + relevant span inputs/outputs  
-5. Calls Anthropic Haiku (or GPT-4o-mini as fallback) — max 300 tokens  
-6. Returns the explanation to the dashboard
+1. Signal fires → `run_id` stored in Postgres
+2. Dashboard calls `POST /v1/signals/{id}/explain` with optional `langfuse_trace_id`
+3. API fetches `GET /api/public/traces/{traceId}` from Langfuse (retries up to 4× for ingestion lag; fetches full observation list separately when ≥10 observations are returned paginated)
+4. Extracts system prompt from GENERATION observation `messages[]` arrays
+5. Normalises step range from evidence using detector-specific field names (e.g. `first_truncation_step` for LLM_TRUNCATION_LOOP)
+6. Builds a prompt: signal type + evidence + system prompt + relevant span inputs/outputs (600-char limit for failing steps, 150-char for others)
+7. Calls Anthropic Haiku (or GPT-4o-mini fallback) — max 400 tokens — asking for `{"root_cause": "...", "fix_content": "..."}` JSON
+8. Returns structured response with fix type classification
 
 The Langfuse trace is never stored — fetched, analysed, discarded.
 

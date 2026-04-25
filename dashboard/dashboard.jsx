@@ -140,6 +140,19 @@ async function apiFetch(path) {
   return r.json();
 }
 
+async function apiPost(path, body) {
+  const r = await fetch(`${API}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(err.detail || `${r.status} ${path}`);
+  }
+  return r.json();
+}
+
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 function Dashboard() {
   const [agents,        setAgents]        = useState([]);
@@ -161,6 +174,17 @@ function Dashboard() {
   const [failurePattern,        setFailurePattern]        = useState(null);
   const [failurePatternLoading, setFailurePatternLoading] = useState(false);
   const PAGE_SIZE = 15;
+
+  // ── Autofix state ──────────────────────────────────────────────────────────
+  // explainStates[signalId] = { loading, error, rootCause, fixContent,
+  //                              langfusePromptName, langfusePromptVersion }
+  const [explainStates, setExplainStates] = useState({});
+  // copyFeedback[signalId] = true while "Copied ✓" is showing
+  const [copyFeedback,  setCopyFeedback]  = useState({});
+  // applyConfirm = null | { signalId, promptName, fixContent }
+  const [applyConfirm,  setApplyConfirm]  = useState(null);
+  // applyResults[signalId] = { loading, version, url, error }
+  const [applyResults,  setApplyResults]  = useState({});
 
   // Deep-link: /runs/<run_id> from Slack alert → auto-open that run
   useEffect(() => {
@@ -332,6 +356,63 @@ function Dashboard() {
     setSelectedRun(null);
     setSelectedDay(null);
     setRunsPage(0);
+  }
+
+  // ── Autofix handlers ─────────────────────────────────────────────────────────
+  async function handleExplain(signalId) {
+    setExplainStates(s => ({ ...s, [signalId]: { loading: true } }));
+    try {
+      const res = await apiPost(`/v1/signals/${signalId}/explain`, {});
+      setExplainStates(s => ({
+        ...s,
+        [signalId]: {
+          loading: false,
+          rootCause:             res.root_cause,
+          fixContent:            res.fix_content,
+          fixType:               res.fix_type,
+          applyBlocked:          res.apply_blocked,
+          langfusePromptName:    res.langfuse_prompt_name,
+          langfusePromptVersion: res.langfuse_prompt_version,
+        },
+      }));
+    } catch (e) {
+      setExplainStates(s => ({ ...s, [signalId]: { loading: false, error: e.message } }));
+    }
+  }
+
+  function handleCopyFix(signalId, text) {
+    navigator.clipboard.writeText(text).catch(() => {});
+    setCopyFeedback(s => ({ ...s, [signalId]: true }));
+    setTimeout(() => setCopyFeedback(s => ({ ...s, [signalId]: false })), 2000);
+    // Record clipboard path (fire-and-forget)
+    const st = explainStates[signalId];
+    if (st?.fixContent) {
+      apiPost(`/v1/signals/${signalId}/record-copy`, {
+        fix_content: st.fixContent,
+        langfuse_prompt_name: st.langfusePromptName || "",
+        applied_via: "clipboard",
+      }).catch(() => {});
+    }
+  }
+
+  async function handleApplyConfirm() {
+    if (!applyConfirm) return;
+    const { signalId, promptName, fixContent } = applyConfirm;
+    setApplyResults(s => ({ ...s, [signalId]: { loading: true } }));
+    setApplyConfirm(null);
+    try {
+      const res = await apiPost(`/v1/signals/${signalId}/apply-fix`, {
+        fix_content: fixContent,
+        langfuse_prompt_name: promptName,
+        applied_via: "langfuse",
+      });
+      setApplyResults(s => ({
+        ...s,
+        [signalId]: { loading: false, version: res.new_version, url: res.prompt_url },
+      }));
+    } catch (e) {
+      setApplyResults(s => ({ ...s, [signalId]: { loading: false, error: e.message } }));
+    }
   }
 
   // ── Render ───────────────────────────────────────────────────────────────────
@@ -1037,18 +1118,26 @@ function Dashboard() {
                     ) : (
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         {runDetail.signals.map(s => {
-                          const col = SEV_COLOR[s.severity] || C.textM;
+                          const col  = SEV_COLOR[s.severity] || C.textM;
+                          const exSt = explainStates[s.id] || {};
+                          const apSt = applyResults[s.id]  || {};
+                          const staticFix = s.suggested_fixes?.[0]?.code || "";
+                          const llmFix    = exSt.fixContent || "";
+                          const bestFix   = llmFix || staticFix;
                           return (
                             <div key={s.id} style={{
                               background: `${col}11`, border: `1px solid ${col}33`,
                               borderRadius: 6, padding: "10px 12px",
                             }}>
+                              {/* Header */}
                               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                                 <span style={{ fontSize: 10, fontWeight: 700, color: col }}>
                                   {s.failure_type.replace(/_/g, " ")}
                                 </span>
                                 <span style={{ fontSize: 9, color: col, opacity: 0.7 }}>{s.severity}</span>
                               </div>
+
+                              {/* Static evidence */}
                               {s.evidence_summary && (
                                 <div style={{ fontSize: 10, color: C.textM, lineHeight: 1.5, marginBottom: 4 }}>
                                   {s.evidence_summary}
@@ -1059,7 +1148,21 @@ function Dashboard() {
                                   {s.what}
                                 </div>
                               )}
-                              {s.suggested_fixes?.[0] && (
+
+                              {/* LLM root cause (shown after explain) */}
+                              {exSt.rootCause && (
+                                <div style={{
+                                  fontSize: 10, color: C.text, lineHeight: 1.6,
+                                  background: "rgba(0,0,0,0.3)", borderRadius: 4,
+                                  padding: "8px 10px", marginTop: 6, marginBottom: 6,
+                                }}>
+                                  <span style={{ color: C.orange, fontSize: 9, letterSpacing: "0.08em" }}>ROOT CAUSE  </span>
+                                  {exSt.rootCause}
+                                </div>
+                              )}
+
+                              {/* Static fix (before explain) */}
+                              {!exSt.rootCause && s.suggested_fixes?.[0] && (
                                 <details style={{ marginTop: 6 }}>
                                   <summary style={{ fontSize: 9, color: col, cursor: "pointer", opacity: 0.8, userSelect: "none" }}>
                                     Fix: {s.suggested_fixes[0].description}
@@ -1073,7 +1176,111 @@ function Dashboard() {
                                   </pre>
                                 </details>
                               )}
-                              <div style={{ fontSize: 9, color: C.textD, marginTop: 4 }}>
+
+                              {/* LLM fix text (shown after explain) */}
+                              {exSt.rootCause && llmFix && (() => {
+                                const isCodeChange = exSt.fixType === "code_change";
+                                const isSecuritySignal = exSt.fixType === "no_auto_apply";
+                                const label = isCodeChange
+                                  ? "CODE CHANGE NEEDED"
+                                  : isSecuritySignal
+                                    ? "SECURITY FIX (review manually)"
+                                    : "SUGGESTED FIX";
+                                const borderColor = isCodeChange ? C.yellow : isSecuritySignal ? C.red : C.green;
+                                const textColor   = isCodeChange ? "#fde68a" : isSecuritySignal ? "#fca5a5" : "#86efac";
+                                return (
+                                  <div style={{
+                                    fontSize: 10, color: textColor,
+                                    background: "rgba(0,0,0,0.4)", borderRadius: 4,
+                                    padding: "8px 10px", marginBottom: 6,
+                                    borderLeft: `2px solid ${borderColor}`,
+                                  }}>
+                                    <span style={{ color: borderColor, fontSize: 9, letterSpacing: "0.08em" }}>{label}  </span>
+                                    {llmFix}
+                                  </div>
+                                );
+                              })()}
+
+                              {/* Action buttons row */}
+                              <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                {/* Explain button */}
+                                {!exSt.rootCause && !exSt.loading && (
+                                  <button
+                                    onClick={() => handleExplain(s.id)}
+                                    style={{
+                                      fontSize: 9, padding: "3px 8px", cursor: "pointer",
+                                      background: "none", border: `1px solid ${col}55`,
+                                      color: col, borderRadius: 3, fontFamily: "inherit",
+                                    }}
+                                  >Explain +</button>
+                                )}
+                                {exSt.loading && (
+                                  <span style={{ fontSize: 9, color: C.textD }}>analysing…</span>
+                                )}
+                                {exSt.error && (
+                                  <span style={{ fontSize: 9, color: C.red }}>{exSt.error}</span>
+                                )}
+
+                                {/* Copy fix */}
+                                {bestFix && (
+                                  <button
+                                    onClick={() => handleCopyFix(s.id, bestFix)}
+                                    style={{
+                                      fontSize: 9, padding: "3px 8px", cursor: "pointer",
+                                      background: copyFeedback[s.id] ? `${C.green}22` : "none",
+                                      border: `1px solid ${copyFeedback[s.id] ? C.green : C.border}`,
+                                      color: copyFeedback[s.id] ? C.green : C.textM,
+                                      borderRadius: 3, fontFamily: "inherit",
+                                      transition: "all 0.15s",
+                                    }}
+                                  >{copyFeedback[s.id] ? "Copied ✓" : "Copy fix"}</button>
+                                )}
+
+                                {/* Apply via Langfuse — only for prompt_addition fixes with a managed prompt */}
+                                {!exSt.applyBlocked && exSt.langfusePromptName && llmFix && !apSt.version && !apSt.loading && (
+                                  <button
+                                    onClick={() => setApplyConfirm({
+                                      signalId: s.id,
+                                      promptName: exSt.langfusePromptName,
+                                      fixContent: llmFix,
+                                    })}
+                                    style={{
+                                      fontSize: 9, padding: "3px 8px", cursor: "pointer",
+                                      background: `${C.blue}15`,
+                                      border: `1px solid ${C.blue}44`,
+                                      color: C.blue, borderRadius: 3, fontFamily: "inherit",
+                                    }}
+                                  >Apply via Langfuse</button>
+                                )}
+                                {apSt.loading && (
+                                  <span style={{ fontSize: 9, color: C.textD }}>applying…</span>
+                                )}
+                                {apSt.version && (
+                                  <a
+                                    href={apSt.url} target="_blank" rel="noopener noreferrer"
+                                    style={{
+                                      fontSize: 9, color: C.green,
+                                      textDecoration: "none", borderBottom: `1px solid ${C.green}44`,
+                                    }}
+                                  >Applied as v{apSt.version} in Langfuse ↗</a>
+                                )}
+                                {apSt.error && (
+                                  <span style={{ fontSize: 9, color: C.red }}>{apSt.error}</span>
+                                )}
+
+                                {/* Contextual note when apply is unavailable */}
+                                {exSt.rootCause && !apSt.version && !apSt.loading && (() => {
+                                  if (exSt.fixType === "no_auto_apply")
+                                    return <span style={{ fontSize: 9, color: C.red, fontStyle: "italic" }}>Security signal — review and apply manually.</span>;
+                                  if (exSt.fixType === "code_change")
+                                    return <span style={{ fontSize: 9, color: C.textD, fontStyle: "italic" }}>Code/infra fix — cannot apply via Langfuse.</span>;
+                                  if (!exSt.langfusePromptName)
+                                    return <span style={{ fontSize: 9, color: C.textD, fontStyle: "italic" }}>To auto-apply, manage prompts through Langfuse.</span>;
+                                  return null;
+                                })()}
+                              </div>
+
+                              <div style={{ fontSize: 9, color: C.textD, marginTop: 6 }}>
                                 step {s.step_index} · confidence {Math.round(s.confidence * 100)}%
                               </div>
                             </div>
@@ -1110,6 +1317,55 @@ function Dashboard() {
           </div>
         )}
       </div>
+
+      {/* ── Apply-fix confirm dialog ── */}
+      {applyConfirm && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 200,
+          background: "rgba(8,11,17,0.85)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div style={{
+            background: C.surface, border: `1px solid ${C.border}`,
+            borderRadius: 8, padding: "20px 24px", maxWidth: 480, width: "90%",
+          }}>
+            <div style={{ fontSize: 10, color: C.orange, letterSpacing: "0.1em", marginBottom: 12 }}>
+              CONFIRM FIX
+            </div>
+            <div style={{ fontSize: 11, color: C.textM, lineHeight: 1.6, marginBottom: 12 }}>
+              This will create a new version of{" "}
+              <span style={{ color: C.text, fontWeight: 600 }}>{applyConfirm.promptName}</span>{" "}
+              in Langfuse. Your next agent run will use the updated prompt.
+            </div>
+            <div style={{
+              fontSize: 10, color: "#86efac",
+              background: "rgba(0,0,0,0.4)", borderRadius: 4,
+              padding: "8px 10px", marginBottom: 16,
+              borderLeft: `2px solid ${C.green}`,
+            }}>
+              + {applyConfirm.fixContent}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={handleApplyConfirm}
+                style={{
+                  padding: "6px 16px", fontSize: 10, cursor: "pointer",
+                  background: `${C.green}22`, border: `1px solid ${C.green}66`,
+                  color: C.green, borderRadius: 4, fontFamily: "inherit",
+                }}
+              >Confirm</button>
+              <button
+                onClick={() => setApplyConfirm(null)}
+                style={{
+                  padding: "6px 16px", fontSize: 10, cursor: "pointer",
+                  background: "none", border: `1px solid ${C.border}`,
+                  color: C.textM, borderRadius: 4, fontFamily: "inherit",
+                }}
+              >Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Graph overlay ── */}
       {graphRunId && (
