@@ -21,7 +21,7 @@ AI agents fail in ways that traditional monitoring can't see.
 
 Your API returns 200. Your logs show no exceptions. But the agent called the same tool 12 times in a row, burned $X in tokens, and gave the user a wrong answer or no answer at all.
 
-LangSmith/Langfuse answer "what happened?" after you already know something broke. Dunetrace answers a different question: **"is something breaking right now?"** — and if you're already running Langfuse, it can pull your trace context to explain *why*.
+LangSmith/Langfuse answer "what happened?" after you already know something broke. Dunetrace answers a different question: **"is something breaking right now?"** and if you're already running Langfuse, it can pull your trace context to explain *why*.
 
 It watches the structural pattern of every run and fires a Slack alert within 15 seconds of completion.
 
@@ -122,9 +122,9 @@ Slack and generic webhook (PagerDuty, Linear, custom).
 
 ## Integrations
 
-- [Custom Python agent — decorator, middleware, manual](docs/integrate-custom-python-agent.md)
+- [Custom Python agent - decorator, middleware, manual](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
-- [Langfuse — connect traces for deep root-cause analysis](docs/integrations.md#langfuse)
+- [Langfuse - connect traces for deep root-cause analysis](docs/integrations.md#langfuse)
 - [FastAPI / Flask / ASGI / WSGI / OpenTelemetry / Loki](docs/integrations.md)
 
 ---
