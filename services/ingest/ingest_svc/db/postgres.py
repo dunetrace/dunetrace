@@ -112,6 +112,19 @@ CREATE TABLE IF NOT EXISTS fixes (
 
 CREATE INDEX IF NOT EXISTS idx_fixes_signal_id ON fixes(signal_id);
 CREATE INDEX IF NOT EXISTS idx_fixes_run_id    ON fixes(run_id, applied_at DESC);
+
+CREATE TABLE IF NOT EXISTS policies (
+    id          BIGSERIAL PRIMARY KEY,
+    agent_id    TEXT        NOT NULL DEFAULT '*',
+    name        TEXT        NOT NULL,
+    condition   JSONB       NOT NULL,
+    action      JSONB       NOT NULL,
+    enabled     BOOLEAN     NOT NULL DEFAULT TRUE,
+    priority    INT         NOT NULL DEFAULT 100,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
 """
 
 
@@ -162,6 +175,49 @@ async def insert_events(events: list, batch_id: str) -> int:
     except Exception as exc:
         logger.error("insert_events failed: %s", exc)
         return 0
+
+
+async def fetch_policies(agent_id: str) -> list:
+    """
+    Return enabled policies matching agent_id or '*'.
+    Called by the ingest service's policy fetch endpoint (SDK-facing).
+    """
+    if not _pool:
+        return []
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, agent_id, name, condition, action, enabled, priority
+                FROM policies
+                WHERE enabled = TRUE
+                  AND (agent_id = $1 OR agent_id = '*')
+                ORDER BY priority ASC, id ASC
+                """,
+                agent_id,
+            )
+        def _j(v):
+            if not v:
+                return {}
+            if isinstance(v, str):
+                return json.loads(v)
+            return dict(v)
+
+        return [
+            {
+                "id":        r["id"],
+                "agent_id":  r["agent_id"],
+                "name":      r["name"],
+                "condition": _j(r["condition"]),
+                "action":    _j(r["action"]),
+                "enabled":   r["enabled"],
+                "priority":  r["priority"],
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        logger.error("fetch_policies failed: %s", exc)
+        return []
 
 
 async def verify_api_key(api_key: str) -> Optional[str]:

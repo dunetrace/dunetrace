@@ -497,6 +497,41 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 .ac-stat-val{font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:var(--chalk2)}
 .ac-stat-lbl{font-family:'IBM Plex Mono',monospace;font-size:8px;color:var(--chalk4);letter-spacing:1px;text-transform:uppercase;margin-top:2px}
 .ac-last{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);margin-top:.75rem}
+.ac-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:.25rem}
+.health-badge{display:flex;flex-direction:column;align-items:center;gap:1px;flex-shrink:0;margin-left:8px}
+.health-score{font-family:'IBM Plex Mono',monospace;font-size:18px;font-weight:700;line-height:1}
+.health-lbl{font-family:'IBM Plex Mono',monospace;font-size:7px;letter-spacing:1.5px;text-transform:uppercase;opacity:.7}
+.health-bar{width:36px;height:3px;border-radius:2px;margin-top:3px;background:var(--wire)}
+.health-bar-fill{height:100%;border-radius:2px;transition:width .4s}
+
+/* Policies */
+.policy-row{display:flex;align-items:center;gap:1rem;background:var(--s1);border:1px solid var(--wire);border-radius:6px;padding:.85rem 1rem;margin-bottom:.5rem}
+.policy-row:hover{border-color:var(--wire2)}
+.policy-toggle{width:32px;height:18px;border-radius:9px;border:none;cursor:pointer;flex-shrink:0;transition:background .2s;position:relative}
+.policy-toggle::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .2s}
+.policy-toggle.on{background:var(--green)}
+.policy-toggle.on::after{transform:translateX(14px)}
+.policy-toggle.off{background:var(--wire2)}
+.policy-name{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--chalk);min-width:180px}
+.policy-rule{font-size:12px;color:var(--chalk3);flex:1;font-family:'IBM Plex Mono',monospace}
+.policy-action-badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:600;padding:2px 8px;border-radius:2px;text-transform:uppercase;letter-spacing:1px;flex-shrink:0}
+.pa-stop{background:rgba(229,62,62,.12);color:var(--red)}
+.pa-switch{background:rgba(212,146,10,.12);color:var(--amber)}
+.pa-inject{background:rgba(74,158,222,.12);color:var(--blue)}
+.pa-log{background:rgba(139,132,120,.12);color:var(--chalk3)}
+.policy-del{background:none;border:none;color:var(--chalk4);cursor:pointer;font-size:14px;padding:4px;flex-shrink:0}
+.policy-del:hover{color:var(--red)}
+.policy-example{background:var(--s2);border:1px solid var(--wire);border-radius:6px;padding:.85rem 1rem;cursor:pointer;transition:border-color .15s}
+.policy-example:hover{border-color:var(--wire2)}
+.pe-rule{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--chalk);margin-bottom:.25rem}
+.pe-desc{font-size:11px;color:var(--chalk4)}
+.btn-primary{background:var(--orange);border:none;color:#fff;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;padding:7px 16px;border-radius:4px;cursor:pointer;letter-spacing:.5px}
+.btn-primary:hover{opacity:.85}
+.btn-secondary{background:var(--s2);border:1px solid var(--wire);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:7px 16px;border-radius:4px;cursor:pointer}
+.btn-secondary:hover{border-color:var(--wire2)}
+.cfg-input{background:var(--s2);border:1px solid var(--wire);border-radius:4px;color:var(--chalk);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:6px 10px;outline:none}
+.cfg-input:focus{border-color:var(--orange)}
+.cfg-label{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:.35rem}
 
 /* Run comparison */
 .compare-controls{display:flex;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;flex-wrap:wrap}
@@ -582,6 +617,11 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="sb-item" onclick="nav('config',this)">
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/></svg>
       Detectors
+    </div>
+    <div class="sb-item" onclick="nav('policies',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 8l2 2 4-4"/></svg>
+      Policies
+      <span class="sb-count" id="badge-policies" style="background:rgba(74,158,222,0.1);color:var(--blue)">—</span>
     </div>
   </div>
 </nav>
@@ -1079,6 +1119,106 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   </div>
 </div>
 
+<!-- ── POLICIES PAGE ── -->
+<div id="page-policies" class="page">
+  <div class="sec-head">
+    <span class="sec-title">Runtime policies</span>
+    <button class="btn-primary" onclick="openPolicyForm()">+ New policy</button>
+  </div>
+
+  <!-- Policy list -->
+  <div id="policies-list" style="margin-bottom:2rem"></div>
+
+  <!-- Create / edit form -->
+  <div id="policy-form-wrap" style="display:none;background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.5rem;margin-bottom:2rem">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--orange);letter-spacing:2px;text-transform:uppercase;margin-bottom:1.25rem" id="policy-form-title">New policy</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem">
+      <div>
+        <div class="cfg-label">Policy name</div>
+        <input id="pf-name" type="text" class="cfg-input" placeholder="Stop at 5 tool calls" style="width:100%">
+      </div>
+      <div>
+        <div class="cfg-label">Applies to agent (or * for all)</div>
+        <input id="pf-agent" type="text" class="cfg-input" value="*" style="width:100%">
+      </div>
+    </div>
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--blue);letter-spacing:2px;text-transform:uppercase;margin-bottom:.75rem">CONDITION — when this is true…</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.75rem;margin-bottom:1.25rem">
+      <div>
+        <div class="cfg-label">Trigger</div>
+        <select id="pf-trigger" class="cfg-input" style="width:100%" onchange="updatePolicyFormHints()">
+          <option value="tool_call_count">Tool call count</option>
+          <option value="step_count">Step count</option>
+          <option value="cost_usd">Cost (USD)</option>
+          <option value="error_count">Error count</option>
+          <option value="finish_reason">LLM finish reason</option>
+          <option value="llm_latency_ms">LLM latency (ms)</option>
+          <option value="signal">Detector signal</option>
+        </select>
+      </div>
+      <div>
+        <div class="cfg-label">Operator</div>
+        <select id="pf-operator" class="cfg-input" style="width:100%">
+          <option value="gt">&gt; greater than</option>
+          <option value="gte">≥ at least</option>
+          <option value="lt">&lt; less than</option>
+          <option value="lte">≤ at most</option>
+          <option value="eq">= equals</option>
+          <option value="contains">contains</option>
+        </select>
+      </div>
+      <div>
+        <div class="cfg-label" id="pf-value-label">Value</div>
+        <input id="pf-value" type="text" class="cfg-input" placeholder="5" style="width:100%">
+      </div>
+    </div>
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--green);letter-spacing:2px;text-transform:uppercase;margin-bottom:.75rem">ACTION — …do this</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem;margin-bottom:1.5rem">
+      <div>
+        <div class="cfg-label">Action type</div>
+        <select id="pf-action" class="cfg-input" style="width:100%" onchange="updatePolicyFormHints()">
+          <option value="stop">Stop run (raises PolicyViolation)</option>
+          <option value="switch_model">Switch model</option>
+          <option value="inject_prompt">Inject prompt fix</option>
+          <option value="log">Log only (no interruption)</option>
+        </select>
+      </div>
+      <div id="pf-param-wrap">
+        <div class="cfg-label" id="pf-param-label" style="display:none">Model / Prompt text</div>
+        <input id="pf-param" type="text" class="cfg-input" placeholder="" style="width:100%;display:none">
+      </div>
+    </div>
+    <div style="display:flex;gap:.75rem;align-items:center">
+      <button class="btn-primary" onclick="submitPolicyForm()">Save policy</button>
+      <button class="btn-secondary" onclick="closePolicyForm()">Cancel</button>
+      <span id="pf-error" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--red)"></span>
+    </div>
+  </div>
+
+  <!-- Examples box -->
+  <div style="background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:2px;text-transform:uppercase;margin-bottom:1rem">Policy examples</div>
+    <div style="display:grid;gap:.75rem">
+      <div class="policy-example" onclick="fillExample('tool_call_count','gt','5','stop','')">
+        <div class="pe-rule">tool_call_count &gt; 5 → <span style="color:var(--red)">stop</span></div>
+        <div class="pe-desc">Hard cap on tool calls — prevents runaway loops</div>
+      </div>
+      <div class="policy-example" onclick="fillExample('cost_usd','gt','0.50','switch_model','gpt-4o-mini')">
+        <div class="pe-rule">cost_usd &gt; $0.50 → <span style="color:var(--amber)">switch_model</span> → gpt-4o-mini</div>
+        <div class="pe-desc">Automatically downgrade to cheaper model mid-run when cost threshold is hit</div>
+      </div>
+      <div class="policy-example" onclick="fillExample('signal','eq','TOOL_LOOP','inject_prompt','Stop repeating the same tool calls. Summarize what you have found and provide a final answer.')">
+        <div class="pe-rule">signal = TOOL_LOOP → <span style="color:var(--blue)">inject_prompt</span></div>
+        <div class="pe-desc">Inject a corrective instruction when a loop is detected in real-time</div>
+      </div>
+      <div class="policy-example" onclick="fillExample('finish_reason','eq','length','log','')">
+        <div class="pe-rule">finish_reason = length → <span style="color:var(--chalk3)">log</span></div>
+        <div class="pe-desc">Record every LLM truncation event for later analysis</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 </div><!-- /main -->
 
 <script>
@@ -1088,6 +1228,7 @@ const KEY = 'dt_dev_test';
 
 // ── State ────────────────────────────────────────────────────────────────────
 let _agents        = [];   // [{agent_id, run_count, signal_count, critical_count, high_count, failure_types, _runs, _signals, _shadowSignals}]
+let _healthScores  = {};   // { agent_id: {score, components, sample_runs} }
 let _allRuns       = [];   // flat list across agents
 let _allSigs       = [];   // live signals only
 let _allShadowSigs = [];   // shadow (not-yet-graduated) signals
@@ -1109,14 +1250,16 @@ async function loadAll() {
 
     await Promise.all(_agents.map(async a => {
       try {
-        const [rd, sd] = await Promise.all([
+        const [rd, sd, hs] = await Promise.all([
           apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/runs?limit=200'),
           apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/signals?limit=500&include_shadow=true'),
+          apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/health-score').catch(() => null),
         ]);
         a._runs          = rd.runs || [];
         const allSigs    = sd.signals || [];
         a._signals       = allSigs.filter(s => !s.shadow);
         a._shadowSignals = allSigs.filter(s =>  s.shadow);
+        if (hs) _healthScores[a.agent_id] = hs;
       } catch(e) {
         a._runs = []; a._signals = []; a._shadowSignals = [];
       }
@@ -1682,6 +1825,7 @@ async function explainWithLangfuse() {
     } else {
       const rootCause  = data.root_cause  || '';
       const fixContent = data.fix_content || '';
+      const fixPatch   = data.fix_patch   || '';
       const fixType    = data.fix_type    || 'prompt_addition';
       const source     = data.source      || 'langfuse';
 
@@ -1714,15 +1858,36 @@ async function explainWithLangfuse() {
         }
       }
 
-      // Static code block from suggested_fixes[0].code (always show if available)
-      const codeHtml = _explainStaticCode
-        ? `<div style="margin-top:.75rem">
-             <div style="font-size:10px;color:var(--chalk4);letter-spacing:.08em;font-family:'IBM Plex Mono',monospace;margin-bottom:6px">CODE CHANGE · ${esc(_explainStaticLang)}</div>
-             <pre style="background:rgba(0,0,0,0.5);border:1px solid var(--wire);border-radius:4px;padding:10px 14px;font-size:11px;line-height:1.7;overflow-x:auto;color:#86efac;white-space:pre">${esc(_explainStaticCode)}</pre>
-           </div>`
-        : '';
+      // fix_patch: LLM-generated diff or code snippet — preferred over static code
+      // Fall back to static suggested_fixes code when the LLM didn't return a patch.
+      let patchHtml = '';
+      if (fixPatch) {
+        const isPrompt = fixType === 'prompt_addition';
+        const patchLabel = isPrompt ? 'SYSTEM PROMPT PATCH' : `CODE PATCH · ${esc(_explainStaticLang)}`;
+        // Colour diff lines: lines starting with + green, - red, context dim
+        const coloredPatch = fixPatch.split('\n').map(line => {
+          if (line.startsWith('+'))
+            return `<span style="color:#86efac">${esc(line)}</span>`;
+          if (line.startsWith('-'))
+            return `<span style="color:#fca5a5">${esc(line)}</span>`;
+          if (line.startsWith('@@'))
+            return `<span style="color:#93c5fd">${esc(line)}</span>`;
+          return `<span style="color:var(--chalk3)">${esc(line)}</span>`;
+        }).join('\n');
+        patchHtml = `
+          <div style="margin-top:.75rem">
+            <div style="font-size:10px;color:var(--chalk4);letter-spacing:.08em;font-family:'IBM Plex Mono',monospace;margin-bottom:6px">${patchLabel}</div>
+            <pre style="background:rgba(0,0,0,0.5);border:1px solid var(--wire);border-radius:4px;padding:10px 14px;font-size:11px;line-height:1.7;overflow-x:auto;white-space:pre">${coloredPatch}</pre>
+          </div>`;
+      } else if (_explainStaticCode) {
+        patchHtml = `
+          <div style="margin-top:.75rem">
+            <div style="font-size:10px;color:var(--chalk4);letter-spacing:.08em;font-family:'IBM Plex Mono',monospace;margin-bottom:6px">CODE CHANGE · ${esc(_explainStaticLang)}</div>
+            <pre style="background:rgba(0,0,0,0.5);border:1px solid var(--wire);border-radius:4px;padding:10px 14px;font-size:11px;line-height:1.7;overflow-x:auto;color:#86efac;white-space:pre">${esc(_explainStaticCode)}</pre>
+          </div>`;
+      }
 
-      result.innerHTML = esc(rootCause) + sourceNote + fixHtml + codeHtml;
+      result.innerHTML = esc(rootCause) + sourceNote + fixHtml + patchHtml;
     }
   } catch (e) {
     result.innerHTML = `<span style="color:var(--red)">Analysis unavailable. Try again.</span>`;
@@ -2025,8 +2190,9 @@ function nav(id, el) {
   const page = document.getElementById('page-' + id);
   if (page) page.classList.add('active');
   if (el)   el.classList.add('active');
-  if (id === 'heatmap') renderHeatmap();
-  if (id === 'agents')  renderAgents();
+  if (id === 'heatmap')  renderHeatmap();
+  if (id === 'agents')   renderAgents();
+  if (id === 'policies') loadAndRenderPolicies();
 }
 
 // ── Detail tabs ───────────────────────────────────────────────────────────────
@@ -2154,6 +2320,14 @@ function updateTrendDeltas() {
 }
 
 // ── Agent health cards ────────────────────────────────────────────────────────
+function healthColor(score) {
+  if (score === null || score === undefined) return 'var(--chalk4)';
+  if (score >= 80) return 'var(--green)';
+  if (score >= 60) return '#a3c94a';   // yellow-green
+  if (score >= 40) return 'var(--amber)';
+  return 'var(--red)';
+}
+
 function renderAgents() {
   const grid = document.getElementById('agents-grid');
   if (!grid) return;
@@ -2169,10 +2343,26 @@ function renderAgents() {
     const lastSeen  = a.last_seen ? timeAgo(a.last_seen) : '—';
     const color     = failRate >= 50 ? 'var(--red)' : failRate >= 25 ? 'var(--amber)' : failRate >= 10 ? 'var(--orange)' : 'var(--green)';
     const shadowCnt = a._shadowSignals?.length || 0;
+    const hs        = _healthScores[a.agent_id];
+    const hsScore   = hs?.score ?? null;
+    const hsColor   = healthColor(hsScore);
+    const hsPct     = hsScore !== null ? Math.round(hsScore) : null;
+    const hsTip     = hs?.components ? Object.entries(hs.components).map(([k,v]) =>
+      `${k}: ${v.score}/${v.max}`).join(' | ') : '';
+
     return `<div class="agent-card" onclick="nav('runs',document.querySelector('[onclick*=runs]'))">
       <div class="ac-top-bar" style="background:${color}"></div>
-      <div class="ac-id" title="${esc(a.agent_id)}">${esc(a.agent_id)}</div>
-      <div class="ac-fail-rate" style="color:${color}">${failRate}%</div>
+      <div class="ac-header">
+        <div style="min-width:0">
+          <div class="ac-id" title="${esc(a.agent_id)}">${esc(a.agent_id)}</div>
+          <div class="ac-fail-rate" style="color:${color}">${failRate}%</div>
+        </div>
+        ${hsPct !== null ? `<div class="health-badge" title="Health score (30d)\n${hsTip}">
+          <div class="health-score" style="color:${hsColor}">${hsPct}</div>
+          <div class="health-lbl" style="color:${hsColor}">health</div>
+          <div class="health-bar"><div class="health-bar-fill" style="width:${hsPct}%;background:${hsColor}"></div></div>
+        </div>` : ''}
+      </div>
       <div class="ac-dominant">${dominant ? ftLabel(dominant[0]) + ' dominant' : 'no failures yet'}</div>
       <div class="ac-stats-row">
         <div class="ac-stat">
@@ -2720,6 +2910,209 @@ function tick() {
   document.getElementById('clock').textContent = now.toUTCString().slice(17, 25) + ' UTC';
 }
 tick(); setInterval(tick, 1000);
+
+// ── Policies ─────────────────────────────────────────────────────────────────
+
+let _policies = [];
+let _editingPolicyId = null;
+
+async function apiPost(path, body) {
+  const r = await fetch(API + path, {
+    method: 'POST', headers: { Authorization: 'Bearer ' + KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || r.status); }
+  return r.json();
+}
+
+async function apiPut(path, body) {
+  const r = await fetch(API + path, {
+    method: 'PUT', headers: { Authorization: 'Bearer ' + KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || r.status); }
+  return r.json();
+}
+
+async function apiPatch(path) {
+  const r = await fetch(API + path, { method: 'PATCH', headers: { Authorization: 'Bearer ' + KEY } });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+async function apiDelete(path) {
+  const r = await fetch(API + path, { method: 'DELETE', headers: { Authorization: 'Bearer ' + KEY } });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+async function loadAndRenderPolicies() {
+  try {
+    _policies = await apiFetch('/v1/policies');
+  } catch(e) {
+    _policies = [];
+  }
+  renderPolicies();
+  const badge = document.getElementById('badge-policies');
+  if (badge) badge.textContent = _policies.length || '0';
+}
+
+function actionBadgeClass(type) {
+  return type === 'stop' ? 'pa-stop' : type === 'switch_model' ? 'pa-switch'
+       : type === 'inject_prompt' ? 'pa-inject' : 'pa-log';
+}
+
+function policyRuleText(p) {
+  const t = p.condition?.trigger || '';
+  const op = p.condition?.operator || '';
+  const v  = p.condition?.value ?? '';
+  const opLabel = {gt:'>',gte:'≥',lt:'<',lte:'≤',eq:'=',neq:'≠',contains:'∋'}[op] || op;
+  return `${t} ${opLabel} ${v}`;
+}
+
+function actionLabel(p) {
+  const t = p.action?.type || '';
+  const param = p.action?.params?.model || p.action?.params?.prompt || '';
+  return param ? `${t} → ${param.length > 30 ? param.slice(0,30)+'…' : param}` : t;
+}
+
+function renderPolicies() {
+  const el = document.getElementById('policies-list');
+  if (!el) return;
+  if (!_policies.length) {
+    el.innerHTML = '<div style="color:var(--chalk4);font-family:\'IBM Plex Mono\',monospace;font-size:12px;padding:1rem 0">No policies yet. Create one below or click an example.</div>';
+    return;
+  }
+  el.innerHTML = _policies.map(p => {
+    const aType = p.action?.type || 'log';
+    return `<div class="policy-row">
+      <button class="policy-toggle ${p.enabled ? 'on' : 'off'}" title="${p.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}"
+        onclick="togglePolicy(${p.id})"></button>
+      <div class="policy-name">${esc(p.name)}</div>
+      <div class="policy-rule mono">${esc(policyRuleText(p))}</div>
+      <div class="policy-action-badge ${actionBadgeClass(aType)}">${esc(actionLabel(p))}</div>
+      ${p.agent_id !== '*' ? `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);padding:2px 8px;background:var(--s2);border-radius:2px">${esc(p.agent_id)}</div>` : ''}
+      <button class="policy-del" title="Delete" onclick="deletePolicy(${p.id})">✕</button>
+    </div>`;
+  }).join('');
+}
+
+async function togglePolicy(id) {
+  try {
+    await apiPatch(`/v1/policies/${id}/toggle`);
+    await loadAndRenderPolicies();
+  } catch(e) { alert('Toggle failed: ' + e.message); }
+}
+
+async function deletePolicy(id) {
+  if (!confirm('Delete this policy?')) return;
+  try {
+    await apiDelete(`/v1/policies/${id}`);
+    await loadAndRenderPolicies();
+  } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+function openPolicyForm(policy) {
+  _editingPolicyId = policy?.id ?? null;
+  document.getElementById('policy-form-title').textContent = policy ? 'Edit policy' : 'New policy';
+  document.getElementById('pf-name').value    = policy?.name    || '';
+  document.getElementById('pf-agent').value   = policy?.agent_id || '*';
+  document.getElementById('pf-trigger').value = policy?.condition?.trigger   || 'tool_call_count';
+  document.getElementById('pf-operator').value= policy?.condition?.operator  || 'gt';
+  document.getElementById('pf-value').value   = policy?.condition?.value     ?? '';
+  document.getElementById('pf-action').value  = policy?.action?.type         || 'stop';
+  document.getElementById('pf-param').value   = policy?.action?.params?.model || policy?.action?.params?.prompt || '';
+  document.getElementById('pf-error').textContent = '';
+  document.getElementById('policy-form-wrap').style.display = 'block';
+  updatePolicyFormHints();
+  document.getElementById('pf-name').focus();
+}
+
+function closePolicyForm() {
+  document.getElementById('policy-form-wrap').style.display = 'none';
+  _editingPolicyId = null;
+}
+
+function updatePolicyFormHints() {
+  const trigger = document.getElementById('pf-trigger').value;
+  const action  = document.getElementById('pf-action').value;
+  const labelEl = document.getElementById('pf-value-label');
+  const paramWrap = document.getElementById('pf-param-wrap');
+  const paramLabel = document.getElementById('pf-param-label');
+  const paramInput = document.getElementById('pf-param');
+
+  const triggerHints = {
+    tool_call_count: 'Value (e.g. 5)',
+    step_count:      'Value (e.g. 20)',
+    cost_usd:        'Value in USD (e.g. 0.50)',
+    error_count:     'Value (e.g. 2)',
+    finish_reason:   'Value (e.g. length)',
+    llm_latency_ms:  'Value in ms (e.g. 8000)',
+    signal:          'Signal name (e.g. TOOL_LOOP)',
+  };
+  if (labelEl) labelEl.textContent = triggerHints[trigger] || 'Value';
+
+  const needsParam = action === 'switch_model' || action === 'inject_prompt';
+  paramLabel.style.display = needsParam ? '' : 'none';
+  paramInput.style.display = needsParam ? '' : 'none';
+  if (action === 'switch_model')  { paramLabel.textContent = 'Target model'; paramInput.placeholder = 'gpt-4o-mini'; }
+  if (action === 'inject_prompt') { paramLabel.textContent = 'Prompt to inject'; paramInput.placeholder = 'Stop repeating yourself. Provide a final answer.'; }
+}
+
+async function submitPolicyForm() {
+  const name    = document.getElementById('pf-name').value.trim();
+  const agentId = document.getElementById('pf-agent').value.trim() || '*';
+  const trigger = document.getElementById('pf-trigger').value;
+  const operator= document.getElementById('pf-operator').value;
+  const rawVal  = document.getElementById('pf-value').value.trim();
+  const action  = document.getElementById('pf-action').value;
+  const param   = document.getElementById('pf-param').value.trim();
+  const errEl   = document.getElementById('pf-error');
+  errEl.textContent = '';
+
+  if (!name)   { errEl.textContent = 'Name is required'; return; }
+  if (!rawVal) { errEl.textContent = 'Value is required'; return; }
+  if ((action === 'switch_model' || action === 'inject_prompt') && !param)
+    { errEl.textContent = `${action} requires a parameter`; return; }
+
+  // Auto-cast value
+  let value = rawVal;
+  if (!isNaN(rawVal) && rawVal !== '') value = Number(rawVal);
+
+  const body = {
+    name,
+    agent_id: agentId,
+    condition: { trigger, operator, value },
+    action: { type: action, params: param ? (action === 'switch_model' ? {model: param} : {prompt: param}) : undefined },
+  };
+
+  try {
+    if (_editingPolicyId !== null) {
+      await apiPut(`/v1/policies/${_editingPolicyId}`, body);
+    } else {
+      await apiPost('/v1/policies', body);
+    }
+    closePolicyForm();
+    await loadAndRenderPolicies();
+  } catch(e) {
+    errEl.textContent = e.message || 'Save failed';
+  }
+}
+
+function fillExample(trigger, operator, value, action, param) {
+  openPolicyForm();
+  document.getElementById('pf-trigger').value  = trigger;
+  document.getElementById('pf-operator').value = operator;
+  document.getElementById('pf-value').value    = value;
+  document.getElementById('pf-action').value   = action;
+  if (param) document.getElementById('pf-param').value = param;
+  // Auto-set name from trigger+action
+  const names = { tool_call_count:'Limit tool calls', cost_usd:'Cost cap',
+                  signal:'Loop guard', finish_reason:'Truncation logger' };
+  if (!document.getElementById('pf-name').value)
+    document.getElementById('pf-name').value = names[trigger] || `${trigger} policy`;
+  updatePolicyFormHints();
+}
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 loadAll();

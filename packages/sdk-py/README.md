@@ -83,13 +83,52 @@ cd dunetrace && cp .env.example .env && docker compose up -d
 
 Dashboard → `http://localhost:3000` · Ingest → `http://localhost:8001`
 
+## Policies
+
+Runtime guardrails that fire mid-run — before a failure propagates. Define conditions with any supported trigger and attach a `stop`, `switch_model`, `inject_prompt`, or `log` action.
+
+```python
+from dunetrace import Dunetrace
+
+dt = Dunetrace()
+
+# Stop the run if tool call count exceeds 5
+dt.add_policy(
+    name="cap tool calls",
+    condition={"trigger": "tool_call_count", "operator": "gt", "value": 5},
+    action={"type": "stop"},
+)
+
+# Downgrade model when cost exceeds $0.50
+dt.add_policy(
+    name="cost cap",
+    condition={"trigger": "cost_usd", "operator": "gt", "value": 0.50},
+    action={"type": "switch_model", "params": {"model": "gpt-4o-mini"}},
+)
+
+# Inject a corrective prompt when a loop is detected
+dt.add_policy(
+    name="loop fix",
+    condition={"trigger": "signal", "operator": "eq", "value": "TOOL_LOOP"},
+    action={"type": "inject_prompt", "params": {"prompt": "Stop repeating tool calls. Summarise what you know and answer."}},
+)
+
+with dt.run("my-agent", user_input=query, tools=["search"]) as run:
+    ...
+    # After a stop policy fires, PolicyViolation is raised
+    # After switch_model fires, check run.model_override
+    # After inject_prompt fires, check run.pop_prompt_addition()
+```
+
+Policies can also be defined in the dashboard and fetched automatically at run start (60-second TTL cache per agent). See [docs/integrations.md](../../docs/integrations.md#policies) for the full reference.
+
 ## Tests
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-52 tests, no network required.
+290 tests, no network required.
 
 ## Links
 

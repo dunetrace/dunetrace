@@ -156,6 +156,7 @@ async def explain_signal(
         "source":                  source,
         "root_cause":              llm_result["root_cause"],
         "fix_content":             llm_result["fix_content"],
+        "fix_patch":               llm_result["fix_patch"],
         "fix_type":                fix_type,
         "apply_blocked":           apply_blocked,
         "langfuse_prompt_name":    prompt_name,
@@ -290,28 +291,33 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
     if failure_type in _CODE_CHANGE_TYPES:
         fix_instruction = (
             "fix_content: one sentence (under 120 chars) describing the specific "
-            "code or infrastructure change needed — e.g. add a timeout, add "
-            "summarization, fix the retrieval pipeline. Not a system prompt addition."
+            "code or infrastructure change needed.\n"
+            "fix_patch: a concrete Python code snippet (max 20 lines) showing "
+            "exactly what to add or change — a real function or guard clause, "
+            "not pseudocode. Use the tool name and error pattern from the trace."
         )
     elif failure_type in _NO_AUTO_APPLY_TYPES:
         fix_instruction = (
-            "fix_content: one sentence (under 120 chars) describing a defensive "
-            "code-level or prompt-level guard to add. Note: this is a security "
-            "signal — be specific about the defensive measure."
+            "fix_content: one sentence (under 120 chars) describing a defensive guard to add.\n"
+            "fix_patch: a concrete code snippet (max 10 lines) implementing the "
+            "guard — e.g. an input validation function or a regex check on user input."
         )
     else:
         fix_instruction = (
-            "fix_content: one sentence (under 100 chars) to add verbatim to the "
-            "agent's system prompt."
+            "fix_content: one sentence (under 100 chars) to add verbatim to the agent's system prompt.\n"
+            "fix_patch: a short unified diff (5-8 lines) showing where to insert "
+            "fix_content in the system prompt. Use the actual system prompt text shown above. "
+            'Format: lines starting with " " are context, "+" is the new line. '
+            "If the system prompt was not found, just show the single + line."
         )
 
     system = (
         "You are analyzing an AI agent behavioral failure. "
         "Given a detection signal and the agent's execution trace, identify the "
         "specific root cause and the single most important fix.\n"
-        "Respond ONLY in JSON with exactly two fields:\n"
-        '{"root_cause": "...", "fix_content": "..."}\n'
-        "root_cause: max 150 words explaining specifically WHY this happened, "
+        "Respond ONLY in JSON with exactly three fields:\n"
+        '{"root_cause": "...", "fix_content": "...", "fix_patch": "..."}\n'
+        "root_cause: max 120 words explaining specifically WHY this happened, "
         "quoting relevant prompt text or tool output.\n"
         f"{fix_instruction}"
     )
@@ -326,7 +332,7 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
         msg = await client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=400,
+            max_tokens=700,
             system=system,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -340,7 +346,7 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         resp = await client.chat.completions.create(
             model="gpt-4o-mini",
-            max_tokens=400,
+            max_tokens=700,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user_prompt},
@@ -360,8 +366,9 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
             return {
                 "root_cause":  str(parsed.get("root_cause",  "")),
                 "fix_content": str(parsed.get("fix_content", "")),
+                "fix_patch":   str(parsed.get("fix_patch",   "")),
             }
     except (_json.JSONDecodeError, TypeError):
         pass
 
-    return {"root_cause": raw, "fix_content": ""}
+    return {"root_cause": raw, "fix_content": "", "fix_patch": ""}

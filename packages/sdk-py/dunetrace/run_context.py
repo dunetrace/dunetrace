@@ -18,6 +18,10 @@ from dunetrace.models import (
     ToolCall,
     hash_content,
 )
+import logging
+from dunetrace.policies import PolicyViolation, build_metrics
+
+logger = logging.getLogger("dunetrace.run")
 
 if TYPE_CHECKING:
     from dunetrace.client import Dunetrace
@@ -52,6 +56,11 @@ class RunContext:
             input_text_hash=input_text_hash,
         )
 
+        # Policy enforcement state
+        self.model_override:    str | None  = None  # set by switch_model action
+        self.prompt_additions:  list        = []    # appended by inject_prompt action
+        self._triggered_policies: set       = set() # policy keys fired in this run
+
     # ── LLM hooks ─────────────────────────────────────────────────────────────
 
     def llm_called(self, model: str, prompt_tokens: int = 0) -> None:
@@ -79,9 +88,10 @@ class RunContext:
         # Back-fill the most recent LlmCall with response data.
         if self.state.llm_calls:
             lc = self.state.llm_calls[-1]
-            lc.finish_reason  = finish_reason
-            lc.latency_ms     = latency_ms
-            lc.output_length  = output_length
+            lc.finish_reason      = finish_reason
+            lc.latency_ms         = latency_ms
+            lc.output_length      = output_length
+            lc.completion_tokens  = completion_tokens or None
         self._emit(EventType.LLM_RESPONDED, {
             "completion_tokens": completion_tokens,
             "latency_ms":        latency_ms,
@@ -200,12 +210,83 @@ class RunContext:
         self.state.events.append(event)
         self._client._emit(event)
 
+    def pop_prompt_addition(self) -> str | None:
+        """Return and remove the oldest injected prompt addition, or None."""
+        return self.prompt_additions.pop(0) if self.prompt_additions else None
+
     def final_answer(self) -> None:
         """Call when the agent produces its final answer."""
         self.exit_reason       = "final_answer"
         self.state.exit_reason = "final_answer"
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _check_policies(self) -> None:
+        """
+        Evaluate registered policies against the current run metrics.
+
+        Called after tool_called, llm_responded, and tool_responded. Raises
+        PolicyViolation for 'stop' actions; sets model_override / prompt_additions
+        for soft actions; emits POLICY_TRIGGERED for 'log' actions.
+        """
+        engine = self._client._policy_engine  # type: ignore[attr-defined]
+        if not len(engine):
+            return
+
+        metrics = build_metrics(self.state, self.step)
+
+        # Augment metrics with signal detection if any policy uses trigger="signal".
+        # We do this lazily to avoid running detectors when no signal policies exist.
+        with engine._lock:
+            needs_signal = any(
+                p.condition.get("trigger") == "signal"
+                for p in engine._policies
+                if p.enabled and p.agent_id in ("*", self.agent_id)
+            )
+        if needs_signal:
+            from dunetrace.detectors import run_detectors
+            sigs = run_detectors(self.state)
+            metrics["signal"] = [s.failure_type.value for s in sigs] if sigs else []
+
+        result = engine.evaluate(self.agent_id, metrics, self._triggered_policies)
+        if result is None:
+            return
+
+        policy, action = result
+        action_type = action.get("type", "log")
+        params       = action.get("params") or {}
+
+        # Emit a policy.triggered event for all action types
+        self._emit(EventType.POLICY_TRIGGERED, {
+            "policy_name": policy.name,
+            "action_type": action_type,
+            "trigger":     policy.condition.get("trigger"),
+            "value":       metrics.get(policy.condition.get("trigger", "")),
+        }, advance=False)
+
+        if action_type == "stop":
+            self._triggered_policies.add(policy.key)
+            raise PolicyViolation(policy.name, action,
+                params.get("message", f"Policy '{policy.name}' stopped the run"))
+
+        elif action_type == "switch_model":
+            model = params.get("model")
+            if model:
+                self.model_override = model
+                logger.info("Policy '%s': model_override → %s", policy.name, model)
+            self._triggered_policies.add(policy.key)
+
+        elif action_type == "inject_prompt":
+            prompt = params.get("prompt", "")
+            if prompt:
+                self.prompt_additions.append(prompt)
+                logger.info("Policy '%s': injected prompt (%d chars)", policy.name, len(prompt))
+            self._triggered_policies.add(policy.key)
+
+        elif action_type == "log":
+            # Log policies fire every time; don't add to triggered_already
+            logger.info("Policy '%s' logged: %s=%s", policy.name,
+                        policy.condition.get("trigger"), metrics.get(policy.condition.get("trigger", "")))
 
     def _emit(self, event_type: EventType, payload: dict, *, advance: bool = True) -> None:
         if advance:
@@ -221,3 +302,12 @@ class RunContext:
         )
         self.state.events.append(event)
         self._client._emit(event)
+
+        # Evaluate policies after events that change tracked metrics.
+        # POLICY_TRIGGERED is excluded to prevent recursive evaluation.
+        if event_type in (
+            EventType.TOOL_CALLED,
+            EventType.LLM_RESPONDED,
+            EventType.TOOL_RESPONDED,
+        ):
+            self._check_policies()

@@ -2,11 +2,14 @@
 from __future__ import annotations
 from typing import Optional
 import asyncio
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from api_svc.auth import require_customer
 from api_svc.config import settings
-from api_svc.db.queries import list_agents, agent_signal_sparklines, agent_failure_type_counts
-from api_svc.schemas import AgentListResponse, AgentSummary, Page
+from api_svc.db.queries import (
+    list_agents, agent_signal_sparklines, agent_failure_type_counts,
+    get_agent_health_score,
+)
+from api_svc.schemas import AgentListResponse, AgentSummary, AgentHealthScore, Page
 
 router = APIRouter(prefix="/v1/agents", tags=["Agents"])
 
@@ -46,3 +49,27 @@ async def get_agents(
         page=Page(total=total, offset=offset, limit=limit,
                   has_more=(offset + limit) < total),
     )
+
+
+@router.get(
+    "/{agent_id}/health-score",
+    response_model=AgentHealthScore,
+    summary="0–100 health score for an agent",
+)
+async def get_health_score(
+    agent_id:    str,
+    customer_id: str = Depends(require_customer),
+) -> AgentHealthScore:
+    """
+    Composite health score derived from the last 30 days of run data.
+
+    Components:
+    - **failure_rate** (0–40 pts): proportion of runs with any signal
+    - **loop_avoidance** (0–25 pts): proportion of runs free of looping signals
+    - **token_efficiency** (0–20 pts): avg prompt tokens (lower = better)
+    - **latency** (0–15 pts): avg LLM latency in ms (lower = better)
+
+    Returns `score: null` when fewer than 3 sample runs are available.
+    """
+    result = await get_agent_health_score(agent_id)
+    return AgentHealthScore(agent_id=agent_id, **result)

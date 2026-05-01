@@ -61,15 +61,28 @@ def _basic_auth(public_key: str, secret_key: str) -> str:
 
 
 def _extract_system_prompt(obs_input: Any) -> Optional[str]:
-    """Pull the system message out of a GENERATION input dict, if present."""
-    if not isinstance(obs_input, dict):
+    """Pull the system message out of a GENERATION input, if present.
+
+    Handles two shapes:
+      - dict with a "messages" key  (OpenAI SDK / most integrations)
+      - list of message dicts       (LangChain Langfuse callback)
+    Each message may use "role" or "type" for the role field, and
+    "content" or "text" for the content field.
+    """
+    if isinstance(obs_input, dict):
+        messages = obs_input.get("messages", [])
+    elif isinstance(obs_input, list):
+        messages = obs_input
+    else:
         return None
-    for msg in obs_input.get("messages", []):
+
+    for msg in messages:
         if not isinstance(msg, dict):
             continue
         role = msg.get("role") or msg.get("type", "")
         if role == "system":
-            return msg.get("content", "")[:_SYSTEM_PROMPT_LIMIT]
+            content = msg.get("content") or msg.get("text") or ""
+            return str(content)[:_SYSTEM_PROMPT_LIMIT]
     return None
 
 

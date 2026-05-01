@@ -21,6 +21,7 @@ from dunetrace.buffer import RingBuffer
 from dunetrace.context import _current_run
 from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
 from dunetrace.models import AgentEvent, EventType, hash_content, agent_version
+from dunetrace.policies import Policy, PolicyEngine, PolicyViolation
 from dunetrace.run_context import RunContext
 
 logger = logging.getLogger("dunetrace")
@@ -67,9 +68,12 @@ class Dunetrace:
         self._otel_exporter     = otel_exporter   # DunetraceOTelExporter or None
         self._stdout_lock       = Lock()  # one JSON line per write, no interleaving
         self._default_agent_id  = ""      # set by init()
+        self._policy_engine     = PolicyEngine()
 
         if debug:
             logging.basicConfig(level=logging.DEBUG)
+
+        self._flush_gate = Event()  # set to wake drain thread immediately
 
         self._drain_thread = Thread(
             target=self._drain_loop,
@@ -138,6 +142,10 @@ class Dunetrace:
             payload=payload,
         ))
 
+        # Fetch remote policies in a background thread so run start isn't delayed.
+        if self._ingest_url and self._api_key and self._policy_engine.needs_fetch(agent_id):
+            Thread(target=self._fetch_policies, args=(agent_id,), daemon=True).start()
+
         _token = _current_run.set(ctx)
         try:
             yield ctx
@@ -157,6 +165,26 @@ class Dunetrace:
                     "tool_call_count": len(ctx.state.tool_calls),
                 },
             ))
+        except PolicyViolation as exc:
+            ctx.state.current_step = ctx.step
+            ctx.state.exit_reason  = "policy_violation"
+            if self._otel_exporter is not None:
+                self._otel_exporter.notify_run_state(ctx.run_id, ctx.state)
+            self._emit(AgentEvent(
+                event_type=EventType.RUN_ERRORED,
+                run_id=ctx.run_id,
+                agent_id=agent_id,
+                agent_version=version,
+                step_index=ctx.step,
+                payload={
+                    "error_type":  "PolicyViolation",
+                    "error_hash":  hash_content(str(exc)),
+                    "exit_reason": "policy_violation",
+                    "policy_name": exc.policy_name,
+                    "step_index":  ctx.step,
+                },
+            ))
+            raise
         except Exception as exc:
             ctx.state.current_step = ctx.step
             ctx.state.exit_reason  = "error"
@@ -236,6 +264,84 @@ class Dunetrace:
         from dunetrace.auto import auto_instrument as _auto_instrument
         _auto_instrument(frameworks=frameworks)
 
+    def add_policy(
+        self,
+        name:      str,
+        condition: dict,
+        action:    dict,
+        *,
+        agent_id:  str = "*",
+        priority:  int = 100,
+        enabled:   bool = True,
+    ) -> Policy:
+        """
+        Register a runtime policy that fires mid-run when the condition is met.
+
+        condition examples::
+
+            {"trigger": "tool_call_count", "operator": "gt",  "value": 5}
+            {"trigger": "cost_usd",        "operator": "gt",  "value": 0.50}
+            {"trigger": "signal",          "operator": "eq",  "value": "TOOL_LOOP"}
+            {"trigger": "finish_reason",   "operator": "eq",  "value": "length"}
+
+        action examples::
+
+            {"type": "stop"}
+            {"type": "switch_model",  "params": {"model": "gpt-4o-mini"}}
+            {"type": "inject_prompt", "params": {"prompt": "Stop repeating yourself."}}
+            {"type": "log"}
+
+        :param name:      Human-readable label shown in policy.triggered events.
+        :param condition: Trigger definition dict.
+        :param action:    Action to execute when condition is met.
+        :param agent_id:  ``"*"`` (default) applies to all agents; pass a specific
+                          agent_id to scope the policy.
+        :param priority:  Lower numbers fire first. Default 100.
+        :param enabled:   Set to False to register but not activate.
+        :returns:         The Policy object (can be stored to mutate .enabled later).
+        """
+        policy = Policy(
+            name=name,
+            condition=condition,
+            action=action,
+            agent_id=agent_id,
+            priority=priority,
+            enabled=enabled,
+        )
+        self._policy_engine.add(policy)
+        logger.debug("Policy registered: %r trigger=%s action=%s",
+                     name, condition.get("trigger"), action.get("type"))
+        return policy
+
+    def _fetch_policies(self, agent_id: str) -> None:
+        """
+        Background fetch of remote policies for agent_id.
+
+        Calls GET {ingest_url_base}/v1/policies?agent_id=...&api_key=...
+        Silently ignores all errors — policies are best-effort.
+        """
+        if not self._ingest_url or not self._api_key:
+            return
+        if not self._policy_engine.needs_fetch(agent_id):
+            return
+
+        self._policy_engine.mark_fetched(agent_id)  # prevent stampede
+
+        try:
+            base = self._ingest_url.replace("/v1/ingest", "")
+            url  = (
+                f"{base}/v1/policies"
+                f"?agent_id={urllib.request.quote(agent_id, safe='')}"
+                f"&api_key={urllib.request.quote(self._api_key, safe='')}"
+            )
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                import json as _json
+                data = _json.loads(resp.read())
+                self._policy_engine.load(data.get("policies", []))
+        except Exception as exc:
+            logger.debug("Policy fetch skipped: %s", exc)
+
     def agent(
         self,
         agent_id:      str = "",
@@ -314,9 +420,23 @@ class Dunetrace:
 
         return decorator
 
+    def flush(self, *, block: bool = False, timeout: float = 5.0) -> None:
+        """Wake the drain thread to ship buffered events immediately.
+
+        block=True waits up to `timeout` seconds for the buffer to empty.
+        Use this after important checkpoints (tool response, LLM response) to
+        ensure observability data reaches the backend before the next step.
+        """
+        self._flush_gate.set()
+        if block:
+            deadline = time.monotonic() + timeout
+            while self._buffer and time.monotonic() < deadline:
+                time.sleep(0.01)
+
     def shutdown(self, timeout: float = 5.0) -> None:
         """Flush remaining events and stop the drain thread."""
         self._stop_evt.set()
+        self._flush_gate.set()  # wake the drain thread so shutdown is immediate
         self._drain_thread.join(timeout=timeout)
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -365,9 +485,10 @@ class Dunetrace:
                 if self._ingest_url:
                     self._ship(batch)
             else:
-                # Use Event.wait so shutdown() wakes the thread immediately
-                # instead of waiting up to flush_interval for time.sleep to expire.
-                self._stop_evt.wait(timeout=self._flush_interval)
+                # Wait until either flush() signals us, shutdown() fires, or the
+                # interval expires. This lets flush() wake the thread immediately.
+                self._flush_gate.wait(timeout=self._flush_interval)
+                self._flush_gate.clear()
 
         remaining = self._buffer.drain_all()
         if remaining and self._ingest_url:

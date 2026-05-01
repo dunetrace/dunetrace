@@ -13,9 +13,10 @@ The Mission Control dashboard is a live, API-driven single-page app served at **
 | **Alerts** | Signals grouped by failure type. Each group header shows run count and estimated wasted tokens. Expandable per group with per-run confidence and token estimates. Shadow signals rendered below with dashed border + SHADOW badge. |
 | **Analytics** | Estimated token cost saved this week (configurable $/1k rate). Cross-agent totals. Top failure patterns with per-type token waste. Per-agent breakdown with estimated wasted tokens. |
 | **Risk Heatmap** | Failure type × agent intensity grid. |
-| **Agents** | Per-agent health cards — failure rate %, dominant pattern, run / critical / high counts, last seen, ungraduated shadow signal count. Each agent card links to a **Health Record** panel showing failure rate per failure type over 30 days: a sparkline of daily rate, a `SYSTEMIC` badge when ≥10% of runs in the last 7 days were affected, and a 7-day affected/total count. Powered by `GET /v1/agents/{id}/insights` (`failure_rates` + `systemic_patterns`). Clicking any failure type in the sidebar opens the **Why is this happening?** deep-dive panel (see below). |
+| **Agents** | Per-agent health cards — failure rate %, dominant pattern, run / critical / high counts, last seen, ungraduated shadow signal count. Each card shows an **Agent Health Score** badge (0–100, colour-coded green/amber/red) computed from failure rate (40%), loop avoidance (25%), token efficiency (20%), and latency (15%). Score is `null` until 3+ runs are available. Powered by `GET /v1/agents/{id}/health-score`. Each agent card links to a **Health Record** panel showing failure rate per failure type over 30 days: a sparkline of daily rate, a `SYSTEMIC` badge when ≥10% of runs in the last 7 days were affected, and a 7-day affected/total count. Powered by `GET /v1/agents/{id}/insights` (`failure_rates` + `systemic_patterns`). Clicking any failure type in the sidebar opens the **Why is this happening?** deep-dive panel (see below). |
 | **Compare Runs** | Side-by-side run comparison. Select any two runs from dropdowns — metrics, signals, and max confidence shown in both panels with a colour-coded delta table (new / resolved failure types highlighted). |
 | **Detectors** | Threshold sliders and alert level selector. Live review panel: "with current config, N of M past runs would be flagged HIGH or above (N% of runs)" — recomputes on every change. |
+| **Policies** | Create, edit, toggle, and delete runtime guardrails. Each policy row shows its trigger, operator, threshold, action type, and enabled state. Toggle switch enables/disables without deleting. Example grid provides one-click templates for "cap tool calls", "cost cap", and "loop fix". Policies saved here are fetched automatically by the SDK within 60 seconds. |
 
 ---
 
@@ -89,6 +90,7 @@ All data is computed client-side from the Customer API. No server-side rendering
 | Overview, Alerts, Analytics, Heatmap, Agents | `GET /v1/agents` + per-agent `/runs` + `/signals?include_shadow=true` |
 | All Runs, Compare Runs | Same cached data, no extra calls |
 | Run detail | `GET /v1/runs/{id}` (events + signals) |
-| Agent view (health record + runs) | `GET /v1/agents/{id}/runs` + `/signals` + `/insights` |
+| Agent view (health record + runs) | `GET /v1/agents/{id}/runs` + `/signals` + `/insights` + `/health-score` |
 | Why is this happening? panel | `GET /v1/agents/{id}/failure-patterns/{failure_type}` |
 | Detectors | Static — edits require updating `detectors.yml` and restarting the detector service |
+| Policies | `GET /v1/policies` + `POST` + `PUT /{id}` + `DELETE /{id}` + `PATCH /{id}/toggle` |

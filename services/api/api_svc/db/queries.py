@@ -39,6 +39,21 @@ CREATE INDEX IF NOT EXISTS idx_fixes_signal_id ON fixes(signal_id);
 CREATE INDEX IF NOT EXISTS idx_fixes_run_id    ON fixes(run_id, applied_at DESC);
 """
 
+_POLICIES_DDL = """
+CREATE TABLE IF NOT EXISTS policies (
+    id          BIGSERIAL PRIMARY KEY,
+    agent_id    TEXT        NOT NULL DEFAULT '*',
+    name        TEXT        NOT NULL,
+    condition   JSONB       NOT NULL,
+    action      JSONB       NOT NULL,
+    enabled     BOOLEAN     NOT NULL DEFAULT TRUE,
+    priority    INT         NOT NULL DEFAULT 100,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
+"""
+
 
 async def init_pool() -> None:
     global _pool
@@ -52,6 +67,7 @@ async def init_pool() -> None:
     )
     async with _pool.acquire() as conn:
         await conn.execute(_FIXES_DDL)
+        await conn.execute(_POLICIES_DDL)
     logger.info("DB pool ready")
 
 
@@ -1267,4 +1283,233 @@ async def get_signal_fix_status(
             "still_occurring" if rec > 0 else
             "insufficient_data"
         ),
+    }
+
+
+# ── Policies ─────────────────────────────────────────────────────────────────
+
+
+def _policy_row(r: Any) -> dict:
+    import json as _json
+    cond = r["condition"]
+    act  = r["action"]
+    if isinstance(cond, str): cond = _json.loads(cond)
+    if isinstance(act,  str): act  = _json.loads(act)
+    ca = r["created_at"]
+    ua = r["updated_at"]
+    return {
+        "id":         r["id"],
+        "agent_id":   r["agent_id"],
+        "name":       r["name"],
+        "condition":  dict(cond) if cond else {},
+        "action":     dict(act)  if act  else {},
+        "enabled":    r["enabled"],
+        "priority":   r["priority"],
+        "created_at": ca.timestamp() if hasattr(ca, "timestamp") else ca,
+        "updated_at": ua.timestamp() if hasattr(ua, "timestamp") else ua,
+    }
+
+
+async def list_policies(agent_id: Optional[str] = None) -> list:
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        if agent_id:
+            rows = await conn.fetch(
+                "SELECT * FROM policies WHERE agent_id = $1 OR agent_id = '*' ORDER BY priority, id",
+                agent_id,
+            )
+        else:
+            rows = await conn.fetch("SELECT * FROM policies ORDER BY priority, id")
+    return [_policy_row(r) for r in rows]
+
+
+async def get_policy_by_id(policy_id: int) -> Optional[dict]:
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM policies WHERE id = $1", policy_id)
+    return _policy_row(row) if row else None
+
+
+async def create_policy(
+    name: str, agent_id: str, condition: dict, action: dict,
+    priority: int = 100, enabled: bool = True,
+) -> dict:
+    import json as _json
+    if not _pool:
+        raise RuntimeError("DB pool not available")
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO policies (name, agent_id, condition, action, priority, enabled)
+            VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+            RETURNING *
+            """,
+            name, agent_id,
+            _json.dumps(condition), _json.dumps(action),
+            priority, enabled,
+        )
+    return _policy_row(row)
+
+
+async def update_policy(policy_id: int, fields: dict) -> dict:
+    import json as _json
+    if not _pool:
+        raise RuntimeError("DB pool not available")
+
+    set_parts = []
+    params: list = []
+    for key, value in fields.items():
+        if key not in {"name", "agent_id", "condition", "action", "priority", "enabled"}:
+            continue
+        params.append(value if key not in {"condition", "action"} else _json.dumps(value))
+        cast = "::jsonb" if key in {"condition", "action"} else ""
+        set_parts.append(f"{key} = ${len(params)}{cast}")
+
+    if not set_parts:
+        return await get_policy_by_id(policy_id)  # type: ignore[return-value]
+
+    params.append(policy_id)
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE policies SET {', '.join(set_parts)}, updated_at = NOW() "
+            f"WHERE id = ${len(params)} RETURNING *",
+            *params,
+        )
+    return _policy_row(row)
+
+
+async def delete_policy(policy_id: int) -> None:
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute("DELETE FROM policies WHERE id = $1", policy_id)
+
+
+# ── Agent Health Score ────────────────────────────────────────────────────────
+
+async def get_agent_health_score(agent_id: str) -> dict:
+    """
+    Composite 0–100 health score for an agent based on the last 30 days.
+
+    Components:
+      failure_rate  (0–40): proportion of runs with any signal (40 = zero failures)
+      loop_avoidance (0–25): proportion of runs free of looping signals
+      token_efficiency (0–20): avg prompt tokens — lower is more efficient
+      latency (0–15): avg LLM latency_ms — lower is faster
+
+    Returns {"score": int|None, "components": {...}, "sample_runs": int}.
+    score is None when fewer than 3 runs are available.
+    """
+    if not _pool:
+        return {"score": None, "components": {}, "sample_runs": 0}
+
+    async with _pool.acquire() as conn:
+        stats = await conn.fetchrow(
+            """
+            WITH runs_30d AS (
+                SELECT DISTINCT run_id
+                FROM processed_runs
+                WHERE agent_id = $1
+                  AND processed_at >= NOW() - INTERVAL '30 days'
+            ),
+            signal_runs AS (
+                SELECT DISTINCT run_id
+                FROM failure_signals
+                WHERE agent_id = $1
+                  AND shadow = FALSE
+                  AND detected_at >= NOW() - INTERVAL '30 days'
+            ),
+            loop_runs AS (
+                SELECT DISTINCT run_id
+                FROM failure_signals
+                WHERE agent_id = $1
+                  AND shadow = FALSE
+                  AND detected_at >= NOW() - INTERVAL '30 days'
+                  AND failure_type IN (
+                      'TOOL_LOOP','TOOL_THRASHING','TOOL_AVOIDANCE',
+                      'STEP_COUNT_INFLATION','LLM_TRUNCATION_LOOP'
+                  )
+            ),
+            token_data AS (
+                SELECT AVG((payload->>'prompt_tokens')::float) AS avg_prompt_tokens
+                FROM events
+                WHERE agent_id = $1
+                  AND event_type = 'llm.called'
+                  AND payload->>'prompt_tokens' IS NOT NULL
+                  AND received_at >= NOW() - INTERVAL '30 days'
+            ),
+            latency_data AS (
+                SELECT AVG((payload->>'latency_ms')::float) AS avg_latency_ms
+                FROM events
+                WHERE agent_id = $1
+                  AND event_type = 'llm.responded'
+                  AND payload->>'latency_ms' IS NOT NULL
+                  AND received_at >= NOW() - INTERVAL '30 days'
+            )
+            SELECT
+                (SELECT COUNT(*) FROM runs_30d)                      AS total_runs,
+                (SELECT COUNT(*) FROM signal_runs)                   AS runs_with_signals,
+                (SELECT COUNT(*) FROM loop_runs)                     AS runs_with_loops,
+                (SELECT avg_prompt_tokens FROM token_data)           AS avg_prompt_tokens,
+                (SELECT avg_latency_ms    FROM latency_data)         AS avg_latency_ms
+            """,
+            agent_id,
+        )
+
+    total = int(stats["total_runs"] or 0)
+    if total < 3:
+        return {"score": None, "components": {}, "sample_runs": total}
+
+    failure_rate = (int(stats["runs_with_signals"] or 0)) / total
+    loop_rate    = (int(stats["runs_with_loops"]   or 0)) / total
+    avg_tokens   = stats["avg_prompt_tokens"]
+    avg_latency  = stats["avg_latency_ms"]
+
+    # Failure component (0–40): 0% failure rate = 40 pts
+    failure_score = round((1.0 - failure_rate) * 40)
+
+    # Loop component (0–25): 0% loop rate = 25 pts
+    loop_score = round((1.0 - loop_rate) * 25)
+
+    # Token efficiency (0–20): <500 tokens avg = 20 pts, >4000 = 0 pts, linear
+    if avg_tokens is None:
+        token_score = 15  # neutral — no LLM token data recorded
+    else:
+        token_score = max(0, min(20, round(20.0 * (1.0 - max(0.0, avg_tokens - 500) / 3500))))
+
+    # Latency component (0–15): <1 000 ms avg = 15 pts, >8 000 ms = 0 pts, linear
+    if avg_latency is None:
+        latency_score = 10  # neutral — no latency data recorded
+    else:
+        latency_score = max(0, min(15, round(15.0 * (1.0 - max(0.0, avg_latency - 1000) / 7000))))
+
+    score = failure_score + loop_score + token_score + latency_score
+
+    return {
+        "score": score,
+        "components": {
+            "failure_rate": {
+                "score": failure_score, "max": 40,
+                "value": round(failure_rate * 100, 1),
+                "label": "% runs with failures",
+            },
+            "loop_avoidance": {
+                "score": loop_score, "max": 25,
+                "value": round(loop_rate * 100, 1),
+                "label": "% runs with loops",
+            },
+            "token_efficiency": {
+                "score": token_score, "max": 20,
+                "value": round(avg_tokens) if avg_tokens is not None else None,
+                "label": "avg prompt tokens",
+            },
+            "latency": {
+                "score": latency_score, "max": 15,
+                "value": round(avg_latency) if avg_latency is not None else None,
+                "label": "avg LLM latency ms",
+            },
+        },
+        "sample_runs": total,
     }

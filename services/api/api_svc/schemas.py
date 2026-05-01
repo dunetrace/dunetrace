@@ -246,6 +246,12 @@ if _PYDANTIC:
         co_occurring:        List[CoOccurring]
         top_runs:            List[TopRun]
 
+    class AgentHealthScore(_Model):
+        agent_id:    str
+        score:       Optional[int]          # None when <3 sample runs
+        components:  Dict[str, Any]         # keyed by component name
+        sample_runs: int
+
 else:
     # Stdlib dataclass fallback (sandbox / testing)
     from dataclasses import dataclass, field
@@ -343,4 +349,8 @@ else:
         failure_type: str; total_runs: int; affected_runs: int
         rate: float; first_seen: Optional[float]; last_seen: Optional[float]; is_systemic: bool
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class AgentHealthScore:
+        agent_id: str; score: Optional[int]; components: Dict[str, Any]; sample_runs: int
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)

@@ -92,6 +92,55 @@ If you are running Langfuse alongside Dunetrace, click **Explain +** on any sign
 
 ---
 
+## Policies
+
+Runtime guardrails that fire mid-run — before a failure propagates. Define a condition and an action; the SDK evaluates it after every tool call and LLM response.
+
+```python
+from dunetrace import Dunetrace, PolicyViolation
+
+dt = Dunetrace()
+
+dt.add_policy(
+    name="cap tool calls",
+    condition={"trigger": "tool_call_count", "operator": "gt", "value": 5},
+    action={"type": "stop"},
+)
+dt.add_policy(
+    name="cost cap",
+    condition={"trigger": "cost_usd", "operator": "gt", "value": 0.50},
+    action={"type": "switch_model", "params": {"model": "gpt-4o-mini"}},
+)
+dt.add_policy(
+    name="loop fix",
+    condition={"trigger": "signal", "operator": "eq", "value": "TOOL_LOOP"},
+    action={"type": "inject_prompt", "params": {"prompt": "Stop repeating tool calls."}},
+)
+```
+
+| Trigger | What it measures |
+|---|---|
+| `tool_call_count` | Total tool calls so far |
+| `step_count` | Current step index |
+| `cost_usd` | Accumulated LLM cost in USD |
+| `error_count` | Failed tool calls |
+| `finish_reason` | Latest LLM finish_reason |
+| `llm_latency_ms` | Latest LLM latency (ms) |
+| `signal` | Detector signal name e.g. `"TOOL_LOOP"` |
+
+| Action | Effect |
+|---|---|
+| `stop` | Raises `PolicyViolation`; run exits with `exit_reason="policy_violation"` |
+| `switch_model` | Sets `run.model_override`; read it between LLM calls |
+| `inject_prompt` | Appends to `run.prompt_additions`; read with `run.pop_prompt_addition()` |
+| `log` | Emits a `policy.triggered` event; no interruption |
+
+Policies can also be created in the dashboard under **Policies** and are fetched automatically by the SDK at run start (60-second TTL per agent).
+
+→ [docs/integrations.md#policies](docs/integrations.md#policies): full reference, operators, examples
+
+---
+
 ## Dashboard
 
 ![Dashboard overview](dashboard.png)

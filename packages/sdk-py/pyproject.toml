@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace"
-version = "0.3.9"
+version = "0.3.10"
 description = "Behavioral observability for AI agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}

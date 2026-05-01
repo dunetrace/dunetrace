@@ -369,6 +369,7 @@ function Dashboard() {
           loading: false,
           rootCause:             res.root_cause,
           fixContent:            res.fix_content,
+          fixPatch:              res.fix_patch,
           fixType:               res.fix_type,
           applyBlocked:          res.apply_blocked,
           source:                res.source,

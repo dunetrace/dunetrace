@@ -220,6 +220,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             })
             self._last_run_id = ctx.run_id
             self._cleanup(lc_run_id)
+            self._client.flush()
         except Exception as exc:
             logger.warning("Dunetrace: on_chain_end failed: %s", exc)
 
@@ -237,6 +238,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 "error_hash": hash_content(str(error)),
             })
             self._cleanup(lc_run_id)
+            self._client.flush()
         except Exception as exc:
             logger.warning("Dunetrace: on_chain_error failed: %s", exc)
 
@@ -331,6 +333,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
 
             from dunetrace.models import EventType
             self._safe_emit(EventType.LLM_RESPONDED, ctx, payload)
+            self._client.flush()
         except Exception as exc:
             logger.warning("Dunetrace: on_llm_end failed: %s", exc)
 
@@ -396,11 +399,14 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 return
             lc_run_id = str(kwargs.get("run_id") or "")
             step = ctx.child_steps.pop(lc_run_id, None)
+            tool_name = kwargs.get("name") or ""
             from dunetrace.models import EventType
             self._safe_emit(EventType.TOOL_RESPONDED, ctx, {
+                "tool_name":     tool_name,
                 "success":       True,
                 "output_length": len(str(output)),
             }, step=step)
+            self._client.flush()
         except Exception as exc:
             logger.warning("Dunetrace: on_tool_end failed: %s", exc)
 
@@ -411,11 +417,14 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 return
             lc_run_id = str(kwargs.get("run_id") or "")
             step = ctx.child_steps.pop(lc_run_id, None)
+            tool_name = kwargs.get("name") or ""
             from dunetrace.models import EventType
             self._safe_emit(EventType.TOOL_RESPONDED, ctx, {
+                "tool_name":  tool_name,
                 "success":    False,
                 "error_hash": hash_content(str(error)),
             }, step=step)
+            self._client.flush()
         except Exception as exc:
             logger.warning("Dunetrace: on_tool_error failed: %s", exc)
 

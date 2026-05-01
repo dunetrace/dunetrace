@@ -24,6 +24,7 @@ class EventType(str, Enum):
     RETRIEVAL_CALLED    = "retrieval.called"
     RETRIEVAL_RESPONDED = "retrieval.responded"
     EXTERNAL_SIGNAL     = "external.signal"
+    POLICY_TRIGGERED    = "policy.triggered"
 
 
 class Severity(str, Enum):
@@ -97,13 +98,14 @@ class ToolCall:
 @dataclass
 class LlmCall:
     """Metadata from a single LLM call/response pair within a run."""
-    model:         str
-    prompt_tokens: Optional[int]
-    finish_reason: Optional[str]
-    latency_ms:    Optional[int]
-    step_index:    int
-    timestamp:     float
-    output_length: Optional[int] = None
+    model:             str
+    prompt_tokens:     Optional[int]
+    finish_reason:     Optional[str]
+    latency_ms:        Optional[int]
+    step_index:        int
+    timestamp:         float
+    output_length:     Optional[int] = None
+    completion_tokens: Optional[int] = None
 
 
 @dataclass
