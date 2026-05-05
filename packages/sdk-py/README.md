@@ -27,12 +27,26 @@ result = agent.invoke(input, config={"callbacks": [callback]})
 dt.shutdown()
 ```
 
-**Pure Python / custom agent**
+**Pure Python / custom agent — decorator style**
 
 ```python
 from dunetrace import Dunetrace
 
 dt = Dunetrace()
+
+@dt.tool                                  # auto-emits tool.called / tool.responded
+def web_search(query: str) -> list: ...   # args are SHA-256 hashed, never transmitted raw
+
+@dt.trace                                 # agent_id defaults to "my_agent"
+def my_agent(question: str) -> str:
+    return web_search(question)[0]        # zero SDK calls needed inside function bodies
+```
+
+`@dt.trace` supports bare usage (`@dt.trace` with no parens), explicit agent ID (`@dt.trace("research-agent")`), and keyword args (`@dt.trace(model="gpt-4o")`). `@dt.tool` works on both sync and async functions and is a no-op when called outside a run context.
+
+**Or with `@dt.agent` + auto-instrumentation:**
+
+```python
 dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests globally
 
 @dt.agent(model="gpt-4o")      # agent_id inherited from init()
@@ -128,7 +142,7 @@ Policies can also be defined in the dashboard and fetched automatically at run s
 python -m unittest discover -s tests -v
 ```
 
-290 tests, no network required.
+307 tests, no network required.
 
 ## Links
 

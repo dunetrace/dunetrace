@@ -46,10 +46,24 @@ pip install 'dunetrace[langchain,langfuse]'       # + Langfuse deep analysis
 
 ### 3. Instrument your agent
 
+**Auto-instrument with decorators** — zero SDK calls inside function bodies:
+
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace()               # no api_key needed for local dev
+dt = Dunetrace()
+
+@dt.tool                                  # auto-emits tool.called / tool.responded
+def web_search(query: str) -> list: ...
+
+@dt.trace                                 # auto-emits run.started / run.completed
+def my_agent(question: str) -> str:
+    return web_search(question)[0]        # just call the tool — tracking is automatic
+```
+
+**Or with full control via `@dt.agent` + `dt.init()`:**
+
+```python
 dt.init(agent_id="my-agent")  # patches openai, anthropic, httpx, requests globally
 
 @dt.agent()
@@ -173,9 +187,10 @@ Slack and generic webhook (PagerDuty, Linear, custom).
 
 ## Integrations
 
-- [Custom Python agent - decorator, middleware, manual](docs/integrate-custom-python-agent.md)
+- [Custom Python agent — `@dt.trace` / `@dt.tool` decorators, middleware, manual](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
-- [Langfuse - connect traces for deep root-cause analysis and one-click autofix](docs/integrations.md#langfuse)
+- [TypeScript / JavaScript — raw HTTP, no npm package needed](docs/integrate-typescript-agent.md)
+- [Langfuse — connect traces for deep root-cause analysis and one-click autofix](docs/integrations.md#langfuse)
 - [FastAPI / Flask / ASGI / WSGI / OpenTelemetry / Loki](docs/integrations.md)
 
 ---

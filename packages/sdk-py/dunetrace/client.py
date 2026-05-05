@@ -420,6 +420,124 @@ class Dunetrace:
 
         return decorator
 
+    def trace(
+        self,
+        agent_id_or_fn: "Union[str, Callable, None]" = None,
+        *,
+        model:         str              = "unknown",
+        tools:         Optional[List[str]] = None,
+        system_prompt: str              = "",
+        input_from:    Optional[str]    = None,
+    ) -> Callable:
+        """
+        Decorator that wraps a function in a ``dt.run()`` context.
+        Identical to ``@dt.agent`` but defaults ``agent_id`` to the function name
+        when omitted, and supports bare ``@dt.trace`` usage.
+
+        Usage::
+
+            @dt.trace
+            def my_agent(query: str) -> str: ...          # agent_id = "my_agent"
+
+            @dt.trace("research-agent", model="gpt-4o")
+            def my_agent(query: str) -> str: ...
+
+            @dt.trace(model="gpt-4o")
+            async def my_agent(query: str) -> str: ...    # agent_id = "my_agent"
+        """
+        # @dt.trace (no parens) — agent_id_or_fn is the decorated function
+        if callable(agent_id_or_fn):
+            fn = agent_id_or_fn
+            return self.agent(fn.__name__, model=model, tools=tools,
+                              system_prompt=system_prompt, input_from=input_from)(fn)
+
+        # @dt.trace("name") or @dt.trace(model="gpt-4o")
+        _agent_id = agent_id_or_fn or ""
+
+        def decorator(fn: Callable) -> Callable:
+            return self.agent(_agent_id or fn.__name__, model=model, tools=tools,
+                              system_prompt=system_prompt, input_from=input_from)(fn)
+        return decorator
+
+    def tool(
+        self,
+        name_or_fn: "Union[str, Callable, None]" = None,
+    ) -> Callable:
+        """
+        Decorator that auto-emits ``tool.called`` / ``tool.responded`` around the
+        function. No-op when called outside a ``dt.run()`` context (the function
+        still runs, it just isn't tracked).
+
+        Tool arguments are serialized and SHA-256 hashed before transmission —
+        raw values never leave the process.
+
+        Usage::
+
+            @dt.tool
+            def search(query: str) -> list: ...           # tool_name = "search"
+
+            @dt.tool("web_search")
+            def search(query: str) -> list: ...           # explicit name
+
+            @dt.tool
+            async def fetch_page(url: str) -> str: ...    # async works identically
+        """
+        def _wrap(fn: Callable, tool_name: str) -> Callable:
+            if inspect.iscoroutinefunction(fn):
+                @functools.wraps(fn)
+                async def async_wrapper(*args, **kwargs):
+                    run = _current_run.get(None)
+                    args_dict = _bind_args(fn, args, kwargs)
+                    if run:
+                        run.tool_called(tool_name, args_dict)
+                    t0 = time.time()
+                    try:
+                        result = await fn(*args, **kwargs)
+                    except Exception as exc:
+                        if run:
+                            run.tool_responded(tool_name, success=False,
+                                               latency_ms=int((time.time() - t0) * 1000),
+                                               error=str(exc))
+                        raise
+                    if run:
+                        run.tool_responded(tool_name, success=True,
+                                           output_length=len(str(result)),
+                                           latency_ms=int((time.time() - t0) * 1000))
+                    return result
+                return async_wrapper
+            else:
+                @functools.wraps(fn)
+                def sync_wrapper(*args, **kwargs):
+                    run = _current_run.get(None)
+                    args_dict = _bind_args(fn, args, kwargs)
+                    if run:
+                        run.tool_called(tool_name, args_dict)
+                    t0 = time.time()
+                    try:
+                        result = fn(*args, **kwargs)
+                    except Exception as exc:
+                        if run:
+                            run.tool_responded(tool_name, success=False,
+                                               latency_ms=int((time.time() - t0) * 1000),
+                                               error=str(exc))
+                        raise
+                    if run:
+                        run.tool_responded(tool_name, success=True,
+                                           output_length=len(str(result)),
+                                           latency_ms=int((time.time() - t0) * 1000))
+                    return result
+                return sync_wrapper
+
+        # @dt.tool (no parens) — name_or_fn is the function
+        if callable(name_or_fn):
+            return _wrap(name_or_fn, name_or_fn.__name__)
+
+        # @dt.tool("name") — returns a decorator
+        _tool_name = name_or_fn or ""
+        def decorator(fn: Callable) -> Callable:
+            return _wrap(fn, _tool_name or fn.__name__)
+        return decorator
+
     def flush(self, *, block: bool = False, timeout: float = 5.0) -> None:
         """Wake the drain thread to ship buffered events immediately.
 
@@ -442,11 +560,14 @@ class Dunetrace:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _emit(self, event: AgentEvent) -> None:
-        if self._emit_json:
-            self._write_json_line(event)
-        if self._otel_exporter is not None:
-            self._otel_exporter.handle(event)
-        self._buffer.push(event)
+        try:
+            if self._emit_json:
+                self._write_json_line(event)
+            if self._otel_exporter is not None:
+                self._otel_exporter.handle(event)
+            self._buffer.push(event)
+        except Exception as exc:
+            logger.warning("Dunetrace: failed to emit %s: %s", event.event_type, exc)
 
     def _write_json_line(self, event: AgentEvent) -> None:
         """
@@ -529,6 +650,16 @@ class Dunetrace:
 
 # Backwards-compatible alias
 DunetraceClient = Dunetrace
+
+
+def _bind_args(fn: Callable, args: tuple, kwargs: dict) -> dict:
+    """Return a {param_name: value} dict for the call, excluding self/cls."""
+    try:
+        bound = inspect.signature(fn).bind(*args, **kwargs)
+        bound.apply_defaults()
+        return {k: v for k, v in bound.arguments.items() if k not in ("self", "cls")}
+    except Exception:
+        return {}
 
 
 def _extract_input(fn: Callable, args: tuple, kwargs: dict, input_from: Optional[str]) -> str:

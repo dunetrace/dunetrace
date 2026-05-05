@@ -414,7 +414,8 @@ async def get_signal_by_id(signal_id: int) -> Optional[dict]:
         row = await conn.fetchrow(
             """
             SELECT id, failure_type, severity, run_id, agent_id, agent_version,
-                   step_index, confidence, detected_at, evidence, alerted, shadow
+                   step_index, confidence, detected_at, evidence, alerted, shadow,
+                   COALESCE(co_signal_count, 0) AS co_signal_count
             FROM failure_signals
             WHERE id = $1
             """,
@@ -462,6 +463,7 @@ async def get_signal_by_id(signal_id: int) -> Optional[dict]:
         "evidence":         dict(evidence) if evidence else {},
         "alerted":          row["alerted"],
         "shadow":           row["shadow"],
+        "co_signal_count":  row["co_signal_count"],
         "title":            exp.title           if exp else row["failure_type"],
         "what":             exp.what            if exp else "",
         "why_it_matters":   exp.why_it_matters  if exp else "",
@@ -511,7 +513,8 @@ async def list_signals(
         rows = await conn.fetch(
             f"""
             SELECT id, failure_type, severity, run_id, agent_id, agent_version,
-                   step_index, confidence, detected_at, evidence, alerted, shadow
+                   step_index, confidence, detected_at, evidence, alerted, shadow,
+                   COALESCE(co_signal_count, 0) AS co_signal_count
             FROM failure_signals
             WHERE {where_clause}
             ORDER BY detected_at DESC
@@ -560,6 +563,7 @@ async def list_signals(
             "evidence":        dict(evidence) if evidence else {},
             "alerted":         s["alerted"],
             "shadow":          s["shadow"],
+            "co_signal_count": s["co_signal_count"],
             "title":           exp.title if exp else s["failure_type"],
             "what":            exp.what if exp else "",
             "why_it_matters":  exp.why_it_matters if exp else "",
@@ -1513,3 +1517,116 @@ async def get_agent_health_score(agent_id: str) -> dict:
         },
         "sample_runs": total,
     }
+
+
+# ── Cross-run patterns ─────────────────────────────────────────────────────────
+
+def _is_trending_up(daily_counts: list) -> bool:
+    if len(daily_counts) < 3:
+        return False
+    recent  = sum(daily_counts[-3:]) / 3
+    earlier = sum(daily_counts[:3])  / 3
+    return recent > earlier * 1.3
+
+
+async def cross_run_patterns(customer_id: str) -> list:
+    """
+    Per (agent_id × failure_type) 7-day signal frequency. Only live signals (shadow=FALSE).
+    Returns a list of agent dicts, each containing detector rows with daily buckets and summary stats.
+    Filters out pairs with only 1 total occurrence (noise).
+    """
+    if not _pool:
+        return []
+
+    import datetime
+    from collections import defaultdict
+
+    today = datetime.date.today()
+    days  = [today - datetime.timedelta(days=i) for i in range(6, -1, -1)]  # oldest → newest
+
+    async with _pool.acquire() as conn:
+        sig_rows = await conn.fetch(
+            """
+            SELECT
+                agent_id,
+                failure_type,
+                DATE_TRUNC('day', detected_at AT TIME ZONE 'UTC')::date AS day,
+                COUNT(*)                  AS signal_count,
+                COUNT(DISTINCT run_id)    AS affected_runs
+            FROM failure_signals
+            WHERE shadow = FALSE
+              AND detected_at >= NOW() - INTERVAL '7 days'
+              AND ($1 = 'dev_customer' OR agent_id IN (
+                  SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
+              ))
+            GROUP BY agent_id, failure_type, DATE_TRUNC('day', detected_at AT TIME ZONE 'UTC')::date
+            ORDER BY agent_id, failure_type, day
+            """,
+            customer_id,
+        )
+
+        run_rows = await conn.fetch(
+            """
+            SELECT agent_id, COUNT(DISTINCT run_id) AS total_runs
+            FROM processed_runs
+            WHERE processed_at >= NOW() - INTERVAL '7 days'
+              AND ($1 = 'dev_customer' OR agent_id IN (
+                  SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
+              ))
+            GROUP BY agent_id
+            """,
+            customer_id,
+        )
+
+    # agent_id → total runs in period
+    agent_total_runs: dict = {r["agent_id"]: int(r["total_runs"]) for r in run_rows}
+
+    # (agent_id, failure_type, date) → {signal_count, affected_runs}
+    daily: dict = defaultdict(lambda: defaultdict(lambda: {"signal_count": 0, "affected_runs": 0}))
+    for r in sig_rows:
+        d = r["day"] if isinstance(r["day"], datetime.date) else r["day"].date()
+        daily[(r["agent_id"], r["failure_type"])][d] = {
+            "signal_count":  int(r["signal_count"]),
+            "affected_runs": int(r["affected_runs"]),
+        }
+
+    # Build per-agent result, filtering single-occurrence noise
+    agent_map: dict = defaultdict(list)
+    for (agent_id, failure_type), day_map in daily.items():
+        buckets = [
+            {
+                "date":          d.isoformat(),
+                "signal_count":  day_map[d]["signal_count"]  if d in day_map else 0,
+                "affected_runs": day_map[d]["affected_runs"] if d in day_map else 0,
+            }
+            for d in days
+        ]
+        total_occurrences   = sum(b["signal_count"]  for b in buckets)
+        total_affected_runs = sum(b["affected_runs"] for b in buckets)
+
+        if total_occurrences <= 1:
+            continue
+
+        total_runs = agent_total_runs.get(agent_id, 0)
+        pct_of_runs = round(total_affected_runs / total_runs, 4) if total_runs else 0.0
+
+        trending_up = _is_trending_up([b["signal_count"] for b in buckets])
+
+        agent_map[agent_id].append({
+            "failure_type":        failure_type,
+            "days":                buckets,
+            "total_occurrences":   total_occurrences,
+            "total_affected_runs": total_affected_runs,
+            "total_runs":          total_runs,
+            "pct_of_runs":         pct_of_runs,
+            "trending_up":         trending_up,
+        })
+
+    # Sort rows within each agent by total_occurrences desc
+    return [
+        {
+            "agent_id": agent_id,
+            "rows":     sorted(rows, key=lambda r: r["total_occurrences"], reverse=True),
+        }
+        for agent_id, rows in sorted(agent_map.items())
+    ]

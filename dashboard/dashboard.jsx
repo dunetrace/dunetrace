@@ -175,6 +175,9 @@ function Dashboard() {
   const [failurePatternLoading, setFailurePatternLoading] = useState(false);
   const PAGE_SIZE = 15;
 
+  const [activeView,    setActiveView]    = useState("runs");   // "runs" | "patterns"
+  const [patterns,      setPatterns]      = useState(null);
+
   // ── Autofix state ──────────────────────────────────────────────────────────
   // explainStates[signalId] = { loading, error, rootCause, fixContent,
   //                              langfusePromptName, langfusePromptVersion }
@@ -184,7 +187,16 @@ function Dashboard() {
   // applyConfirm = null | { signalId, promptName, fixContent }
   const [applyConfirm,  setApplyConfirm]  = useState(null);
   // applyResults[signalId] = { loading, version, url, error }
-  const [applyResults,  setApplyResults]  = useState({});
+  const [applyResults,     setApplyResults]     = useState({});
+  // null = unknown (loading), true/false once /v1/config responds
+  const [langfuseEnabled,  setLangfuseEnabled]  = useState(null);
+
+  // Fetch server config once on mount to know whether Langfuse is wired up
+  useEffect(() => {
+    apiFetch("/v1/config")
+      .then(d => setLangfuseEnabled(!!d.langfuse_configured))
+      .catch(() => setLangfuseEnabled(false));
+  }, []);
 
   // Deep-link: /runs/<run_id> from Slack alert → auto-open that run
   useEffect(() => {
@@ -280,6 +292,20 @@ function Dashboard() {
     const t = setInterval(() => loadAgentData(selectedAgent), 10000);
     return () => clearInterval(t);
   }, [selectedAgent, loadAgentData]);
+
+  // Load cross-run patterns
+  const loadPatterns = useCallback(async () => {
+    try {
+      const d = await apiFetch("/v1/patterns");
+      setPatterns(d);
+    } catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => {
+    loadPatterns();
+    const t = setInterval(loadPatterns, 30000);
+    return () => clearInterval(t);
+  }, [loadPatterns]);
 
   // Current agent record (for sidebar)
   const agentRecord = useMemo(
@@ -470,6 +496,24 @@ function Dashboard() {
           ))}
         </div>
 
+        <div style={{ width: 1, height: 20, background: C.border }} />
+        <button onClick={() => setActiveView(v => v === "patterns" ? "runs" : "patterns")} style={{
+          padding: "3px 10px", borderRadius: 4, border: "none", cursor: "pointer",
+          fontSize: 10, fontFamily: "inherit", whiteSpace: "nowrap", letterSpacing: "0.04em",
+          background: activeView === "patterns" ? C.blue : C.surfaceB,
+          color:      activeView === "patterns" ? "#fff"  : C.textM,
+        }}>
+          PATTERNS
+          {patterns?.agents?.length > 0 && (
+            <span style={{
+              marginLeft: 5, fontSize: 9, background: C.orange, color: "#fff",
+              borderRadius: 8, padding: "0 5px",
+            }}>
+              {patterns.agents.reduce((n, a) => n + a.rows.length, 0)}
+            </span>
+          )}
+        </button>
+
         <div style={{ marginLeft: "auto", display: "flex", gap: 20, fontSize: 11, color: C.textD }}>
           <span>auto-refresh 10s</span>
           <span style={{ color: C.green }}>● LIVE</span>
@@ -581,7 +625,132 @@ function Dashboard() {
         {/* ── Main content ── */}
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
 
-          {selectedAgent ? (
+          {/* ── Patterns view ── */}
+          {activeView === "patterns" && (() => {
+            const DAY_LABELS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+            const agents     = patterns?.agents || [];
+
+            function heatBg(count) {
+              if (!count) return C.surfaceB;
+              const alpha = Math.min(0.85, 0.2 + count * 0.12);
+              return `rgba(232,106,43,${alpha})`;
+            }
+
+            function handlePatternRowClick(agentId, failureType) {
+              setActiveView("runs");
+              selectAgent(agentId);
+              // handleFailureTypeClick won't have insights yet — set pending and let
+              // the agent data load trigger it via a flag stored in state.
+              setSelectedFailureType(failureType);
+              setFailurePattern(null);
+              loadFailurePattern(agentId, failureType);
+            }
+
+            if (agents.length === 0) {
+              return (
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, color: C.textD }}>
+                  <span style={{ fontSize: 32 }}>✓</span>
+                  <div style={{ fontSize: 13, color: C.green }}>No patterns detected in the last 7 days</div>
+                  <div style={{ fontSize: 10 }}>Signals will appear here when a detector fires on more than one run</div>
+                </div>
+              );
+            }
+
+            // Day header labels from API response (use first row's days array)
+            const dayDates = agents[0]?.rows[0]?.days?.map(d => {
+              const dt  = new Date(d.date + "T00:00:00Z");
+              return DAY_LABELS[dt.getUTCDay() === 0 ? 6 : dt.getUTCDay() - 1];
+            }) || DAY_LABELS;
+
+            return (
+              <div style={{ padding: "20px 24px", display: "flex", flexDirection: "column", gap: 24 }}>
+                <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.15em" }}>
+                  CROSS-RUN PATTERNS — LAST 7 DAYS · {agents.reduce((n, a) => n + a.rows.length, 0)} active detector{agents.reduce((n, a) => n + a.rows.length, 0) !== 1 ? "s" : ""}
+                </div>
+
+                {agents.map(agent => (
+                  <div key={agent.agent_id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
+
+                    {/* Agent header */}
+                    <div style={{ padding: "10px 16px", borderBottom: `1px solid ${C.border}`, background: C.surfaceB, display: "flex", alignItems: "center", gap: 10 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: C.text, letterSpacing: "0.05em" }}>
+                        {agent.agent_id}
+                      </span>
+                      <span style={{ fontSize: 9, color: C.textD }}>
+                        {agent.rows.length} detector{agent.rows.length !== 1 ? "s" : ""} firing
+                      </span>
+                    </div>
+
+                    {/* Heat table */}
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={{ padding: "8px 16px", textAlign: "left", fontSize: 9, color: C.textD, fontWeight: 400, letterSpacing: "0.1em", borderBottom: `1px solid ${C.border}`, minWidth: 220 }}>
+                              DETECTOR
+                            </th>
+                            {dayDates.map((label, i) => (
+                              <th key={i} style={{ padding: "8px 12px", fontSize: 9, color: C.textD, fontWeight: 400, letterSpacing: "0.08em", textAlign: "center", borderBottom: `1px solid ${C.border}`, minWidth: 52 }}>
+                                {label}
+                              </th>
+                            ))}
+                            <th style={{ padding: "8px 16px", fontSize: 9, color: C.textD, fontWeight: 400, letterSpacing: "0.08em", textAlign: "right", borderBottom: `1px solid ${C.border}`, minWidth: 160 }}>
+                              7-DAY SUMMARY
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {agent.rows.map((row, ri) => (
+                            <tr key={row.failure_type}
+                              onClick={() => handlePatternRowClick(agent.agent_id, row.failure_type)}
+                              style={{ cursor: "pointer", borderBottom: ri < agent.rows.length - 1 ? `1px solid ${C.border}` : "none" }}
+                              onMouseEnter={e => e.currentTarget.style.background = C.navy}
+                              onMouseLeave={e => e.currentTarget.style.background = ""}
+                            >
+                              <td style={{ padding: "10px 16px" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                  <span style={{ fontSize: 11, color: C.text }}>
+                                    {row.failure_type.replace(/_/g, " ")}
+                                  </span>
+                                  {row.trending_up && (
+                                    <span style={{ fontSize: 9, color: C.red, background: `${C.red}22`, padding: "1px 5px", borderRadius: 3, fontWeight: 700 }}>
+                                      ↑ TRENDING
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              {row.days.map((day, di) => (
+                                <td key={di} style={{
+                                  padding: "10px 8px", textAlign: "center",
+                                  background: heatBg(day.signal_count),
+                                }}>
+                                  <span style={{ fontSize: 12, fontWeight: day.signal_count ? 700 : 400, color: day.signal_count ? C.text : C.textD, fontFamily: "monospace" }}>
+                                    {day.signal_count || "—"}
+                                  </span>
+                                </td>
+                              ))}
+                              <td style={{ padding: "10px 16px", textAlign: "right" }}>
+                                <span style={{ fontSize: 11, color: C.orange, fontWeight: 700 }}>
+                                  {row.total_occurrences}
+                                </span>
+                                <span style={{ fontSize: 9, color: C.textD }}> signals · </span>
+                                <span style={{ fontSize: 11, color: row.pct_of_runs > 0.1 ? C.red : C.textM, fontWeight: 700 }}>
+                                  {Math.round(row.pct_of_runs * 100)}%
+                                </span>
+                                <span style={{ fontSize: 9, color: C.textD }}> of runs</span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
+          {activeView === "runs" && (selectedAgent ? (
             /* ── Agent view: health record + heatmap + runs table ── */
             <>
               {/* ── Health record: failure rate trends ── */}
@@ -1013,7 +1182,7 @@ function Dashboard() {
                 </div>
               ))}
             </div>
-          )}
+          ))}
         </div>
 
         {/* ── Right panel: run detail ── */}
@@ -1136,7 +1305,18 @@ function Dashboard() {
                                 <span style={{ fontSize: 10, fontWeight: 700, color: col }}>
                                   {s.failure_type.replace(/_/g, " ")}
                                 </span>
-                                <span style={{ fontSize: 9, color: col, opacity: 0.7 }}>{s.severity}</span>
+                                <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                                  {s.co_signal_count >= 2 && (
+                                    <span style={{
+                                      fontSize: 8, padding: "1px 5px", borderRadius: 3,
+                                      background: `${C.orange}22`, border: `1px solid ${C.orange}55`,
+                                      color: C.orange, letterSpacing: "0.04em",
+                                    }}>
+                                      confidence boosted · {s.co_signal_count} co-occurring signals
+                                    </span>
+                                  )}
+                                  <span style={{ fontSize: 9, color: col, opacity: 0.7 }}>{s.severity}</span>
+                                </div>
                               </div>
 
                               {/* Static evidence */}
@@ -1170,17 +1350,32 @@ function Dashboard() {
                               {/* Action bar — always visible, anchors the card bottom */}
                               <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
                                 {!exSt.rootCause && !exSt.loading && (
-                                  <button
-                                    onClick={() => handleExplain(s.id)}
-                                    style={{
-                                      fontSize: 9, padding: "3px 8px", cursor: "pointer",
-                                      background: "none", border: `1px solid ${col}55`,
-                                      color: col, borderRadius: 3, fontFamily: "inherit",
-                                    }}
-                                  >Explain +</button>
+                                  langfuseEnabled
+                                    ? (
+                                      <button
+                                        onClick={() => handleExplain(s.id)}
+                                        style={{
+                                          fontSize: 9, padding: "3px 8px", cursor: "pointer",
+                                          background: "none", border: `1px solid ${col}55`,
+                                          color: col, borderRadius: 3, fontFamily: "inherit",
+                                        }}
+                                      >Explain with Langfuse</button>
+                                    ) : langfuseEnabled === false ? (
+                                      <span style={{ fontSize: 9, color: C.textD, fontStyle: "italic" }}>
+                                        Connect Langfuse to enable deep analysis
+                                      </span>
+                                    ) : null
                                 )}
                                 {exSt.loading && (
-                                  <span style={{ fontSize: 9, color: C.textD }}>analysing…</span>
+                                  <span style={{ fontSize: 9, color: C.textD }}>
+                                    <span style={{
+                                      display: "inline-block", width: 8, height: 8,
+                                      border: `1px solid ${C.textD}`, borderTopColor: "transparent",
+                                      borderRadius: "50%", marginRight: 4,
+                                      animation: "spin 0.7s linear infinite",
+                                    }} />
+                                    analysing…
+                                  </span>
                                 )}
                                 {exSt.error && (
                                   <span style={{ fontSize: 9, color: C.red }}>{exSt.error}</span>

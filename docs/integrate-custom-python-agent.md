@@ -78,6 +78,7 @@ Pick the path that fits your agent's architecture:
 
 | Path | Best for | Code change |
 |---|---|---|
+| `@dt.trace` + `@dt.tool` | Multi-function agents, no SDK in body | Decorators only |
 | `@dt.agent()` decorator | Single-function agents | Minimal |
 | ASGI/WSGI middleware | FastAPI / Flask / Django | One line |
 | `dt.run()` context manager | Full manual control | Moderate |
@@ -86,7 +87,40 @@ Pick the path that fits your agent's architecture:
 
 ---
 
-## Path A: Decorator (Recommended for most agents)
+## Path A: Zero-instrumentation decorators (`@dt.trace` / `@dt.tool`)
+
+Decorate your tool functions with `@dt.tool` and your agent entry point with `@dt.trace`. No SDK calls are needed inside any function body — everything is tracked automatically.
+
+```python
+from dunetrace import Dunetrace
+
+dt = Dunetrace(endpoint="https://your-dunetrace-ingest", api_key="dt_live_...")
+
+@dt.tool                                      # auto-emits tool.called / tool.responded
+def web_search(query: str) -> list:
+    return search_api(query)                  # tool args are SHA-256 hashed, never transmitted raw
+
+@dt.tool("calculator")                        # explicit tool name
+def calc(expr: str) -> float:
+    return eval(expr)                         # noqa: S307
+
+@dt.trace                                     # agent_id defaults to function name "my_agent"
+def my_agent(question: str) -> str:
+    results = web_search(question)
+    return str(calc(results[0]))              # tool calls are auto-tracked inside
+
+# Or with an explicit agent ID and model:
+@dt.trace("research-agent", model="gpt-4o")
+async def async_agent(question: str) -> str:
+    results = await async_search(question)
+    return results[0]
+```
+
+`@dt.tool` is a no-op when called outside a `dt.run()` / `@dt.trace` context — the function still runs normally with no overhead. Both decorators work on sync and async functions identically.
+
+---
+
+## Path B: Decorator (Recommended for most agents)
 
 Wrap your agent's entry point with `@dt.agent()`. Calls to OpenAI and Anthropic are captured automatically via `auto_instrument()`.
 
@@ -127,7 +161,7 @@ async def run_agent_async(query: str) -> str:
 
 ---
 
-## Path B: FastAPI / ASGI Middleware
+## Path C: FastAPI / ASGI Middleware
 
 Add one middleware line. Each HTTP request becomes one agent run.
 
@@ -163,7 +197,7 @@ For Flask / Django, use `DunetraceWSGIMiddleware` instead.
 
 ---
 
-## Path C: Manual `dt.run()` Context Manager
+## Path D: Manual `dt.run()` Context Manager
 
 Use this when you need full control over every event.
 
@@ -233,7 +267,7 @@ run.final_answer()
 
 ---
 
-## Path D: LangChain / LangGraph
+## Path E: LangChain / LangGraph
 
 ```python
 from dunetrace import Dunetrace
@@ -252,7 +286,7 @@ result = agent.invoke(
 
 ---
 
-## Path E: OpenTelemetry (Already instrumented with OpenLLMetry)
+## Path F: OpenTelemetry (Already instrumented with OpenLLMetry)
 
 If your agent already emits `gen_ai.*` OTel spans via OpenLLMetry, attach the receiver to your existing TracerProvider:
 
@@ -416,7 +450,7 @@ Hashing happens in-process. Raw content never leaves your agent.
 - [ ] Add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `ANTHROPIC_API_KEY` to `.env`
 - [ ] Restart the API container: `docker compose up -d api`
 - [ ] Pass `LangfuseCallbackHandler()` alongside `DunetraceCallbackHandler` in `config={"callbacks": [...]}`
-- [ ] Click "Explain with Langfuse ↗" on any signal in the dashboard
+- [ ] Click "Explain with Langfuse" on any signal in the dashboard (button only appears when `LANGFUSE_PUBLIC_KEY` is configured)
 - [ ] See [docs/integrations.md#langfuse](integrations.md#langfuse) for the full setup guide
 
 ---

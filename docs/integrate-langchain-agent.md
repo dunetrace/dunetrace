@@ -14,7 +14,7 @@ This guide covers adding Dunetrace monitoring to a LangChain or LangGraph agent 
 | `on_chat_model_start` / `on_llm_start` | `LLM_CALLED` |
 | `on_llm_end` | `LLM_RESPONDED` (with token counts + latency) |
 | `on_tool_start` / `on_agent_action` | `TOOL_CALLED` |
-| `on_tool_end` | `TOOL_RESPONDED` |
+| `on_tool_end` | `TOOL_RESPONDED` (success=True, or success=False when `error=` kwarg present — covers `handle_tool_error=True` in AgentExecutor and `handle_tool_errors=True` in LangGraph ToolNode) |
 | `on_retriever_start` | `RETRIEVAL_CALLED` |
 | `on_retriever_end` | `RETRIEVAL_RESPONDED` (with result count + top score) |
 | `on_chain_end` (outermost) | `RUN_COMPLETED` |
@@ -290,6 +290,7 @@ Stale runs (invocations that never completed after 30 minutes) are pruned automa
 **Captured automatically:**
 - Every LLM call: model name, token counts (prompt + completion), latency, finish reason
 - Every tool call: tool name, success/failure, output length
+- Tool errors handled by the framework (`handle_tool_error=True` / `handle_tool_errors=True`) — reported as `success=False` in `TOOL_RESPONDED`, enabling RETRY_STORM and CASCADING_TOOL_FAILURE detection on real failures
 - Every retriever call: index name, result count, top similarity score
 - Run-level: total steps, tool call count, exit reason
 
@@ -371,6 +372,8 @@ Content-Type: application/json
 
 {"langfuse_trace_id": "<lf_trace_id>"}
 ```
+
+The "Explain with Langfuse" button only appears when `LANGFUSE_PUBLIC_KEY` is configured on the API container — if credentials are missing, a muted "Connect Langfuse to enable deep analysis" hint is shown instead.
 
 See [docs/integrations.md#langfuse](integrations.md#langfuse) for full setup — credentials, `.env` vars, and the complete runnable example.
 

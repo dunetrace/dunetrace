@@ -36,6 +36,36 @@ logging.basicConfig(
 logger = logging.getLogger("dunetrace.detector")
 
 
+_COOCCURRENCE_MULTIPLIERS = {1: 1.0, 2: 1.15, 3: 1.30}
+
+
+def _apply_cooccurrence_boost(signals: list[FailureSignal]) -> None:
+    """Raise each signal's confidence when multiple independent signals co-fire.
+
+    Co-occurring signals are strong evidence of a real failure — this reduces
+    false positives without touching individual detector thresholds.
+    Sets co_signal_count on every signal so the dashboard can show the badge.
+    """
+    n = len(signals)
+    if n < 2:
+        return
+    multiplier = _COOCCURRENCE_MULTIPLIERS.get(n, 1.40)  # 4+ signals → ×1.40
+    for sig in signals:
+        sig.confidence = round(min(1.0, sig.confidence * multiplier), 4)
+        sig.co_signal_count = n
+
+
+def _apply_hard_override(signals: list[FailureSignal], risk) -> None:
+    """If RiskEngine fired a hard rule, override every signal to CRITICAL/HIGH."""
+    if not risk.severity:
+        return
+    from dunetrace.models import Severity
+    sev = Severity(risk.severity)
+    for sig in signals:
+        sig.severity   = sev
+        sig.confidence = round(min(1.0, risk.confidence), 4)
+
+
 def _injection_signal_from_events(events: list[dict], run_id: str, agent_id: str, agent_version: str):
     """Extract prompt injection evidence from the run.started payload and build a FailureSignal. The SDK detects injection on raw input before hashing, so by the time we get here the evidence is already baked into the event."""
     for e in events:
@@ -82,6 +112,8 @@ async def process_run(
             run_id, risk.confidence, risk.active_signals,
             risk.severity or "normal", risk.scores,
         )
+        _apply_hard_override(signals, risk)
+        _apply_cooccurrence_boost(signals)
     except Exception as exc:
         logger.error("Run processing failed. run_id=%s err=%s", run_id, exc)
         await mark_run_processed(run_id, agent_id, agent_version, trigger, 0)

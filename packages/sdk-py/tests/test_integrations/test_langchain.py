@@ -289,6 +289,28 @@ class TestToolCallbacks(unittest.TestCase):
         self.assertIsNotNone(responded)
         self.assertFalse(responded.payload["success"])
 
+    def test_tool_end_with_error_kwarg_emits_failure(self):
+        """handle_tool_error=True / LangGraph ToolNode calls on_tool_end with error= kwarg."""
+        handler, emitted = _make_handler()
+        handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
+        handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
+        handler.on_tool_end("Error: timeout", run_id="lc-tool", parent_run_id="lc-1",
+                            name="search", error=RuntimeError("timeout"))
+        responded = next((e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None)
+        self.assertIsNotNone(responded)
+        self.assertFalse(responded.payload["success"])
+        self.assertIn("error_hash", responded.payload)
+
+    def test_tool_end_without_error_kwarg_emits_success(self):
+        """Normal on_tool_end (no error kwarg) still reports success=True."""
+        handler, emitted = _make_handler()
+        handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
+        handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
+        handler.on_tool_end("result text", run_id="lc-tool", parent_run_id="lc-1", name="search")
+        responded = next((e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None)
+        self.assertIsNotNone(responded)
+        self.assertTrue(responded.payload["success"])
+
     def test_tool_error_does_not_include_raw_error(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")

@@ -57,10 +57,34 @@ DUNETRACE_API_KEY=                         # empty for local dev
 Create `src/dunetrace.ts` in your project. No npm packages needed.
 
 ```typescript
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const ENDPOINT = process.env.DUNETRACE_ENDPOINT ?? "http://localhost:8001";
 const API_KEY  = process.env.DUNETRACE_API_KEY  ?? "";
+
+// ── Hashing — must match the Python SDK exactly ───────────────────────────────
+
+function sha256hex(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/** SHA-256, first 16 chars. Used for all content fields (args, errors, outputs). */
+export function hashContent(text: string): string {
+  return sha256hex(text).slice(0, 16);
+}
+
+/**
+ * Stable 8-char fingerprint of your agent config. Any change to system prompt,
+ * model, or tool list produces a new version — preventing deploy-induced false
+ * positives in cross-version comparisons.
+ *
+ * Replicates Python: sha256(f"{systemPrompt}:{model}:{sorted(tools)}").hex()[:8]
+ */
+export function agentVersion(systemPrompt: string, model: string, tools: string[]): string {
+  const sorted     = [...tools].sort();
+  const pythonList = "[" + sorted.map(t => `'${t}'`).join(", ") + "]";
+  return sha256hex(`${systemPrompt}:${model}:${pythonList}`).slice(0, 8);
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -94,8 +118,10 @@ export class DunetraceRun {
     private readonly version:  string,
   ) {}
 
-  private emit(type: EventType, payload: Record<string, unknown>): void {
-    this.step++;
+  // advance=true for "called" events, advance=false for "responded" events.
+  // Mirrors the Python SDK: step increments when an action starts, not when it ends.
+  private emit(type: EventType, payload: Record<string, unknown>, advance = true): void {
+    if (advance) this.step++;
     this.events.push({
       event_type:    type,
       run_id:        this.runId,
@@ -118,20 +144,22 @@ export class DunetraceRun {
     latencyMs?:        number;
     finishReason?:     string;
     outputLength?:     number;
+    outputText?:       string;   // hashed before transmission — never sent raw
   }): void {
     this.emit("llm.responded", {
       completion_tokens: opts.completionTokens ?? 0,
       latency_ms:        opts.latencyMs        ?? 0,
       finish_reason:     opts.finishReason      ?? "stop",
-      output_length:     opts.outputLength      ?? 0,
-    });
+      output_length:     opts.outputLength      ?? (opts.outputText?.length ?? 0),
+      output_hash:       hashContent(opts.outputText ?? ""),
+    }, false);   // ← does not advance step
   }
 
-  /** Call before each tool execution. args are hashed in-process — not transmitted. */
+  /** Call before each tool execution. args are SHA-256 hashed — never transmitted raw. */
   toolCalled(toolName: string, args: Record<string, unknown> = {}): void {
     this.emit("tool.called", {
       tool_name: toolName,
-      args_hash: Buffer.from(JSON.stringify(args)).toString("base64"),
+      args_hash: hashContent(JSON.stringify(args)),
     });
   }
 
@@ -149,13 +177,16 @@ export class DunetraceRun {
       output_length: outputLength,
       latency_ms:    latencyMs,
     };
-    if (error) payload["error_hash"] = Buffer.from(error).toString("base64");
-    this.emit("tool.responded", payload);
+    if (error) payload["error_hash"] = hashContent(error);
+    this.emit("tool.responded", payload, false);   // ← does not advance step
   }
 
   /** Call before a vector search / retrieval. */
-  retrievalCalled(indexName: string, queryHash = ""): void {
-    this.emit("retrieval.called", { index_name: indexName, query_hash: queryHash });
+  retrievalCalled(indexName: string, query = ""): void {
+    this.emit("retrieval.called", {
+      index_name: indexName,
+      query_hash: query ? hashContent(query) : "",
+    });
   }
 
   /** Call after retrieval returns. */
@@ -170,15 +201,15 @@ export class DunetraceRun {
       result_count: resultCount,
       top_score:    topScore ?? null,
       latency_ms:   latencyMs,
-    });
+    }, false);   // ← does not advance step
   }
 
   /**
-   * Emit an infrastructure signal without advancing the step counter.
+   * Emit an infrastructure context event without advancing the step counter.
    * Use for rate limits, cache misses, upstream errors, etc.
    */
   externalSignal(signalName: string, source = "", meta: Record<string, unknown> = {}): void {
-    this.step++;
+    // step_index stays at current step — this event annotates the current action
     this.events.push({
       event_type:    "external.signal",
       run_id:        this.runId,
@@ -192,25 +223,37 @@ export class DunetraceRun {
 
   /** Call when the agent produces its final output. */
   finalAnswer(): void {
-    this.emit("run.completed", { exit_reason: "final_answer", total_steps: this.step });
+    this.emit("run.completed", {
+      exit_reason:     "final_answer",
+      total_steps:     this.step,
+      tool_call_count: this.events.filter(e => e.event_type === "tool.called").length,
+    }, false);   // ← does not advance step
   }
 
-  getEvents(): AgentEvent[] { return this.events; }
+  currentStep(): number      { return this.step; }
+  getEvents():   AgentEvent[] { return this.events; }
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
 
 export class Dunetrace {
   /**
-   * Wrap one agent invocation. Emits RUN_STARTED on entry, RUN_COMPLETED on
-   * clean exit, and RUN_ERRORED if an exception escapes.
+   * Wrap one agent invocation. Emits run.started on entry, run.completed on
+   * clean exit, and run.errored if an exception escapes.
    */
   async run(
-    agentId: string,
-    opts: { model?: string; tools?: string[] },
+    agentId:      string,
+    opts: {
+      systemPrompt?: string;
+      model?:        string;
+      tools?:        string[];
+      userInput?:    string;
+    },
     fn: (run: DunetraceRun) => Promise<void>,
   ): Promise<void> {
-    const version = opts.model ?? "unknown";
+    const model   = opts.model        ?? "unknown";
+    const tools   = opts.tools        ?? [];
+    const version = agentVersion(opts.systemPrompt ?? "", model, tools);
     const run     = new DunetraceRun(agentId, version);
 
     const startEvent: AgentEvent = {
@@ -221,8 +264,9 @@ export class Dunetrace {
       step_index:    0,
       timestamp:     Date.now() / 1000,
       payload: {
-        model: opts.model ?? "unknown",
-        tools: opts.tools ?? [],
+        input_hash: opts.userInput ? hashContent(opts.userInput) : "",
+        model,
+        tools,
       },
     };
 
@@ -237,9 +281,12 @@ export class Dunetrace {
           run_id:        run.runId,
           agent_id:      agentId,
           agent_version: version,
-          step_index:    run.getEvents().length + 1,
+          step_index:    run.currentStep(),
           timestamp:     Date.now() / 1000,
-          payload:       { error_type: (err as Error).name ?? "Error" },
+          payload: {
+            error_type: (err as Error).name ?? "Error",
+            error_hash: hashContent(String(err)),
+          },
         },
       ]);
       throw err;
@@ -276,22 +323,29 @@ const dt = new Dunetrace();
 async function runAgent(query: string): Promise<string> {
   let answer = "";
 
-  await dt.run("my-ts-agent", { model: "gpt-4o", tools: ["web_search"] }, async (run) => {
+  await dt.run("my-ts-agent", {
+    systemPrompt: "You are a helpful research assistant.",
+    model:        "gpt-4o",
+    tools:        ["web_search"],
+    userInput:    query,           // hashed before transmission — never sent raw
+  }, async (run) => {
     // Before LLM call
     run.llmCalled("gpt-4o", 150);
     const t0 = Date.now();
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model:    "gpt-4o",
       messages: [{ role: "user", content: query }],
     });
+
+    const output = response.choices[0].message.content ?? "";
 
     // After LLM responds
     run.llmResponded({
       completionTokens: response.usage?.completion_tokens,
       latencyMs:        Date.now() - t0,
       finishReason:     response.choices[0].finish_reason ?? "stop",
-      outputLength:     response.choices[0].message.content?.length,
+      outputText:       output,    // hashed before transmission
     });
 
     // Tool call
@@ -302,12 +356,13 @@ async function runAgent(query: string): Promise<string> {
 
     // Second LLM call with search results
     run.llmCalled("gpt-4o", 400);
-    const t2  = Date.now();
-    const res2 = await openai.chat.completions.create({ ... });
-    run.llmResponded({ completionTokens: res2.usage?.completion_tokens, latencyMs: Date.now() - t2, finishReason: "stop" });
+    const t2   = Date.now();
+    const res2 = await openai.chat.completions.create({ /* ... */ } as any);
+    const out2 = res2.choices[0].message.content ?? "";
+    run.llmResponded({ completionTokens: res2.usage?.completion_tokens, latencyMs: Date.now() - t2, finishReason: "stop", outputText: out2 });
 
     run.finalAnswer();
-    answer = res2.choices[0].message.content ?? "";
+    answer = out2;
   });
 
   return answer;
@@ -319,15 +374,15 @@ async function runAgent(query: string): Promise<string> {
 ```typescript
 await dt.run("rag-agent", { model: "gpt-4o" }, async (run) => {
   run.llmCalled("gpt-4o", 200);
-  run.llmResponded({ finishReason: "tool_calls" });
+  run.llmResponded({ finishReason: "tool_calls", outputText: "I will search the docs." });
 
-  run.retrievalCalled("product-docs");
-  const t0  = Date.now();
+  run.retrievalCalled("product-docs", query);   // query is hashed inside
+  const t0   = Date.now();
   const docs = await vectorStore.search(query);
   run.retrievalResponded("product-docs", docs.length, docs[0]?.score, Date.now() - t0);
 
   run.llmCalled("gpt-4o", 600);
-  run.llmResponded({ finishReason: "stop", completionTokens: 120 });
+  run.llmResponded({ finishReason: "stop", completionTokens: 120, outputText: answer });
   run.finalAnswer();
 });
 ```
@@ -366,7 +421,7 @@ To confirm detectors fire, send a run that loops a tool:
 await dt.run("my-ts-agent", { model: "gpt-4o", tools: ["web_search"] }, async (run) => {
   for (let i = 0; i < 5; i++) {
     run.llmCalled("gpt-4o", 200 + i * 50);
-    run.llmResponded({ finishReason: "tool_calls" });
+    run.llmResponded({ finishReason: "tool_calls", outputText: "search again" });
     run.toolCalled("web_search", { query: "same query every time" });
     run.toolResponded("web_search", true, 256);
   }
@@ -383,12 +438,12 @@ This triggers `TOOL_LOOP` (same tool ≥3 times in a 5-call window). The signal 
 | Method | When to call |
 |---|---|
 | `run.llmCalled(model, promptTokens?)` | Before each LLM API call |
-| `run.llmResponded({ completionTokens?, latencyMs?, finishReason?, outputLength? })` | After LLM responds |
-| `run.toolCalled(toolName, args?)` | Before each tool execution |
-| `run.toolResponded(toolName, success, outputLength?, latencyMs?, error?)` | After tool returns |
-| `run.retrievalCalled(indexName, queryHash?)` | Before vector search |
+| `run.llmResponded({ completionTokens?, latencyMs?, finishReason?, outputText? })` | After LLM responds — `outputText` is hashed, never transmitted raw |
+| `run.toolCalled(toolName, args?)` | Before each tool execution — `args` is SHA-256 hashed |
+| `run.toolResponded(toolName, success, outputLength?, latencyMs?, error?)` | After tool returns — `error` is SHA-256 hashed |
+| `run.retrievalCalled(indexName, query?)` | Before vector search — `query` is SHA-256 hashed |
 | `run.retrievalResponded(indexName, resultCount, topScore?, latencyMs?)` | After retrieval returns |
-| `run.externalSignal(signalName, source?, meta?)` | Rate limits, cache misses, upstream errors |
+| `run.externalSignal(signalName, source?, meta?)` | Rate limits, cache misses, upstream errors — does not advance step |
 | `run.finalAnswer()` | When agent produces its final output |
 
 ---
@@ -404,8 +459,8 @@ This triggers `TOOL_LOOP` (same tool ≥3 times in a 5-call window). The signal 
 **Never transmitted (privacy):**
 - User input text
 - LLM prompts and completions
-- Tool arguments and outputs — only a base64 representation is used locally for loop detection; raw args never leave your process
-- Error messages — only a base64 hash is transmitted
+- Tool arguments and outputs — SHA-256 hashed (16 chars) before transmission; raw values never leave your process
+- Error messages — SHA-256 hashed before transmission
 
 ---
 

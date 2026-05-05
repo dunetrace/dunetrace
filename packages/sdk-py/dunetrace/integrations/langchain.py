@@ -401,11 +401,23 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             step = ctx.child_steps.pop(lc_run_id, None)
             tool_name = kwargs.get("name") or ""
             from dunetrace.models import EventType
-            self._safe_emit(EventType.TOOL_RESPONDED, ctx, {
-                "tool_name":     tool_name,
-                "success":       True,
-                "output_length": len(str(output)),
-            }, step=step)
+            # LangChain calls on_tool_end instead of on_tool_error when
+            # handle_tool_error=True (AgentExecutor) or handle_tool_errors=True
+            # (LangGraph ToolNode, the default). In that case the error is passed
+            # as kwargs["error"] so we can still report success=False.
+            error = kwargs.get("error")
+            if error is not None:
+                self._safe_emit(EventType.TOOL_RESPONDED, ctx, {
+                    "tool_name":  tool_name,
+                    "success":    False,
+                    "error_hash": hash_content(str(error)),
+                }, step=step)
+            else:
+                self._safe_emit(EventType.TOOL_RESPONDED, ctx, {
+                    "tool_name":     tool_name,
+                    "success":       True,
+                    "output_length": len(str(output)),
+                }, step=step)
             self._client.flush()
         except Exception as exc:
             logger.warning("Dunetrace: on_tool_end failed: %s", exc)

@@ -83,6 +83,32 @@ Use this to evaluate detector precision before graduating — compare shadow sig
 
 ---
 
+## Confidence boosting
+
+Each detector fires with a calibrated base confidence (0.70–0.95) tuned in isolation. When multiple independent signals fire on the same run, two post-processing steps run before signals are written to the database:
+
+**Co-occurrence boost** — reduces false positives without touching individual thresholds:
+
+| Co-firing signals | Multiplier |
+|---|---|
+| 1 | ×1.0 (no change) |
+| 2 | ×1.15 |
+| 3 | ×1.30 |
+| 4+ | ×1.40 |
+
+All signals in the run receive the same multiplier (capped at 1.0). The `co_signal_count` field on each `failure_signals` row records how many signals co-fired. The dashboard shows an amber **"confidence boosted · N co-occurring signals"** badge on boosted signal cards.
+
+**Hard overrides** — deterministic cuts for structurally unambiguous failures that bypass continuous scoring:
+
+| Condition | Result |
+|---|---|
+| Same tool called ≥8× with ≥90% identical args | All signals → CRITICAL at confidence 0.98 |
+| ≥5 consecutive tool failures (tail of run) | All signals → HIGH at confidence 0.95 |
+
+Hard overrides fire before the co-occurrence boost, so the final confidence on a CRITICAL override is exactly 0.98 regardless of base scores.
+
+---
+
 ## How detection works
 
 The detector worker polls Postgres every 5 seconds for completed or stalled runs. For each run it:
@@ -90,7 +116,8 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Runs all 15 detectors against the `RunState`
-4. Writes any triggered `FailureSignal` rows to `failure_signals`
-5. Marks the run as processed in `processed_runs`
+4. Applies confidence boosting: co-occurrence multiplier + hard overrides
+5. Writes any triggered `FailureSignal` rows to `failure_signals`
+6. Marks the run as processed in `processed_runs`
 
-Detection adds zero latency to the agent i.e it runs entirely after the run completes.
+Detection adds zero latency to the agent — it runs entirely after the run completes.

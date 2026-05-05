@@ -181,15 +181,16 @@ class RiskScore:
 @dataclass
 class FailureSignal:
     """Output of a detector."""
-    failure_type:  FailureType
-    severity:      Severity
-    run_id:        str
-    agent_id:      str
-    agent_version: str
-    step_index:    int
-    confidence:    float
-    evidence:      Dict[str, Any]
-    detected_at:   float = field(default_factory=time.time)
+    failure_type:    FailureType
+    severity:        Severity
+    run_id:          str
+    agent_id:        str
+    agent_version:   str
+    step_index:      int
+    confidence:      float
+    evidence:        Dict[str, Any]
+    detected_at:     float = field(default_factory=time.time)
+    co_signal_count: int   = 0
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

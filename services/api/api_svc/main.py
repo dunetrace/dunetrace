@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api_svc.config import settings
 from api_svc.db.queries import init_pool, close_pool, check_db
-from api_svc.routers import agents, runs, signals, insights, issues, failure_patterns, policies
+from api_svc.routers import agents, runs, signals, insights, issues, failure_patterns, policies, patterns
 from api_svc.schemas import HealthResponse
 
 logging.basicConfig(
@@ -71,11 +71,16 @@ def create_app() -> FastAPI:
     app.include_router(insights.router)
     app.include_router(issues.router)
     app.include_router(failure_patterns.router)
+    app.include_router(patterns.router)
     app.include_router(policies.router)
 
     @app.get("/health", response_model=HealthResponse, include_in_schema=False)
     async def health() -> HealthResponse:
         return HealthResponse(db=await check_db())
+
+    @app.get("/v1/config", include_in_schema=False)
+    async def config():
+        return {"langfuse_configured": settings.langfuse_configured}
 
     return app
 

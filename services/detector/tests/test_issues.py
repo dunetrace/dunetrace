@@ -151,7 +151,7 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
              patch("detector_svc.worker.build_run_state", return_value=MagicMock(baseline_p75_steps=None)), \
              patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)), \
              patch("detector_svc.worker.run_detectors", return_value=signals), \
-             patch("detector_svc.worker.RiskEngine", return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock()))), \
+             patch("detector_svc.worker.RiskEngine", return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock(severity=None)))), \
              patch("detector_svc.worker._injection_signal_from_events", return_value=None), \
              patch("detector_svc.worker.write_signals", AsyncMock(return_value=1)), \
              patch("detector_svc.worker.mark_run_processed", AsyncMock()), \
@@ -173,7 +173,7 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
              patch("detector_svc.worker.build_run_state", return_value=MagicMock(baseline_p75_steps=None)), \
              patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)), \
              patch("detector_svc.worker.run_detectors", return_value=[]), \
-             patch("detector_svc.worker.RiskEngine", return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock()))), \
+             patch("detector_svc.worker.RiskEngine", return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock(severity=None)))), \
              patch("detector_svc.worker._injection_signal_from_events", return_value=None), \
              patch("detector_svc.worker.write_signals", AsyncMock(return_value=0)), \
              patch("detector_svc.worker.mark_run_processed", AsyncMock()), \
@@ -193,7 +193,7 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
              patch("detector_svc.worker.build_run_state", return_value=MagicMock(baseline_p75_steps=None)), \
              patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)), \
              patch("detector_svc.worker.run_detectors", return_value=signals), \
-             patch("detector_svc.worker.RiskEngine", return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock()))), \
+             patch("detector_svc.worker.RiskEngine", return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock(severity=None)))), \
              patch("detector_svc.worker._injection_signal_from_events", return_value=None), \
              patch("detector_svc.worker.write_signals", AsyncMock(return_value=1)), \
              patch("detector_svc.worker.mark_run_processed", AsyncMock()) as mock_mark, \

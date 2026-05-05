@@ -107,6 +107,7 @@ if _PYDANTIC:
         evidence:         Dict[str, Any]
         alerted:          bool
         shadow:           bool
+        co_signal_count:  int = 0
         title:            str
         what:             str
         why_it_matters:   str
@@ -252,6 +253,27 @@ if _PYDANTIC:
         components:  Dict[str, Any]         # keyed by component name
         sample_runs: int
 
+    class PatternDay(_Model):
+        date:          str
+        signal_count:  int
+        affected_runs: int
+
+    class PatternRow(_Model):
+        failure_type:        str
+        days:                List[PatternDay]
+        total_occurrences:   int
+        total_affected_runs: int
+        total_runs:          int
+        pct_of_runs:         float
+        trending_up:         bool
+
+    class AgentPatterns(_Model):
+        agent_id: str
+        rows:     List[PatternRow]
+
+    class PatternsResponse(_Model):
+        agents: List[AgentPatterns]
+
 else:
     # Stdlib dataclass fallback (sandbox / testing)
     from dataclasses import dataclass, field
@@ -324,6 +346,7 @@ else:
         run_id: str; agent_id: str; agent_version: str
         step_index: int; confidence: float; detected_at: float
         evidence: Dict[str, Any]; alerted: bool; shadow: bool
+        co_signal_count: int
         title: str; what: str; why_it_matters: str
         evidence_summary: str; suggested_fixes: List[Dict[str, Any]]
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)
@@ -353,4 +376,26 @@ else:
     @dataclass
     class AgentHealthScore:
         agent_id: str; score: Optional[int]; components: Dict[str, Any]; sample_runs: int
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class PatternDay:
+        date: str; signal_count: int; affected_runs: int
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class PatternRow:
+        failure_type: str; days: List[Any]
+        total_occurrences: int; total_affected_runs: int; total_runs: int
+        pct_of_runs: float; trending_up: bool
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class AgentPatterns:
+        agent_id: str; rows: List[Any]
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class PatternsResponse:
+        agents: List[Any]
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)

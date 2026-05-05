@@ -17,6 +17,7 @@ The Mission Control dashboard is a live, API-driven single-page app served at **
 | **Compare Runs** | Side-by-side run comparison. Select any two runs from dropdowns — metrics, signals, and max confidence shown in both panels with a colour-coded delta table (new / resolved failure types highlighted). |
 | **Detectors** | Threshold sliders and alert level selector. Live review panel: "with current config, N of M past runs would be flagged HIGH or above (N% of runs)" — recomputes on every change. |
 | **Policies** | Create, edit, toggle, and delete runtime guardrails. Each policy row shows its trigger, operator, threshold, action type, and enabled state. Toggle switch enables/disables without deleting. Example grid provides one-click templates for "cap tool calls", "cost cap", and "loop fix". Policies saved here are fetched automatically by the SDK within 60 seconds. |
+| **Patterns** | Signal frequency heatmap — agent × detector over 7 days. A `TRENDING ↑` badge appears when the last-3-day avg exceeds the first-3-day avg × 1.3. Click any cell to drill into the runs for that agent+detector pair. Powered by `GET /v1/patterns`. Refreshes every 30 seconds. |
 
 ---
 
@@ -43,7 +44,7 @@ Powered by `GET /v1/agents/{agent_id}/failure-patterns/{failure_type}`.
 
 Click any run row to open the detail panel. Three tabs:
 
-- **Analysis** — execution timeline (one node per step, loop detection), signal score cards with confidence bars, plain-English explanation + suggested fix
+- **Analysis** — execution timeline (one node per step, loop detection), signal score cards with confidence bars, plain-English explanation + suggested fix. When multiple signals fire on the same run, each card shows an amber **"confidence boosted · N co-occurring signals"** badge. An "**Explain with Langfuse**" button appears on each signal card when `LANGFUSE_PUBLIC_KEY` is configured; if not configured, a muted "Connect Langfuse to enable deep analysis" hint is shown instead.
 - **Run graph** — SVG node graph: green = LLM call, orange = tool call (ok), red = looping tool call, blue = start/end. Loop clusters highlighted with a dashed red outline.
 - **Event log** — every event in chronological order, expandable to show full payload. Content fields are shown as SHA-256 hashes — no raw text stored.
 
@@ -94,3 +95,4 @@ All data is computed client-side from the Customer API. No server-side rendering
 | Why is this happening? panel | `GET /v1/agents/{id}/failure-patterns/{failure_type}` |
 | Detectors | Static — edits require updating `detectors.yml` and restarting the detector service |
 | Policies | `GET /v1/policies` + `POST` + `PUT /{id}` + `DELETE /{id}` + `PATCH /{id}/toggle` |
+| Patterns | `GET /v1/patterns` |

@@ -387,5 +387,97 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(signals, 0)
 
 
+class TestCooccurrenceBoost(unittest.TestCase):
+    """Unit tests for _apply_cooccurrence_boost."""
+
+    def _make_signal(self, confidence: float):
+        from dunetrace.models import FailureSignal, FailureType, Severity
+        return FailureSignal(
+            failure_type=FailureType.TOOL_LOOP,
+            severity=Severity.HIGH,
+            run_id="r1",
+            agent_id="a1",
+            agent_version="v1",
+            step_index=1,
+            confidence=confidence,
+            evidence={},
+        )
+
+    def test_single_signal_not_boosted(self):
+        from detector_svc.worker import _apply_cooccurrence_boost
+        sig = self._make_signal(0.80)
+        _apply_cooccurrence_boost([sig])
+        self.assertAlmostEqual(sig.confidence, 0.80, places=4)
+        self.assertEqual(sig.co_signal_count, 0)  # single signal: no count set
+
+    def test_two_signals_boosted_by_1_15(self):
+        from detector_svc.worker import _apply_cooccurrence_boost
+        s1 = self._make_signal(0.80)
+        s2 = self._make_signal(0.70)
+        _apply_cooccurrence_boost([s1, s2])
+        self.assertAlmostEqual(s1.confidence, round(0.80 * 1.15, 4), places=4)
+        self.assertAlmostEqual(s2.confidence, round(0.70 * 1.15, 4), places=4)
+        self.assertEqual(s1.co_signal_count, 2)
+        self.assertEqual(s2.co_signal_count, 2)
+
+    def test_three_signals_boosted_by_1_30(self):
+        from detector_svc.worker import _apply_cooccurrence_boost
+        s1 = self._make_signal(0.60)
+        s2 = self._make_signal(0.70)
+        s3 = self._make_signal(0.75)
+        _apply_cooccurrence_boost([s1, s2, s3])
+        self.assertAlmostEqual(s1.confidence, round(0.60 * 1.30, 4), places=4)
+        self.assertEqual(s1.co_signal_count, 3)
+
+    def test_four_signals_boosted_by_1_40(self):
+        from detector_svc.worker import _apply_cooccurrence_boost
+        signals = [self._make_signal(0.70) for _ in range(4)]
+        _apply_cooccurrence_boost(signals)
+        self.assertAlmostEqual(signals[0].confidence, round(0.70 * 1.40, 4), places=4)
+        self.assertEqual(signals[0].co_signal_count, 4)
+
+    def test_boost_capped_at_1_0(self):
+        from detector_svc.worker import _apply_cooccurrence_boost
+        s1 = self._make_signal(0.99)
+        s2 = self._make_signal(0.99)
+        _apply_cooccurrence_boost([s1, s2])
+        self.assertLessEqual(s1.confidence, 1.0)
+        self.assertLessEqual(s2.confidence, 1.0)
+
+    def test_empty_list_noop(self):
+        from detector_svc.worker import _apply_cooccurrence_boost
+        _apply_cooccurrence_boost([])  # must not raise
+
+    def test_hard_override_forces_critical(self):
+        """If RiskEngine fires a hard rule, every signal becomes CRITICAL at 0.98."""
+        from detector_svc.worker import _apply_hard_override
+        from dunetrace.models import RiskScore, Severity
+
+        s1 = self._make_signal(0.50)   # low base confidence
+        s2 = self._make_signal(0.60)
+        risk = RiskScore(confidence=0.98, active_signals=1,
+                         scores={"loop": 1.0}, severity="CRITICAL")
+        _apply_hard_override([s1, s2], risk)
+
+        self.assertEqual(s1.severity, Severity.CRITICAL)
+        self.assertEqual(s2.severity, Severity.CRITICAL)
+        self.assertAlmostEqual(s1.confidence, 0.98, places=4)
+        self.assertAlmostEqual(s2.confidence, 0.98, places=4)
+
+    def test_no_hard_override_when_severity_none(self):
+        """Normal runs (no hard rule) must not have their severity changed."""
+        from detector_svc.worker import _apply_hard_override
+        from dunetrace.models import RiskScore, Severity
+
+        s1 = self._make_signal(0.80)
+        original_severity = s1.severity
+        risk = RiskScore(confidence=0.75, active_signals=2,
+                         scores={"loop": 0.6, "retry": 0.7})
+        _apply_hard_override([s1], risk)
+
+        self.assertEqual(s1.severity, original_severity)
+        self.assertAlmostEqual(s1.confidence, 0.80, places=4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -72,6 +72,17 @@ BEGIN
     END IF;
 END $$;
 
+-- co_signal_count: how many signals fired on the same run (>=2 means boosted).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'failure_signals' AND column_name = 'co_signal_count'
+    ) THEN
+        ALTER TABLE failure_signals ADD COLUMN co_signal_count INTEGER NOT NULL DEFAULT 0;
+    END IF;
+END $$;
+
 -- Persistent issue tracking: one row per (agent_id, failure_type) pair.
 -- status: open | resolved | reopened
 -- clean_runs_since: consecutive runs with no signal of this type (reset to 0 on each hit).
@@ -273,6 +284,7 @@ async def write_signals(signals: list, shadow: bool) -> int:
             s.confidence,
             json.dumps(s.evidence),
             shadow,
+            s.co_signal_count,
         )
         for s in signals
     ]
@@ -282,8 +294,8 @@ async def write_signals(signals: list, shadow: bool) -> int:
             """
             INSERT INTO failure_signals
                 (failure_type, severity, run_id, agent_id, agent_version,
-                 step_index, confidence, evidence, shadow)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+                 step_index, confidence, evidence, shadow, co_signal_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
             """,
             rows,
         )
