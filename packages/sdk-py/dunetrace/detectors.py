@@ -28,6 +28,16 @@ from typing import List, Optional
 from dunetrace.models import EventType, FailureSignal, FailureType, RunState, Severity
 
 
+def _scale_confidence(ratio: float) -> float:
+    """Confidence as a function of how far the observation exceeds its trigger threshold.
+
+    ratio = observed / threshold.  At ratio=1.0 (barely triggers): 0.5.
+    Reaches 1.0 when ratio ≥ 3.25 (2.25× beyond the trigger point).
+    Applied to count/ratio detectors; binary detectors keep their static values.
+    """
+    return min(1.0, 0.5 + (ratio - 1.0) * 0.4)
+
+
 # ── Base ──────────────────────────────────────────────────────────────────────
 
 class BaseDetector:
@@ -106,7 +116,7 @@ class ToolLoopDetector(BaseDetector):
                     agent_id=state.agent_id,
                     agent_version=state.agent_version,
                     step_index=window[-1].step_index,
-                    confidence=0.95,
+                    confidence=_scale_confidence(len(all_calls) / self.THRESHOLD),
                     evidence={
                         "tool":           tool,
                         "count":          len(all_calls),
@@ -238,6 +248,7 @@ class GoalAbandonmentDetector(BaseDetector):
             for e in recent
         )
         if all_llm:
+            steps_since_last_tool = state.current_step - state.tool_calls[-1].step_index
             return FailureSignal(
                 failure_type=FailureType.GOAL_ABANDONMENT,
                 severity=Severity.MEDIUM,
@@ -245,13 +256,13 @@ class GoalAbandonmentDetector(BaseDetector):
                 agent_id=state.agent_id,
                 agent_version=state.agent_version,
                 step_index=state.current_step,
-                confidence=0.70,
+                confidence=_scale_confidence(steps_since_last_tool / self.STALL_STEPS),
                 evidence={
                     "stall_steps":           self.STALL_STEPS,
                     "last_tool_step":        state.tool_calls[-1].step_index,
                     "last_tool_used":        state.tool_calls[-1].tool_name,
                     "current_step":          state.current_step,
-                    "steps_since_last_tool": state.current_step - state.tool_calls[-1].step_index,
+                    "steps_since_last_tool": steps_since_last_tool,
                     "stall_event_sequence":  [e.event_type.value for e in recent],
                 },
             )
@@ -308,7 +319,7 @@ class PromptInjectionDetector(BaseDetector):
             agent_id=state.agent_id,
             agent_version=state.agent_version,
             step_index=0,
-            confidence=0.85,
+            confidence=_scale_confidence(len(matched)),
             evidence={
                 "matched_pattern_count": len(matched),
                 "matched_patterns":      matched[:5],
@@ -403,7 +414,7 @@ class LlmTruncationLoopDetector(BaseDetector):
             agent_id=state.agent_id,
             agent_version=state.agent_version,
             step_index=state.current_step,
-            confidence=0.90,
+            confidence=_scale_confidence(len(truncated) / self.THRESHOLD),
             evidence={
                 "truncation_count":            len(truncated),
                 "total_llm_calls":             len(state.llm_calls),
@@ -431,10 +442,11 @@ class ContextBloatDetector(BaseDetector):
     MIN_LAST_TOKENS (default 2000) — suppresses false positives where proportional growth
     on a tiny context isn't actually a problem.
     """
-    name            = "CONTEXT_BLOAT"
-    MIN_CALLS       = 3
-    GROWTH_FACTOR   = 3.0
-    MIN_LAST_TOKENS = 2000
+    name             = "CONTEXT_BLOAT"
+    MIN_CALLS        = 3
+    GROWTH_FACTOR    = 3.0
+    MIN_LAST_TOKENS  = 2000
+    INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         calls_with_tokens = [
@@ -456,8 +468,29 @@ class ContextBloatDetector(BaseDetector):
 
         growth = last_tokens / first_tokens
 
-        if growth < self.GROWTH_FACTOR:
+        if state.baseline_p75_token_growth is not None:
+            effective_threshold = state.baseline_p75_token_growth * self.INFLATION_FACTOR
+        else:
+            effective_threshold = self.GROWTH_FACTOR
+
+        if growth < effective_threshold:
             return None
+
+        evidence: dict = {
+            "first_tokens":          first_tokens,
+            "last_tokens":           last_tokens,
+            "growth_factor":         round(growth, 2),
+            "threshold_factor":      round(effective_threshold, 2),
+            "llm_call_count":        len(calls_with_tokens),
+            "first_call_step":       calls_with_tokens[0].step_index,
+            "last_call_step":        calls_with_tokens[-1].step_index,
+            "token_growth_sequence": [
+                {"step": c.step_index, "tokens": c.prompt_tokens}
+                for c in calls_with_tokens
+            ],
+        }
+        if state.baseline_p75_token_growth is not None:
+            evidence["baseline_p75"] = round(state.baseline_p75_token_growth, 2)
 
         return FailureSignal(
             failure_type=FailureType.CONTEXT_BLOAT,
@@ -466,19 +499,8 @@ class ContextBloatDetector(BaseDetector):
             agent_id=state.agent_id,
             agent_version=state.agent_version,
             step_index=state.current_step,
-            confidence=0.80,
-            evidence={
-                "first_tokens":          first_tokens,
-                "last_tokens":           last_tokens,
-                "growth_factor":         round(growth, 2),
-                "llm_call_count":        len(calls_with_tokens),
-                "first_call_step":       calls_with_tokens[0].step_index,
-                "last_call_step":        calls_with_tokens[-1].step_index,
-                "token_growth_sequence": [
-                    {"step": c.step_index, "tokens": c.prompt_tokens}
-                    for c in calls_with_tokens
-                ],
-            },
+            confidence=_scale_confidence(growth / effective_threshold),
+            evidence=evidence,
         )
 
 
@@ -502,11 +524,17 @@ class SlowStepDetector(BaseDetector):
         ("llm.called",  30_000, "LLM call"),
         ("",            60_000, "step"),
     ]
+    INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
-    def _threshold_for(self, event_type: str) -> tuple[int, str]:
-        for prefix, ms, label in self.THRESHOLDS:
+    def _threshold_for(self, event_type: str, state: Optional[RunState] = None) -> tuple[int, str]:
+        for prefix, static_ms, label in self.THRESHOLDS:
             if not prefix or event_type.startswith(prefix):
-                return ms, label
+                if state is not None:
+                    if prefix == "tool.called" and state.baseline_p75_latency_tool is not None:
+                        return int(state.baseline_p75_latency_tool * self.INFLATION_FACTOR), label
+                    if prefix == "llm.called" and state.baseline_p75_latency_llm is not None:
+                        return int(state.baseline_p75_latency_llm * self.INFLATION_FACTOR), label
+                return static_ms, label
         return 60_000, "step"
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
@@ -528,7 +556,7 @@ class SlowStepDetector(BaseDetector):
 
         for step_idx, duration_ms in state.step_durations_ms.items():
             event_type = step_event_type.get(step_idx, "")
-            threshold_ms, label = self._threshold_for(event_type)
+            threshold_ms, label = self._threshold_for(event_type, state)
 
             if duration_ms > threshold_ms:
                 ratio = duration_ms / threshold_ms
@@ -554,9 +582,15 @@ class SlowStepDetector(BaseDetector):
             "ratio":        round(ratio, 1),
             "all_slow_steps": {
                 k: v for k, v in state.step_durations_ms.items()
-                if v > self._threshold_for(step_event_type.get(k, ""))[0]
+                if v > self._threshold_for(step_event_type.get(k, ""), state)[0]
             },
         }
+
+        # Include the raw P75 baseline so dashboards can show what normal looks like.
+        if worst_event_type.startswith("tool.called") and state.baseline_p75_latency_tool is not None:
+            evidence["baseline_p75"] = round(state.baseline_p75_latency_tool, 1)
+        elif worst_event_type.startswith("llm.called") and state.baseline_p75_latency_llm is not None:
+            evidence["baseline_p75"] = round(state.baseline_p75_latency_llm, 1)
 
         # Correlate with external signals that occurred during the slow step.
         # A signal is coincident when its timestamp falls within
@@ -583,7 +617,7 @@ class SlowStepDetector(BaseDetector):
             agent_id=state.agent_id,
             agent_version=state.agent_version,
             step_index=worst_step_idx,
-            confidence=0.92,
+            confidence=_scale_confidence(ratio),
             evidence=evidence,
         )
 
@@ -645,6 +679,16 @@ class RetryStormDetector(BaseDetector):
         args_hashes  = [tc.args_hash  for tc in best_streak]
         error_hashes = [tc.error_hash for tc in best_streak]
 
+        # Self-correction check: if the tool subsequently succeeded after the streak,
+        # the agent recovered and this is CoT/retry behaviour, not a storm.
+        last_fail_step = best_streak[-1].step_index
+        recovered = any(
+            tc.tool_name == best_tool and tc.success is True and tc.step_index > last_fail_step
+            for tc in state.tool_calls
+        )
+        if recovered:
+            return None
+
         args_identical    = len(set(args_hashes)) == 1
         all_have_reason   = all(h is not None for h in error_hashes)
         reason_identical  = all_have_reason and len(set(error_hashes)) == 1
@@ -657,7 +701,7 @@ class RetryStormDetector(BaseDetector):
             agent_id=state.agent_id,
             agent_version=state.agent_version,
             step_index=state.current_step,
-            confidence=0.92,
+            confidence=_scale_confidence(best_count / self.THRESHOLD),
             evidence={
                 "tool":                best_tool,
                 "consecutive_fails":   best_count,
@@ -732,6 +776,8 @@ class StepCountInflationDetector(BaseDetector):
             return None
 
         ratio = state.current_step / state.baseline_p75_steps
+        # confidence anchored to how far above the effective threshold (baseline × factor)
+        effective_threshold = state.baseline_p75_steps * self.INFLATION_FACTOR
 
         return FailureSignal(
             failure_type=FailureType.STEP_COUNT_INFLATION,
@@ -740,7 +786,7 @@ class StepCountInflationDetector(BaseDetector):
             agent_id=state.agent_id,
             agent_version=state.agent_version,
             step_index=state.current_step,
-            confidence=0.82,
+            confidence=_scale_confidence(state.current_step / effective_threshold),
             evidence={
                 "current_steps":    state.current_step,
                 "baseline_p75":     round(state.baseline_p75_steps, 1),
@@ -791,7 +837,7 @@ class CascadingToolFailureDetector(BaseDetector):
             agent_id=state.agent_id,
             agent_version=state.agent_version,
             step_index=state.current_step,
-            confidence=0.88,
+            confidence=_scale_confidence(len(failed_run) / self.THRESHOLD),
             evidence={
                 "consecutive_failures": len(failed_run),
                 "distinct_tools":       sorted(distinct_tools),
@@ -894,12 +940,14 @@ class ReasoningSpinDetector(BaseDetector):
     RATIO_THRESHOLD (default 4.0) — LLM calls / tool calls. Raise for agents with intentional
     multi-step chain-of-thought designs where high ratios are expected.
     """
-    name            = "REASONING_STALL"
-    MIN_LLM_CALLS   = 5
-    RATIO_THRESHOLD = 4.0
+    name             = "REASONING_STALL"
+    MIN_LLM_CALLS    = 5
+    RATIO_THRESHOLD  = 4.0
+    INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
-        if state.exit_reason != "final_answer":
+        # Skip errored runs — FIRST_STEP_FAILURE and RETRY_STORM cover those.
+        if state.exit_reason == "error":
             return None
 
         llm_count  = len(state.llm_calls)
@@ -910,8 +958,17 @@ class ReasoningSpinDetector(BaseDetector):
 
         ratio = llm_count / max(tool_count, 1)
 
-        if ratio < self.RATIO_THRESHOLD:
+        if state.baseline_p75_llm_tool_ratio is not None:
+            effective_threshold = state.baseline_p75_llm_tool_ratio * self.INFLATION_FACTOR
+        else:
+            effective_threshold = self.RATIO_THRESHOLD
+
+        if ratio < effective_threshold:
             return None
+
+        # A run that ended with a final answer is inefficient (MEDIUM).
+        # A run that stalled without converging shows the ratio caused failure (HIGH).
+        severity = Severity.MEDIUM if state.exit_reason == "final_answer" else Severity.HIGH
 
         action_events = [
             e for e in state.events
@@ -922,21 +979,26 @@ class ReasoningSpinDetector(BaseDetector):
             for e in action_events
         ]
 
+        evidence: dict = {
+            "llm_calls":      llm_count,
+            "tool_calls":     tool_count,
+            "ratio":          round(ratio, 2),
+            "threshold":      round(effective_threshold, 2),
+            "exit_reason":    state.exit_reason,
+            "event_sequence": event_sequence,
+        }
+        if state.baseline_p75_llm_tool_ratio is not None:
+            evidence["baseline_p75"] = round(state.baseline_p75_llm_tool_ratio, 2)
+
         return FailureSignal(
             failure_type=FailureType.REASONING_STALL,
-            severity=Severity.MEDIUM,
+            severity=severity,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
             step_index=state.current_step,
-            confidence=0.70,
-            evidence={
-                "llm_calls":      llm_count,
-                "tool_calls":     tool_count,
-                "ratio":          round(ratio, 2),
-                "threshold":      self.RATIO_THRESHOLD,
-                "event_sequence": event_sequence,
-            },
+            confidence=_scale_confidence(ratio / effective_threshold),
+            evidence=evidence,
         )
 
 

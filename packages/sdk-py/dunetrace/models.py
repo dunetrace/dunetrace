@@ -147,9 +147,13 @@ class RunState:
     current_step:    int                   = 0
     exit_reason:     Optional[str]         = None
     input_text_hash: Optional[str]         = None
-    # Cross-run baseline populated by the server before detectors run.
-    # None = insufficient history. Local self-hosted mode may leave this None.
-    baseline_p75_steps: Optional[float]    = None
+    # Cross-run baselines populated by the server before detectors run.
+    # None = insufficient history. Local self-hosted mode may leave these None.
+    baseline_p75_steps:         Optional[float] = None
+    baseline_p75_latency_tool:  Optional[float] = None  # ms, P75 tool step duration
+    baseline_p75_latency_llm:   Optional[float] = None  # ms, P75 LLM step duration
+    baseline_p75_token_growth:  Optional[float] = None  # ratio, P75 context growth factor
+    baseline_p75_llm_tool_ratio: Optional[float] = None  # P75 LLM:tool call ratio
 
 
 # ── Risk Score ────────────────────────────────────────────────────────────────

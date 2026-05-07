@@ -23,12 +23,18 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
         "growth_factor":    "GROWTH_FACTOR",
         "min_calls":        "MIN_CALLS",
         "min_last_tokens":  "MIN_LAST_TOKENS",
+        "inflation_factor": "INFLATION_FACTOR",
     },
+    "slow_step":               {"inflation_factor": "INFLATION_FACTOR"},
     "retry_storm":             {"threshold": "THRESHOLD"},
     "step_count_inflation":    {"inflation_factor": "INFLATION_FACTOR"},
     "cascading_tool_failure":  {"threshold": "THRESHOLD"},
     "first_step_failure":      {"max_step": "MAX_STEP"},
-    "reasoning_stall":         {"ratio_threshold": "RATIO_THRESHOLD", "min_llm_calls": "MIN_LLM_CALLS"},
+    "reasoning_stall":         {
+        "ratio_threshold": "RATIO_THRESHOLD",
+        "min_llm_calls":   "MIN_LLM_CALLS",
+        "inflation_factor": "INFLATION_FACTOR",
+    },
 }
 
 

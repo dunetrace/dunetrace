@@ -8,23 +8,23 @@ Dunetrace runs 15 structural detectors against every completed agent run. All th
 
 | Detector | What it catches | Severity |
 |---|---|---|
-| `SLOW_STEP` | Tool call >15s or LLM call >30s | MEDIUM/HIGH |
+| `SLOW_STEP` | Step duration exceeds threshold — 2× P75 baseline ¹ or static fallback (tool >15s, LLM >30s) | MEDIUM/HIGH |
 | `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
 | `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM |
-| `CONTEXT_BLOAT` | Prompt tokens grow 3× from first to last LLM call | MEDIUM |
+| `CONTEXT_BLOAT` | Prompt tokens grow beyond 2× P75 baseline ¹ or static fallback (3× from first to last call) | MEDIUM |
 | `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent ¹ | MEDIUM |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
-| `REASONING_STALL` | LLM:tool-call ratio ≥4× — agent reasoning without acting | MEDIUM |
+| `REASONING_STALL` | LLM:tool-call ratio exceeds 2× P75 baseline ¹ or static fallback (≥4×) — MEDIUM if run finished, HIGH if it stalled | MEDIUM/HIGH |
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
-| `RETRY_STORM` | Same tool fails 3+ times in a row | HIGH |
+| `RETRY_STORM` | Same tool fails 3+ times in a row without subsequent recovery | HIGH |
 | `EMPTY_LLM_RESPONSE` | Model returned zero-length output with `finish_reason=stop` | HIGH |
 | `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
 | `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
 
-¹ **`STEP_COUNT_INFLATION` requires a warm baseline.** P75 is computed from the last 50 successfully completed runs (errored runs excluded) for the same `agent_id` + `agent_version` pair. The detector produces no signal until at least 10 such runs exist, then activates automatically.
+¹ **Four detectors use per-agent learned baselines.** `STEP_COUNT_INFLATION`, `SLOW_STEP`, `CONTEXT_BLOAT`, and `REASONING_STALL` compute a P75 from the last 50 successfully completed runs (errored runs excluded) for the same `agent_id` + `agent_version` pair. The threshold fires at **2× that baseline**. Each detector falls back to its static threshold until at least **20** historical runs exist — below that the P75 estimate is too sensitive to individual outliers to be useful — then switches to the adaptive baseline automatically. Tune the multiplier per agent category with `inflation_factor` in `detectors.yml`.
 
 ---
 
@@ -37,11 +37,24 @@ default:
   tool_loop:
     threshold: 2        # lower = catch loops sooner
   context_bloat:
-    growth_factor: 4.0  # raise for agents that intentionally accumulate context
+    growth_factor: 4.0  # static fallback when no baseline; raise for context-heavy agents
+    inflation_factor: 2.0  # P75-baseline multiplier; raise for high-variance agents
+
+  slow_step:
+    inflation_factor: 2.0  # fire when step > P75_latency × this
+
+  reasoning_stall:
+    ratio_threshold: 4.0   # static fallback
+    inflation_factor: 2.0  # fire when LLM:tool ratio > P75_ratio × this
+
+  step_count_inflation:
+    inflation_factor: 1.5  # tighter threshold for predictable coding agents
 
 web-research:
   tool_loop:
-    threshold: 5        # search agents legitimately repeat queries across pages
+    threshold: 5           # search agents legitimately repeat queries across pages
+  reasoning_stall:
+    inflation_factor: 3.0  # research agents naturally reason more before acting
 ```
 
 Named sections match the `agent_id` and inherit from `default`, overriding only what you specify. Restart the detector to apply:
@@ -83,11 +96,19 @@ Use this to evaluate detector precision before graduating — compare shadow sig
 
 ---
 
-## Confidence boosting
+## Confidence scoring
 
-Each detector fires with a calibrated base confidence (0.70–0.95) tuned in isolation. When multiple independent signals fire on the same run, two post-processing steps run before signals are written to the database:
+**Dynamic confidence** — count and ratio detectors scale confidence based on how far the observation exceeds the trigger threshold:
 
-**Co-occurrence boost** — reduces false positives without touching individual thresholds:
+```
+confidence = min(1.0, 0.5 + (observed / threshold − 1.0) × 0.4)
+```
+
+Barely at the threshold → 0.5. Twice the threshold → 0.9. Beyond 3.25× → capped at 1.0. Binary and pattern detectors (TOOL_THRASHING, TOOL_AVOIDANCE, RAG_EMPTY_RETRIEVAL, EMPTY_LLM_RESPONSE, FIRST_STEP_FAILURE) retain static values because there is no meaningful "degree of excess" to measure.
+
+When multiple independent signals fire on the same run, two additional post-processing steps run before signals are written to the database:
+
+**Co-occurrence boost** — further reduces false positives without touching individual thresholds:
 
 | Co-firing signals | Multiplier |
 |---|---|
@@ -115,9 +136,14 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
-3. Runs all 15 detectors against the `RunState`
-4. Applies confidence boosting: co-occurrence multiplier + hard overrides
-5. Writes any triggered `FailureSignal` rows to `failure_signals`
-6. Marks the run as processed in `processed_runs`
+3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio) and attaches them to the `RunState`
+4. Runs all 15 detectors against the `RunState`
+5. Applies confidence boosting: co-occurrence multiplier + hard overrides
+6. Writes any triggered `FailureSignal` rows to `failure_signals`
+7. Marks the run as processed in `processed_runs`
 
 Detection adds zero latency to the agent — it runs entirely after the run completes.
+
+**Self-correction suppression** — `RETRY_STORM` checks whether the tool that hit the failure streak subsequently succeeded in the same run. If it did, the agent recovered on its own and no signal is emitted.
+
+**REASONING_STALL severity** — fires MEDIUM when the run finished with a `final_answer` (CoT-heavy but converged) and HIGH when the run stalled without ever converging (the ratio is likely the reason for failure).

@@ -31,12 +31,16 @@ default:
     threshold: 2      # number of finish_reason=length events to trigger
 
   context_bloat:
-    growth_factor: 3.0    # last/first prompt token ratio to trigger
+    growth_factor: 3.0    # last/first prompt token ratio to trigger (static fallback when no baseline)
     min_calls: 3          # minimum LLM calls with token data required
     min_last_tokens: 2000 # suppress signal if final token count is below this
+    inflation_factor: 2.0 # fire when growth > P75_baseline × this (requires ≥10 historical runs)
 
   retry_storm:
     threshold: 3      # consecutive failures on the same tool to trigger
+
+  slow_step:
+    inflation_factor: 2.0 # fire when step duration > P75_baseline × this (requires ≥10 historical runs)
 
   step_count_inflation:
     inflation_factor: 2.0 # multiplier over P75 baseline to trigger
@@ -48,8 +52,9 @@ default:
     max_step: 2       # step index at or below which an error triggers
 
   reasoning_stall:
-    ratio_threshold: 4.0  # LLM calls / tool calls ratio to trigger
+    ratio_threshold: 4.0  # LLM calls / tool calls ratio to trigger (static fallback when no baseline)
     min_llm_calls: 5      # ignore short runs with fewer LLM calls
+    inflation_factor: 2.0 # fire when ratio > P75_baseline × this (requires ≥10 historical runs)
 
 
 # ── Per-agent-category overrides ─────────────────────────────────────────────

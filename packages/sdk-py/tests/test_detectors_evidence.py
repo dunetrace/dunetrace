@@ -608,12 +608,17 @@ class TestSlowStepDetector(unittest.TestCase):
         assert signal is not None
         assert signal.evidence["step_index"] == 2
 
-    def test_confidence(self):
+    def test_confidence_scales_with_excess(self):
+        # 20s on a 15s threshold → ratio=1.33 → confidence≈0.63
         state = make_state()
         state.events = [make_event(EventType.TOOL_CALLED, step=1)]
         state.step_durations_ms = {1: 20_000}
         signal = self.detector.check(state)
-        assert signal.confidence == 0.92
+        assert round(signal.confidence, 2) == 0.63
+        # 60s on a 15s threshold → ratio=4.0 → confidence=1.0 (capped)
+        state.step_durations_ms = {1: 60_000}
+        high = self.detector.check(state)
+        assert high.confidence == 1.0
 
     def test_coincident_external_signal_in_evidence(self):
         """An external signal coincident with the slow step appears in evidence."""

@@ -35,7 +35,7 @@ from dunetrace.detectors import (
 )
 from dunetrace.models import (
     RunState, ToolCall, LlmCall, RetrievalResult, AgentEvent,
-    EventType, FailureType,
+    EventType, FailureType, Severity,
 )
 
 
@@ -989,9 +989,17 @@ class TestReasoningStallDetector(unittest.TestCase):
         # MIN_LLM_CALLS=5 — only 4 LLM calls even at high ratio
         self.assertIsNone(self.d.check(self._state(4, 0)))
 
-    def test_does_not_fire_when_not_final_answer(self):
-        # Mid-run stall caught by GOAL_ABANDONMENT, not REASONING_STALL
-        self.assertIsNone(self.d.check(self._state(20, 1, exit_reason=None)))
+    def test_severity_by_exit_state(self):
+        # Stalled run (no final answer) → HIGH; completed run → MEDIUM
+        stalled = self.d.check(self._state(20, 1, exit_reason=None))
+        self.assertIsNotNone(stalled)
+        self.assertEqual(stalled.severity, Severity.HIGH)
+        completed = self.d.check(self._state(20, 1, exit_reason="final_answer"))
+        self.assertIsNotNone(completed)
+        self.assertEqual(completed.severity, Severity.MEDIUM)
+
+    def test_does_not_fire_on_error_exit(self):
+        # Errored runs are covered by FIRST_STEP_FAILURE / RETRY_STORM
         self.assertIsNone(self.d.check(self._state(20, 1, exit_reason="error")))
 
     def test_fires_when_no_tool_calls(self):

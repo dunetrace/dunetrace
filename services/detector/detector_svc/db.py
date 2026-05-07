@@ -133,11 +133,17 @@ async def ensure_detector_schema() -> None:
 
 # ── Reads ──────────────────────────────────────────────────────────────────────
 
+# Minimum completed runs required before a P75 baseline is considered reliable.
+# Below this threshold all baseline functions return None and detectors fall back
+# to their static defaults.  P75 computed from fewer runs is too sensitive to
+# single-run outliers to be useful — 20 gives a stable enough percentile estimate.
+_MIN_BASELINE_RUNS = 20
+
 async def fetch_step_count_baseline(
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
-    min_runs: int = 10,
+    min_runs: int = _MIN_BASELINE_RUNS,
     lookback: int = 50,
 ) -> "Optional[float]":
     """
@@ -179,6 +185,200 @@ async def fetch_step_count_baseline(
                 COUNT(*)                                                      AS sample_size,
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY step_count)     AS p75
             FROM step_counts
+            """,
+            agent_id, agent_version, exclude_run_id, lookback,
+        )
+
+    if not row or (row["sample_size"] or 0) < min_runs:
+        return None
+    return float(row["p75"]) if row["p75"] is not None else None
+
+
+async def fetch_latency_baseline(
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    event_type: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """
+    P75 wall-clock gap (ms) that follows each event of ``event_type`` across the last
+    ``lookback`` successfully completed runs.  Mirrors the step_durations_ms computation
+    in run_builder: gap = timestamp of the next event minus timestamp of this event.
+
+    Used by SlowStepDetector to replace the hard-coded 15s/30s thresholds with a
+    per-agent learned baseline.  Returns None when fewer than ``min_runs`` runs have
+    at least one matching event.
+    """
+    if not _pool:
+        return None
+
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            WITH recent AS (
+                SELECT pr.run_id
+                FROM processed_runs pr
+                WHERE pr.agent_id      = $1
+                  AND pr.agent_version = $2
+                  AND pr.run_id       != $3
+                  AND EXISTS (
+                      SELECT 1 FROM events e
+                      WHERE e.run_id = pr.run_id
+                        AND e.event_type = 'run.completed'
+                  )
+                ORDER BY pr.processed_at DESC
+                LIMIT $4
+            ),
+            event_gaps AS (
+                SELECT
+                    e.run_id,
+                    (LEAD(e.timestamp) OVER (
+                        PARTITION BY e.run_id
+                        ORDER BY e.step_index, e.timestamp
+                    ) - e.timestamp) * 1000.0 AS gap_ms
+                FROM events e
+                WHERE e.run_id IN (SELECT run_id FROM recent)
+                  AND e.event_type = $5
+            )
+            SELECT
+                COUNT(DISTINCT run_id)                                              AS sample_size,
+                PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY gap_ms)               AS p75
+            FROM event_gaps
+            WHERE gap_ms >= 0
+              AND gap_ms IS NOT NULL
+            """,
+            agent_id, agent_version, exclude_run_id, lookback, event_type,
+        )
+
+    if not row or (row["sample_size"] or 0) < min_runs:
+        return None
+    return float(row["p75"]) if row["p75"] is not None else None
+
+
+async def fetch_token_growth_baseline(
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """
+    P75 context growth factor (last / first prompt_tokens) across the last ``lookback``
+    successfully completed runs.  Excludes short runs (<3 LLM calls), tiny contexts
+    (<10 first tokens), and runs whose final context never exceeded 2000 tokens —
+    matching the ContextBloatDetector guard conditions.
+
+    Returns None when fewer than ``min_runs`` qualifying runs exist.
+    """
+    if not _pool:
+        return None
+
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            WITH recent AS (
+                SELECT pr.run_id
+                FROM processed_runs pr
+                WHERE pr.agent_id      = $1
+                  AND pr.agent_version = $2
+                  AND pr.run_id       != $3
+                  AND EXISTS (
+                      SELECT 1 FROM events e
+                      WHERE e.run_id = pr.run_id
+                        AND e.event_type = 'run.completed'
+                  )
+                ORDER BY pr.processed_at DESC
+                LIMIT $4
+            ),
+            token_data AS (
+                SELECT
+                    e.run_id,
+                    (e.payload->>'prompt_tokens')::integer AS prompt_tokens
+                FROM events e
+                WHERE e.run_id IN (SELECT run_id FROM recent)
+                  AND e.event_type = 'llm.called'
+                  AND e.payload->>'prompt_tokens' IS NOT NULL
+                  AND (e.payload->>'prompt_tokens')::integer > 0
+            ),
+            run_growth AS (
+                SELECT
+                    run_id,
+                    MIN(prompt_tokens) AS first_tokens,
+                    MAX(prompt_tokens) AS last_tokens,
+                    COUNT(*)           AS call_count
+                FROM token_data
+                GROUP BY run_id
+                HAVING COUNT(*)           >= 3
+                   AND MIN(prompt_tokens) >= 10
+                   AND MAX(prompt_tokens) >= 2000
+            )
+            SELECT
+                COUNT(*)                                                                    AS sample_size,
+                PERCENTILE_CONT(0.75) WITHIN GROUP (
+                    ORDER BY last_tokens::float / first_tokens::float
+                )                                                                           AS p75
+            FROM run_growth
+            """,
+            agent_id, agent_version, exclude_run_id, lookback,
+        )
+
+    if not row or (row["sample_size"] or 0) < min_runs:
+        return None
+    return float(row["p75"]) if row["p75"] is not None else None
+
+
+async def fetch_llm_tool_ratio_baseline(
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """
+    P75 LLM:tool call ratio (llm_count / max(tool_count, 1)) across the last ``lookback``
+    successfully completed runs.  Restricted to runs with at least 5 LLM calls, matching
+    the ReasoningSpinDetector guard.
+
+    Returns None when fewer than ``min_runs`` qualifying runs exist.
+    """
+    if not _pool:
+        return None
+
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            WITH recent AS (
+                SELECT pr.run_id
+                FROM processed_runs pr
+                WHERE pr.agent_id      = $1
+                  AND pr.agent_version = $2
+                  AND pr.run_id       != $3
+                  AND EXISTS (
+                      SELECT 1 FROM events e
+                      WHERE e.run_id = pr.run_id
+                        AND e.event_type = 'run.completed'
+                  )
+                ORDER BY pr.processed_at DESC
+                LIMIT $4
+            ),
+            run_counts AS (
+                SELECT
+                    e.run_id,
+                    COUNT(*) FILTER (WHERE e.event_type = 'llm.called')  AS llm_count,
+                    COUNT(*) FILTER (WHERE e.event_type = 'tool.called') AS tool_count
+                FROM events e
+                WHERE e.run_id IN (SELECT run_id FROM recent)
+                GROUP BY e.run_id
+                HAVING COUNT(*) FILTER (WHERE e.event_type = 'llm.called') >= 5
+            )
+            SELECT
+                COUNT(*)                                                                        AS sample_size,
+                PERCENTILE_CONT(0.75) WITHIN GROUP (
+                    ORDER BY llm_count::float / GREATEST(tool_count, 1)
+                )                                                                               AS p75
+            FROM run_counts
             """,
             agent_id, agent_version, exclude_run_id, lookback,
         )

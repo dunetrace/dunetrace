@@ -66,12 +66,18 @@ class TestToolLoopDetector(unittest.TestCase):
         state.current_step = 5
         assert self.detector.check(state) is None
 
-    def test_confidence_is_high(self):
+    def test_confidence_scales_with_count(self):
+        # 5 calls at threshold=3 → ratio 1.67 → dynamic confidence ~0.77
         state = make_state()
         state.tool_calls = [make_tool_call("web_search")] * 5
         state.current_step = 5
         signal = self.detector.check(state)
-        assert signal.confidence >= 0.9
+        assert 0.7 <= signal.confidence <= 0.85
+        # More calls → higher confidence
+        state.tool_calls = [make_tool_call("web_search")] * 9
+        state.current_step = 9
+        high = self.detector.check(state)
+        assert high.confidence > signal.confidence
 
 
 # ── ToolThrashingDetector ─────────────────────────────────────────────────────
@@ -323,12 +329,18 @@ class TestLlmTruncationLoopDetector(unittest.TestCase):
         state.current_step = 5
         assert self.detector.check(state) is None
 
-    def test_confidence_is_high(self):
+    def test_confidence_scales_with_truncation_count(self):
+        # 3 truncations at threshold=2 → ratio 1.5 → dynamic confidence 0.70
         state = make_state()
         state.llm_calls = [make_llm_call("length", step=i) for i in range(3)]
         state.current_step = 3
         signal = self.detector.check(state)
-        assert signal.confidence >= 0.85
+        assert round(signal.confidence, 2) == 0.70
+        # More truncations → higher confidence
+        state.llm_calls = [make_llm_call("length", step=i) for i in range(6)]
+        state.current_step = 6
+        high = self.detector.check(state)
+        assert high.confidence > signal.confidence
 
     def test_evidence_contains_step_indices(self):
         state = make_state()
@@ -432,7 +444,8 @@ class TestContextBloatDetector(unittest.TestCase):
         state.current_step = 4
         assert self.detector.check(state) is None
 
-    def test_confidence(self):
+    def test_confidence_scales_with_growth(self):
+        # 300→4500 tokens → growth=15×, threshold=3.0 → ratio=5.0 → confidence=1.0
         state = make_state()
         state.llm_calls = [
             make_llm_call(prompt_tokens=300,  step=1),
@@ -441,7 +454,16 @@ class TestContextBloatDetector(unittest.TestCase):
         ]
         state.current_step = 3
         signal = self.detector.check(state)
-        assert signal.confidence == 0.80
+        assert signal.confidence == 1.0
+        # Barely over threshold (3.01×) → near-minimum confidence
+        state.llm_calls = [
+            make_llm_call(prompt_tokens=1000, step=1),
+            make_llm_call(prompt_tokens=2002, step=2),
+            make_llm_call(prompt_tokens=3010, step=3),
+        ]
+        state.current_step = 3
+        low = self.detector.check(state)
+        assert low.confidence < signal.confidence
 
 
 # ── ReasoningSpinDetector ─────────────────────────────────────────────────────
@@ -500,25 +522,32 @@ class TestReasoningSpinDetector(unittest.TestCase):
         state = _make_spin_state(llm_count=5, tool_count=2)
         assert self.detector.check(state) is None
 
-    def test_no_signal_before_final_answer(self):
-        """Run still in progress — must not fire mid-run."""
+    def test_fires_at_high_severity_when_stalled(self):
+        """Run never converged — fires at HIGH because the ratio caused failure, not just inefficiency."""
         state = _make_spin_state(llm_count=12, tool_count=1, exit_reason=None)
-        assert self.detector.check(state) is None
+        signal = self.detector.check(state)
+        assert signal is not None
+        assert signal.severity.value == "HIGH"
 
     def test_no_signal_on_error_exit(self):
-        """Run errored — must not fire (agent didn't complete deliberately)."""
+        """Run errored — must not fire (FIRST_STEP_FAILURE / RETRY_STORM cover errors)."""
         state = _make_spin_state(llm_count=12, tool_count=1, exit_reason="error")
         assert self.detector.check(state) is None
 
-    def test_severity_is_medium(self):
+    def test_severity_is_medium_when_final_answer(self):
+        """Run finished — CoT-heavy but still converged, so MEDIUM not HIGH."""
         state = _make_spin_state(llm_count=10, tool_count=1)
         signal = self.detector.check(state)
         assert signal.severity.value == "MEDIUM"
 
-    def test_confidence(self):
-        state = _make_spin_state(llm_count=10, tool_count=1)
-        signal = self.detector.check(state)
-        assert signal.confidence == 0.70
+    def test_confidence_scales_with_ratio(self):
+        # ratio=10/4=2.5 above threshold → confidence=1.0; barely above (5.1/4=1.275) → lower
+        high_state = _make_spin_state(llm_count=10, tool_count=1)
+        high_signal = self.detector.check(high_state)
+        assert high_signal.confidence == 1.0
+        low_state = _make_spin_state(llm_count=5, tool_count=1)  # ratio=5/4=1.25 above threshold
+        low_signal = self.detector.check(low_state)
+        assert 0.5 < low_signal.confidence < high_signal.confidence
 
     def test_custom_threshold(self):
         detector = ReasoningSpinDetector(RATIO_THRESHOLD=2.0)

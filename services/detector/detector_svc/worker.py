@@ -18,9 +18,12 @@ from detector_svc.db import (
     close_pool,
     ensure_detector_schema,
     fetch_completed_runs,
+    fetch_latency_baseline,
+    fetch_llm_tool_ratio_baseline,
     fetch_run_events,
     fetch_stalled_runs,
     fetch_step_count_baseline,
+    fetch_token_growth_baseline,
     init_pool,
     mark_run_processed,
     write_signals,
@@ -72,6 +75,8 @@ def _injection_signal_from_events(events: list[dict], run_id: str, agent_id: str
         if e["event_type"] == "run.started":
             evidence = e.get("payload", {}).get("injection_signal")
             if evidence:
+                matched = evidence.get("matched_pattern_count", 1)
+                confidence = min(1.0, 0.5 + (matched - 1.0) * 0.4)
                 return FailureSignal(
                     failure_type=FailureType.PROMPT_INJECTION_SIGNAL,
                     severity=Severity.CRITICAL,
@@ -79,7 +84,7 @@ def _injection_signal_from_events(events: list[dict], run_id: str, agent_id: str
                     agent_id=agent_id,
                     agent_version=agent_version,
                     step_index=0,
-                    confidence=0.85,
+                    confidence=confidence,
                     evidence=evidence,
                 )
     return None
@@ -98,8 +103,18 @@ async def process_run(
 
     try:
         state = build_run_state(events)
-        state.baseline_p75_steps = await fetch_step_count_baseline(
-            agent_id, agent_version, run_id
+        (
+            state.baseline_p75_steps,
+            state.baseline_p75_latency_tool,
+            state.baseline_p75_latency_llm,
+            state.baseline_p75_token_growth,
+            state.baseline_p75_llm_tool_ratio,
+        ) = await asyncio.gather(
+            fetch_step_count_baseline(agent_id, agent_version, run_id),
+            fetch_latency_baseline(agent_id, agent_version, run_id, "tool.called"),
+            fetch_latency_baseline(agent_id, agent_version, run_id, "llm.called"),
+            fetch_token_growth_baseline(agent_id, agent_version, run_id),
+            fetch_llm_tool_ratio_baseline(agent_id, agent_version, run_id),
         )
         signals = run_detectors(state, detectors=get_detectors(agent_id))
         inj = _injection_signal_from_events(events, run_id, agent_id, agent_version)
