@@ -161,6 +161,7 @@ The entry point for all SDK traffic. Its only job is to accept events as fast as
 - Returns `202 Accepted` before touching the database
 - Writes events to Postgres in a `BackgroundTask` (after the 202)
 - Never does any detection logic
+- `POST /v1/deploy` — accepts deploy markers from `dt.mark_deploy()` and writes to the `deploy_events` table synchronously (no background task; deploy markers are rare and low-volume)
 
 **Why the 202 before writing?** Your agent is waiting. The round-trip to the agent should be as short as possible. Validation is synchronous; persistence is async.
 
@@ -226,7 +227,7 @@ A read-only FastAPI service. Powers the dashboard and any customer integrations.
 | `GET /v1/agents` | List all agents with run counts, signal counts, critical/high counts, and failure type breakdown |
 | `GET /v1/agents/{id}/runs` | Paginated run list for an agent — summary fields only (no events) |
 | `GET /v1/agents/{id}/signals` | Paginated signal list with full explanations. Accepts `severity`, `failure_type`, `include_shadow` filters |
-| `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution. Also returns `failure_rates` (daily affected/total per failure type) and `systemic_patterns` (7-day rate + `is_systemic` flag for each failure type) — the data powering the Health Record panel |
+| `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution. Also returns `failure_rates` (daily affected/total per failure type), `systemic_patterns` (7-day rate + `is_systemic` flag), and `deploy_events` (last 90 days of deploy markers) — the data powering the Health Record and Deploy Timeline panels |
 | `GET /v1/agents/{id}/issues` | Open/resolved issue list for an agent. Accepts optional `status` filter (`open`, `resolved`, `reopened`). Returns id, failure_type, status, first_seen, last_seen, resolved_at, affected_runs, clean_runs_since |
 | `GET /v1/runs/{id}` | Full run detail — metadata, all events, all signals with explanations |
 | `POST /v1/signals/{id}/explain` | Fetch Langfuse trace, run LLM analysis, return `root_cause`, `fix_content`, `fix_type`, `apply_blocked`, and `langfuse_prompt_name`. Requires `LANGFUSE_*` and `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in env |
@@ -277,6 +278,15 @@ Auto-refreshes every 15 seconds. All data is computed client-side from the API r
 ## Database Schema
 
 ```sql
+-- Deploy markers: one row per dt.mark_deploy() call
+CREATE TABLE deploy_events (
+    id           BIGSERIAL PRIMARY KEY,
+    agent_id     TEXT        NOT NULL,
+    version      TEXT        NOT NULL,
+    deployed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    meta         JSONB       NOT NULL DEFAULT '{}'   -- arbitrary key/value (commit, env, …)
+);
+
 -- All agent events, raw
 CREATE TABLE events (
     id             BIGSERIAL PRIMARY KEY,

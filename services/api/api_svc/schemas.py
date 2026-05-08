@@ -178,6 +178,12 @@ if _PYDANTIC:
         last_seen:     Optional[float]
         is_systemic:   bool
 
+    class DeployEvent(_Model):
+        id:          int
+        version:     str
+        deployed_at: float
+        meta:        Dict[str, Any] = {}
+
     class AgentInsights(_Model):
         input_patterns:    List[InputHashPattern]
         signal_trends:     List[SignalTrendPoint]
@@ -186,6 +192,7 @@ if _PYDANTIC:
         hourly_pattern:    List[HourlyPatternPoint]
         failure_rates:     List[FailureRatePoint]
         systemic_patterns: List[SystemicPattern]
+        deploy_events:     List[DeployEvent] = []
 
     class Issue(_Model):
         id:               int

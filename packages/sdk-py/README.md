@@ -97,6 +97,19 @@ cd dunetrace && cp .env.example .env && docker compose up -d
 
 Dashboard → `http://localhost:3000` · Ingest → `http://localhost:8001`
 
+## Deploy markers
+
+Annotate the detector timeline with release boundaries so you can correlate failure spikes with deploys:
+
+```python
+# Call from your deploy script, CI/CD pipeline, or app startup
+dt.mark_deploy("my-agent", version="v1.4.2", commit="abc1234", env="production")
+```
+
+The dashboard renders blue dashed vertical lines at each deploy timestamp on the 30-day detector rate chart. Fire-and-forget — runs on a background thread, never blocks the caller.
+
+Additional keyword arguments are stored as `meta` and shown on hover.
+
 ## Policies
 
 Runtime guardrails that fire mid-run — before a failure propagates. Define conditions with any supported trigger and attach a `stop`, `switch_model`, `inject_prompt`, or `log` action.

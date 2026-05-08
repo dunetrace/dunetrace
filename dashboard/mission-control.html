@@ -151,6 +151,9 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
 .sec-title{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3);letter-spacing:2px;text-transform:uppercase}
 .sec-action{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);cursor:pointer;transition:color .2s}
 .sec-action:hover{color:var(--chalk2)}
+.filter-btn{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.5px;padding:3px 10px;border-radius:3px;border:1px solid var(--wire);background:transparent;color:var(--chalk4);cursor:pointer;transition:all .15s}
+.filter-btn:hover{color:var(--chalk2);border-color:var(--chalk4)}
+.filter-btn-active{background:var(--s2);color:var(--chalk2);border-color:var(--chalk3)}
 
 /* ── MINI CHART ── */
 .chart-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem}
@@ -533,6 +536,28 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 .cfg-input:focus{border-color:var(--orange)}
 .cfg-label{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:.35rem}
 
+/* ── GLOBAL SEARCH ── */
+.search-wrap{position:relative;flex:1;max-width:340px;margin:0 1.5rem}
+.search-input{width:100%;background:var(--s2);border:1px solid var(--wire2);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:5px 10px;border-radius:4px;outline:none;box-sizing:border-box}
+.search-input:focus{border-color:var(--blue)}
+.search-dropdown{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--s1);border:1px solid var(--wire2);border-radius:4px;z-index:200;max-height:280px;overflow-y:auto}
+.search-item{padding:7px 12px;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3);display:flex;gap:8px;align-items:center}
+.search-item:hover{background:var(--s2);color:var(--chalk2)}
+.search-item-tag{font-size:9px;padding:2px 6px;border-radius:2px;background:var(--s3);color:var(--chalk4);flex-shrink:0}
+
+/* ── GLOBAL PERIOD BAR ── */
+.gp-bar{display:flex;gap:3px;margin-right:12px}
+.gp-btn{font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:.5px;padding:3px 8px;border-radius:3px;border:1px solid var(--wire);background:transparent;color:var(--chalk4);cursor:pointer;transition:all .15s}
+.gp-btn:hover{color:var(--chalk2);border-color:var(--chalk4)}
+.gp-btn-active{background:var(--s2);color:var(--chalk2);border-color:var(--chalk3)}
+
+/* ── RUNS FILTER ROW ── */
+.runs-filter-row{display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap;align-items:center}
+
+/* ── ACK BUTTON ── */
+.ack-btn{font-size:9px;padding:2px 8px;border-radius:2px;border:1px solid var(--wire);background:transparent;color:var(--chalk4);cursor:pointer;margin-left:auto;flex-shrink:0}
+.ack-btn:hover{color:var(--red);border-color:var(--red)}
+
 /* Run comparison */
 .compare-controls{display:flex;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;flex-wrap:wrap}
 .cmp-run-select{display:flex;flex-direction:column;gap:4px}
@@ -563,7 +588,17 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="brand-mark">D</div>
     <span class="brand-name">DUNETRACE</span>
   </div>
+  <div class="search-wrap">
+    <input id="search-input" class="search-input" placeholder="Search runs, agents, failures…" oninput="runSearch(this.value)" onblur="setTimeout(()=>closeSearch(),200)">
+    <div id="search-dropdown" class="search-dropdown" style="display:none"></div>
+  </div>
   <div class="top-right">
+    <div class="gp-bar">
+      <button class="gp-btn" data-p="1d" onclick="setGlobalPeriod('1d')">1D</button>
+      <button class="gp-btn gp-btn-active" data-p="7d" onclick="setGlobalPeriod('7d')">7D</button>
+      <button class="gp-btn" data-p="30d" onclick="setGlobalPeriod('30d')">30D</button>
+      <button class="gp-btn" data-p="all" onclick="setGlobalPeriod('all')">All</button>
+    </div>
     <div class="live-badge"><div class="live-dot"></div>LIVE</div>
     <div class="top-time mono" id="clock">00:00:00 UTC</div>
   </div>
@@ -704,10 +739,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)" id="risk-trend-total"></div>
       </div>
       <div id="risk-trend-bars" style="display:flex;align-items:flex-end;gap:2px;height:64px"></div>
-      <div style="display:flex;justify-content:space-between;margin-top:6px">
-        <span class="mono" style="font-size:9px;color:var(--chalk4)">24h ago</span>
-        <span class="mono" style="font-size:9px;color:var(--chalk4)">now</span>
-      </div>
+      <div id="risk-trend-axis" style="display:flex;justify-content:space-between;margin-top:4px"></div>
     </div>
     <div class="chart-card">
       <div class="chart-title mono">TOP FAILURE PATTERNS</div>
@@ -726,23 +758,20 @@ input[type=range]{accent-color:var(--orange);background:transparent}
           <div class="chart-title mono">TOKEN WASTE DRIFT — 24H VS 7-DAY BASELINE</div>
           <div class="drift-delta" id="drift-delta-val" style="color:var(--chalk4)">computing…</div>
         </div>
-      </div>
-      <div style="display:flex;gap:14px;align-items:flex-end">
-        <div style="flex:1;position:relative;height:72px">
-          <div id="drift-bars" style="display:flex;align-items:flex-end;gap:2px;height:100%"></div>
-          <div id="drift-baseline-line" style="display:none;position:absolute;left:0;right:0;border-top:1px dashed rgba(46,184,114,0.7);pointer-events:none"></div>
-        </div>
-        <div style="flex-shrink:0;width:124px;display:flex;flex-direction:column">
-          <span id="drift-badge" class="posture-badge ok">NORMAL</span>
-          <div class="drift-stat"><span class="drift-stat-lbl">24h wasted</span><span class="drift-stat-val" id="drift-current">—</span></div>
-          <div class="drift-stat"><span class="drift-stat-lbl">7d baseline</span><span class="drift-stat-val" id="drift-baseline">—</span></div>
-          <div class="drift-stat"><span class="drift-stat-lbl">warn trigger</span><span class="drift-stat-val" id="drift-trigger">—</span></div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <span id="drift-badge" class="posture-badge ok" style="margin-bottom:2px">NORMAL</span>
+          <div style="display:flex;gap:16px">
+            <div class="drift-stat"><span class="drift-stat-lbl">24h wasted&nbsp;</span><span class="drift-stat-val" id="drift-current">—</span></div>
+            <div class="drift-stat"><span class="drift-stat-lbl">7d baseline&nbsp;</span><span class="drift-stat-val" id="drift-baseline">—</span></div>
+            <div class="drift-stat"><span class="drift-stat-lbl">warn trigger&nbsp;</span><span class="drift-stat-val" id="drift-trigger">—</span></div>
+          </div>
         </div>
       </div>
-      <div style="display:flex;justify-content:space-between;margin-top:6px">
-        <span class="mono" style="font-size:9px;color:var(--chalk4)">24h ago</span>
-        <span class="mono" style="font-size:9px;color:var(--chalk4)">now</span>
+      <div style="position:relative;height:72px">
+        <div id="drift-bars" style="display:flex;align-items:flex-end;gap:2px;height:100%"></div>
+        <div id="drift-baseline-line" style="display:none;position:absolute;left:0;right:0;border-top:1px dashed rgba(46,184,114,0.7);pointer-events:none"></div>
       </div>
+      <div id="drift-axis" style="display:flex;justify-content:space-between;margin-top:4px"></div>
     </div>
 
     <!-- Failure posture gauge -->
@@ -823,7 +852,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
   <div class="run-detail-header" id="detail-header">
     <div class="rdh-left">
-      <div class="rdh-run-id mono" id="detail-run-id">loading…</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="rdh-run-id mono" id="detail-run-id">loading…</div>
+        <button class="filter-btn" onclick="copyRunId()" id="copy-run-btn" title="Copy run ID" style="font-size:9px;padding:2px 8px">copy ID</button>
+      </div>
       <div class="rdh-title" id="detail-title">—</div>
       <div class="rdh-meta" id="detail-meta"></div>
     </div>
@@ -902,6 +934,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <div>Status</div>
         <div>Payload summary</div>
       </div>
+      <div style="display:flex;gap:8px;margin:.5rem .75rem;align-items:center">
+        <input id="event-filter" class="search-input" style="max-width:180px" placeholder="Filter by step or type…" oninput="filterEventLog(this.value)">
+        <span style="font-size:10px;color:var(--chalk4)" id="event-filter-count"></span>
+      </div>
       <div id="detail-event-rows">
         <div class="loading">loading…</div>
       </div>
@@ -919,6 +955,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <div id="page-alerts" class="page">
   <div class="sec-head">
     <span class="sec-title">Active signals — grouped by failure type</span>
+    <div style="display:flex;gap:8px;align-items:center"><span style="font-size:11px;color:var(--chalk4)" id="acked-count"></span><button class="filter-btn" onclick="unackAll()" id="unack-btn" style="display:none">restore all</button></div>
   </div>
   <div id="alerts-container">
     <div class="loading">loading…</div>
@@ -1017,7 +1054,28 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- ── RUNS PAGE ── -->
 <div id="page-runs" class="page">
-  <div class="sec-head"><span class="sec-title">All runs</span></div>
+  <div class="sec-head">
+    <span class="sec-title">All runs</span>
+    <div style="display:flex;gap:6px">
+      <button id="runs-filter-day"   class="filter-btn filter-btn-active" onclick="setRunsFilter('day')">Day</button>
+      <button id="runs-filter-week"  class="filter-btn" onclick="setRunsFilter('week')">Week</button>
+      <button id="runs-filter-month" class="filter-btn" onclick="setRunsFilter('month')">Month</button>
+    </div>
+  </div>
+  <div class="runs-filter-row" id="runs-filter-row">
+    <input id="runs-search" class="search-input" style="max-width:220px" placeholder="Search run ID or agent…" oninput="setRunsSearch(this.value)">
+    <select id="runs-sev" class="trend-select" onchange="setRunsSevFilter(this.value)">
+      <option value="">All severities</option>
+      <option value="CRITICAL">Critical</option>
+      <option value="HIGH">High</option>
+      <option value="MEDIUM">Medium</option>
+      <option value="LOW">Low</option>
+      <option value="CLEAN">Clean</option>
+    </select>
+    <select id="runs-agent" class="trend-select" onchange="setRunsAgentFilter(this.value)">
+      <option value="">All agents</option>
+    </select>
+  </div>
   <div class="table-card">
     <table class="run-table">
       <thead><tr><th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th><th>Failure types</th><th>Duration</th><th>Steps</th><th></th></tr></thead>
@@ -1090,7 +1148,11 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <div id="page-agents" class="page">
   <div class="sec-head">
     <span class="sec-title">Agent health overview</span>
-    <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)">failure rate = runs with ≥1 signal</span>
+    <div style="display:flex;gap:6px">
+      <button class="filter-btn filter-btn-active" id="sort-health"   onclick="setAgentSort('health')">Health score</button>
+      <button class="filter-btn"                   id="sort-failrate" onclick="setAgentSort('failrate')">Fail rate</button>
+      <button class="filter-btn"                   id="sort-lastseen" onclick="setAgentSort('lastseen')">Last seen</button>
+    </div>
   </div>
   <div id="agents-grid" class="agent-cards">
     <div class="loading">loading…</div>
@@ -1235,6 +1297,15 @@ let _allShadowSigs = [];   // shadow (not-yet-graduated) signals
 let _curRunId   = null;
 let _curAgentId = null;
 
+// ── Improvement state ────────────────────────────────────────────────────────
+let _prevPage       = 'overview';          // #3 back nav
+let _globalPeriod   = '7d';               // #4 time range
+let _runsSearch     = '';                 // #5 run search
+let _runsSevFilter  = '';                 // #5 sev filter
+let _runsAgentFilter = '';               // #5 agent filter
+let _agentSort      = 'health';           // #8 agent sort
+let _ackedSignals   = new Set(JSON.parse(localStorage.getItem('dt_acked') || '[]'));  // #7 ack
+
 // ── API helpers ───────────────────────────────────────────────────────────────
 async function apiFetch(path) {
   const r = await fetch(API + path, { headers: { Authorization: 'Bearer ' + KEY } });
@@ -1269,6 +1340,7 @@ async function loadAll() {
     _allSigs       = _agents.flatMap(a => a._signals);
     _allShadowSigs = _agents.flatMap(a => a._shadowSignals);
 
+    populateRunsAgentDropdown();
     renderOverview();
     renderRuns();
     renderAlerts();
@@ -1288,10 +1360,10 @@ async function loadAll() {
 function updateSidebarCounts() {
   const critTotal = _agents.reduce((n, a) => n + (a.critical_count || 0), 0);
   const runsWithSigs = _allRuns.filter(r => r.has_signals).length;
-  const highPlus = _allSigs.filter(s => s.severity === 'HIGH' || s.severity === 'CRITICAL').length;
+  const unreadAlerts = _allSigs.filter(s => !s.alerted).length;
   document.getElementById('badge-overview').textContent = critTotal || '0';
   document.getElementById('badge-runs').textContent     = runsWithSigs || '0';
-  document.getElementById('badge-alerts').textContent   = highPlus || '0';
+  document.getElementById('badge-alerts').textContent   = unreadAlerts || '0';
   document.getElementById('badge-agents').textContent   = _agents.length || '0';
 }
 
@@ -1338,7 +1410,12 @@ function renderOverview() {
     const diff    = cur24 - prev24;
     const trendColor = diff > 0 ? 'var(--red)' : diff < 0 ? 'var(--green)' : 'var(--chalk4)';
     const trendTxt   = diff > 0 ? '↑ ' + diff : diff < 0 ? '↓ ' + Math.abs(diff) : '—';
-    return `<div class="failure-item" onclick="nav('runs',document.querySelector('[onclick*=runs]'))">
+    const topAgent = _agents.reduce((best, a) => {
+      const c = (a.failure_types||{})[ft] || 0;
+      return c > (best?.cnt||0) ? {id: a.agent_id, cnt: c} : best;
+    }, null);
+    const topAgentId = topAgent?.id || '';
+    return `<div class="failure-item" onclick="openAgentDetail('${esc(topAgentId)}')">
       <div class="fi-bar" style="background:${color}"></div>
       <span class="fi-name">${ftLabel(ft)}</span>
       <span class="fi-count">${cnt} signals</span>
@@ -1360,11 +1437,48 @@ function renderOverview() {
 }
 
 // ── All Runs ──────────────────────────────────────────────────────────────────
+let _runsFilter = 'day';
+
+function setRunsFilter(period) {
+  _runsFilter = period;
+  ['day','week','month'].forEach(p => {
+    const el = document.getElementById('runs-filter-' + p);
+    if (el) el.className = 'filter-btn' + (p === period ? ' filter-btn-active' : '');
+  });
+  renderRuns();
+}
+
 function renderRuns() {
-  const sorted = [..._allRuns].sort((a, b) => b.started_at - a.started_at).slice(0, 100);
+  const now = Date.now() / 1000;
+  const cutoff = { day: 86400, week: 604800, month: 2592000 }[_runsFilter] || 86400;
+  let filtered = _allRuns.filter(r => r.started_at && (now - r.started_at) <= cutoff);
+
+  // Apply search filter
+  if (_runsSearch) {
+    filtered = filtered.filter(r =>
+      r.run_id.toLowerCase().includes(_runsSearch) ||
+      (r.agent_id || r._agentId || '').toLowerCase().includes(_runsSearch)
+    );
+  }
+
+  // Apply severity filter
+  if (_runsSevFilter) {
+    filtered = filtered.filter(r => {
+      const signals = _allSigs.filter(s => s.run_id === r.run_id);
+      if (_runsSevFilter === 'CLEAN') return signals.length === 0;
+      return signals.some(s => s.severity === _runsSevFilter);
+    });
+  }
+
+  // Apply agent filter
+  if (_runsAgentFilter) {
+    filtered = filtered.filter(r => (r.agent_id || r._agentId || '') === _runsAgentFilter);
+  }
+
+  const sorted = filtered.sort((a, b) => b.started_at - a.started_at);
   document.getElementById('runs-tbody').innerHTML = sorted.length
     ? sorted.map(r => runRow(r)).join('')
-    : '<tr><td colspan="8" class="loading">no runs yet</td></tr>';
+    : '<tr><td colspan="8" class="loading">no runs in this period</td></tr>';
 }
 
 function runRow(r) {
@@ -1382,7 +1496,7 @@ function runRow(r) {
     <td>${esc(agentId)}</td>
     <td class="mono">${signals.length}</td>
     <td>${sev ? `<span class="sev-badge sb-${sev.toLowerCase()}">${sev}</span>` : '<span class="sev-badge sb-low">CLEAN</span>'}</td>
-    <td style="font-size:11px">${esc(fts)}</td>
+    <td style="font-size:11px">${fts}</td>
     <td class="mono">${dur}</td>
     <td class="mono">${r.step_count || 0}</td>
     <td><button class="view-btn" onclick="showDetail('${esc(r.run_id)}','${esc(agentId)}');event.stopPropagation()">View →</button></td>
@@ -1391,12 +1505,24 @@ function runRow(r) {
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
 function renderAlerts() {
-  // Group signals by failure_type
+  // Group signals by failure_type using filtered set
   const groups = {};
-  _allSigs.forEach(s => {
+  filteredSigs().forEach(s => {
     if (!groups[s.failure_type]) groups[s.failure_type] = [];
     groups[s.failure_type].push(s);
   });
+
+  // Filter out fully-acked groups
+  const ackedCount = Object.values(groups).filter(sigs => sigs.every(s => _ackedSignals.has(String(s.id)))).length;
+  Object.keys(groups).forEach(ft => {
+    if (groups[ft].every(s => _ackedSignals.has(String(s.id)))) delete groups[ft];
+  });
+
+  // Update acked UI
+  const ackedCountEl = document.getElementById('acked-count');
+  const unackBtn = document.getElementById('unack-btn');
+  if (ackedCountEl) ackedCountEl.textContent = ackedCount > 0 ? ackedCount + ' dismissed' : '';
+  if (unackBtn) unackBtn.style.display = ackedCount > 0 ? '' : 'none';
 
   const sorted = Object.entries(groups).sort((a, b) => {
     const sevOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
@@ -1407,6 +1533,7 @@ function renderAlerts() {
 
   if (!sorted.length) {
     document.getElementById('alerts-container').innerHTML = '<div class="loading">no signals yet</div>';
+    renderShadowSection();
     return;
   }
 
@@ -1419,6 +1546,7 @@ function renderAlerts() {
     const agentId  = sigs[0]?.agent_id || '';
     const open     = topS === 'CRITICAL' || topS === 'HIGH' ? ' open' : '';
     const wasted   = wastedTok(uniqRuns);
+    const sigIds   = sigs.map(s => s.id);
 
     const runItems = uniqRuns.slice(0, 6).map(rid => {
       const s  = sigs.filter(x => x.run_id === rid);
@@ -1443,6 +1571,7 @@ function renderAlerts() {
         <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--amber);margin-left:4px">~${fmtTok(wasted)} wasted</span>
         <span class="ag-time mono">${latStr}</span>
         <span class="ag-expand">${open ? 'collapse ↑' : 'expand ↓'}</span>
+        <button class="ack-btn" onclick="ackGroup(event,[${sigIds.join(',')}])">dismiss</button>
       </div>
       <div class="ag-runs${open}">${runItems}</div>
     </div>`;
@@ -1453,14 +1582,16 @@ function renderAlerts() {
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
 function renderAnalytics() {
-  const runTotal  = _agents.reduce((n, a) => n + (a.run_count     || 0), 0);
-  const sigTotal  = _agents.reduce((n, a) => n + (a.signal_count  || 0), 0);
-  const critTotal = _agents.reduce((n, a) => n + (a.critical_count || 0), 0);
+  const fSigs = filteredSigs();
+  const fRuns = filteredRuns();
+  const runTotal  = fRuns.length;
+  const sigTotal  = fSigs.length;
+  const critTotal = fSigs.filter(s => s.severity === 'CRITICAL').length;
   const rate      = runTotal ? (sigTotal / runTotal).toFixed(2) : '0.00';
 
   // Total wasted tokens: runs that have at least one live signal
-  const sigRunIds = new Set(_allSigs.map(s => s.run_id));
-  const totalWasted = _allRuns
+  const sigRunIds = new Set(fSigs.map(s => s.run_id));
+  const totalWasted = fRuns
     .filter(r => sigRunIds.has(r.run_id))
     .reduce((sum, r) => sum + tokEst(r.step_count), 0);
 
@@ -1472,19 +1603,17 @@ function renderAnalytics() {
   document.getElementById('analytics-agents-sub').textContent     = 'across ' + _agents.length + ' agent' + (_agents.length !== 1 ? 's' : '');
   updateCostSaved();
 
-  // Top patterns — per-type wasted tokens
+  // Top patterns — per-type wasted tokens (using filtered signals)
   const ftRunMap = {};   // ft → Set of run_ids
-  _allSigs.forEach(s => {
+  fSigs.forEach(s => {
     if (!ftRunMap[s.failure_type]) ftRunMap[s.failure_type] = new Set();
     ftRunMap[s.failure_type].add(s.run_id);
   });
   const ftMap = {};
-  _agents.forEach(a => {
-    Object.entries(a.failure_types || {}).forEach(([k, v]) => {
-      if (!ftMap[k]) ftMap[k] = { count: 0, agents: new Set() };
-      ftMap[k].count += v;
-      ftMap[k].agents.add(a.agent_id);
-    });
+  fSigs.forEach(s => {
+    if (!ftMap[s.failure_type]) ftMap[s.failure_type] = { count: 0, agents: new Set() };
+    ftMap[s.failure_type].count++;
+    if (s.agent_id) ftMap[s.failure_type].agents.add(s.agent_id);
   });
   const ptSorted = Object.entries(ftMap).sort((a, b) => b[1].count - a[1].count);
   document.getElementById('analytics-patterns-tbody').innerHTML = ptSorted.length
@@ -1499,20 +1628,22 @@ function renderAnalytics() {
       }).join('')
     : '<tr><td colspan="4" class="loading">no signals yet</td></tr>';
 
-  // Per-agent
+  // Per-agent (using filtered data per agent)
   document.getElementById('analytics-agents-tbody').innerHTML = _agents.length
     ? _agents.map(a => {
-        const top = Object.entries(a.failure_types || {}).sort((x,y) => y[1]-x[1])[0];
-        const agentSigRunIds = new Set((a._signals || []).map(s => s.run_id));
-        const agentWasted    = (a._runs || [])
+        const aFSigs = fSigs.filter(s => s.agent_id === a.agent_id);
+        const aFRuns = fRuns.filter(r => (r.agent_id || r._agentId) === a.agent_id);
+        const top = Object.entries(aFSigs.reduce((m, s) => { m[s.failure_type] = (m[s.failure_type]||0)+1; return m; }, {})).sort((x,y)=>y[1]-x[1])[0];
+        const agentSigRunIds = new Set(aFSigs.map(s => s.run_id));
+        const agentWasted    = aFRuns
           .filter(r => agentSigRunIds.has(r.run_id))
           .reduce((sum, r) => sum + tokEst(r.step_count), 0);
         return `<tr>
           <td>${esc(a.agent_id)}</td>
-          <td class="mono">${a.run_count || 0}</td>
-          <td class="mono">${a.signal_count || 0}</td>
-          <td class="mono" style="color:var(--red)">${a.critical_count || 0}</td>
-          <td class="mono" style="color:var(--orange)">${a.high_count || 0}</td>
+          <td class="mono">${aFRuns.length}</td>
+          <td class="mono">${aFSigs.length}</td>
+          <td class="mono" style="color:var(--red)">${aFSigs.filter(s=>s.severity==='CRITICAL').length}</td>
+          <td class="mono" style="color:var(--orange)">${aFSigs.filter(s=>s.severity==='HIGH').length}</td>
           <td class="mono" style="color:var(--amber)">${fmtTok(agentWasted)}</td>
           <td style="font-size:11px">${top ? ftLabel(top[0]) : '—'}</td>
         </tr>`;
@@ -1561,9 +1692,16 @@ function updateCostSaved() {
 
 // ── Heatmap ───────────────────────────────────────────────────────────────────
 function renderHeatmap() {
+  // Build per-agent per-failure-type counts from filteredSigs
+  const fSigs = filteredSigs();
+  const countMap = {};  // countMap[agent_id][failure_type] = n
+  fSigs.forEach(s => {
+    if (!countMap[s.agent_id]) countMap[s.agent_id] = {};
+    countMap[s.agent_id][s.failure_type] = (countMap[s.agent_id][s.failure_type] || 0) + 1;
+  });
+
   // rows = failure types, cols = agents
-  const ftSet = new Set();
-  _agents.forEach(a => Object.keys(a.failure_types || {}).forEach(k => ftSet.add(k)));
+  const ftSet = new Set(fSigs.map(s => s.failure_type));
   const fts = [...ftSet].sort();
 
   if (!fts.length || !_agents.length) {
@@ -1583,7 +1721,7 @@ function renderHeatmap() {
   fts.forEach(ft => {
     html += `<div class="hm-cell hm-label">${ftLabel(ft)}</div>`;
     visAgents.forEach(a => {
-      const v = (a.failure_types || {})[ft] || 0;
+      const v = (countMap[a.agent_id] || {})[ft] || 0;
       const cls = v === 0 ? 'hm-0' : v < 5 ? 'hm-1' : v < 10 ? 'hm-2' : v < 20 ? 'hm-3' : 'hm-4';
       const col = v >= 20 ? 'var(--red)' : v >= 10 ? 'var(--orange)' : v > 0 ? 'var(--amber)' : 'var(--chalk4)';
       html += `<div class="hm-cell ${cls}"><span style="color:${col};font-family:'IBM Plex Mono',monospace;font-size:12px">${v}</span></div>`;
@@ -1597,6 +1735,14 @@ function renderHeatmap() {
 async function showDetail(runId, agentId) {
   _curRunId   = runId;
   _curAgentId = agentId;
+
+  // Capture current page before navigating away (#3 back nav)
+  _prevPage = document.querySelector('.page.active')?.id?.replace('page-','') || 'overview';
+  const backBtn = document.getElementById('detail-back-btn');
+  if (backBtn) {
+    backBtn.textContent = '← back to ' + _prevPage;
+    backBtn.onclick = () => nav(_prevPage, document.querySelector('[onclick*="' + _prevPage + '"]'));
+  }
 
   nav('detail', null);
 
@@ -1648,7 +1794,7 @@ function renderRunDetail(run, events, signals) {
   // Header
   document.getElementById('detail-run-id').textContent =
     run.run_id + ' · ' + run.agent_id + ' · ' + started;
-  document.getElementById('detail-title').textContent  =
+  document.getElementById('detail-title').innerHTML  =
     fts.length ? fts.map(ftLabel).join(' + ') : 'Clean run — no signals fired';
 
   document.getElementById('detail-meta').innerHTML = [
@@ -1721,7 +1867,7 @@ function renderTimeline(events, signals) {
       ? (st.payload?.tool_name || 'tool').slice(0, 8)
       : isLLM ? 'LLM' : st.types[0]?.split('.')[0] || '?';
     const sub  = isLoop ? 'loop ⟳' : isFail ? 'failed' :
-      isLLM && st.payload?.prompt_tokens ? st.payload.prompt_tokens + ' tk' : '';
+      isLLM && st.payload?.prompt_tokens ? st.payload.prompt_tokens + ' tokens' : '';
     const badge = isLoop ? '<span class="loop-badge">⟳</span>' : '';
     const conn  = i < steps.length - 1
       ? `<div class="ts-connector${isLoop || isFail ? ' bad' : ''}"></div>` : '';
@@ -1898,8 +2044,11 @@ async function explainWithLangfuse() {
   }
 }
 
-function renderEventLog(events, startTs) {
-  const rows = events.map(e => {
+let _curEvents  = [];
+let _curStartTs = 0;
+
+function buildEventRows(events, startTs) {
+  return events.map(e => {
     const offset = startTs ? '+' + fmtDur(e.timestamp - startTs) : '';
     const p      = e.payload || {};
     const typeCls = e.event_type.startsWith('run.')  ? 'ev-type-run'  :
@@ -1923,8 +2072,28 @@ function renderEventLog(events, startTs) {
       <div class="ev-details" style="display:none">${kvs}</div>
     </div>`;
   }).join('');
+}
 
+function renderEventLog(events, startTs) {
+  _curEvents  = events;
+  _curStartTs = startTs;
+  const ef = document.getElementById('event-filter');
+  if (ef) ef.value = '';
+  const countEl = document.getElementById('event-filter-count');
+  if (countEl) countEl.textContent = '';
+  const rows = buildEventRows(events, startTs);
   document.getElementById('detail-event-rows').innerHTML = rows || '<div class="loading">no events</div>';
+}
+
+function filterEventLog(q) {
+  q = q.toLowerCase();
+  const filtered = q ? _curEvents.filter(e =>
+    String(e.step_index).includes(q) || e.event_type.toLowerCase().includes(q)
+  ) : _curEvents;
+  const countEl = document.getElementById('event-filter-count');
+  if (countEl) countEl.textContent = q ? `${filtered.length} / ${_curEvents.length}` : '';
+  const rows = buildEventRows(filtered, _curStartTs);
+  document.getElementById('detail-event-rows').innerHTML = rows || '<div class="loading">no matching events</div>';
 }
 
 // ── Run Graph (SVG) ───────────────────────────────────────────────────────────
@@ -1995,7 +2164,7 @@ function drawGraph() {
       : isTool ? (st.payload?.tool_name || 'tool').slice(0, 6)
       : isLLM  ? 'LLM' : '?';
 
-    const sub = isLLM && st.payload?.prompt_tokens ? st.payload.prompt_tokens + 'tk' : '';
+    const sub = isLLM && st.payload?.prompt_tokens ? st.payload.prompt_tokens + ' tokens' : '';
 
     // Alternate loop nodes up/down
     const yOff = (isLoop && i % 2 === 0) ? -60 : (isLoop && i % 2 === 1) ? 60 : 0;
@@ -2152,8 +2321,25 @@ function ftSev(ft) {
   return { label:'MED', bg:'var(--amber-d)', fg:'var(--amber)' };
 }
 
+const FT_DESCRIPTIONS = {
+  TOOL_LOOP:'Same tool called repeatedly with identical args — agent stuck in a loop',
+  CONTEXT_BLOAT:'Token count growing unsustainably — context window near limit',
+  RETRY_STORM:'Tool failure followed by repeated retries — hammering a broken tool',
+  CASCADING_TOOL_FAILURE:'Multiple tools failing in sequence — systemic tool layer issue',
+  GOAL_ABANDONMENT:'Agent stopped using tools before task completion',
+  PROMPT_INJECTION_SIGNAL:'Input matched injection patterns — potential adversarial content',
+  LLM_TRUNCATION_LOOP:'LLM output repeatedly truncated — hitting output length limits',
+  EMPTY_LLM_RESPONSE:'LLM returned empty output — model response failure',
+  SLOW_STEP:'Step latency exceeds threshold — performance degradation',
+  RAG_EMPTY_RETRIEVAL:'Retrieval returned no results — knowledge base gap',
+  STEP_COUNT_INFLATION:'Far more steps than baseline — inefficiency or runaway loop',
+  FIRST_STEP_FAILURE:'Failed on the very first step — likely config or setup issue',
+};
+
 function ftLabel(ft) {
-  return ft.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+  const label = ft.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+  const desc = FT_DESCRIPTIONS[ft] || '';
+  return desc ? `<span title="${desc.replace(/"/g,'&quot;')}">${label}</span>` : label;
 }
 
 function shortId(id) {
@@ -2180,7 +2366,10 @@ function esc(s) {
 }
 
 function copyRunId() {
-  if (_curRunId) navigator.clipboard?.writeText(_curRunId).catch(() => {});
+  if (!_curRunId) return;
+  navigator.clipboard?.writeText(_curRunId).catch(() => {});
+  const btn = document.getElementById('copy-run-btn');
+  if (btn) { btn.textContent = 'copied ✓'; setTimeout(() => { btn.textContent = 'copy ID'; }, 1500); }
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -2219,6 +2408,29 @@ function toggleEvent(wrap, evt) {
   if (!detail) return;
   const open = detail.style.display !== 'none';
   detail.style.display = open ? 'none' : 'grid';
+}
+
+// Shared helper: render a time axis under a 24-bar hourly chart.
+// axisEl     – the container div to populate
+// nowSec     – current unix timestamp in seconds
+// HOURS      – number of bars (24)
+// tickEvery  – show a label every N bars (default 4 = six labels across 24h)
+function renderHourAxis(axisEl, nowSec, HOURS, tickEvery) {
+  if (!axisEl) return;
+  tickEvery = tickEvery || 4;
+  axisEl.innerHTML = '';
+  const style = 'font-family:\'IBM Plex Mono\',monospace;font-size:9px;color:var(--chalk4);white-space:nowrap';
+  for (let i = 0; i < HOURS; i++) {
+    if (i % tickEvery !== 0 && i !== HOURS - 1) continue;
+    const hrsAgo = HOURS - 1 - i;
+    const d = new Date((nowSec - hrsAgo * 3600) * 1000);
+    const label = hrsAgo === 0 ? 'now'
+      : d.getUTCHours().toString().padStart(2, '0') + ':00';
+    const span = document.createElement('span');
+    span.style.cssText = style;
+    span.textContent = label;
+    axisEl.appendChild(span);
+  }
 }
 
 // ── Risk trend chart ─────────────────────────────────────────────────────────
@@ -2273,14 +2485,14 @@ function renderRiskTrend() {
     bar.style.cssText = `flex:1;height:${h}px;background:${bg};border:1px solid ${border};border-radius:${radius};transition:height .4s${outline}`;
 
     const hrsAgo = HOURS - 1 - i;
-    const labelTime = hrsAgo === 0 ? 'now' : ('-' + hrsAgo + 'h');
     const d = new Date((now - hrsAgo * 3600) * 1000);
     const hhmm = d.getUTCHours().toString().padStart(2, '0') + ':00';
-    bar.title = hhmm + ' (' + labelTime + '): ' + count + ' signal' + (count !== 1 ? 's' : '');
+    bar.title = hhmm + ': ' + count + ' signal' + (count !== 1 ? 's' : '');
 
     barsEl.appendChild(bar);
   });
 
+  renderHourAxis(axisEl, now, HOURS);
 }
 
 // ── Trend deltas ──────────────────────────────────────────────────────────────
@@ -2335,7 +2547,21 @@ function renderAgents() {
     grid.innerHTML = '<div class="loading">no agents yet</div>';
     return;
   }
-  grid.innerHTML = _agents.map(a => {
+  const sorted = [..._agents].sort((a, b) => {
+    if (_agentSort === 'health') {
+      const ha = _healthScores[a.agent_id]?.score ?? -1;
+      const hb = _healthScores[b.agent_id]?.score ?? -1;
+      return hb - ha;
+    }
+    if (_agentSort === 'failrate') {
+      const fa = a._runs?.length ? a._runs.filter(r=>r.has_signals).length / a._runs.length : 0;
+      const fb = b._runs?.length ? b._runs.filter(r=>r.has_signals).length / b._runs.length : 0;
+      return fb - fa;
+    }
+    if (_agentSort === 'lastseen') return (b.last_seen || 0) - (a.last_seen || 0);
+    return 0;
+  });
+  grid.innerHTML = sorted.map(a => {
     const totalRuns = a.run_count || a._runs?.length || 0;
     const failRuns  = a._runs ? a._runs.filter(r => r.has_signals).length : 0;
     const failRate  = totalRuns ? Math.round(failRuns / totalRuns * 100) : 0;
@@ -2350,7 +2576,7 @@ function renderAgents() {
     const hsTip     = hs?.components ? Object.entries(hs.components).map(([k,v]) =>
       `${k}: ${v.score}/${v.max}`).join(' | ') : '';
 
-    return `<div class="agent-card" onclick="nav('runs',document.querySelector('[onclick*=runs]'))">
+    return `<div class="agent-card" onclick="openAgentDetail('${esc(a.agent_id)}')" title="Click to filter runs by this agent">
       <div class="ac-top-bar" style="background:${color}"></div>
       <div class="ac-header">
         <div style="min-width:0">
@@ -2587,10 +2813,10 @@ const TK_PER_STEP    = 250;    // rough estimate: tokens consumed per agent step
 const COST_PER_1M_TK = 10.00;  // $ per 1M tokens (~$0.010/1k, blended mid-tier model)
 function tokEst(stepCount) { return (stepCount || 0) * TK_PER_STEP; }
 function fmtTok(n) {
-  if (!n) return '0 tk';
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M tk';
-  if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k tk';
-  return n + ' tk';
+  if (!n) return '0 tokens';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M tokens';
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k tokens';
+  return n + ' tokens';
 }
 function fmtCost(tokens) {
   const dollars = tokens / 1_000_000 * COST_PER_1M_TK;
@@ -2663,7 +2889,7 @@ function renderDriftPanel() {
     if (trigEl) trigEl.textContent = fmtTok(Math.round(baseline24h * 1.2));
   } else {
     if (deltaEl) deltaEl.innerHTML = '<span style="color:var(--chalk4)">no wasted-token data yet</span>';
-    if (curEl)   curEl.textContent  = '0 tk';
+    if (curEl)   curEl.textContent  = '0 tokens';
     if (baseEl)  baseEl.textContent = '—';
     if (trigEl)  trigEl.textContent = '—';
     if (badgeEl) { badgeEl.className = 'posture-badge ok'; badgeEl.textContent = 'NORMAL'; }
@@ -2686,7 +2912,7 @@ function renderDriftPanel() {
       : isAbove ? `rgba(229,62,62,${isCur ? '1' : '0.7'})`
       : `rgba(46,184,114,${isCur ? '0.9' : '0.55'})`;
     const bar = document.createElement('div');
-    bar.title = fmtTok(waste) + ' wasted this hour';
+    bar.title = fmtTok(waste) + ' wasted';
     bar.style.cssText = `flex:1;height:${h}px;background:${bg};border:1px solid ${brd};border-radius:2px 2px 0 0;transition:height .4s`;
     barsEl.appendChild(bar);
   });
@@ -2697,6 +2923,8 @@ function renderDriftPanel() {
     lineEl.style.display = 'block';
     lineEl.style.bottom  = pxFromBottom + 'px';
   }
+
+  renderHourAxis(document.getElementById('drift-axis'), now, HOURS);
 }
 
 // ── Failure posture gauge ──────────────────────────────────────────────────────
@@ -2768,7 +2996,7 @@ function renderTopDrivers() {
       <div class="driver-bar" style="background:${color}"></div>
       <span class="driver-rank">${i + 1}</span>
       <div class="driver-info">
-        <div class="driver-name" title="${esc(g.agent)} · ${esc(g.ft)}">${esc(g.agent)} · ${esc(ftLabel(g.ft))}</div>
+        <div class="driver-name" title="${esc(g.agent)} · ${esc(g.ft)}">${esc(g.agent)} · ${ftLabel(g.ft)}</div>
         <div class="driver-meta">${g.sigs.length} signals · ~${fmtTok(wastedTks)} wasted · ${runIds.length} run${runIds.length !== 1 ? 's' : ''}</div>
       </div>
       <div class="driver-right">
@@ -3112,6 +3340,134 @@ function fillExample(trigger, operator, value, action, param) {
   if (!document.getElementById('pf-name').value)
     document.getElementById('pf-name').value = names[trigger] || `${trigger} policy`;
   updatePolicyFormHints();
+}
+
+// ── Global search (#1) ────────────────────────────────────────────────────────
+function runSearch(q) {
+  const dropdown = document.getElementById('search-dropdown');
+  if (!q || !q.trim()) { dropdown.style.display = 'none'; return; }
+  const lq = q.toLowerCase();
+  const results = [];
+  const seenAgents = new Set();
+
+  // Match runs by run_id or agent_id
+  _allRuns.forEach(r => {
+    if (results.length >= 8) return;
+    const agentId = r.agent_id || r._agentId || '';
+    if (r.run_id.toLowerCase().includes(lq)) {
+      results.push({ tag: 'RUN', label: shortId(r.run_id) + ' · ' + esc(agentId), action: `showDetail('${esc(r.run_id)}','${esc(agentId)}')` });
+    } else if (agentId.toLowerCase().includes(lq) && !seenAgents.has(agentId)) {
+      seenAgents.add(agentId);
+      results.push({ tag: 'AGENT', label: esc(agentId), action: `openAgentDetail('${esc(agentId)}')` });
+    }
+  });
+
+  // Match failure types in signals
+  const ftSeen = new Set();
+  _allSigs.forEach(s => {
+    if (results.length >= 8) return;
+    if (!ftSeen.has(s.failure_type) && s.failure_type.toLowerCase().replace(/_/g,' ').includes(lq)) {
+      ftSeen.add(s.failure_type);
+      const agentId = s.agent_id || '';
+      results.push({ tag: 'FAILURE', label: s.failure_type.replace(/_/g,' ').toLowerCase(), action: `nav('alerts',document.querySelector('[onclick*=alerts]'))` });
+    }
+  });
+
+  if (!results.length) { dropdown.style.display = 'none'; return; }
+
+  dropdown.innerHTML = results.slice(0, 8).map(r =>
+    `<div class="search-item" onclick="${r.action}; closeSearch()">
+      <span class="search-item-tag">${r.tag}</span>
+      <span>${r.label}</span>
+    </div>`
+  ).join('');
+  dropdown.style.display = 'block';
+}
+
+function closeSearch() {
+  const dropdown = document.getElementById('search-dropdown');
+  if (dropdown) dropdown.style.display = 'none';
+}
+
+// ── Global period selector (#4) ────────────────────────────────────────────────
+function setGlobalPeriod(p) {
+  _globalPeriod = p;
+  document.querySelectorAll('.gp-btn').forEach(b => b.classList.toggle('gp-btn-active', b.dataset.p === p));
+  renderAlerts();
+  renderAnalytics();
+  renderHeatmap();
+}
+
+function getSigCutoff() {
+  const now = Date.now() / 1000;
+  if (_globalPeriod === '1d')  return now - 86400;
+  if (_globalPeriod === '7d')  return now - 604800;
+  if (_globalPeriod === '30d') return now - 2592000;
+  return 0;
+}
+
+function filteredSigs() {
+  const c = getSigCutoff();
+  return c ? _allSigs.filter(s => s.detected_at >= c) : _allSigs;
+}
+
+function filteredRuns() {
+  const c = getSigCutoff();
+  return c ? _allRuns.filter(r => r.started_at >= c) : _allRuns;
+}
+
+// ── Runs search/filter (#5) ────────────────────────────────────────────────────
+function setRunsSearch(v)     { _runsSearch     = v.toLowerCase(); renderRuns(); }
+function setRunsSevFilter(v)  { _runsSevFilter  = v; renderRuns(); }
+function setRunsAgentFilter(v){ _runsAgentFilter = v; renderRuns(); }
+
+function populateRunsAgentDropdown() {
+  const sel = document.getElementById('runs-agent');
+  if (!sel) return;
+  const agents = [...new Set(_allRuns.map(r => r.agent_id || r._agentId).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">All agents</option>' + agents.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
+}
+
+// ── Signal acknowledgment (#7) ─────────────────────────────────────────────────
+function ackGroup(event, ids) {
+  event.stopPropagation();
+  ids.forEach(id => _ackedSignals.add(String(id)));
+  localStorage.setItem('dt_acked', JSON.stringify([..._ackedSignals]));
+  renderAlerts();
+}
+
+function ackSignal(sigId, btn) {
+  _ackedSignals.add(String(sigId));
+  localStorage.setItem('dt_acked', JSON.stringify([..._ackedSignals]));
+  renderAlerts();
+}
+
+function unackAll() {
+  _ackedSignals.clear();
+  localStorage.removeItem('dt_acked');
+  renderAlerts();
+}
+
+// ── Agent sort (#8) ────────────────────────────────────────────────────────────
+function setAgentSort(key) {
+  _agentSort = key;
+  ['health','failrate','lastseen'].forEach(k => {
+    const el = document.getElementById('sort-' + k);
+    if (el) el.className = 'filter-btn' + (k === key ? ' filter-btn-active' : '');
+  });
+  renderAgents();
+}
+
+// ── Agent drill-down (#1 #9) ───────────────────────────────────────────────────
+function openAgentDetail(agentId) {
+  if (!agentId) return;
+  // Navigate to runs page filtered to this agent
+  nav('runs', document.querySelector('[onclick*=runs]'));
+  // Pre-set the agent filter and re-render
+  _runsAgentFilter = agentId;
+  const sel = document.getElementById('runs-agent');
+  if (sel) sel.value = agentId;
+  renderRuns();
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────

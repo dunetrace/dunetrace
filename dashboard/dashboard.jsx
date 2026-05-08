@@ -98,6 +98,143 @@ function Sparkline({ values, color, w = 80, h = 24 }) {
   );
 }
 
+const DETECTOR_COLORS = [
+  C.orange, C.blue, C.red, C.green, C.yellow, C.purple,
+  "#06B6D4", "#F97316", "#8B5CF6", "#EC4899",
+];
+
+function DeployTimeline({ failureRates, deployEvents }) {
+  if (!failureRates || failureRates.length === 0) return null;
+
+  const W = 620, H = 160, PAD_L = 36, PAD_R = 12, PAD_T = 12, PAD_B = 28;
+  const plotW = W - PAD_L - PAD_R;
+  const plotH = H - PAD_T - PAD_B;
+
+  // Build sorted day list (last 30 days)
+  const daySet = new Set(failureRates.map(r => r.day));
+  const days   = Array.from(daySet).sort();
+  if (days.length < 2) return null;
+
+  const dayIdx = Object.fromEntries(days.map((d, i) => [d, i]));
+  const xOf    = i => PAD_L + (i / (days.length - 1)) * plotW;
+
+  // Group by failure_type
+  const byType = {};
+  failureRates.forEach(r => {
+    if (!byType[r.failure_type]) byType[r.failure_type] = {};
+    byType[r.failure_type][r.day] = r.rate;
+  });
+  const types = Object.keys(byType);
+
+  // y scale: 0..maxRate, min ceiling 0.2
+  const maxRate = Math.max(0.2, ...failureRates.map(r => r.rate));
+  const yOf     = rate => PAD_T + plotH - (rate / maxRate) * plotH;
+
+  // Deploy event x positions (clamp to day range)
+  const dayTs  = days.map(d => new Date(d).getTime());
+  const minTs  = dayTs[0], maxTs = dayTs[dayTs.length - 1];
+  const deploys = (deployEvents || []).filter(d => {
+    const ts = d.deployed_at * 1000;
+    return ts >= minTs - 86400000 && ts <= maxTs + 86400000;
+  });
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.15em", marginBottom: 8 }}>
+        DETECTOR TIMELINE — failure rate per day
+        {deploys.length > 0 && (
+          <span style={{ marginLeft: 10, color: "#60A5FA" }}>
+            ┊ deploy markers
+          </span>
+        )}
+      </div>
+      <svg width={W} height={H} style={{ display: "block", overflow: "visible" }}>
+        {/* y-axis grid lines */}
+        {[0, 0.25, 0.5, 0.75, 1].map(f => {
+          const rate = maxRate * f;
+          const y    = yOf(rate);
+          return (
+            <g key={f}>
+              <line x1={PAD_L} y1={y} x2={W - PAD_R} y2={y}
+                stroke={C.border} strokeWidth="0.5" strokeDasharray="3,3" />
+              <text x={PAD_L - 4} y={y + 3} textAnchor="end"
+                fontSize="7" fill={C.textD} fontFamily="monospace">
+                {Math.round(rate * 100)}%
+              </text>
+            </g>
+          );
+        })}
+
+        {/* detector rate lines */}
+        {types.map((ft, ti) => {
+          const color = DETECTOR_COLORS[ti % DETECTOR_COLORS.length];
+          const pts   = days
+            .map((d, i) => {
+              const r = byType[ft][d];
+              return r != null ? `${xOf(i)},${yOf(r)}` : null;
+            })
+            .filter(Boolean);
+          if (pts.length < 2) return null;
+          return (
+            <polyline key={ft} points={pts.join(" ")}
+              fill="none" stroke={color} strokeWidth="1.5"
+              strokeLinejoin="round" strokeLinecap="round" opacity="0.85" />
+          );
+        })}
+
+        {/* deploy marker lines */}
+        {deploys.map((dep, di) => {
+          const ts  = dep.deployed_at * 1000;
+          const frac = Math.max(0, Math.min(1, (ts - minTs) / (maxTs - minTs)));
+          const x    = PAD_L + frac * plotW;
+          return (
+            <g key={dep.id}>
+              <line x1={x} y1={PAD_T} x2={x} y2={H - PAD_B}
+                stroke="#60A5FA" strokeWidth="1.5" strokeDasharray="4,3" opacity="0.8" />
+              <text x={x + 3} y={PAD_T + 9} fontSize="7" fill="#60A5FA"
+                fontFamily="monospace" style={{ pointerEvents: "none" }}>
+                {dep.version}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* x-axis day labels — show ~5 evenly spaced */}
+        {days.filter((_, i) => {
+          const step = Math.max(1, Math.floor(days.length / 5));
+          return i % step === 0 || i === days.length - 1;
+        }).map((d, _, arr) => {
+          const i = dayIdx[d];
+          return (
+            <text key={d} x={xOf(i)} y={H - 4} textAnchor="middle"
+              fontSize="7" fill={C.textD} fontFamily="monospace">
+              {d.slice(5)}
+            </text>
+          );
+        })}
+      </svg>
+
+      {/* legend */}
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 6 }}>
+        {types.map((ft, ti) => (
+          <div key={ft} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <div style={{ width: 16, height: 2, background: DETECTOR_COLORS[ti % DETECTOR_COLORS.length], borderRadius: 1 }} />
+            <span style={{ fontSize: 8, color: C.textD, fontFamily: "monospace" }}>
+              {ft.replace(/_/g, " ")}
+            </span>
+          </div>
+        ))}
+        {deploys.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <div style={{ width: 16, height: 2, background: "#60A5FA", borderRadius: 1, borderTop: "1px dashed #60A5FA" }} />
+            <span style={{ fontSize: 8, color: "#60A5FA", fontFamily: "monospace" }}>deploy</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function HeatCell({ runs, date, selected, onClick }) {
   const s         = dayStats(runs);
   const intensity = Math.min(1, runs.length / 30);
@@ -801,6 +938,10 @@ function Dashboard() {
                       );
                     })}
                   </div>
+                  <DeployTimeline
+                    failureRates={insights.failure_rates || []}
+                    deployEvents={insights.deploy_events || []}
+                  />
                 </div>
               )}
 

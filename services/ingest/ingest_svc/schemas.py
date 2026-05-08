@@ -59,6 +59,20 @@ class IngestResponse(BaseModel):
     queued_at: float = Field(default_factory=time.time)
 
 
+class DeployRequest(BaseModel):
+    api_key:  str            = Field(default="")
+    agent_id: str            = Field(min_length=1)
+    version:  str            = Field(min_length=1)
+    meta:     Dict[str, Any] = Field(default_factory=dict)
+
+
+class DeployResponse(BaseModel):
+    id:          int
+    agent_id:    str
+    version:     str
+    deployed_at: float = Field(default_factory=time.time)
+
+
 class HealthResponse(BaseModel):
     status:  str = "ok"
     version: str = "0.1.0"

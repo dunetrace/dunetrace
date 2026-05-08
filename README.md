@@ -106,6 +106,23 @@ If you are running Langfuse alongside Dunetrace, click **Explain +** on any sign
 
 ---
 
+## Deploy markers
+
+Correlate failure spikes with releases. Call `mark_deploy()` from your CI/CD pipeline or at application startup:
+
+```python
+dt = Dunetrace(api_key="dt_live_...")
+
+# In your deploy script or startup hook
+dt.mark_deploy("my-agent", version="v1.4.2", commit="abc1234", env="production")
+```
+
+The dashboard overlays blue dashed vertical lines at each deploy boundary on the 30-day detector timeline, so you can immediately see whether a spike in `TOOL_LOOP` or any other failure type started before or after a release.
+
+The call is fire-and-forget — it runs on a background thread and never blocks the caller. No pipeline access is required; it also works with `dt.mark_deploy()` at the top of `app.py`.
+
+---
+
 ## Policies
 
 Runtime guardrails that fire mid-run — before a failure propagates. Define a condition and an action; the SDK evaluates it after every tool call and LLM response.

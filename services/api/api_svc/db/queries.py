@@ -23,6 +23,10 @@ _pool = None
 
 # ── Pool lifecycle ─────────────────────────────────────────────────────────────
 
+_MIGRATIONS_DDL = """
+ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS co_signal_count INTEGER NOT NULL DEFAULT 0;
+"""
+
 _FIXES_DDL = """
 CREATE TABLE IF NOT EXISTS fixes (
     id                    BIGSERIAL PRIMARY KEY,
@@ -66,6 +70,7 @@ async def init_pool() -> None:
         command_timeout=15,
     )
     async with _pool.acquire() as conn:
+        await conn.execute(_MIGRATIONS_DDL)
         await conn.execute(_FIXES_DDL)
         await conn.execute(_POLICIES_DDL)
     logger.info("DB pool ready")
@@ -944,6 +949,48 @@ async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -
             "first_seen":    _ts(r["first_seen"]),
             "last_seen":     _ts(r["last_seen"]),
             "is_systemic":   float(r["rate"] or 0) >= rate_threshold,
+        }
+        for r in rows
+    ]
+
+
+async def agent_deploy_events(agent_id: str) -> list:
+    """Deploy markers for an agent over the last 90 days.
+    Returns: [{id, version, deployed_at (unix float), meta}]."""
+    import json as _json
+
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, version, deployed_at, meta
+            FROM deploy_events
+            WHERE agent_id = $1
+              AND deployed_at >= NOW() - INTERVAL '90 days'
+            ORDER BY deployed_at ASC
+            """,
+            agent_id,
+        )
+
+    def _ts(v):
+        if v is None:
+            return None
+        return v.timestamp() if hasattr(v, "timestamp") else float(v)
+
+    def _meta(v):
+        if not v:
+            return {}
+        if isinstance(v, str):
+            return _json.loads(v)
+        return dict(v)
+
+    return [
+        {
+            "id":          int(r["id"]),
+            "version":     r["version"],
+            "deployed_at": _ts(r["deployed_at"]),
+            "meta":        _meta(r["meta"]),
         }
         for r in rows
     ]

@@ -7,8 +7,9 @@ import logging
 import uuid
 from fastapi import APIRouter, HTTPException, Query, status, BackgroundTasks
 
-from ingest_svc.db import insert_events, verify_api_key, fetch_policies
-from ingest_svc.schemas import IngestRequest, IngestResponse
+import time
+from ingest_svc.db import insert_events, insert_deploy_event, verify_api_key, fetch_policies
+from ingest_svc.schemas import IngestRequest, IngestResponse, DeployRequest, DeployResponse
 
 logger = logging.getLogger("dunetrace.ingest")
 router = APIRouter()
@@ -63,6 +64,29 @@ async def get_policies(
         raise HTTPException(status_code=401, detail="Invalid API key")
     policies = await fetch_policies(agent_id)
     return {"policies": policies}
+
+
+@router.post(
+    "/v1/deploy",
+    response_model=DeployResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Record a deploy marker for an agent",
+)
+async def mark_deploy(body: DeployRequest) -> DeployResponse:
+    agent_id = await verify_api_key(body.api_key)
+    if agent_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or inactive API key",
+        )
+    row_id = await insert_deploy_event(agent_id, body.version, body.meta)
+    logger.info("Deploy marked. agent_id=%s version=%s id=%d", agent_id, body.version, row_id)
+    return DeployResponse(
+        id=row_id,
+        agent_id=agent_id,
+        version=body.version,
+        deployed_at=time.time(),
+    )
 
 
 async def _persist(events: list, batch_id: str, agent_id: str) -> None:

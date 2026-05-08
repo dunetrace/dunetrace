@@ -538,6 +538,56 @@ class Dunetrace:
             return _wrap(fn, _tool_name or fn.__name__)
         return decorator
 
+    def mark_deploy(
+        self,
+        agent_id: str,
+        version:  str,
+        **meta,
+    ) -> None:
+        """
+        Record a deploy marker for ``agent_id`` at the current timestamp.
+
+        Call this from your CI/CD pipeline or at application startup to annotate
+        the detector timeline with release boundaries.
+
+        Usage::
+
+            dt.mark_deploy("my-agent", version="v1.4.2", env="production")
+            dt.mark_deploy("my-agent", version="v1.4.2", commit="abc1234")
+
+        The call is fire-and-forget — it runs on a background thread so it never
+        blocks the caller. Errors are logged at WARNING level and silently dropped.
+        """
+        if not self._ingest_url:
+            return
+        Thread(
+            target=self._ship_deploy,
+            args=(agent_id, version, dict(meta)),
+            daemon=True,
+            name="dunetrace-deploy",
+        ).start()
+
+    def _ship_deploy(self, agent_id: str, version: str, meta: dict) -> None:
+        base    = self._ingest_url.replace("/v1/ingest", "")
+        payload = json.dumps({
+            "api_key":  self._api_key,
+            "agent_id": agent_id,
+            "version":  version,
+            "meta":     meta,
+        }).encode()
+        req = urllib.request.Request(
+            base + "/v1/deploy",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                logger.debug("Deploy marked. agent_id=%s version=%s status=%d",
+                             agent_id, version, resp.status)
+        except Exception as exc:
+            logger.warning("mark_deploy failed: %s", exc)
+
     def flush(self, *, block: bool = False, timeout: float = 5.0) -> None:
         """Wake the drain thread to ship buffered events immediately.
 

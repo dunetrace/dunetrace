@@ -4,6 +4,7 @@ from .postgres import (
     ensure_schema,
     fetch_policies,
     init_pool,
+    insert_deploy_event,
     insert_events,
     verify_api_key,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "check_db",
     "ensure_schema",
     "fetch_policies",
+    "insert_deploy_event",
     "insert_events",
     "verify_api_key",
 ]

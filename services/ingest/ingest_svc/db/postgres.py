@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS failure_signals (
 CREATE INDEX IF NOT EXISTS idx_signals_agent     ON failure_signals(agent_id, detected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_unalerted ON failure_signals(alerted) WHERE alerted = FALSE;
 
+ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS co_signal_count INTEGER NOT NULL DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS api_keys (
     key         TEXT PRIMARY KEY,
     agent_id    TEXT        NOT NULL,
@@ -125,6 +127,15 @@ CREATE TABLE IF NOT EXISTS policies (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
+
+CREATE TABLE IF NOT EXISTS deploy_events (
+    id           BIGSERIAL PRIMARY KEY,
+    agent_id     TEXT        NOT NULL,
+    version      TEXT        NOT NULL,
+    deployed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    meta         JSONB       NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_deploys_agent ON deploy_events(agent_id, deployed_at DESC);
 """
 
 
@@ -174,6 +185,27 @@ async def insert_events(events: list, batch_id: str) -> int:
         return len(rows)
     except Exception as exc:
         logger.error("insert_events failed: %s", exc)
+        return 0
+
+
+async def insert_deploy_event(agent_id: str, version: str, meta: dict) -> int:
+    """Insert a deploy marker. Returns the new row id, or 0 on failure."""
+    if not _pool:
+        return 0
+    import json as _json
+    try:
+        async with _pool.acquire() as conn:
+            row_id = await conn.fetchval(
+                """
+                INSERT INTO deploy_events (agent_id, version, meta)
+                VALUES ($1, $2, $3::jsonb)
+                RETURNING id
+                """,
+                agent_id, version, _json.dumps(meta),
+            )
+        return int(row_id)
+    except Exception as exc:
+        logger.error("insert_deploy_event failed: %s", exc)
         return 0
 
 
