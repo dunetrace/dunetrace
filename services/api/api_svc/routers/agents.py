@@ -64,12 +64,13 @@ async def get_health_score(
     Composite health score derived from the last 30 days of run data.
 
     Components:
-    - **failure_rate** (0–40 pts): proportion of runs with any signal
-    - **loop_avoidance** (0–25 pts): proportion of runs free of looping signals
-    - **token_efficiency** (0–20 pts): avg prompt tokens (lower = better)
-    - **latency** (0–15 pts): avg LLM latency in ms (lower = better)
+    - **failure_rate** (0–40 pts): proportion of runs with any signal — active from run 1
+    - **loop_avoidance** (0–25 pts): proportion of runs free of looping signals — active from run 1
+    - **token_efficiency** (0–20 pts): scored relative to agent's own P75 baseline once ≥ 30 runs exist; neutral (15 pts) until then
+    - **latency** (0–15 pts): scored relative to agent's own P75 baseline once ≥ 30 runs exist; neutral (10 pts) until then
 
     Returns `score: null` when fewer than 3 sample runs are available.
+    `baseline_ready: false` when fewer than 30 runs — token and latency components are held at neutral.
     """
     result = await get_agent_health_score(agent_id)
     return AgentHealthScore(agent_id=agent_id, **result)

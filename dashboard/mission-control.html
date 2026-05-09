@@ -546,7 +546,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 .search-item-tag{font-size:9px;padding:2px 6px;border-radius:2px;background:var(--s3);color:var(--chalk4);flex-shrink:0}
 
 /* ── GLOBAL PERIOD BAR ── */
-.gp-bar{display:flex;gap:3px;margin-right:12px}
+.gp-bar{display:flex;gap:3px}
 .gp-btn{font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:.5px;padding:3px 8px;border-radius:3px;border:1px solid var(--wire);background:transparent;color:var(--chalk4);cursor:pointer;transition:all .15s}
 .gp-btn:hover{color:var(--chalk2);border-color:var(--chalk4)}
 .gp-btn-active{background:var(--s2);color:var(--chalk2);border-color:var(--chalk3)}
@@ -593,12 +593,6 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div id="search-dropdown" class="search-dropdown" style="display:none"></div>
   </div>
   <div class="top-right">
-    <div class="gp-bar">
-      <button class="gp-btn" data-p="1d" onclick="setGlobalPeriod('1d')">1D</button>
-      <button class="gp-btn gp-btn-active" data-p="7d" onclick="setGlobalPeriod('7d')">7D</button>
-      <button class="gp-btn" data-p="30d" onclick="setGlobalPeriod('30d')">30D</button>
-      <button class="gp-btn" data-p="all" onclick="setGlobalPeriod('all')">All</button>
-    </div>
     <div class="live-badge"><div class="live-dot"></div>LIVE</div>
     <div class="top-time mono" id="clock">00:00:00 UTC</div>
   </div>
@@ -955,7 +949,15 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <div id="page-alerts" class="page">
   <div class="sec-head">
     <span class="sec-title">Active signals — grouped by failure type</span>
-    <div style="display:flex;gap:8px;align-items:center"><span style="font-size:11px;color:var(--chalk4)" id="acked-count"></span><button class="filter-btn" onclick="unackAll()" id="unack-btn" style="display:none">restore all</button></div>
+    <div style="display:flex;gap:12px;align-items:center">
+      <div class="gp-bar">
+        <button class="gp-btn" data-p="1d" onclick="setGlobalPeriod('1d')">1D</button>
+        <button class="gp-btn gp-btn-active" data-p="7d" onclick="setGlobalPeriod('7d')">7D</button>
+        <button class="gp-btn" data-p="30d" onclick="setGlobalPeriod('30d')">30D</button>
+        <button class="gp-btn" data-p="all" onclick="setGlobalPeriod('all')">All</button>
+      </div>
+      <span style="font-size:11px;color:var(--chalk4)" id="acked-count"></span><button class="filter-btn" onclick="unackAll()" id="unack-btn" style="display:none">restore all</button>
+    </div>
   </div>
   <div id="alerts-container">
     <div class="loading">loading…</div>
@@ -964,6 +966,15 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- ── ANALYTICS PAGE ── -->
 <div id="page-analytics" class="page">
+  <div class="sec-head" style="margin-bottom:1.5rem">
+    <span class="sec-title">Analytics</span>
+    <div class="gp-bar">
+      <button class="gp-btn" data-p="1d" onclick="setGlobalPeriod('1d')">1D</button>
+      <button class="gp-btn gp-btn-active" data-p="7d" onclick="setGlobalPeriod('7d')">7D</button>
+      <button class="gp-btn" data-p="30d" onclick="setGlobalPeriod('30d')">30D</button>
+      <button class="gp-btn" data-p="all" onclick="setGlobalPeriod('all')">All</button>
+    </div>
+  </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem">
     <div class="cost-banner">
       <div><div class="cb-val" id="analytics-runs">—</div></div>
@@ -1036,7 +1047,15 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- ── HEATMAP PAGE ── -->
 <div id="page-heatmap" class="page">
-  <div class="sec-head"><span class="sec-title">Risk heatmap — failure type × agent</span></div>
+  <div class="sec-head">
+    <span class="sec-title">Risk heatmap — failure type × agent</span>
+    <div class="gp-bar">
+      <button class="gp-btn" data-p="1d" onclick="setGlobalPeriod('1d')">1D</button>
+      <button class="gp-btn gp-btn-active" data-p="7d" onclick="setGlobalPeriod('7d')">7D</button>
+      <button class="gp-btn" data-p="30d" onclick="setGlobalPeriod('30d')">30D</button>
+      <button class="gp-btn" data-p="all" onclick="setGlobalPeriod('all')">All</button>
+    </div>
+  </div>
   <div class="table-card" style="padding:1.25rem">
     <div id="heatmap-grid-wrap">
       <div class="loading">loading…</div>
@@ -2569,12 +2588,16 @@ function renderAgents() {
     const lastSeen  = a.last_seen ? timeAgo(a.last_seen) : '—';
     const color     = failRate >= 50 ? 'var(--red)' : failRate >= 25 ? 'var(--amber)' : failRate >= 10 ? 'var(--orange)' : 'var(--green)';
     const shadowCnt = a._shadowSignals?.length || 0;
-    const hs        = _healthScores[a.agent_id];
-    const hsScore   = hs?.score ?? null;
-    const hsColor   = healthColor(hsScore);
-    const hsPct     = hsScore !== null ? Math.round(hsScore) : null;
-    const hsTip     = hs?.components ? Object.entries(hs.components).map(([k,v]) =>
-      `${k}: ${v.score}/${v.max}`).join(' | ') : '';
+    const hs             = _healthScores[a.agent_id];
+    const hsScore        = hs?.score ?? null;
+    const hsColor        = healthColor(hsScore);
+    const hsPct          = hsScore !== null ? Math.round(hsScore) : null;
+    const baselineReady  = hs?.baseline_ready ?? true;
+    const sampleRuns     = hs?.sample_runs ?? totalRuns;
+    const hsTip          = hs?.components ? Object.entries(hs.components).map(([k,v]) => {
+      const base = v.baseline != null ? ` (baseline ${v.baseline})` : '';
+      return `${k}: ${v.score}/${v.max}  val=${v.value ?? '—'}${base}`;
+    }).join('\n') : '';
 
     return `<div class="agent-card" onclick="openAgentDetail('${esc(a.agent_id)}')" title="Click to filter runs by this agent">
       <div class="ac-top-bar" style="background:${color}"></div>
@@ -2604,6 +2627,9 @@ function renderAgents() {
           <div class="ac-stat-lbl">High</div>
         </div>
       </div>
+      ${!baselineReady && hsPct !== null ? `<div style="margin-top:.6rem;font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);line-height:1.5;border-top:1px solid var(--wire);padding-top:.5rem">
+        Health score based on detector signals only —<br>baseline calibrating (${sampleRuns}/30 runs)
+      </div>` : ''}
       ${shadowCnt ? `<div style="margin-top:.75rem;display:flex;align-items:center;gap:6px">
         <span class="shadow-badge">SHADOW</span>
         <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)">${shadowCnt} ungraduated signal${shadowCnt!==1?'s':''}</span>

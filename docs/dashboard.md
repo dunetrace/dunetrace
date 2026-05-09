@@ -10,7 +10,7 @@ The Mission Control dashboard is a live, API-driven single-page app served at **
 A search bar in the topbar matches run IDs, agent names, and failure types across all loaded data. Results are tagged **RUN** / **AGENT** / **FAILURE** and clicking any result navigates directly to the relevant page or run detail.
 
 ### Time range selector
-Four buttons in the topbar — **1D / 7D / 30D / All** — set a global time window that filters the Alerts, Analytics, and Heatmap pages simultaneously. Defaults to 7D.
+**1D / 7D / 30D / All** buttons appear in the header of the **Alerts**, **Analytics**, and **Heatmap** pages. Selecting a period on any of these pages updates all three simultaneously. Defaults to 7D.
 
 ### Back navigation
 The run detail panel shows a dynamic back button ("← back to alerts", "← back to agents", etc.) that returns to whichever page opened the detail.
@@ -26,11 +26,44 @@ The run detail panel shows a dynamic back button ("← back to alerts", "← bac
 | **Alerts** | Signals grouped by failure type, filtered by the global time range. Each group header shows run count, estimated wasted tokens, and a **dismiss** button that hides the group (persisted to `localStorage`). Dismissed groups show a count and a "restore all" link. Shadow signals rendered below with dashed border + SHADOW badge. |
 | **Analytics** | Estimated token cost saved this week (configurable $/1k rate). Cross-agent totals. Top failure patterns with per-type token waste. Per-agent breakdown with estimated wasted tokens. All figures respect the global time range. |
 | **Risk Heatmap** | Failure type × agent intensity grid. Counts respect the global time range. |
-| **Agents** | Per-agent health cards sortable by **Health score / Fail rate / Last seen**. Each card shows failure rate %, dominant pattern, run / critical / high counts, last seen, ungraduated shadow signal count, and an **Agent Health Score** badge (0–100, colour-coded green/amber/red). Score is `null` until 3+ runs are available. Each card links to a **Health Record** panel showing failure rate per failure type over 30 days with a `SYSTEMIC` badge and a **Deploy Timeline** chart showing detector failure rates with blue dashed deploy markers. Clicking any failure type in the sidebar opens the **Why is this happening?** deep-dive panel. |
+| **Agents** | Per-agent health cards sortable by **Health score / Fail rate / Last seen**. Each card shows failure rate %, dominant pattern, run / critical / high counts, last seen, ungraduated shadow signal count, and an **Agent Health Score** badge (0–100, colour-coded green/amber/red). Score is `null` until 3+ runs are available. While fewer than 30 runs exist, the card shows *"baseline calibrating (N/30 runs)"* — token and latency components are held at neutral until a baseline can be established. Each card links to a **Health Record** panel showing failure rate per failure type over 30 days with a `SYSTEMIC` badge and a **Deploy Timeline** chart showing detector failure rates with blue dashed deploy markers. Clicking any failure type in the sidebar opens the **Why is this happening?** deep-dive panel. |
 | **Compare Runs** | Side-by-side run comparison with colour-coded delta table (new / resolved failure types highlighted). |
 | **Detectors** | Threshold sliders and alert level selector. Live review panel recomputes on every change. |
 | **Policies** | Create, edit, toggle, and delete runtime guardrails. Policies are fetched automatically by the SDK within 60 seconds. |
 | **Patterns** | Signal frequency heatmap — agent × detector over 7 days. `TRENDING ↑` badge when last-3-day avg exceeds first-3-day avg × 1.3. Click any cell to drill into runs for that agent+detector pair. |
+
+---
+
+## Agent Health Score
+
+A 0–100 composite score computed from the last 30 days of run data. Powered by `GET /v1/agents/{id}/health-score`.
+
+| Component | Weight | Active from | How it's scored |
+|---|---|---|---|
+| **Failure rate** | 40 pts | Run 1 | `(1 − failure_rate) × 40`. Zero failures = 40 pts. |
+| **Loop avoidance** | 25 pts | Run 1 | `(1 − loop_rate) × 25`. Loop detectors: `TOOL_LOOP`, `TOOL_THRASHING`, `TOOL_AVOIDANCE`, `STEP_COUNT_INFLATION`, `LLM_TRUNCATION_LOOP`. |
+| **Token efficiency** | 20 pts | 30 runs | Scored relative to the agent's own P75 baseline (see below). Neutral (15 pts) until baseline is ready. |
+| **Latency** | 15 pts | 30 runs | Scored relative to the agent's own P75 baseline. Neutral (10 pts) until baseline is ready. |
+
+**Per-agent baselines (token efficiency and latency)**
+
+Rather than global absolute thresholds, each agent is measured against its own historical normal. The baseline is the P75 of per-run averages computed from the **30–90 day window** — deliberately excluding the most recent 30 days so the reference is independent of the period being scored. This prevents chronic degradation from inflating the baseline (boiling frog problem).
+
+Scoring zones once baseline is ready:
+
+- `avg ≤ 1.5 × P75` → full score (healthy operating range)
+- `1.5 × P75 < avg < 4 × P75` → linear decay
+- `avg ≥ 4 × P75` → 0 pts
+
+A research agent whose P75 token usage is 2,000 scores full marks up to 3,000 tokens per call. A support bot with a 400-token P75 scores full up to 600. Same formula, different reference point.
+
+**Baseline readiness**
+
+Token and latency components are held at neutral (15 and 10 pts respectively) only when no LLM event data has been recorded at all (i.e. `avg_tokens` / `avg_latency` is `null`). Until the agent has 30 runs, the card shows: *"Health score based on detector signals only — baseline calibrating (N/30 runs)."*
+
+When an agent has LLM data but no pre-window baseline — either because it has fewer than 30 runs (young agent) or because the 30–90 day window is empty — the global absolute thresholds are used instead of neutral: token < 500 = full score, > 4,000 = 0; latency < 1,000ms = full score, > 8,000ms = 0. This ensures a new agent running at 7,000ms latency is flagged rather than silently scored neutral.
+
+The per-agent P75 baseline additionally requires at least 20 runs with LLM event data in the 30–90 day window before it is used. Once available, it supersedes the global absolutes.
 
 ---
 

@@ -255,10 +255,11 @@ if _PYDANTIC:
         top_runs:            List[TopRun]
 
     class AgentHealthScore(_Model):
-        agent_id:    str
-        score:       Optional[int]          # None when <3 sample runs
-        components:  Dict[str, Any]         # keyed by component name
-        sample_runs: int
+        agent_id:       str
+        score:          Optional[int]       # None when <3 sample runs
+        components:     Dict[str, Any]      # keyed by component name
+        sample_runs:    int
+        baseline_ready: bool                # False when <30 runs; token/latency components are neutral
 
     class PatternDay(_Model):
         date:          str
@@ -382,7 +383,7 @@ else:
 
     @dataclass
     class AgentHealthScore:
-        agent_id: str; score: Optional[int]; components: Dict[str, Any]; sample_runs: int
+        agent_id: str; score: Optional[int]; components: Dict[str, Any]; sample_runs: int; baseline_ready: bool
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)
 
     @dataclass

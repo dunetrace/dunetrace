@@ -1484,7 +1484,9 @@ async def get_agent_health_score(agent_id: str) -> dict:
                   )
             ),
             token_data AS (
-                SELECT AVG((payload->>'prompt_tokens')::float) AS avg_prompt_tokens
+                SELECT
+                    AVG((payload->>'prompt_tokens')::float)                                        AS avg_prompt_tokens,
+                    COUNT(*)                                                                        AS token_sample
                 FROM events
                 WHERE agent_id = $1
                   AND event_type = 'llm.called'
@@ -1492,48 +1494,121 @@ async def get_agent_health_score(agent_id: str) -> dict:
                   AND received_at >= NOW() - INTERVAL '30 days'
             ),
             latency_data AS (
-                SELECT AVG((payload->>'latency_ms')::float) AS avg_latency_ms
+                SELECT
+                    AVG((payload->>'latency_ms')::float)                                           AS avg_latency_ms,
+                    COUNT(*)                                                                        AS latency_sample
                 FROM events
                 WHERE agent_id = $1
                   AND event_type = 'llm.responded'
                   AND payload->>'latency_ms' IS NOT NULL
                   AND received_at >= NOW() - INTERVAL '30 days'
+            ),
+            token_baseline AS (
+                -- P75 of per-run average token usage, computed from 30–90 days ago.
+                -- Excludes the 30-day scoring window so the baseline is independent
+                -- of the period being measured — avoids the boiling-frog problem where
+                -- chronic degradation inflates the reference point.
+                SELECT
+                    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY avg_tokens) AS p75_tokens,
+                    COUNT(*)                                                   AS baseline_sample
+                FROM (
+                    SELECT run_id, AVG((payload->>'prompt_tokens')::float) AS avg_tokens
+                    FROM events
+                    WHERE agent_id = $1
+                      AND event_type = 'llm.called'
+                      AND payload->>'prompt_tokens' IS NOT NULL
+                      AND received_at >= NOW() - INTERVAL '90 days'
+                      AND received_at <  NOW() - INTERVAL '30 days'
+                    GROUP BY run_id
+                ) per_run
+            ),
+            latency_baseline AS (
+                -- P75 of per-run average LLM latency, same 30–90 day reference window.
+                SELECT
+                    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY avg_latency) AS p75_latency_ms,
+                    COUNT(*)                                                    AS baseline_sample
+                FROM (
+                    SELECT run_id, AVG((payload->>'latency_ms')::float) AS avg_latency
+                    FROM events
+                    WHERE agent_id = $1
+                      AND event_type = 'llm.responded'
+                      AND payload->>'latency_ms' IS NOT NULL
+                      AND received_at >= NOW() - INTERVAL '90 days'
+                      AND received_at <  NOW() - INTERVAL '30 days'
+                    GROUP BY run_id
+                ) per_run
             )
             SELECT
-                (SELECT COUNT(*) FROM runs_30d)                      AS total_runs,
-                (SELECT COUNT(*) FROM signal_runs)                   AS runs_with_signals,
-                (SELECT COUNT(*) FROM loop_runs)                     AS runs_with_loops,
-                (SELECT avg_prompt_tokens FROM token_data)           AS avg_prompt_tokens,
-                (SELECT avg_latency_ms    FROM latency_data)         AS avg_latency_ms
+                (SELECT COUNT(*)           FROM runs_30d)            AS total_runs,
+                (SELECT COUNT(*)           FROM signal_runs)         AS runs_with_signals,
+                (SELECT COUNT(*)           FROM loop_runs)           AS runs_with_loops,
+                (SELECT avg_prompt_tokens  FROM token_data)          AS avg_prompt_tokens,
+                (SELECT avg_latency_ms     FROM latency_data)        AS avg_latency_ms,
+                (SELECT p75_tokens         FROM token_baseline)      AS p75_tokens,
+                (SELECT baseline_sample    FROM token_baseline)      AS token_baseline_sample,
+                (SELECT p75_latency_ms     FROM latency_baseline)    AS p75_latency_ms,
+                (SELECT baseline_sample    FROM latency_baseline)    AS latency_baseline_sample
             """,
             agent_id,
         )
 
+    _BASELINE_MIN_RUNS = 30  # runs needed before token/latency components leave neutral
+
     total = int(stats["total_runs"] or 0)
     if total < 3:
-        return {"score": None, "components": {}, "sample_runs": total}
+        return {"score": None, "components": {}, "sample_runs": total, "baseline_ready": False}
+
+    baseline_ready = total >= _BASELINE_MIN_RUNS
 
     failure_rate = (int(stats["runs_with_signals"] or 0)) / total
     loop_rate    = (int(stats["runs_with_loops"]   or 0)) / total
     avg_tokens   = stats["avg_prompt_tokens"]
     avg_latency  = stats["avg_latency_ms"]
+    p75_tokens   = stats["p75_tokens"]    if (stats["token_baseline_sample"]   or 0) >= 20 else None
+    p75_latency  = stats["p75_latency_ms"] if (stats["latency_baseline_sample"] or 0) >= 20 else None
 
-    # Failure component (0–40): 0% failure rate = 40 pts
+    # Failure component (0–40): 0% failure rate = 40 pts. Active from run 1.
     failure_score = round((1.0 - failure_rate) * 40)
 
-    # Loop component (0–25): 0% loop rate = 25 pts
+    # Loop component (0–25): 0% loop rate = 25 pts. Active from run 1.
     loop_score = round((1.0 - loop_rate) * 25)
 
-    # Token efficiency (0–20): <500 tokens avg = 20 pts, >4000 = 0 pts, linear
+    # Token efficiency (0–20).
+    # Neutral (15) only when avg_tokens is None — no data at all.
+    # Young agents (no P75 baseline yet) fall back to global absolutes rather than neutral,
+    # because 4,000 tokens/call is expensive regardless of history.
+    # Once a P75 baseline exists: full score ≤ 1.5× P75; linear decay 1.5×–4×; 0 at 4×.
     if avg_tokens is None:
-        token_score = 15  # neutral — no LLM token data recorded
+        token_score = 15  # neutral — no token data recorded
+    elif p75_tokens is not None:
+        healthy_ceil = p75_tokens * 1.5
+        penalty_ceil = p75_tokens * 4.0
+        if avg_tokens <= healthy_ceil:
+            token_score = 20
+        elif avg_tokens >= penalty_ceil:
+            token_score = 0
+        else:
+            token_score = round(20.0 * (1.0 - (avg_tokens - healthy_ceil) / (penalty_ceil - healthy_ceil)))
     else:
+        # No pre-window baseline (young agent or no LLM events in 30–90 day window).
+        # Use global absolutes: < 500 tokens = full score, > 4,000 = 0.
         token_score = max(0, min(20, round(20.0 * (1.0 - max(0.0, avg_tokens - 500) / 3500))))
 
-    # Latency component (0–15): <1 000 ms avg = 15 pts, >8 000 ms = 0 pts, linear
+    # Latency component (0–15). Same logic: neutral only when avg_latency is None.
+    # Young agents with data scored against global absolutes: < 1,000ms = full, > 8,000ms = 0.
     if avg_latency is None:
         latency_score = 10  # neutral — no latency data recorded
+    elif p75_latency is not None:
+        healthy_ceil = p75_latency * 1.5
+        penalty_ceil = p75_latency * 4.0
+        if avg_latency <= healthy_ceil:
+            latency_score = 15
+        elif avg_latency >= penalty_ceil:
+            latency_score = 0
+        else:
+            latency_score = round(15.0 * (1.0 - (avg_latency - healthy_ceil) / (penalty_ceil - healthy_ceil)))
     else:
+        # No pre-window baseline — global absolutes: < 1,000ms = full, > 8,000ms = 0.
         latency_score = max(0, min(15, round(15.0 * (1.0 - max(0.0, avg_latency - 1000) / 7000))))
 
     score = failure_score + loop_score + token_score + latency_score
@@ -1554,15 +1629,18 @@ async def get_agent_health_score(agent_id: str) -> dict:
             "token_efficiency": {
                 "score": token_score, "max": 20,
                 "value": round(avg_tokens) if avg_tokens is not None else None,
+                "baseline": round(p75_tokens) if p75_tokens is not None else None,
                 "label": "avg prompt tokens",
             },
             "latency": {
                 "score": latency_score, "max": 15,
                 "value": round(avg_latency) if avg_latency is not None else None,
+                "baseline": round(p75_latency) if p75_latency is not None else None,
                 "label": "avg LLM latency ms",
             },
         },
         "sample_runs": total,
+        "baseline_ready": baseline_ready,
     }
 
 
