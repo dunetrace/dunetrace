@@ -887,9 +887,12 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <div class="explain-title">Why this triggered</div>
       <div class="explain-text" id="detail-explain-text">—</div>
       <div class="explain-list" id="detail-explain-list"></div>
-      <div id="langfuse-explain-row" style="display:none;margin-top:.75rem;align-items:center;gap:.75rem">
+      <div id="langfuse-explain-row" style="display:none;margin-top:.75rem;align-items:center;gap:.75rem;flex-wrap:wrap">
         <button class="act-btn act-secondary" id="langfuse-explain-btn" onclick="explainWithLangfuse()" style="font-size:12px;padding:5px 12px">Explain with Langfuse ↗</button>
         <span id="langfuse-explain-status" style="display:none;font-size:12px;color:var(--chalk3)">analyzing…</span>
+        <button class="act-btn" id="langfuse-open-pr-btn" onclick="openPROnGitHub()" style="display:none;font-size:12px;padding:5px 12px">Open PR on GitHub ↗</button>
+        <span id="langfuse-pr-status" style="display:none;font-size:12px;color:var(--chalk3)">creating PR…</span>
+        <a id="langfuse-pr-link" style="display:none;font-size:12px;color:var(--green);text-decoration:none" target="_blank" rel="noopener">View PR ↗</a>
       </div>
       <div id="langfuse-explain-result" style="display:none;margin-top:1rem;font-size:13px;color:var(--chalk2);line-height:1.8;border-top:1px solid var(--wire);padding-top:1rem"></div>
     </div>
@@ -1927,6 +1930,7 @@ function renderSignalCards(signals) {
 let _explainSignalId   = null;
 let _explainStaticCode = null;   // suggested_fixes[0].code from the signal
 let _explainStaticLang = 'python';
+let _explainLastData   = null;   // last explain API response, used by openPROnGitHub()
 
 function renderExplain(signals) {
   const explainRow    = document.getElementById('langfuse-explain-row');
@@ -1938,6 +1942,13 @@ function renderExplain(signals) {
   explainResult.innerHTML = '';
   _explainSignalId   = null;
   _explainStaticCode = null;
+  _explainLastData   = null;
+  const prBtn  = document.getElementById('langfuse-open-pr-btn');
+  const prLink = document.getElementById('langfuse-pr-link');
+  const prStat = document.getElementById('langfuse-pr-status');
+  if (prBtn)  prBtn.style.display  = 'none';
+  if (prLink) prLink.style.display = 'none';
+  if (prStat) prStat.style.display = 'none';
 
   if (!signals.length) {
     document.getElementById('detail-explain-text').textContent = 'No signals fired on this run.';
@@ -2053,6 +2064,15 @@ async function explainWithLangfuse() {
       }
 
       result.innerHTML = esc(rootCause) + sourceNote + fixHtml + patchHtml;
+
+      // Store for PR creation and show "Open PR" button for code-change types
+      _explainLastData = { root_cause: rootCause, fix_content: fixContent, fix_patch: fixPatch, fix_type: fixType };
+      const prBtn  = document.getElementById('langfuse-open-pr-btn');
+      const prLink = document.getElementById('langfuse-pr-link');
+      const prStat = document.getElementById('langfuse-pr-status');
+      if (prBtn)  prBtn.style.display  = fixType === 'code_change' ? '' : 'none';
+      if (prLink) prLink.style.display = 'none';
+      if (prStat) prStat.style.display = 'none';
     }
   } catch (e) {
     result.innerHTML = `<span style="color:var(--red)">Analysis unavailable. Try again.</span>`;
@@ -2060,6 +2080,52 @@ async function explainWithLangfuse() {
     btn.disabled = false;
     status.style.display = 'none';
     result.style.display = '';
+  }
+}
+
+async function openPROnGitHub() {
+  if (!_explainSignalId || !_explainLastData) return;
+  const prBtn  = document.getElementById('langfuse-open-pr-btn');
+  const prStat = document.getElementById('langfuse-pr-status');
+  const prLink = document.getElementById('langfuse-pr-link');
+
+  prBtn.disabled        = true;
+  prStat.style.display  = '';
+  prLink.style.display  = 'none';
+
+  try {
+    const r = await fetch(`${API}/v1/signals/${_explainSignalId}/open-pr`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        root_cause:  _explainLastData.root_cause,
+        fix_content: _explainLastData.fix_content,
+        fix_patch:   _explainLastData.fix_patch,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      prStat.style.display = 'none';
+      prLink.style.display = '';
+      prLink.style.color   = 'var(--red)';
+      prLink.removeAttribute('href');
+      prLink.textContent   = data.detail || 'Failed to create PR';
+    } else {
+      prStat.style.display = 'none';
+      prLink.href          = data.pr_url;
+      prLink.textContent   = `View PR #${data.pr_number} ↗`;
+      prLink.style.color   = 'var(--green)';
+      prLink.style.display = '';
+      prBtn.style.display  = 'none';
+    }
+  } catch (e) {
+    prStat.style.display = 'none';
+    prLink.style.display = '';
+    prLink.style.color   = 'var(--red)';
+    prLink.removeAttribute('href');
+    prLink.textContent   = 'Network error — try again';
+  } finally {
+    prBtn.disabled = false;
   }
 }
 
@@ -3496,8 +3562,25 @@ function openAgentDetail(agentId) {
   renderRuns();
 }
 
+// ── Deep-link: /runs/<run_id> from Slack "View Run" button ───────────────────
+let _deepLinkHandled = false;
+async function handleDeepLink() {
+  if (_deepLinkHandled) return;
+  const match = window.location.pathname.match(/^\/runs\/([^/]+)$/);
+  if (!match) return;
+  _deepLinkHandled = true;
+  const runId = match[1];
+  window.history.replaceState(null, '', '/');
+  try {
+    const run = await apiFetch('/v1/runs/' + encodeURIComponent(runId));
+    await showDetail(runId, run.agent_id || (run.run && run.run.agent_id) || '');
+  } catch(e) {
+    console.error('Deep-link failed:', e);
+  }
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
-loadAll();
+loadAll().then(handleDeepLink);
 setInterval(loadAll, 15000);
 </script>
 </body>

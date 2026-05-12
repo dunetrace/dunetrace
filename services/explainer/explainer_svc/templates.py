@@ -1288,6 +1288,188 @@ def explain_reasoning_stall(signal: FailureSignal) -> Explanation:
     )
 
 
+# COST_SPIKE
+
+def explain_cost_spike(signal: FailureSignal) -> Explanation:
+    ev           = signal.evidence
+    total        = ev.get("total_tokens", 0)
+    threshold    = ev.get("threshold", 0)
+    ratio        = ev.get("inflation_ratio", "?")
+    llm_calls    = ev.get("llm_calls", "?")
+    baseline_p75 = ev.get("baseline_p75")
+
+    baseline_note = (
+        f" (P75 baseline for this agent: {baseline_p75:,} tokens)"
+        if baseline_p75 is not None
+        else " (static threshold — baseline not yet established)"
+    )
+
+    return Explanation(
+        **_base(signal),
+        title=f"Cost spike: {total:,} tokens consumed ({ratio}× above threshold{baseline_note})",
+        what=(
+            f"This run consumed {total:,} total tokens across {llm_calls} LLM calls — "
+            f"{ratio}× the expected ceiling of {threshold:,} tokens{baseline_note}. "
+            f"The excess is typically caused by runaway tool loops accumulating context, "
+            f"a model swap to a larger/more verbose model, or an unusually large input "
+            f"that was passed to the LLM without summarisation."
+        ),
+        why_it_matters=(
+            f"At gpt-4o pricing ($15/M input + $60/M output), {total:,} tokens costs "
+            f"roughly ${total * 30 / 1_000_000:.2f}. If this run is representative of "
+            f"a regression, every subsequent run carries the same overhead. "
+            f"Token overruns also correlate with CONTEXT_BLOAT and LLM_TRUNCATION_LOOP — "
+            f"the agent is likely approaching the context window limit."
+        ),
+        evidence_summary=(
+            f"{total:,} total tokens ({llm_calls} LLM calls). "
+            f"Threshold: {threshold:,}. Ratio: {ratio}×. "
+            f"Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description="Summarise tool outputs and conversation history before each LLM call",
+                language="python",
+                code=(
+                    "MAX_CONTEXT_TOKENS = 8_000\n\n"
+                    "def trim_context(messages):\n"
+                    "    total = sum(count_tokens(m['content']) for m in messages)\n"
+                    "    if total <= MAX_CONTEXT_TOKENS:\n"
+                    "        return messages\n"
+                    "    # Summarise oldest non-system messages\n"
+                    "    system = [m for m in messages if m['role'] == 'system']\n"
+                    "    rest   = [m for m in messages if m['role'] != 'system']\n"
+                    "    mid = len(rest) // 2\n"
+                    "    summary = llm.summarise('\\n'.join(m['content'] for m in rest[:mid]))\n"
+                    "    return system + [{'role': 'system', 'content': f'[Summary]: {summary}'}] + rest[mid:]"
+                ),
+            ),
+            CodeFix(
+                description="Switch to a smaller model for high-volume tasks",
+                language="python",
+                code=(
+                    "# Route to a cheaper model when expected token count is high\n"
+                    "def choose_model(estimated_tokens: int) -> str:\n"
+                    "    if estimated_tokens > 20_000:\n"
+                    "        return 'gpt-4o-mini'   # $0.15/M in, $0.60/M out\n"
+                    "    return 'gpt-4o'             # $5/M in, $15/M out"
+                ),
+            ),
+            CodeFix(
+                description="Add a per-run token budget and stop early if exceeded",
+                language="python",
+                code=(
+                    "MAX_RUN_TOKENS = 30_000\n"
+                    "total_tokens_used = 0\n\n"
+                    "def after_llm_call(response):\n"
+                    "    global total_tokens_used\n"
+                    "    total_tokens_used += response.usage.total_tokens\n"
+                    "    if total_tokens_used > MAX_RUN_TOKENS:\n"
+                    "        raise RuntimeError(\n"
+                    "            f'Token budget exceeded ({total_tokens_used} / {MAX_RUN_TOKENS}). '\n"
+                    "            'Returning best partial result.'\n"
+                    "        )"
+                ),
+            ),
+        ],
+    )
+
+
+# SESSION_LATENCY
+
+def explain_session_latency(signal: FailureSignal) -> Explanation:
+    ev           = signal.evidence
+    duration_s   = ev.get("duration_s", 0)
+    threshold_s  = ev.get("threshold_s", 0)
+    ratio        = ev.get("inflation_ratio", "?")
+    baseline_p75 = ev.get("baseline_p75_s")
+
+    duration_str  = f"{duration_s:.0f}s"
+    threshold_str = f"{threshold_s:.0f}s"
+    baseline_note = (
+        f" (P75 baseline: {baseline_p75:.0f}s)"
+        if baseline_p75 is not None
+        else " (static threshold — baseline not yet established)"
+    )
+
+    return Explanation(
+        **_base(signal),
+        title=f"Session latency spike: run took {duration_str} ({ratio}× above threshold{baseline_note})",
+        what=(
+            f"This run took {duration_str} end-to-end — {ratio}× the expected ceiling "
+            f"of {threshold_str}{baseline_note}. "
+            f"Unlike SLOW_STEP (which fires on a single step), SESSION_LATENCY fires "
+            f"when the total wall-clock run time is anomalously high. "
+            f"Common causes: a hanging tool that eventually timed out, an unusually "
+            f"deep loop, or a slow external API that blocked multiple steps."
+        ),
+        why_it_matters=(
+            "Long-running agent sessions directly impact user experience: users waiting "
+            "more than 30–60s typically abandon or report errors. "
+            "They also indicate runaway cost — LLM calls accumulate throughout the session. "
+            f"At {duration_str}, this run is {ratio}× longer than typical and likely "
+            "hit or exceeded any user-facing timeout configured in your infrastructure."
+        ),
+        evidence_summary=(
+            f"Run duration: {duration_str}. Threshold: {threshold_str}. "
+            f"Ratio: {ratio}×. "
+            f"Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description="Add a hard wall-clock timeout for the entire agent run",
+                language="python",
+                code=(
+                    "import asyncio\n\n"
+                    "MAX_RUN_SECONDS = 60  # set based on your P75 + buffer\n\n"
+                    "async def run_agent_with_timeout(user_input):\n"
+                    "    try:\n"
+                    "        return await asyncio.wait_for(\n"
+                    "            agent.arun(user_input),\n"
+                    "            timeout=MAX_RUN_SECONDS,\n"
+                    "        )\n"
+                    "    except asyncio.TimeoutError:\n"
+                    "        return {\n"
+                    "            'error': 'timeout',\n"
+                    "            'message': f'Request timed out after {MAX_RUN_SECONDS}s. '\n"
+                    "                       'Try a more specific question or break it into smaller tasks.'\n"
+                    "        }"
+                ),
+            ),
+            CodeFix(
+                description="Add per-tool timeouts to prevent a single slow dependency from blocking the run",
+                language="python",
+                code=(
+                    "import httpx\n\n"
+                    "# Set aggressive timeouts on all HTTP-based tools\n"
+                    "http_client = httpx.AsyncClient(\n"
+                    "    timeout=httpx.Timeout(\n"
+                    "        connect=5.0,   # connection timeout\n"
+                    "        read=15.0,     # read timeout\n"
+                    "        write=5.0,\n"
+                    "        pool=5.0,\n"
+                    "    )\n"
+                    ")"
+                ),
+            ),
+            CodeFix(
+                description="Profile which steps are slow by reviewing step durations in the event log",
+                language="text",
+                code=(
+                    "In the Dunetrace dashboard, open this run's Event Log tab.\n\n"
+                    "Look for large gaps between consecutive timestamps:\n"
+                    "  SELECT step_index, event_type,\n"
+                    "         LEAD(timestamp) OVER (ORDER BY step_index) - timestamp AS gap_s\n"
+                    "  FROM events\n"
+                    "  WHERE run_id = '<this_run_id>'\n"
+                    "  ORDER BY step_index;\n\n"
+                    "The step with the largest gap_s is where time was lost."
+                ),
+            ),
+        ],
+    )
+
+
 TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.TOOL_LOOP:               explain_tool_loop,
     FailureType.TOOL_THRASHING:          explain_tool_thrashing,
@@ -1304,4 +1486,6 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.FIRST_STEP_FAILURE:      explain_first_step_failure,
     FailureType.SLOW_STEP:               explain_slow_step,
     FailureType.REASONING_STALL:         explain_reasoning_stall,
+    FailureType.COST_SPIKE:              explain_cost_spike,
+    FailureType.SESSION_LATENCY:         explain_session_latency,
 }

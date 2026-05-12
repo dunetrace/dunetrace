@@ -18,12 +18,14 @@ from detector_svc.db import (
     close_pool,
     ensure_detector_schema,
     fetch_completed_runs,
+    fetch_duration_baseline,
     fetch_latency_baseline,
     fetch_llm_tool_ratio_baseline,
     fetch_run_events,
     fetch_stalled_runs,
     fetch_step_count_baseline,
     fetch_token_growth_baseline,
+    fetch_total_tokens_baseline,
     init_pool,
     mark_run_processed,
     write_signals,
@@ -109,12 +111,16 @@ async def process_run(
             state.baseline_p75_latency_llm,
             state.baseline_p75_token_growth,
             state.baseline_p75_llm_tool_ratio,
+            state.baseline_p75_total_tokens,
+            state.baseline_p75_duration_s,
         ) = await asyncio.gather(
             fetch_step_count_baseline(agent_id, agent_version, run_id),
             fetch_latency_baseline(agent_id, agent_version, run_id, "tool.called"),
             fetch_latency_baseline(agent_id, agent_version, run_id, "llm.called"),
             fetch_token_growth_baseline(agent_id, agent_version, run_id),
             fetch_llm_tool_ratio_baseline(agent_id, agent_version, run_id),
+            fetch_total_tokens_baseline(agent_id, agent_version, run_id),
+            fetch_duration_baseline(agent_id, agent_version, run_id),
         )
         signals = run_detectors(state, detectors=get_detectors(agent_id))
         inj = _injection_signal_from_events(events, run_id, agent_id, agent_version)

@@ -54,6 +54,8 @@ class FailureType(str, Enum):
     REASONING_STALL         = "REASONING_STALL"
     CONFIDENT_HALLUCINATION = "CONFIDENT_HALLUCINATION_PROXY"
     POLICY_VIOLATION        = "POLICY_VIOLATION"
+    COST_SPIKE              = "COST_SPIKE"
+    SESSION_LATENCY         = "SESSION_LATENCY"
 
 
 # ── Agent Event ────────────────────────────────────────────────────────────────
@@ -149,11 +151,13 @@ class RunState:
     input_text_hash: Optional[str]         = None
     # Cross-run baselines populated by the server before detectors run.
     # None = insufficient history. Local self-hosted mode may leave these None.
-    baseline_p75_steps:         Optional[float] = None
-    baseline_p75_latency_tool:  Optional[float] = None  # ms, P75 tool step duration
-    baseline_p75_latency_llm:   Optional[float] = None  # ms, P75 LLM step duration
-    baseline_p75_token_growth:  Optional[float] = None  # ratio, P75 context growth factor
+    baseline_p75_steps:          Optional[float] = None
+    baseline_p75_latency_tool:   Optional[float] = None  # ms, P75 tool step duration
+    baseline_p75_latency_llm:    Optional[float] = None  # ms, P75 LLM step duration
+    baseline_p75_token_growth:   Optional[float] = None  # ratio, P75 context growth factor
     baseline_p75_llm_tool_ratio: Optional[float] = None  # P75 LLM:tool call ratio
+    baseline_p75_total_tokens:   Optional[float] = None  # P75 total tokens (prompt+completion) per run
+    baseline_p75_duration_s:     Optional[float] = None  # P75 wall-clock run duration in seconds
 
 
 # ── Risk Score ────────────────────────────────────────────────────────────────

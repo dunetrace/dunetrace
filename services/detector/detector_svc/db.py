@@ -120,6 +120,8 @@ LIVE_DETECTORS: set[str] = {
     "CASCADING_TOOL_FAILURE",
     "FIRST_STEP_FAILURE",
     "REASONING_STALL",
+    "COST_SPIKE",
+    "SESSION_LATENCY",
 }
 
 
@@ -379,6 +381,123 @@ async def fetch_llm_tool_ratio_baseline(
                     ORDER BY llm_count::float / GREATEST(tool_count, 1)
                 )                                                                               AS p75
             FROM run_counts
+            """,
+            agent_id, agent_version, exclude_run_id, lookback,
+        )
+
+    if not row or (row["sample_size"] or 0) < min_runs:
+        return None
+    return float(row["p75"]) if row["p75"] is not None else None
+
+
+async def fetch_total_tokens_baseline(
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """
+    P75 total token consumption (prompt + completion) per run across the last ``lookback``
+    successfully completed runs.  Restricted to runs with at least one LLM call that
+    reported token counts.
+
+    Used by CostSpikeDetector.  Returns None when fewer than ``min_runs`` qualifying runs exist.
+    """
+    if not _pool:
+        return None
+
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            WITH recent AS (
+                SELECT pr.run_id
+                FROM processed_runs pr
+                WHERE pr.agent_id      = $1
+                  AND pr.agent_version = $2
+                  AND pr.run_id       != $3
+                  AND EXISTS (
+                      SELECT 1 FROM events e
+                      WHERE e.run_id = pr.run_id
+                        AND e.event_type = 'run.completed'
+                  )
+                ORDER BY pr.processed_at DESC
+                LIMIT $4
+            ),
+            run_tokens AS (
+                SELECT
+                    e.run_id,
+                    SUM(
+                        COALESCE((e.payload->>'prompt_tokens')::integer, 0) +
+                        COALESCE((e.payload->>'completion_tokens')::integer, 0)
+                    ) AS total_tokens
+                FROM events e
+                WHERE e.run_id IN (SELECT run_id FROM recent)
+                  AND e.event_type = 'llm.called'
+                  AND e.payload->>'prompt_tokens' IS NOT NULL
+                GROUP BY e.run_id
+                HAVING SUM(COALESCE((e.payload->>'prompt_tokens')::integer, 0)) > 0
+            )
+            SELECT
+                COUNT(*)                                                          AS sample_size,
+                PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY total_tokens)       AS p75
+            FROM run_tokens
+            """,
+            agent_id, agent_version, exclude_run_id, lookback,
+        )
+
+    if not row or (row["sample_size"] or 0) < min_runs:
+        return None
+    return float(row["p75"]) if row["p75"] is not None else None
+
+
+async def fetch_duration_baseline(
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """
+    P75 wall-clock run duration in seconds (MAX(timestamp) − MIN(timestamp)) across
+    the last ``lookback`` successfully completed runs.
+
+    Used by SessionLatencyDetector.  Returns None when fewer than ``min_runs``
+    qualifying runs exist or when all durations are zero.
+    """
+    if not _pool:
+        return None
+
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            WITH recent AS (
+                SELECT pr.run_id
+                FROM processed_runs pr
+                WHERE pr.agent_id      = $1
+                  AND pr.agent_version = $2
+                  AND pr.run_id       != $3
+                  AND EXISTS (
+                      SELECT 1 FROM events e
+                      WHERE e.run_id = pr.run_id
+                        AND e.event_type = 'run.completed'
+                  )
+                ORDER BY pr.processed_at DESC
+                LIMIT $4
+            ),
+            run_durations AS (
+                SELECT
+                    e.run_id,
+                    (MAX(e.timestamp) - MIN(e.timestamp)) AS duration_s
+                FROM events e
+                WHERE e.run_id IN (SELECT run_id FROM recent)
+                GROUP BY e.run_id
+                HAVING (MAX(e.timestamp) - MIN(e.timestamp)) > 0
+            )
+            SELECT
+                COUNT(*)                                                          AS sample_size,
+                PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY duration_s)         AS p75
+            FROM run_durations
             """,
             agent_id, agent_version, exclude_run_id, lookback,
         )

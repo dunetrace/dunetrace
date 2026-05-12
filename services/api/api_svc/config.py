@@ -42,9 +42,18 @@ class Settings:
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
+    # GitHub integration — for opening fix PRs from code-change signals
+    GITHUB_TOKEN: str       = os.getenv("GITHUB_TOKEN", "")
+    GITHUB_REPO: str        = os.getenv("GITHUB_REPO", "")        # e.g. "owner/repo"
+    GITHUB_BASE_BRANCH: str = os.getenv("GITHUB_BASE_BRANCH", "main")
+
     @property
     def langfuse_configured(self) -> bool:
         return bool(self.LANGFUSE_PUBLIC_KEY and self.LANGFUSE_SECRET_KEY)
+
+    @property
+    def github_configured(self) -> bool:
+        return bool(self.GITHUB_TOKEN and self.GITHUB_REPO)
 
     @property
     def is_dev(self) -> bool:

@@ -343,17 +343,17 @@ Response:
 
 **`fix_type`** classifies the recommended fix:
 
-| `fix_type` | Meaning | `apply_blocked` |
+| `fix_type` | Meaning | Dashboard action |
 |---|---|---|
-| `prompt_addition` | One sentence to append to the system prompt | `false` — apply button shown |
-| `code_change` | Code or infrastructure fix needed (CONTEXT_BLOAT, SLOW_STEP, etc.) | `true` — apply button hidden |
-| `no_auto_apply` | Security signal (PROMPT_INJECTION_SIGNAL) — never auto-apply | `true` — blocked at API level |
+| `prompt_addition` | One sentence to append to the system prompt | **Apply via Langfuse** button — pushes new prompt version |
+| `code_change` | Code or infra fix (CONTEXT_BLOAT, SLOW_STEP, CASCADING_TOOL_FAILURE, etc.) | **Open PR on GitHub ↗** button — creates a draft PR with unified diff |
+| `no_auto_apply` | Security signal (PROMPT_INJECTION_SIGNAL) — never auto-apply | No apply action — review manually |
 
 **`langfuse_prompt_name`** is `null` when the trace's system prompt was a hardcoded string rather than a Langfuse-managed prompt. The apply button only appears when this field is non-null and `apply_blocked` is false.
 
-### 5. Apply a fix to a managed prompt
+### 5a. Apply a prompt fix via Langfuse
 
-When `langfuse_prompt_name` is returned and `apply_blocked` is false, you can apply the fix directly to Langfuse:
+When `fix_type` is `prompt_addition` and `langfuse_prompt_name` is returned, you can apply the fix directly to Langfuse:
 
 ```bash
 POST /v1/signals/{signal_id}/apply-fix
@@ -380,6 +380,43 @@ Response:
 ```
 
 The fix is appended to the current prompt text and published as a new version. The dashboard shows "Applied as v4 in Langfuse ↗" with a link.
+
+### 5b. Open a GitHub PR for code-change fixes
+
+When `fix_type` is `code_change`, the LLM returns a unified diff in `fix_patch`. Call this endpoint to create a draft PR in your GitHub repo:
+
+```bash
+POST /v1/signals/{signal_id}/open-pr
+Content-Type: application/json
+Authorization: Bearer <your-key>
+
+{
+  "root_cause":  "Context window growing unboundedly because...",
+  "fix_content": "Add a sliding window that drops the oldest messages when token count exceeds 80% of the model limit.",
+  "fix_patch":   "--- a/agent.py\n+++ b/agent.py\n@@ -42,6 +42,10 @@\n ..."
+}
+```
+
+Response:
+
+```json
+{
+  "pr_url":    "https://github.com/owner/repo/pull/17",
+  "pr_number": 17,
+  "branch":    "dunetrace/signal-42-context-bloat"
+}
+```
+
+The PR is created as a draft on branch `dunetrace/signal-{id}-{failure-type}` and contains a `dunetrace-fixes/signal-{id}.md` file with the root cause, suggested fix, and diff.
+
+**Prerequisites:** set `GITHUB_TOKEN` (needs `repo` scope) and `GITHUB_REPO` (`owner/repo`) in `.env`, then `docker compose up -d api`.
+
+```bash
+# Create a token at https://github.com/settings/tokens (repo scope)
+GITHUB_TOKEN=ghp_...
+GITHUB_REPO=owner/repo
+GITHUB_BASE_BRANCH=main   # optional, default: main
+```
 
 ### 6. Track fix effectiveness
 
@@ -426,7 +463,7 @@ See [`packages/sdk-py/examples/langfuse_agent.py`](../packages/sdk-py/examples/l
 4. Extracts system prompt from GENERATION observation `messages[]` arrays
 5. Normalises step range from evidence using detector-specific field names (e.g. `first_truncation_step` for LLM_TRUNCATION_LOOP)
 6. Builds a prompt: signal type + evidence + system prompt + relevant span inputs/outputs (600-char limit for failing steps, 150-char for others)
-7. Calls Anthropic Haiku (or GPT-4o-mini fallback) — max 400 tokens — asking for `{"root_cause": "...", "fix_content": "..."}` JSON
+7. Calls Anthropic Haiku (or GPT-4o-mini fallback) — max 900 tokens — asking for `{"root_cause": "...", "fix_content": "...", "fix_patch": "..."}` JSON. For code-change signals, `fix_patch` is a unified diff; for prompt signals it is a short diff showing where to insert `fix_content` in the system prompt.
 8. Returns structured response with fix type classification
 
 The Langfuse trace is never stored — fetched, analysed, discarded.

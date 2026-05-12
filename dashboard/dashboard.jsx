@@ -1159,7 +1159,7 @@ function Dashboard() {
                   {/* Header */}
                   <div style={{
                     display: "grid",
-                    gridTemplateColumns: "200px 70px 70px 60px 80px 1fr 130px",
+                    gridTemplateColumns: "200px 70px 70px 60px 80px 130px 1fr",
                     padding: "8px 20px",
                     borderBottom: `1px solid ${C.border}`,
                     background: C.surface,

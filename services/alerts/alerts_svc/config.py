@@ -32,7 +32,7 @@ class Settings:
     SLACK_CHANNEL:     str   = os.getenv("SLACK_CHANNEL", "#agent-alerts")
 
     # Minimum severity to alert on. One of: LOW, MEDIUM, HIGH, CRITICAL
-    SLACK_MIN_SEVERITY: str  = os.getenv("SLACK_MIN_SEVERITY", "HIGH")
+    SLACK_MIN_SEVERITY: str  = os.getenv("SLACK_MIN_SEVERITY", "LOW")
 
     # Generic webhook
     # A JSON POST will be sent to this URL for every alert.

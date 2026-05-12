@@ -1002,6 +1002,123 @@ class ReasoningSpinDetector(BaseDetector):
         )
 
 
+# ── COST_SPIKE ────────────────────────────────────────────────────────────────
+
+class CostSpikeDetector(BaseDetector):
+    """
+    Total token consumption (prompt + completion) for this run is unusually high
+    compared to the agent's own P75 baseline.
+
+    Catches runs that burned far more tokens than typical — due to runaway loops,
+    context explosion, or a model swap that wasn't accounted for in budgeting.
+
+    Tunable: INFLATION_FACTOR (default 3.0) — how many times over P75 before firing.
+    STATIC_THRESHOLD_TOKENS (default 50 000) — fallback when no baseline is available.
+    MIN_LLM_CALLS (default 1) — skip runs with no LLM activity.
+    """
+    name                    = "COST_SPIKE"
+    INFLATION_FACTOR        = 3.0
+    STATIC_THRESHOLD_TOKENS = 50_000
+    MIN_LLM_CALLS           = 1
+
+    def check(self, state: RunState) -> Optional[FailureSignal]:
+        if len(state.llm_calls) < self.MIN_LLM_CALLS:
+            return None
+
+        total_tokens = sum(
+            (c.prompt_tokens or 0) + (c.completion_tokens or 0)
+            for c in state.llm_calls
+        )
+        if total_tokens == 0:
+            return None
+
+        if state.baseline_p75_total_tokens is not None:
+            threshold = state.baseline_p75_total_tokens * self.INFLATION_FACTOR
+        else:
+            threshold = float(self.STATIC_THRESHOLD_TOKENS)
+
+        if total_tokens < threshold:
+            return None
+
+        ratio = total_tokens / max(threshold, 1)
+        evidence: dict = {
+            "total_tokens":   total_tokens,
+            "threshold":      int(threshold),
+            "inflation_ratio": round(ratio, 2),
+            "llm_calls":      len(state.llm_calls),
+        }
+        if state.baseline_p75_total_tokens is not None:
+            evidence["baseline_p75"] = int(state.baseline_p75_total_tokens)
+
+        return FailureSignal(
+            failure_type=FailureType.COST_SPIKE,
+            severity=Severity.MEDIUM,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=state.current_step,
+            confidence=_scale_confidence(ratio),
+            evidence=evidence,
+        )
+
+
+# ── SESSION_LATENCY ───────────────────────────────────────────────────────────
+
+class SessionLatencyDetector(BaseDetector):
+    """
+    Total wall-clock run duration is unusually high compared to the agent's own P75 baseline.
+
+    Catches slow runs caused by hanging tools, large context windows, or infrastructure issues
+    that inflate per-run latency without necessarily triggering a step-level SLOW_STEP signal.
+
+    Tunable: INFLATION_FACTOR (default 3.0) — how many times over P75 before firing.
+    STATIC_THRESHOLD_SECS (default 300) — fallback threshold when no baseline exists (5 min).
+    MIN_EVENTS (default 2) — need at least two events to compute a duration.
+    """
+    name                   = "SESSION_LATENCY"
+    INFLATION_FACTOR       = 3.0
+    STATIC_THRESHOLD_SECS  = 300
+    MIN_EVENTS             = 2
+
+    def check(self, state: RunState) -> Optional[FailureSignal]:
+        if len(state.events) < self.MIN_EVENTS:
+            return None
+
+        timestamps = [e.timestamp for e in state.events]
+        duration_s = max(timestamps) - min(timestamps)
+
+        if duration_s <= 0:
+            return None
+
+        if state.baseline_p75_duration_s is not None:
+            threshold = state.baseline_p75_duration_s * self.INFLATION_FACTOR
+        else:
+            threshold = float(self.STATIC_THRESHOLD_SECS)
+
+        if duration_s < threshold:
+            return None
+
+        ratio = duration_s / max(threshold, 1)
+        evidence: dict = {
+            "duration_s":     round(duration_s, 1),
+            "threshold_s":    round(threshold, 1),
+            "inflation_ratio": round(ratio, 2),
+        }
+        if state.baseline_p75_duration_s is not None:
+            evidence["baseline_p75_s"] = round(state.baseline_p75_duration_s, 1)
+
+        return FailureSignal(
+            failure_type=FailureType.SESSION_LATENCY,
+            severity=Severity.MEDIUM,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=state.current_step,
+            confidence=_scale_confidence(ratio),
+            evidence=evidence,
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TIER1_DETECTORS: List[BaseDetector] = [
@@ -1019,6 +1136,8 @@ TIER1_DETECTORS: List[BaseDetector] = [
     CascadingToolFailureDetector(),
     FirstStepFailureDetector(),
     ReasoningSpinDetector(),
+    CostSpikeDetector(),
+    SessionLatencyDetector(),
     # PromptInjectionDetector is handled separately (needs raw input)
 ]
 

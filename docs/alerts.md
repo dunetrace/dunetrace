@@ -11,8 +11,8 @@ Add to your `.env`:
 ```bash
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz
 SLACK_CHANNEL=#agent-alerts
-# Options: LOW | MEDIUM | HIGH | CRITICAL  (default: HIGH)
-SLACK_MIN_SEVERITY=HIGH
+# Options: LOW | MEDIUM | HIGH | CRITICAL  (default: LOW — all severities alerted)
+SLACK_MIN_SEVERITY=LOW
 ```
 
 Get a webhook URL from [api.slack.com/messaging/webhooks](https://api.slack.com/messaging/webhooks). Restart the alerts worker to pick up changes:
@@ -21,7 +21,9 @@ Get a webhook URL from [api.slack.com/messaging/webhooks](https://api.slack.com/
 docker compose up -d --force-recreate alerts
 ```
 
-Each Slack alert includes: failure type, severity, what happened, why it matters, a concrete code fix targeted at the specific failure pattern detected, and a one-line rate context summary showing how common this pattern is for the agent.
+Each Slack alert includes: failure type, severity, what happened, why it matters, a concrete code fix targeted at the specific failure pattern detected, a one-line rate context summary showing how common this pattern is for the agent, and a **View Run** button that deep-links directly to that run's detail panel in the dashboard.
+
+> **Note:** `docker compose restart alerts` does not re-read `.env`. Use `docker compose up -d alerts` to recreate the container and pick up env var changes.
 
 ### Rate context in Slack alerts
 

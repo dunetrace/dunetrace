@@ -88,7 +88,9 @@ Powered by `GET /v1/agents/{agent_id}/failure-patterns/{failure_type}`.
 
 Click any run row to open the detail panel. Three tabs:
 
-- **Analysis** — execution timeline (one node per step, loop detection), signal score cards with confidence bars, plain-English explanation + suggested fix. Failure type labels show a plain-English tooltip on hover. When multiple signals fire, each card shows an amber **"confidence boosted · N co-occurring signals"** badge. An "**Explain with Langfuse**" button appears when `LANGFUSE_PUBLIC_KEY` is configured.
+- **Analysis** — execution timeline (one node per step, loop detection), signal score cards with confidence bars, plain-English explanation + suggested fix. Failure type labels show a plain-English tooltip on hover. When multiple signals fire, each card shows an amber **"confidence boosted · N co-occurring signals"** badge. An "**Explain with Langfuse**" button appears when `LANGFUSE_PUBLIC_KEY` is configured. After explaining:
+  - **Prompt-fix signals** (TOOL_LOOP, GOAL_ABANDONMENT, etc.) — **Apply via Langfuse** button pushes a new prompt version directly.
+  - **Code-change signals** (CONTEXT_BLOAT, SLOW_STEP, etc.) — **Open PR on GitHub ↗** button creates a draft PR in your repo containing the LLM-generated unified diff. Requires `GITHUB_TOKEN` and `GITHUB_REPO` in `.env`.
 - **Run graph** — SVG node graph: green = LLM call, orange = tool call (ok), red = looping tool call, blue = start/end.
 - **Event log** — every event in chronological order, expandable to show full payload. A filter input narrows by step index or event type (e.g. `tool.called`). A **copy ID** button in the header copies the full run ID to the clipboard.
 

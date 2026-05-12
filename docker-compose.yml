@@ -79,7 +79,7 @@ services:
       PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/alerts
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-}
-      SLACK_MIN_SEVERITY: ${SLACK_MIN_SEVERITY:-HIGH}
+      SLACK_MIN_SEVERITY: ${SLACK_MIN_SEVERITY:-LOW}
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3000}
@@ -112,6 +112,9 @@ services:
       LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      GITHUB_BASE_BRANCH: ${GITHUB_BASE_BRANCH:-main}
     depends_on:
       postgres:
         condition: service_healthy

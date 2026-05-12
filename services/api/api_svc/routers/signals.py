@@ -18,6 +18,7 @@ router = APIRouter(tags=["Signals"])
 _CODE_CHANGE_TYPES = frozenset({
     "CONTEXT_BLOAT", "RAG_EMPTY_RETRIEVAL", "SLOW_STEP",
     "CASCADING_TOOL_FAILURE", "LLM_TRUNCATION_LOOP", "FIRST_STEP_FAILURE",
+    "COST_SPIKE", "SESSION_LATENCY",
 })
 
 # Detectors that must never have auto-apply enabled — the signal itself indicates
@@ -31,6 +32,7 @@ _VALID_FAILURE_TYPES = {
     "EMPTY_LLM_RESPONSE", "GOAL_ABANDONMENT", "REASONING_STALL",
     "RAG_EMPTY_RETRIEVAL", "SLOW_STEP", "FIRST_STEP_FAILURE",
     "STEP_COUNT_INFLATION", "PROMPT_INJECTION_SIGNAL",
+    "COST_SPIKE", "SESSION_LATENCY",
 }
 
 
@@ -261,6 +263,68 @@ async def record_copy(
     return {"fix_id": fix_id, "signal_id": signal_id}
 
 
+class OpenPRRequest(BaseModel):
+    root_cause:  str
+    fix_content: str
+    fix_patch:   str
+
+
+@router.post(
+    "/v1/signals/{signal_id}/open-pr",
+    summary="Create a GitHub draft PR with the code-change fix suggestion",
+    response_model=Dict[str, Any],
+)
+async def open_pr(
+    signal_id: int,
+    body: OpenPRRequest,
+    _customer: str = Depends(require_customer),
+) -> Dict[str, Any]:
+    if not settings.github_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub not configured. Add GITHUB_TOKEN and GITHUB_REPO to .env.",
+        )
+
+    signal = await get_signal_by_id(signal_id)
+    if signal is None:
+        raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
+
+    if signal["failure_type"] not in _CODE_CHANGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="PR creation is only available for code-change signal types.",
+        )
+
+    from api_svc.github_client import create_fix_pr
+    try:
+        result = await create_fix_pr(
+            signal_id=signal_id,
+            agent_id=signal["agent_id"],
+            failure_type=signal["failure_type"],
+            root_cause=body.root_cause,
+            fix_content=body.fix_content,
+            fix_patch=body.fix_patch,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.warning("create_fix_pr failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Could not create GitHub PR. Check GITHUB_TOKEN and GITHUB_REPO.")
+
+    try:
+        await record_fix(
+            signal_id=signal_id,
+            run_id=signal["run_id"],
+            fix_content=body.fix_content,
+            applied_via="github_pr",
+            langfuse_version=result.get("pr_number"),
+        )
+    except Exception as exc:
+        logger.warning("record_fix (github_pr) failed (non-fatal): %s", exc)
+
+    return result
+
+
 @router.get(
     "/v1/signals/{signal_id}/fix-status",
     summary="Check whether a previously applied fix has reduced recurrence",
@@ -292,9 +356,11 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         fix_instruction = (
             "fix_content: one sentence (under 120 chars) describing the specific "
             "code or infrastructure change needed.\n"
-            "fix_patch: a concrete Python code snippet (max 20 lines) showing "
-            "exactly what to add or change — a real function or guard clause, "
-            "not pseudocode. Use the tool name and error pattern from the trace."
+            "fix_patch: a unified diff (max 30 lines) showing the exact change. "
+            "Use '--- a/path/to/file.py' and '+++ b/path/to/file.py' headers — "
+            "infer the file path from the tool name or error pattern in the trace; "
+            "if unknown use '--- a/agent.py'. Include @@ line numbers. "
+            "Lines starting with '-' are removed, '+' added, ' ' are context."
         )
     elif failure_type in _NO_AUTO_APPLY_TYPES:
         fix_instruction = (
@@ -332,7 +398,7 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
         msg = await client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=700,
+            max_tokens=900,
             system=system,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -346,7 +412,7 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         resp = await client.chat.completions.create(
             model="gpt-4o-mini",
-            max_tokens=700,
+            max_tokens=900,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user_prompt},
