@@ -206,6 +206,136 @@ provider.add_span_processor(SimpleSpanProcessor(receiver))
 
 ---
 
+## CrewAI
+
+`DunetraceCrewCallback` hooks into CrewAI 1.x's global hook system (`register_before_llm_call_hook`, `register_after_llm_call_hook`, `register_before_tool_call_hook`, `register_after_tool_call_hook`) to track every LLM and tool call. Wrap the crew kickoff with `dt.run()` to group all events under one run.
+
+```bash
+pip install 'dunetrace' crewai python-dotenv
+```
+
+```python
+from crewai import Agent, Crew, Task, Process
+from crewai.tools import tool
+from dunetrace import Dunetrace
+from dunetrace.integrations.crewai import DunetraceCrewCallback
+
+dt = Dunetrace()
+cb = DunetraceCrewCallback(dt, agent_id="research-crew", model="gpt-4o-mini",
+                            tools=["web_search"])
+cb.install()   # register global LLM + tool hooks
+
+@tool("web_search")
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    return f"Results for {query}"
+
+# CrewAI 1.x: pass model as a plain string — routed via LiteLLM
+researcher = Agent(
+    role="Senior Researcher",
+    goal="Find accurate information on any topic",
+    backstory="Expert researcher who always uses web_search",
+    llm="gpt-4o-mini",
+    tools=[web_search],
+)
+writer = Agent(
+    role="Content Writer",
+    goal="Write clear summaries from research",
+    backstory="Skilled at turning research into readable content",
+    llm="gpt-4o-mini",
+)
+
+research_task = Task(description="Research AI trends for 2025", agent=researcher,
+                     expected_output="Key findings report")
+write_task    = Task(description="Summarize the research",      agent=writer,
+                     expected_output="One-paragraph summary", context=[research_task])
+
+crew = Crew(agents=[researcher, writer], tasks=[research_task, write_task],
+            process=Process.sequential)
+
+with dt.run("research-crew", user_input="AI trends 2025", model="gpt-4o-mini",
+            tools=["web_search"]) as run:
+    result = crew.kickoff()
+    run.final_answer()
+
+cb.uninstall()   # remove hooks when done
+dt.shutdown()
+```
+
+`install()` is idempotent — safe to call multiple times. `uninstall()` is a no-op if not installed.
+
+**Full working example:**
+
+```bash
+OPENAI_API_KEY=sk-… python packages/sdk-py/examples/crewai_agent.py
+# Tool-loop scenario:
+SCENARIO=tool_loop OPENAI_API_KEY=sk-… python packages/sdk-py/examples/crewai_agent.py
+```
+
+---
+
+## AutoGen
+
+`DunetraceAutoGenObserver` wraps a multi-agent AutoGen conversation with a single Dunetrace run. Call `observe(*agents)` before starting the chat to instrument each agent's `generate_reply` for LLM-level tracking.
+
+```bash
+pip install dunetrace autogen-agentchat autogen-ext python-dotenv
+```
+
+```python
+import asyncio
+from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.teams import RoundRobinGroupChat
+from autogen_agentchat.conditions import MaxMessageTermination
+from autogen_core.tools import FunctionTool
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from dunetrace import Dunetrace
+from dunetrace.integrations.autogen import DunetraceAutoGenObserver
+
+dt       = Dunetrace()
+observer = DunetraceAutoGenObserver(dt, agent_id="my-autogen", model="gpt-4o-mini")
+
+def web_search(query: str) -> str:
+    """Search the web."""
+    return f"Results for {query}"
+
+async def main():
+    base_client = OpenAIChatCompletionClient(model="gpt-4o-mini")
+    dt_client   = observer.wrap_client(base_client)   # instruments every LLM call
+
+    assistant = AssistantAgent(
+        "assistant",
+        model_client=dt_client,
+        tools=[FunctionTool(web_search, description="Search the web.")],
+        system_message="You are helpful. Say TERMINATE when done.",
+    )
+    team = RoundRobinGroupChat([assistant],
+                                termination_condition=MaxMessageTermination(5))
+
+    query = "What is the capital of France?"
+    async with observer.run(user_input=query):
+        result = await team.run(task=query)
+
+    await base_client.close()
+    dt.shutdown()
+
+asyncio.run(main())
+```
+
+Every `model_client.create()` call is wrapped — `llm.called` / `llm.responded` events capture model, token counts (prompt + completion), and latency. The run appears in the dashboard under `my-autogen`.
+
+Compatible with autogen-agentchat >= 0.4 (tested with 0.7.x).
+
+**Full working example:**
+
+```bash
+OPENAI_API_KEY=sk-… python packages/sdk-py/examples/autogen_agent.py
+# Tool-loop scenario:
+SCENARIO=tool_loop OPENAI_API_KEY=sk-… python packages/sdk-py/examples/autogen_agent.py
+```
+
+---
+
 ## LangChain / LangGraph
 
 ```bash

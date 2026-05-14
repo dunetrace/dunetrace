@@ -28,6 +28,23 @@ function fmtDate(tsMs) {
 function fmtTime(tsMs) {
   return new Date(tsMs).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 }
+function fmtCost(usd) {
+  if (usd == null) return "—";
+  if (usd === 0) return "$0.00";
+  if (usd < 0.001) return `$${usd.toFixed(5)}`;
+  if (usd < 0.01)  return `$${usd.toFixed(4)}`;
+  if (usd < 1)     return `$${usd.toFixed(3)}`;
+  if (usd < 1000)  return `$${usd.toFixed(2)}`;
+  return `$${Math.round(usd).toLocaleString()}`;
+}
+
+function verdictColor(verdict, C) {
+  if (verdict === "verified")        return C.green;
+  if (verdict === "likely_fixed")    return C.yellow;
+  if (verdict === "still_occurring") return C.red;
+  return C.textD;
+}
+
 function fmtDuration(s) {
   if (s == null || s < 0) return "—";
   return s < 60 ? `${s.toFixed(1)}s` : `${(s / 60).toFixed(1)}m`;
@@ -312,8 +329,10 @@ function Dashboard() {
   const [failurePatternLoading, setFailurePatternLoading] = useState(false);
   const PAGE_SIZE = 15;
 
-  const [activeView,    setActiveView]    = useState("runs");   // "runs" | "patterns"
+  const [activeView,    setActiveView]    = useState("runs");   // "runs" | "patterns" | "fixes"
   const [patterns,      setPatterns]      = useState(null);
+  const [agentFixes,    setAgentFixes]    = useState([]);
+  const [fixesLoading,  setFixesLoading]  = useState(false);
 
   // ── Autofix state ──────────────────────────────────────────────────────────
   // explainStates[signalId] = { loading, error, rootCause, fixContent,
@@ -360,19 +379,21 @@ function Dashboard() {
     return () => clearInterval(t);
   }, [loadAgents]);
 
-  // Load runs + signals + insights when agent selected
+  // Load runs + signals + insights + fixes when agent selected
   const loadAgentData = useCallback(async (agentId) => {
-    if (!agentId) { setRuns([]); setSignals([]); setInsights(null); return; }
+    if (!agentId) { setRuns([]); setSignals([]); setInsights(null); setAgentFixes([]); return; }
     setLoading(true);
     try {
-      const [rd, sd, id] = await Promise.all([
+      const [rd, sd, id, fx] = await Promise.all([
         apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/runs?limit=200`),
         apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/signals?limit=500`),
         apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/insights`).catch(() => null),
+        apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/fixes`).catch(() => null),
       ]);
       setRuns(rd.runs       || []);
       setSignals(sd.signals || []);
       setInsights(id        || null);
+      setAgentFixes((fx?.fixes) || []);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   }, []);
@@ -385,6 +406,8 @@ function Dashboard() {
     setInsights(null);
     setSelectedFailureType(null);
     setFailurePattern(null);
+    setAgentFixes([]);
+    setActiveView("runs");
     loadAgentData(selectedAgent);
   }, [selectedAgent, loadAgentData]);
 
@@ -651,6 +674,28 @@ function Dashboard() {
           )}
         </button>
 
+        {selectedAgent && (
+          <button onClick={() => setActiveView(v => v === "fixes" ? "runs" : "fixes")} style={{
+            padding: "3px 10px", borderRadius: 4, border: "none", cursor: "pointer",
+            fontSize: 10, fontFamily: "inherit", whiteSpace: "nowrap", letterSpacing: "0.04em",
+            background: activeView === "fixes" ? C.green : C.surfaceB,
+            color:      activeView === "fixes" ? "#fff"  : C.textM,
+          }}>
+            FIXES
+            {agentFixes.length > 0 && (
+              <span style={{
+                marginLeft: 5, fontSize: 9, borderRadius: 8, padding: "0 5px",
+                background: agentFixes.some(f => f.verdict === "still_occurring") ? C.red
+                          : agentFixes.some(f => f.verdict === "verified")       ? C.green
+                          : C.textD,
+                color: "#fff",
+              }}>
+                {agentFixes.length}
+              </span>
+            )}
+          </button>
+        )}
+
         <div style={{ marginLeft: "auto", display: "flex", gap: 20, fontSize: 11, color: C.textD }}>
           <span>auto-refresh 10s</span>
           <span style={{ color: C.green }}>● LIVE</span>
@@ -697,6 +742,44 @@ function Dashboard() {
             ))}
           </div>
 
+          {/* Cost card — agent view only, when cost data available */}
+          {selectedAgent && insights?.cost_stats && insights.cost_stats.total_cost_usd > 0 && (() => {
+            const cs = insights.cost_stats;
+            return (
+              <div style={{ background: C.surfaceB, borderRadius: 6, padding: 12, border: `1px solid ${C.border}` }}>
+                <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.1em", marginBottom: 8 }}>
+                  EST. API COST — 30 DAYS
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: C.textD, marginBottom: 3 }}>TOTAL</div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>
+                      {fmtCost(cs.total_cost_usd)}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: C.textD, marginBottom: 3 }}>WASTED</div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: cs.wasted_pct > 0.3 ? C.red : C.yellow }}>
+                      {fmtCost(cs.wasted_cost_usd)}
+                    </div>
+                    <div style={{ fontSize: 9, color: C.textD }}>
+                      {Math.round(cs.wasted_pct * 100)}% of total
+                    </div>
+                  </div>
+                </div>
+                {cs.cost_by_failure_type?.slice(0, 3).map(ft => (
+                  <div key={ft.failure_type} style={{ marginBottom: 4 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                      <span style={{ fontSize: 9, color: C.textM }}>{ft.failure_type.replace(/_/g, " ")}</span>
+                      <span style={{ fontSize: 9, color: C.orange, fontWeight: 600 }}>{fmtCost(ft.wasted_usd)}</span>
+                    </div>
+                    <MiniBar value={ft.wasted_usd} max={cs.cost_by_failure_type[0].wasted_usd} color={C.orange} width={248} height={3} />
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
           {/* Sparklines — agent view only */}
           {selectedAgent && days.length > 1 && (
             <div style={{ background: C.surfaceB, borderRadius: 6, padding: 12, border: `1px solid ${C.border}` }}>
@@ -742,18 +825,31 @@ function Dashboard() {
               ? <div style={{ fontSize: 10, color: C.textD }}>No signals yet</div>
               : (() => {
                   const maxV = Math.max(...topFailures.map(e => e[1]), 1);
-                  return topFailures.map(([sig, cnt]) => (
-                    <div key={sig} style={{ marginBottom: 8, cursor: selectedAgent ? "pointer" : "default" }}
-                      onClick={() => selectedAgent && handleFailureTypeClick(sig)}>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                        <span style={{ fontSize: 10, color: selectedFailureType === sig ? C.orange : C.textM, fontWeight: selectedFailureType === sig ? 700 : 400 }}>
-                          {sig.replace(/_/g, " ")}
-                        </span>
-                        <span style={{ fontSize: 10, color: C.orange, fontWeight: 700 }}>{cnt}</span>
+                  const userImpactMap = {};
+                  (insights?.user_impact || []).forEach(u => { userImpactMap[u.failure_type] = u; });
+                  return topFailures.map(([sig, cnt]) => {
+                    const ui = userImpactMap[sig];
+                    return (
+                      <div key={sig} style={{ marginBottom: 8, cursor: selectedAgent ? "pointer" : "default" }}
+                        onClick={() => selectedAgent && handleFailureTypeClick(sig)}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                          <span style={{ fontSize: 10, color: selectedFailureType === sig ? C.orange : C.textM, fontWeight: selectedFailureType === sig ? 700 : 400 }}>
+                            {sig.replace(/_/g, " ")}
+                          </span>
+                          <span style={{ fontSize: 10, color: C.orange, fontWeight: 700 }}>{cnt}</span>
+                        </div>
+                        <MiniBar value={cnt} max={maxV} color={C.orange} width={248} height={4} />
+                        {ui && (
+                          <div style={{ fontSize: 9, color: C.textD, marginTop: 2 }}>
+                            <span style={{ color: ui.user_impact_rate > 0.5 ? C.red : C.textM }}>
+                              {ui.affected_users} user{ui.affected_users !== 1 ? "s" : ""} affected
+                            </span>
+                            {" "}· {Math.round(ui.user_impact_rate * 100)}% of total
+                          </div>
+                        )}
                       </div>
-                      <MiniBar value={cnt} max={maxV} color={C.orange} width={248} height={4} />
-                    </div>
-                  ));
+                    );
+                  });
                 })()
             }
           </div>
@@ -887,9 +983,133 @@ function Dashboard() {
             );
           })()}
 
+          {/* ── Fixes view ── */}
+          {activeView === "fixes" && selectedAgent && (
+            <div style={{ padding: 20 }}>
+              <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.15em", marginBottom: 16 }}>
+                FIX HISTORY — {agentFixes.length} fix{agentFixes.length !== 1 ? "es" : ""} applied
+              </div>
+              {agentFixes.length === 0 ? (
+                <div style={{ fontSize: 11, color: C.textD, padding: "40px 0", textAlign: "center" }}>
+                  No fixes applied yet. Use "Explain with Langfuse" on a signal to get a fix recommendation.
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {agentFixes.map(fix => {
+                    const vc = verdictColor(fix.verdict, C);
+                    const verdictLabel = {
+                      verified:          "✓ VERIFIED",
+                      likely_fixed:      "~ LIKELY FIXED",
+                      still_occurring:   "✕ STILL OCCURRING",
+                      insufficient_data: "? INSUFFICIENT DATA",
+                    }[fix.verdict] || fix.verdict;
+                    return (
+                      <div key={fix.id} style={{
+                        background: C.surface, border: `1px solid ${C.border}`,
+                        borderRadius: 6, padding: "12px 16px",
+                        borderLeft: `3px solid ${vc}`,
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                          <div>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: C.text }}>
+                              {fix.failure_type.replace(/_/g, " ")}
+                            </span>
+                            <span style={{ fontSize: 9, color: C.textD, marginLeft: 8 }}>
+                              {fix.severity}
+                            </span>
+                          </div>
+                          <span style={{
+                            fontSize: 9, padding: "2px 8px", borderRadius: 10, fontWeight: 700,
+                            background: `${vc}22`, color: vc, border: `1px solid ${vc}44`,
+                            letterSpacing: "0.05em", whiteSpace: "nowrap",
+                          }}>
+                            {verdictLabel}
+                          </span>
+                        </div>
+
+                        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 8 }}>
+                          <div style={{ fontSize: 9, color: C.textD }}>
+                            Applied via{" "}
+                            <span style={{ color: fix.applied_via === "langfuse" ? C.blue : C.textM }}>
+                              {fix.applied_via}
+                            </span>
+                            {fix.langfuse_prompt_name && (
+                              <> · prompt <span style={{ color: C.text }}>{fix.langfuse_prompt_name}</span>
+                                {fix.langfuse_version && <> v{fix.langfuse_version}</>}
+                              </>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 9, color: C.textD }}>
+                            {new Date(fix.applied_at * 1000).toLocaleString()}
+                          </div>
+                        </div>
+
+                        <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 6 }}>
+                          <div>
+                            <span style={{ fontSize: 9, color: C.textD }}>Runs after fix: </span>
+                            <span style={{ fontSize: 10, color: C.text, fontWeight: 600 }}>{fix.runs_after}</span>
+                          </div>
+                          <div>
+                            <span style={{ fontSize: 9, color: C.textD }}>Recurrences: </span>
+                            <span style={{
+                              fontSize: 10, fontWeight: 600,
+                              color: fix.recurrences_after > 0 ? C.red : C.green,
+                            }}>
+                              {fix.recurrences_after}
+                            </span>
+                          </div>
+                          {fix.runs_after >= 5 && (
+                            <div>
+                              <span style={{ fontSize: 9, color: C.textD }}>Recurrence rate: </span>
+                              <span style={{
+                                fontSize: 10, fontWeight: 600,
+                                color: fix.recurrences_after / fix.runs_after > 0.1 ? C.red : C.green,
+                              }}>
+                                {fix.runs_after > 0 ? Math.round(fix.recurrences_after / fix.runs_after * 100) : 0}%
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        <div style={{ fontSize: 9, color: C.textD }}>
+                          signal #{fix.signal_id} · run {fix.run_id.slice(0, 8)}…
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
           {activeView === "runs" && (selectedAgent ? (
             /* ── Agent view: health record + heatmap + runs table ── */
             <>
+              {/* ── Deploy regression banners ── */}
+              {insights?.deploy_regressions?.filter(r => r.is_regression).map(reg => (
+                <div key={reg.deploy_id} style={{
+                  padding: "10px 20px",
+                  background: `${C.red}15`,
+                  borderBottom: `1px solid ${C.red}44`,
+                  display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+                }}>
+                  <span style={{ fontSize: 11, color: C.red, fontWeight: 700 }}>⚠ REGRESSION DETECTED</span>
+                  <span style={{ fontSize: 10, color: C.textM }}>
+                    Deploy <span style={{ color: C.text, fontWeight: 600 }}>{reg.version}</span>
+                    {" "}increased signal rate{" "}
+                    <span style={{ color: C.textM }}>{Math.round(reg.before_rate * 100)}%</span>
+                    {" → "}
+                    <span style={{ color: C.red, fontWeight: 700 }}>{Math.round(reg.after_rate * 100)}%</span>
+                    {" "}
+                    <span style={{ color: C.red }}>(+{Math.round(reg.delta_rate * 100)}pp)</span>
+                  </span>
+                  <span style={{ fontSize: 9, color: C.textD }}>
+                    {reg.before_runs} runs before · {reg.after_runs} runs after
+                    {" · "}{new Date(reg.deployed_at * 1000).toLocaleString()}
+                  </span>
+                </div>
+              ))}
+
               {/* ── Health record: failure rate trends ── */}
               {insights && (insights.systemic_patterns?.length > 0 || insights.failure_rates?.length > 0) && (
                 <div style={{

@@ -1,0 +1,707 @@
+"""
+Unit tests for dunetrace_mcp tools.
+
+All tests run offline — the HTTP client is patched so no running stack is needed.
+
+Run:
+    cd packages/mcp-server && python -m pytest tests/ -v
+    python -m unittest discover -s packages/mcp-server/tests
+"""
+from __future__ import annotations
+
+import time
+import unittest
+from unittest.mock import patch
+
+import dunetrace_mcp.server as srv
+
+# ── shared fixtures ────────────────────────────────────────────────────────────
+
+AGENT_LIST = {
+    "agents": [
+        {
+            "agent_id": "my-agent",
+            "last_seen": time.time() - 300,
+            "run_count": 50,
+            "signal_count": 12,
+            "critical_count": 1,
+            "high_count": 8,
+            "sparkline": [0, 1, 2, 0, 3, 0, 1],
+            "failure_types": {"TOOL_LOOP": 8, "COST_SPIKE": 4},
+        },
+        {
+            "agent_id": "clean-agent",
+            "last_seen": time.time() - 3600,
+            "run_count": 20,
+            "signal_count": 0,
+            "critical_count": 0,
+            "high_count": 0,
+            "sparkline": [0, 0, 0, 0, 0, 0, 0],
+            "failure_types": {},
+        },
+    ],
+    "page": {"total": 2, "offset": 0, "limit": 100, "has_more": False},
+}
+
+SIGNAL_LIST = {
+    "signals": [
+        {
+            "id": 42,
+            "failure_type": "TOOL_LOOP",
+            "severity": "HIGH",
+            "run_id": "run-abc-123",
+            "agent_id": "my-agent",
+            "agent_version": "v1.2.3",
+            "step_index": 5,
+            "confidence": 0.9,
+            "detected_at": time.time() - 600,
+            "evidence": {
+                "tool": "web_search",
+                "count": 6,
+                "first_step": 2,
+                "last_step": 7,
+                "args_identical": True,
+                "args_hashes": ["aabbccdd"] * 6,
+            },
+            "alerted": True,
+            "shadow": False,
+            "co_signal_count": 1,
+            "title": "Tool loop detected: `web_search` called 6×",
+            "what": "The agent called web_search 6 times with identical args.",
+            "why_it_matters": "Wastes tokens and delays response.",
+            "evidence_summary": "web_search called 6× in steps 2–7.",
+            "suggested_fixes": [
+                {
+                    "description": "Deduplicate tool calls",
+                    "language": "python",
+                    "code": "seen = set()\nif args not in seen:\n    seen.add(args)\n    call_tool(args)",
+                }
+            ],
+        },
+        {
+            "id": 43,
+            "failure_type": "COST_SPIKE",
+            "severity": "CRITICAL",
+            "run_id": "run-def-456",
+            "agent_id": "my-agent",
+            "agent_version": "v1.2.3",
+            "step_index": 10,
+            "confidence": 0.95,
+            "detected_at": time.time() - 7200,
+            "evidence": {"total_tokens": 80000, "baseline_p75": 15000},
+            "alerted": False,
+            "shadow": False,
+            "co_signal_count": 0,
+            "title": "Cost spike: 80k tokens (5× baseline)",
+            "what": "Token usage was 5× above the P75 baseline.",
+            "why_it_matters": "Runaway cost.",
+            "evidence_summary": "80k tokens vs 15k baseline.",
+            "suggested_fixes": [{"description": "Add token budget guard", "language": "python", "code": ""}],
+        },
+    ],
+    "page": {"total": 2, "offset": 0, "limit": 500, "has_more": False},
+}
+
+HEALTH_SCORE = {
+    "agent_id": "my-agent",
+    "score": 62,
+    "components": {
+        "failure_rate": {"score": 24, "max": 40, "value": 24.0, "label": "% runs with failures"},
+        "loop_avoidance": {"score": 18, "max": 25, "value": 16.0, "label": "% runs with loops"},
+        "token_efficiency": {"score": 10, "max": 20, "value": None, "label": "avg prompt tokens"},
+        "latency": {"score": 10, "max": 15, "value": 4200.0, "label": "avg LLM latency ms"},
+    },
+    "sample_runs": 50,
+    "baseline_ready": True,
+}
+
+RUN_DETAIL = {
+    "run_id": "run-abc-123",
+    "agent_id": "my-agent",
+    "agent_version": "v1.2.3",
+    "started_at": time.time() - 120,
+    "completed_at": time.time() - 90,
+    "exit_reason": "run.completed",
+    "step_count": 8,
+    "total_tokens": None,
+    "signals": [SIGNAL_LIST["signals"][0]],
+    "events": [
+        {"event_type": "run.started",   "step_index": 0, "timestamp": time.time() - 120, "payload": {}, "parent_run_id": None},
+        {"event_type": "llm.called",    "step_index": 1, "timestamp": time.time() - 119, "payload": {"model": "gpt-4o-mini", "prompt_tokens": 500, "completion_tokens": 100, "latency_ms": 800}, "parent_run_id": None},
+        {"event_type": "tool.called",   "step_index": 2, "timestamp": time.time() - 115, "payload": {"tool_name": "web_search", "success": True, "latency_ms": 200}, "parent_run_id": None},
+        {"event_type": "run.completed", "step_index": 8, "timestamp": time.time() - 90,  "payload": {"exit_reason": "final_answer"}, "parent_run_id": None},
+    ],
+}
+
+INSIGHTS = {
+    "input_patterns": [
+        {"input_hash": "abc123", "failure_type": "TOOL_LOOP", "triggered_count": 8, "total_runs": 8, "rate": 1.0},
+        {"input_hash": "def456", "failure_type": "COST_SPIKE", "triggered_count": 2, "total_runs": 5, "rate": 0.4},
+    ],
+    "signal_trends": [
+        {"failure_type": "TOOL_LOOP", "agent_version": "v1.2.3", "day": "2026-05-12", "count": 4},
+        {"failure_type": "TOOL_LOOP", "agent_version": "v1.2.3", "day": "2026-05-13", "count": 3},
+        {"failure_type": "COST_SPIKE", "agent_version": "v1.2.3", "day": "2026-05-13", "count": 1},
+    ],
+    "failure_rates": [
+        {"failure_type": "TOOL_LOOP", "day": "2026-05-12", "total_runs": 8, "affected_runs": 8, "rate": 1.0},
+        {"failure_type": "COST_SPIKE", "day": "2026-05-13", "total_runs": 5, "affected_runs": 2, "rate": 0.4},
+    ],
+    "systemic_patterns": [
+        {"failure_type": "TOOL_LOOP", "total_runs": 16, "affected_runs": 16, "rate": 1.0,
+         "first_seen": time.time() - 86400 * 5, "last_seen": time.time() - 600, "is_systemic": True},
+    ],
+    "versions": [],
+    "time_to_tool": {"p25": None, "p50": None, "p75": None, "avg_steps": None, "runs_with_tool": 0, "total_runs": 0, "daily_trend": []},
+    "hourly_pattern": [],
+    "deploy_events": [],
+}
+
+
+def _mock_get(path, **params):
+    """Route mock API calls to the right fixture based on path."""
+    if path == "/v1/agents":
+        return AGENT_LIST
+    if path.endswith("/signals"):
+        return SIGNAL_LIST
+    if path.endswith("/health-score"):
+        return HEALTH_SCORE
+    if path.endswith("/insights"):
+        return INSIGHTS
+    if "/runs/" in path:
+        return RUN_DETAIL
+    if path.endswith("/runs"):
+        return {"runs": [
+            {"run_id": "run-abc-123", "agent_id": "my-agent", "agent_version": "v1.2.3",
+             "started_at": time.time() - 120, "completed_at": time.time() - 90,
+             "exit_reason": "run.completed", "step_count": 8, "total_tokens": None,
+             "signal_count": 1, "has_signals": True}
+        ], "page": {"total": 1, "offset": 0, "limit": 100, "has_more": False}}
+    raise ValueError(f"Unmocked path: {path}")
+
+
+class TestListAgents(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_returns_table(self):
+        out = srv.list_agents()
+        self.assertIn("my-agent", out)
+        self.assertIn("clean-agent", out)
+
+    def test_shows_signal_counts(self):
+        out = srv.list_agents()
+        self.assertIn("12", out)   # signal count for my-agent
+
+    def test_shows_failure_types(self):
+        out = srv.list_agents()
+        self.assertIn("TOOL_LOOP", out)
+
+    def test_shows_last_seen(self):
+        out = srv.list_agents()
+        self.assertIn("ago", out)
+
+    def test_no_agents(self):
+        with patch("dunetrace_mcp.client.get", return_value={"agents": [], "page": {"total": 0}}):
+            out = srv.list_agents()
+        self.assertIn("No agents found", out)
+
+
+class TestGetAgentSignals(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_lists_signals(self):
+        out = srv.get_agent_signals("my-agent")
+        self.assertIn("TOOL_LOOP", out)
+        self.assertIn("COST_SPIKE", out)
+
+    def test_severity_filter(self):
+        out = srv.get_agent_signals("my-agent", severity="CRITICAL")
+        self.assertIn("COST_SPIKE", out)
+        self.assertNotIn("TOOL_LOOP", out)
+
+    def test_no_match_severity(self):
+        out = srv.get_agent_signals("my-agent", severity="LOW")
+        self.assertIn("No signals found", out)
+
+    def test_shows_confidence(self):
+        out = srv.get_agent_signals("my-agent")
+        self.assertIn("90%", out)
+
+    def test_shows_suggested_fix(self):
+        out = srv.get_agent_signals("my-agent")
+        self.assertIn("Deduplicate", out)
+
+    def test_empty_agent(self):
+        with patch("dunetrace_mcp.client.get", return_value={"signals": [], "page": {"total": 0}}):
+            out = srv.get_agent_signals("ghost-agent")
+        self.assertIn("No signals found", out)
+
+
+class TestGetAgentHealth(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_shows_score(self):
+        out = srv.get_agent_health("my-agent")
+        self.assertIn("62/100", out)
+
+    def test_shows_components(self):
+        out = srv.get_agent_health("my-agent")
+        self.assertIn("failure_rate", out)
+        self.assertIn("loop_avoidance", out)
+        self.assertIn("token_efficiency", out)
+        self.assertIn("latency", out)
+
+    def test_baseline_ready_shown(self):
+        out = srv.get_agent_health("my-agent")
+        self.assertIn("yes", out)
+
+    def test_none_score(self):
+        no_score = {**HEALTH_SCORE, "score": None, "sample_runs": 2}
+        with patch("dunetrace_mcp.client.get", return_value=no_score):
+            out = srv.get_agent_health("my-agent")
+        self.assertIn("N/A", out)
+        self.assertIn("need ≥3", out)
+
+
+class TestGetRunDetail(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_shows_metadata(self):
+        out = srv.get_run_detail("run-abc-123")
+        self.assertIn("run-abc-123", out)
+        self.assertIn("my-agent", out)
+        self.assertIn("v1.2.3", out)
+        self.assertIn("30.0s", out)     # duration ~30s
+
+    def test_shows_signal(self):
+        out = srv.get_run_detail("run-abc-123")
+        self.assertIn("TOOL_LOOP", out)
+        self.assertIn("[HIGH]", out)
+
+    def test_shows_event_timeline(self):
+        out = srv.get_run_detail("run-abc-123")
+        self.assertIn("run.started", out)
+        self.assertIn("llm.called", out)
+        self.assertIn("tool.called", out)
+        self.assertIn("web_search", out)
+
+    def test_clean_run_no_signals(self):
+        clean = {**RUN_DETAIL, "signals": []}
+        with patch("dunetrace_mcp.client.get", return_value=clean):
+            out = srv.get_run_detail("run-clean")
+        self.assertIn("clean run", out)
+
+    def test_large_event_list_capped(self):
+        many_events = RUN_DETAIL["events"] * 15   # 60 events
+        big_run = {**RUN_DETAIL, "events": many_events}
+        with patch("dunetrace_mcp.client.get", return_value=big_run):
+            out = srv.get_run_detail("run-big")
+        self.assertIn("more events", out)
+
+
+class TestSearchSignals(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_basic_search(self):
+        out = srv.search_signals()
+        self.assertIn("TOOL_LOOP", out)
+        self.assertIn("COST_SPIKE", out)
+
+    def test_severity_filter(self):
+        out = srv.search_signals(severity="CRITICAL")
+        self.assertIn("COST_SPIKE", out)
+        self.assertNotIn("TOOL_LOOP", out)
+
+    def test_failure_type_filter(self):
+        out = srv.search_signals(failure_type="TOOL_LOOP")
+        self.assertIn("TOOL_LOOP", out)
+
+    def test_since_hours_excludes_old(self):
+        # The COST_SPIKE signal is 2 hours old; within 1h cutoff it should vanish
+        out = srv.search_signals(since_hours=1)
+        self.assertNotIn("COST_SPIKE", out)
+        self.assertIn("TOOL_LOOP", out)     # 10 min old, passes
+
+    def test_since_hours_zero_results(self):
+        # Very short window — nothing should match
+        out = srv.search_signals(since_hours=1, severity="CRITICAL")
+        self.assertIn("No signals found", out)
+
+    def test_agent_id_filter(self):
+        out = srv.search_signals(agent_id="my-agent")
+        self.assertIn("my-agent", out)
+
+    def test_limit(self):
+        out = srv.search_signals(limit=1)
+        # Should show 1 shown, 2 matched
+        self.assertIn("1 shown", out)
+
+    def test_shows_signal_id(self):
+        out = srv.search_signals()
+        self.assertIn("id=42", out)
+        self.assertIn("id=43", out)
+
+    def test_no_results(self):
+        with patch("dunetrace_mcp.client.get", return_value={"signals": [], "page": {"total": 0}}):
+            out = srv.search_signals()
+        self.assertIn("No signals found", out)
+
+
+class TestGetSignalDetail(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_found_by_id(self):
+        out = srv.get_signal_detail(42, "my-agent")
+        self.assertIn("Signal #42", out)
+        self.assertIn("TOOL_LOOP", out)
+
+    def test_shows_full_evidence(self):
+        out = srv.get_signal_detail(42, "my-agent")
+        self.assertIn("Evidence (hashed/structural data):", out)
+        self.assertIn("args_identical", out)
+
+    def test_shows_suggested_fixes(self):
+        out = srv.get_signal_detail(42, "my-agent")
+        self.assertIn("Suggested fixes", out)
+        self.assertIn("Deduplicate", out)
+
+    def test_shows_code_snippet(self):
+        out = srv.get_signal_detail(42, "my-agent")
+        self.assertIn("```python", out)
+        self.assertIn("seen = set()", out)
+
+    def test_shows_why_it_matters(self):
+        out = srv.get_signal_detail(42, "my-agent")
+        self.assertIn("Why it matters:", out)
+        self.assertIn("Wastes tokens", out)
+
+    def test_not_found(self):
+        out = srv.get_signal_detail(9999, "my-agent")
+        self.assertIn("not found", out)
+
+    def test_not_found_without_agent(self):
+        out = srv.get_signal_detail(9999)
+        self.assertIn("not found", out)
+
+    def test_code_truncated_at_20_lines(self):
+        long_fix = {
+            "description": "Big fix",
+            "language": "python",
+            "code": "\n".join(f"line_{i} = True" for i in range(30)),
+        }
+        sig = {**SIGNAL_LIST["signals"][0], "suggested_fixes": [long_fix]}
+        sig_list = {"signals": [sig], "page": {"total": 1}}
+        with patch("dunetrace_mcp.client.get", return_value=sig_list):
+            out = srv.get_signal_detail(42, "my-agent")
+        self.assertIn("more lines", out)
+
+    def test_evidence_list_truncated(self):
+        big_evidence = {**SIGNAL_LIST["signals"][0]["evidence"], "args_hashes": ["x"] * 20}
+        sig = {**SIGNAL_LIST["signals"][0], "evidence": big_evidence}
+        with patch("dunetrace_mcp.client.get", return_value={"signals": [sig], "page": {"total": 1}}):
+            out = srv.get_signal_detail(42, "my-agent")
+        self.assertIn("+14 more", out)
+
+
+class TestGetAgentPatterns(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_shows_systemic(self):
+        out = srv.get_agent_patterns("my-agent")
+        self.assertIn("SYSTEMIC", out)
+        self.assertIn("TOOL_LOOP", out)
+
+    def test_shows_daily_trend(self):
+        out = srv.get_agent_patterns("my-agent")
+        self.assertIn("Daily signal counts", out)
+        self.assertIn("05-12", out)
+        self.assertIn("05-13", out)
+
+    def test_shows_failure_rate(self):
+        out = srv.get_agent_patterns("my-agent")
+        self.assertIn("Failure rate", out)
+        self.assertIn("100%", out)
+
+    def test_shows_input_patterns(self):
+        out = srv.get_agent_patterns("my-agent")
+        self.assertIn("Input patterns", out)
+        self.assertIn("abc123", out)
+
+    def test_low_rate_input_patterns_hidden(self):
+        # def456 has rate 0.4, below 0.5 threshold — should not appear
+        out = srv.get_agent_patterns("my-agent")
+        self.assertNotIn("def456", out)
+
+    def test_no_data(self):
+        empty = {k: [] for k in INSIGHTS}
+        with patch("dunetrace_mcp.client.get", return_value=empty):
+            out = srv.get_agent_patterns("no-data-agent")
+        self.assertIn("No pattern data", out)
+
+
+class TestSummarizeAgent(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_shows_score(self):
+        out = srv.summarize_agent("my-agent")
+        self.assertIn("62/100", out)
+
+    def test_shows_failure_breakdown(self):
+        out = srv.summarize_agent("my-agent")
+        self.assertIn("TOOL_LOOP", out)
+        self.assertIn("COST_SPIKE", out)
+
+    def test_shows_health_bar(self):
+        out = srv.summarize_agent("my-agent")
+        self.assertIn("failure_rate", out)
+        self.assertIn("█", out)
+
+    def test_unknown_agent(self):
+        out = srv.summarize_agent("ghost-agent")
+        self.assertIn("not found", out)
+        self.assertIn("list_agents", out)
+
+    def test_health_fetch_failure_graceful(self):
+        def mock_get_no_health(path, **params):
+            if path.endswith("/health-score"):
+                raise RuntimeError("API down")
+            return _mock_get(path, **params)
+
+        with patch("dunetrace_mcp.client.get", side_effect=mock_get_no_health):
+            out = srv.summarize_agent("my-agent")
+        self.assertIn("my-agent", out)
+        # Should still render summary without health score
+        self.assertIn("Total runs", out)
+
+
+class TestGetAgentRuns(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_shows_run(self):
+        out = srv.get_agent_runs("my-agent")
+        self.assertIn("run-abc-123", out)
+
+    def test_shows_duration(self):
+        out = srv.get_agent_runs("my-agent")
+        self.assertIn("30.0s", out)
+
+    def test_shows_signal_flag(self):
+        out = srv.get_agent_runs("my-agent")
+        self.assertIn("🔴", out)
+
+    def test_no_runs(self):
+        with patch("dunetrace_mcp.client.get", return_value={"runs": [], "page": {"total": 0}}):
+            out = srv.get_agent_runs("empty-agent")
+        self.assertIn("No runs found", out)
+
+
+class TestHelpers(unittest.TestCase):
+    """Edge cases for internal helper functions."""
+
+    def test_ts_none(self):
+        self.assertEqual(srv._ts(None), "—")
+
+    def test_ago_none(self):
+        self.assertEqual(srv._ago(None), "—")
+
+    def test_ago_seconds(self):
+        out = srv._ago(time.time() - 30)
+        self.assertIn("s ago", out)
+
+    def test_ago_minutes(self):
+        out = srv._ago(time.time() - 90)
+        self.assertIn("m ago", out)
+
+    def test_ago_hours(self):
+        out = srv._ago(time.time() - 7200)
+        self.assertIn("h ago", out)
+
+    def test_ago_days(self):
+        out = srv._ago(time.time() - 86400 * 3)
+        self.assertIn("d ago", out)
+
+    def test_sev_icons(self):
+        self.assertEqual(srv._sev_icon("CRITICAL"), "🔴")
+        self.assertEqual(srv._sev_icon("HIGH"), "🟠")
+        self.assertEqual(srv._sev_icon("MEDIUM"), "🟡")
+        self.assertEqual(srv._sev_icon("LOW"), "🟢")
+        self.assertEqual(srv._sev_icon("UNKNOWN"), "⚪")
+
+    def test_score_icon(self):
+        self.assertEqual(srv._score_icon(85), "✅")
+        self.assertEqual(srv._score_icon(65), "🟡")
+        self.assertEqual(srv._score_icon(40), "🔴")
+        self.assertEqual(srv._score_icon(None), "❓")
+
+
+class TestGetInstrumentationGuide(unittest.TestCase):
+    """No HTTP calls — guide content is inline + local file reads."""
+
+    def test_langchain_guide(self):
+        out = srv.get_instrumentation_guide("langchain")
+        self.assertIn("LangChain", out)
+        self.assertIn("DunetraceCallbackHandler", out)
+        self.assertIn("pip install", out)
+
+    def test_langgraph_alias(self):
+        out = srv.get_instrumentation_guide("langgraph")
+        self.assertIn("DunetraceCallbackHandler", out)
+
+    def test_lc_alias(self):
+        out = srv.get_instrumentation_guide("lc")
+        self.assertIn("DunetraceCallbackHandler", out)
+
+    def test_python_guide(self):
+        out = srv.get_instrumentation_guide("python")
+        self.assertIn("@dt.tool", out)
+        self.assertIn("@dt.trace", out)
+        self.assertIn("pip install dunetrace", out)
+
+    def test_custom_python_alias(self):
+        out = srv.get_instrumentation_guide("custom-python")
+        self.assertIn("@dt.tool", out)
+
+    def test_typescript_guide(self):
+        out = srv.get_instrumentation_guide("typescript")
+        self.assertIn("TypeScript", out)
+        self.assertIn("sendEvent", out)
+        self.assertIn("run.started", out)
+
+    def test_ts_alias(self):
+        out = srv.get_instrumentation_guide("ts")
+        self.assertIn("sendEvent", out)
+
+    def test_javascript_alias(self):
+        out = srv.get_instrumentation_guide("javascript")
+        self.assertIn("sendEvent", out)
+
+    def test_node_alias(self):
+        out = srv.get_instrumentation_guide("node")
+        self.assertIn("sendEvent", out)
+
+    def test_tools_guide(self):
+        out = srv.get_instrumentation_guide("tools")
+        self.assertIn("tool_called", out)
+        self.assertIn("TOOL_LOOP", out)
+
+    def test_tool_calls_alias(self):
+        out = srv.get_instrumentation_guide("tool-calls")
+        self.assertIn("tool_called", out)
+
+    def test_tracking_alias(self):
+        out = srv.get_instrumentation_guide("tracking")
+        self.assertIn("tool_called", out)
+
+    def test_unknown_framework(self):
+        out = srv.get_instrumentation_guide("rails")
+        self.assertIn("Unknown framework", out)
+        self.assertIn("rails", out)
+        self.assertIn("langchain", out)     # lists supported values
+
+    def test_case_insensitive(self):
+        out = srv.get_instrumentation_guide("LANGCHAIN")
+        self.assertIn("DunetraceCallbackHandler", out)
+
+    def test_whitespace_stripped(self):
+        out = srv.get_instrumentation_guide("  python  ")
+        self.assertIn("@dt.tool", out)
+
+    def test_includes_full_doc_when_available(self):
+        # When docs directory exists (it does in repo), the full markdown is appended
+        import pathlib
+        doc_path = pathlib.Path(__file__).resolve().parents[3] / "docs" / "integrate-langchain-agent.md"
+        if doc_path.exists():
+            out = srv.get_instrumentation_guide("langchain")
+            # The full doc contains sections not in the inline snippet
+            self.assertIn("## How It Works", out)
+
+    def test_degrades_gracefully_without_docs(self):
+        # Patch the docs path to a non-existent directory — should still return inline guide
+        import pathlib
+        from unittest.mock import patch
+        fake_path = pathlib.Path("/nonexistent/docs")
+        with patch.object(srv, "_DOCS", fake_path):
+            out = srv.get_instrumentation_guide("python")
+        self.assertIn("@dt.tool", out)
+
+
+class TestResources(unittest.TestCase):
+    """Verify resources are registered and readable."""
+
+    def test_resources_registered(self):
+        uris = list(srv.mcp._resource_manager._resources.keys())
+        self.assertIn("dunetrace://docs/integrate-python", uris)
+        self.assertIn("dunetrace://docs/integrate-langchain", uris)
+        self.assertIn("dunetrace://docs/integrate-typescript", uris)
+        self.assertIn("dunetrace://docs/integrations", uris)
+        self.assertIn("dunetrace://docs/detectors", uris)
+        self.assertIn("dunetrace://docs/mcp-server", uris)
+
+    def test_doc_resource_returns_content(self):
+        content = srv.doc_integrate_python()
+        self.assertIn("Dunetrace", content)
+        self.assertGreater(len(content), 500)
+
+    def test_langchain_resource_returns_content(self):
+        content = srv.doc_integrate_langchain()
+        self.assertIn("DunetraceCallbackHandler", content)
+
+    def test_typescript_resource_returns_content(self):
+        content = srv.doc_integrate_typescript()
+        self.assertIn("tool.called", content)
+
+    def test_missing_doc_returns_error_string(self):
+        import pathlib
+        from unittest.mock import patch
+        with patch.object(srv, "_DOCS", pathlib.Path("/nonexistent")):
+            content = srv.doc_integrate_python()
+        self.assertIn("doc not found", content)
+
+
+if __name__ == "__main__":
+    unittest.main()

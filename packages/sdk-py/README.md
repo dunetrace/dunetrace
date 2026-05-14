@@ -76,6 +76,8 @@ def run_agent(query: str) -> str:
 | `REASONING_STALL`         | LLM:tool-call ratio ≥4× — reasoning without acting         | MEDIUM      |
 | `RAG_EMPTY_RETRIEVAL`     | Retrieval returned 0 results but agent answered anyway     | MEDIUM      |
 | `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns         | CRITICAL    |
+| `COST_SPIKE`              | Total tokens 3× above per-agent P75 baseline               | HIGH        |
+| `SESSION_LATENCY`         | Wall-clock run duration 3× above per-agent P75 baseline    | HIGH        |
 
 
 ## Output modes
@@ -149,13 +151,50 @@ with dt.run("my-agent", user_input=query, tools=["search"]) as run:
 
 Policies can also be defined in the dashboard and fetched automatically at run start (60-second TTL cache per agent). See [docs/integrations.md](../../docs/integrations.md#policies) for the full reference.
 
+## MCP server
+
+Query agent signals directly from Claude Code, Cursor, or any MCP-compatible editor — no context switch to the dashboard required.
+
+```bash
+pip install dunetrace-mcp
+```
+
+Ten tools: `list_agents`, `get_agent_signals`, `get_agent_health`, `get_run_detail`, `get_agent_runs`, `search_signals`, `get_signal_detail`, `get_agent_patterns`, `summarize_agent`, `get_instrumentation_guide`.
+
+**Claude Code** — add to `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "dunetrace": {
+      "command": "dunetrace-mcp",
+      "env": {
+        "DUNETRACE_API_URL": "http://localhost:8002",
+        "DUNETRACE_API_KEY": "dt_dev_test"
+      }
+    }
+  }
+}
+```
+
+**Cursor** — add to `.cursor/mcp.json` in your project root (same shape as above).
+
+Once connected, ask your editor things like:
+- *"Is my agent healthy?"*
+- *"What failed in the last 24 hours?"*
+- *"Show me signal #42 with its fix."*
+- *"Is this failure systemic or a one-off?"*
+
+→ [docs/mcp-server.md](../../docs/mcp-server.md)
+
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v          # SDK tests (no network required)
+cd ../mcp-server && python -m pytest tests/ -v   # MCP server tests (no network required)
 ```
 
-307 tests, no network required.
+SDK: 307 tests · MCP server: 83 tests — both run fully offline.
 
 ## Links
 

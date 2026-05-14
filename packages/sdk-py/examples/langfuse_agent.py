@@ -27,7 +27,9 @@ import asyncio
 import os
 import time
 import uuid as uuid_mod
+import warnings
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
@@ -36,6 +38,10 @@ import httpx
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
+
+# The suggested migration target (langchain.agents.create_react_agent) doesn't
+# exist in the installed langchain version, so the warning is premature.
+warnings.filterwarnings("ignore", message=".*create_react_agent.*", category=DeprecationWarning)
 
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler

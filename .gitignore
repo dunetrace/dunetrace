@@ -75,3 +75,5 @@ railway.toml
 *.crt
 *.cer
 dunetrace/
+node_modules/
+**/node_modules/

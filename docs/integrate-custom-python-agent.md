@@ -2,6 +2,9 @@
 
 This guide covers how to instrument a Python agent already running in production so Dunetrace can monitor it for structural failures in real-time.
 
+> **Using TypeScript or Node.js?** See [integrate-typescript-agent.md](./integrate-typescript-agent.md) for the Node.js SDK guide.
+> **Using LangChain, CrewAI, or AutoGen?** See [integrations.md](./integrations.md) — those frameworks have dedicated integrations that require no manual event calls.
+
 ---
 
 ## What Dunetrace Captures

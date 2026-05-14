@@ -7,9 +7,9 @@ from api_svc.auth import require_customer
 from api_svc.config import settings
 from api_svc.db.queries import (
     list_agents, agent_signal_sparklines, agent_failure_type_counts,
-    get_agent_health_score,
+    get_agent_health_score, list_agent_fixes,
 )
-from api_svc.schemas import AgentListResponse, AgentSummary, AgentHealthScore, Page
+from api_svc.schemas import AgentListResponse, AgentSummary, AgentHealthScore, Page, FixListResponse, FixRecord
 
 router = APIRouter(prefix="/v1/agents", tags=["Agents"])
 
@@ -49,6 +49,29 @@ async def get_agents(
         page=Page(total=total, offset=offset, limit=limit,
                   has_more=(offset + limit) < total),
     )
+
+
+@router.get(
+    "/{agent_id}/fixes",
+    response_model=FixListResponse,
+    summary="Fixes applied to signals for an agent, with recurrence verdicts",
+)
+async def get_agent_fixes(
+    agent_id:    str,
+    _customer:   str = Depends(require_customer),
+) -> FixListResponse:
+    """
+    Returns all fixes applied via the dashboard for this agent — both Langfuse prompt
+    applications and clipboard copies — with recurrence status since each fix was applied.
+
+    `verdict` is one of:
+    - **verified** — ≥10 runs after fix with zero recurrences
+    - **likely_fixed** — ≥5 runs after fix with zero recurrences
+    - **still_occurring** — the failure type reappeared after the fix
+    - **insufficient_data** — fewer than 5 runs recorded since the fix
+    """
+    fixes = await list_agent_fixes(agent_id)
+    return FixListResponse(fixes=[FixRecord(**f) for f in fixes])
 
 
 @router.get(

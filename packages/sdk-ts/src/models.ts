@@ -1,0 +1,49 @@
+export type EventType =
+  | "run.started"
+  | "run.completed"
+  | "run.errored"
+  | "llm.called"
+  | "llm.responded"
+  | "tool.called"
+  | "tool.responded"
+  | "retrieval.called"
+  | "retrieval.responded"
+  | "external.signal";
+
+export interface AgentEvent {
+  event_type:     EventType;
+  run_id:         string;
+  agent_id:       string;
+  agent_version:  string;
+  step_index:     number;
+  timestamp:      number;
+  payload:        Record<string, unknown>;
+  parent_run_id?: string | null;
+}
+
+export interface RunOptions {
+  systemPrompt?: string;
+  model?:        string;
+  tools?:        string[];
+  userInput?:    string;
+  parentRunId?:  string;
+  /** Pre-set the run UUID. Use this to correlate a Dunetrace run with an external
+   *  tracing system (e.g. Langfuse) that was given the same ID. */
+  runId?:        string;
+}
+
+export interface LlmRespondedOptions {
+  completionTokens?: number;
+  latencyMs?:        number;
+  finishReason?:     string;
+  outputLength?:     number;
+  /** SHA-256 hashed before transmission — never sent raw. */
+  outputText?:       string;
+}
+
+export interface ClientOptions {
+  endpoint?:        string;
+  apiKey?:          string;
+  flushIntervalMs?: number;
+  emitAsJson?:      boolean;
+}

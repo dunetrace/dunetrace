@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dunetrace": {
+      "command": "dunetrace-mcp",
+      "env": {
+        "DUNETRACE_API_URL": "http://localhost:8002",
+        "DUNETRACE_API_KEY": "dt_dev_test"
+      }
+    }
+  }
+}

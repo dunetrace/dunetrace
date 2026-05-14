@@ -8,11 +8,18 @@ Install:
 Run:
     OPENAI_API_KEY=sk-... python examples/langchain_agent.py
     OPENAI_API_KEY=sk-... SCENARIO=tool_loop python examples/langchain_agent.py
+
+Deploy markers:
+    Call dt.mark_deploy() once at startup (or from CI) to overlay a blue dashed
+    line on the 30-day detector timeline in the dashboard.  Runs after the marker
+    are visually separated from runs before it, making it easy to see whether a
+    failure spike started before or after a release.
 """
 from __future__ import annotations
 
 import os
 import time
+import warnings
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -22,10 +29,25 @@ from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
+# The suggested migration target (langchain.agents.create_react_agent) doesn't
+# exist in the installed langchain version, so the warning is premature.
+warnings.filterwarnings("ignore", message=".*create_react_agent.*", category=DeprecationWarning)
+
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
 
 dt = Dunetrace(endpoint=os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8001"))
+
+# ── Deploy marker ──────────────────────────────────────────────────────────────
+# Call this once at application startup or from your CI/CD pipeline.
+# Fire-and-forget: runs on a background thread, never blocks the caller.
+# The dashboard overlays a blue dashed line at this point on the detector timeline.
+dt.mark_deploy(
+    "langchain-example-agent",
+    version=os.environ.get("APP_VERSION", "dev"),
+    commit=os.environ.get("GIT_COMMIT", "local"),
+    env=os.environ.get("ENV", "development"),
+)
 
 SYSTEM_PROMPT = (
     "You are a research assistant. "

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dunetrace-mcp"
+version = "0.1.0"
+description = "Dunetrace MCP server — expose agent signals to Claude Code, Cursor, and Codex"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]
+keywords = ["ai", "agents", "mcp", "observability", "llm", "monitoring"]
+dependencies = [
+    "mcp>=1.0",
+    "httpx>=0.24",
+]
+
+[project.scripts]
+dunetrace-mcp = "dunetrace_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["dunetrace_mcp*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"

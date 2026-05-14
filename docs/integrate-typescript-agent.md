@@ -1,12 +1,12 @@
 # Integrating a TypeScript Agent with Dunetrace
 
-This guide covers adding Dunetrace monitoring to a TypeScript or JavaScript agent. No SDK package is required — events are sent directly to the ingest HTTP endpoint.
+This guide covers adding Dunetrace monitoring to a TypeScript or JavaScript agent using the `dunetrace` npm package.
 
 ---
 
 ## How It Works
 
-Your agent calls a thin client class that buffers events and POSTs them to the Dunetrace ingest service at run completion. The same detectors, dashboard, and alerts that work for Python agents apply here.
+The SDK buffers events and POSTs them to the Dunetrace ingest service at run completion. The same detectors, dashboard, and alerts that work for Python agents apply here.
 
 ```
 your TS agent  →  POST /v1/ingest  →  detector  →  dashboard + Slack alerts
@@ -17,7 +17,7 @@ your TS agent  →  POST /v1/ingest  →  detector  →  dashboard + Slack alert
 ## Prerequisites
 
 - Dunetrace backend running (`docker compose up -d`)
-- Node 18+ (uses built-in `fetch`) or any runtime with `fetch` available
+- Node 18+ (built-in `fetch` and `AsyncLocalStorage` required)
 
 > **Local dev — no API key needed.** The backend accepts requests without any key when running locally. API keys are only required for production — see [Step 1](#step-1-generate-an-api-key-production-only).
 
@@ -52,9 +52,21 @@ DUNETRACE_API_KEY=                         # empty for local dev
 
 ---
 
-## Step 3: Add the Client
+## Step 3: Install the SDK
 
-Create `src/dunetrace.ts` in your project. No npm packages needed.
+```bash
+npm install dunetrace
+```
+
+The SDK has zero runtime dependencies and works with any Node 18+ runtime.
+
+---
+
+## Step 3b: Manual client (copy-paste, no npm)
+
+If you prefer not to use npm, you can copy the self-contained client below into your project. The npm package is the recommended path — it includes background buffering, `dt.tool()` auto-wrapping, and `getCurrentRun()` access.
+
+Create `src/dunetrace.ts` in your project:
 
 ```typescript
 import { createHash, randomUUID } from "node:crypto";
@@ -109,14 +121,17 @@ interface AgentEvent {
 // ── RunContext ────────────────────────────────────────────────────────────────
 
 export class DunetraceRun {
-  readonly runId: string = randomUUID();
+  readonly runId: string;
   private  step         = 0;
   private  events: AgentEvent[] = [];
 
   constructor(
     private readonly agentId:  string,
     private readonly version:  string,
-  ) {}
+    runId?: string,
+  ) {
+    this.runId = runId ?? randomUUID();
+  }
 
   // advance=true for "called" events, advance=false for "responded" events.
   // Mirrors the Python SDK: step increments when an action starts, not when it ends.
@@ -248,13 +263,14 @@ export class Dunetrace {
       model?:        string;
       tools?:        string[];
       userInput?:    string;
+      runId?:        string;   // pre-set to match a Langfuse trace ID
     },
     fn: (run: DunetraceRun) => Promise<void>,
   ): Promise<void> {
     const model   = opts.model        ?? "unknown";
     const tools   = opts.tools        ?? [];
     const version = agentVersion(opts.systemPrompt ?? "", model, tools);
-    const run     = new DunetraceRun(agentId, version);
+    const run     = new DunetraceRun(agentId, version, opts.runId);
 
     const startEvent: AgentEvent = {
       event_type:    "run.started",
@@ -316,7 +332,7 @@ export class Dunetrace {
 ### Basic agent
 
 ```typescript
-import { Dunetrace } from "./dunetrace";
+import { Dunetrace } from "dunetrace";  // npm package
 
 const dt = new Dunetrace();
 
@@ -433,7 +449,56 @@ This triggers `TOOL_LOOP` (same tool ≥3 times in a 5-call window). The signal 
 
 ---
 
+## Langfuse integration
+
+Correlate a Dunetrace run with a Langfuse trace using a shared UUID. The `runId` option pre-sets the Dunetrace `run_id` to the same value you use as the Langfuse trace ID — so detected signals link directly to the full trace.
+
+```typescript
+import { randomUUID } from "node:crypto";
+import { Langfuse } from "langfuse";
+
+const langfuse = new Langfuse({
+  publicKey: process.env.LANGFUSE_PUBLIC_KEY!,
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+});
+
+const sharedId = randomUUID();
+
+// Open a Langfuse trace with the shared ID first
+const trace = langfuse.trace({ id: sharedId, name: "my-ts-agent" });
+
+await dt.run("my-ts-agent", {
+  runId:  sharedId,    // ← links Dunetrace run to Langfuse trace
+  model:  "gpt-4o",
+  tools:  ["web_search"],
+}, async (run) => {
+  // instrument as normal …
+  run.finalAnswer();
+});
+
+await langfuse.flushAsync();
+// Langfuse trace URL: https://cloud.langfuse.com/trace/<sharedId>
+// Dunetrace signals will carry run_id = sharedId
+```
+
+For a complete working example including the explain/autofix flow, see [`packages/sdk-ts/examples/langfuse_agent.ts`](../packages/sdk-ts/examples/langfuse_agent.ts).
+
+---
+
 ## RunContext API Reference
+
+`dt.run()` accepts an options object:
+
+| Option | Type | Description |
+|---|---|---|
+| `model` | `string` | LLM model name — used for agent version fingerprint |
+| `tools` | `string[]` | Declared tool names — used for agent version fingerprint |
+| `userInput` | `string` | User query — SHA-256 hashed before transmission |
+| `systemPrompt` | `string` | System prompt — used for agent version fingerprint only |
+| `runId` | `string` | Pre-set the run UUID (e.g. to match a Langfuse trace ID) |
+| `parentRunId` | `string` | Link to a parent run for sub-agent tracking |
+
+`run` methods inside the callback:
 
 | Method | When to call |
 |---|---|
@@ -445,6 +510,7 @@ This triggers `TOOL_LOOP` (same tool ≥3 times in a 5-call window). The signal 
 | `run.retrievalResponded(indexName, resultCount, topScore?, latencyMs?)` | After retrieval returns |
 | `run.externalSignal(signalName, source?, meta?)` | Rate limits, cache misses, upstream errors — does not advance step |
 | `run.finalAnswer()` | When agent produces its final output |
+| `run.runId` | Read-only UUID for this run |
 
 ---
 

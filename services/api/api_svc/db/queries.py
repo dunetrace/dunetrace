@@ -275,6 +275,15 @@ async def list_runs(
                  LIMIT 1) AS completed_at,
                 -- step_count
                 (SELECT MAX(e.step_index) FROM events e WHERE e.run_id = pr.run_id) AS step_count,
+                -- total tokens (prompt + completion) from LLM call events; NULL when no LLM data
+                (SELECT SUM(
+                    COALESCE((e.payload->>'prompt_tokens')::integer, 0) +
+                    COALESCE((e.payload->>'completion_tokens')::integer, 0)
+                 ) FROM events e
+                 WHERE e.run_id = pr.run_id
+                   AND e.event_type = 'llm.called'
+                   AND e.payload->>'prompt_tokens' IS NOT NULL
+                )                                                       AS total_tokens,
                 -- live signal count
                 (SELECT COUNT(*) FROM failure_signals s
                  WHERE s.run_id = pr.run_id AND s.shadow = FALSE)      AS signal_count
@@ -392,6 +401,12 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
             ],
         })
 
+    total_tokens = sum(
+        (e["payload"].get("prompt_tokens") or 0) + (e["payload"].get("completion_tokens") or 0)
+        for e in event_list
+        if e["event_type"] == "llm.called"
+    ) or None  # None when no LLM token data recorded
+
     pr_dict = dict(pr)
     return {
         "run_id":        run_id,
@@ -401,6 +416,7 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
         "started_at":    started_at,
         "completed_at":  completed_at,
         "step_count":    max((e["step_index"] for e in event_list), default=0) if event_list else 0,
+        "total_tokens":  total_tokens,
         "events":        event_list,
         "signals":       signal_list,
     }
@@ -1642,6 +1658,363 @@ async def get_agent_health_score(agent_id: str) -> dict:
         "sample_runs": total,
         "baseline_ready": baseline_ready,
     }
+
+
+# ── Cost stats ────────────────────────────────────────────────────────────────
+
+async def agent_cost_stats(agent_id: str) -> dict:
+    """
+    Estimated API cost for an agent over the last 30 days.
+
+    Returns:
+      total_cost_usd     — all runs combined
+      wasted_cost_usd    — runs that had at least one live signal
+      wasted_pct         — wasted / total (0–1)
+      cost_by_failure_type — [{failure_type, wasted_usd, affected_runs}]
+    """
+    if not _pool:
+        return {"total_cost_usd": 0.0, "wasted_cost_usd": 0.0, "wasted_pct": 0.0,
+                "cost_by_failure_type": []}
+
+    from api_svc.cost import estimate_cost
+
+    async with _pool.acquire() as conn:
+        # Prompt tokens + model per run (MAX picks any model name — they should match within a run)
+        prompt_rows = await conn.fetch(
+            """
+            SELECT run_id,
+                   MAX(payload->>'model') AS model,
+                   SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens
+            FROM events
+            WHERE agent_id = $1
+              AND event_type = 'llm.called'
+              AND payload->>'prompt_tokens' IS NOT NULL
+              AND received_at >= NOW() - INTERVAL '30 days'
+            GROUP BY run_id
+            """,
+            agent_id,
+        )
+
+        # Completion tokens per run
+        completion_rows = await conn.fetch(
+            """
+            SELECT run_id,
+                   SUM(COALESCE((payload->>'completion_tokens')::int, 0)) AS completion_tokens
+            FROM events
+            WHERE agent_id = $1
+              AND event_type = 'llm.responded'
+              AND payload->>'completion_tokens' IS NOT NULL
+              AND received_at >= NOW() - INTERVAL '30 days'
+            GROUP BY run_id
+            """,
+            agent_id,
+        )
+
+        # Runs with signals and their failure types
+        signal_rows = await conn.fetch(
+            """
+            SELECT run_id, failure_type
+            FROM failure_signals
+            WHERE agent_id = $1
+              AND shadow = FALSE
+              AND detected_at >= NOW() - INTERVAL '30 days'
+            """,
+            agent_id,
+        )
+
+    # Build lookup maps
+    completion: dict[str, int] = {r["run_id"]: int(r["completion_tokens"]) for r in completion_rows}
+    # run_id → set of failure types
+    run_signals: dict[str, set] = {}
+    for r in signal_rows:
+        run_signals.setdefault(r["run_id"], set()).add(r["failure_type"])
+
+    total_cost  = 0.0
+    wasted_cost = 0.0
+    # failure_type → wasted_usd, affected_run_ids
+    ft_cost: dict[str, dict] = {}
+
+    for r in prompt_rows:
+        run_id  = r["run_id"]
+        model   = r["model"] or "unknown"
+        prompt  = int(r["prompt_tokens"])
+        comp    = completion.get(run_id, 0)
+        cost    = estimate_cost(model, prompt, comp)
+        total_cost += cost
+        if run_id in run_signals:
+            wasted_cost += cost
+            for ft in run_signals[run_id]:
+                entry = ft_cost.setdefault(ft, {"wasted_usd": 0.0, "run_ids": set()})
+                entry["wasted_usd"] += cost
+                entry["run_ids"].add(run_id)
+
+    cost_by_ft = sorted(
+        [
+            {
+                "failure_type":  ft,
+                "wasted_usd":    round(v["wasted_usd"], 4),
+                "affected_runs": len(v["run_ids"]),
+            }
+            for ft, v in ft_cost.items()
+        ],
+        key=lambda x: x["wasted_usd"],
+        reverse=True,
+    )
+
+    return {
+        "total_cost_usd":     round(total_cost,  4),
+        "wasted_cost_usd":    round(wasted_cost, 4),
+        "wasted_pct":         round(wasted_cost / total_cost, 3) if total_cost else 0.0,
+        "cost_by_failure_type": cost_by_ft,
+    }
+
+
+# ── Deploy regression check ────────────────────────────────────────────────────
+
+async def deploy_regression_check(agent_id: str) -> list:
+    """
+    For each deploy event in the last 7 days, compare overall signal rates in the
+    2-hour window before vs after the deploy.
+
+    Skips deploys with fewer than 3 runs in either window — not enough data.
+    Returns: [{deploy_id, version, deployed_at, before_runs, before_signals,
+               before_rate, after_runs, after_signals, after_rate, delta_rate, is_regression}]
+    """
+    if not _pool:
+        return []
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH deploys AS (
+                SELECT id, version, deployed_at
+                FROM deploy_events
+                WHERE agent_id = $1
+                  AND deployed_at >= NOW() - INTERVAL '7 days'
+                ORDER BY deployed_at DESC
+                LIMIT 10
+            ),
+            run_windows AS (
+                SELECT
+                    d.id          AS deploy_id,
+                    d.version,
+                    d.deployed_at,
+                    pr.run_id,
+                    CASE
+                        WHEN pr.processed_at < d.deployed_at THEN 'before'
+                        ELSE 'after'
+                    END           AS window
+                FROM deploys d
+                JOIN processed_runs pr
+                    ON pr.agent_id = $1
+                    AND pr.processed_at >= d.deployed_at - INTERVAL '2 hours'
+                    AND pr.processed_at <= d.deployed_at + INTERVAL '2 hours'
+            ),
+            signal_flags AS (
+                SELECT DISTINCT run_id
+                FROM failure_signals
+                WHERE agent_id = $1 AND shadow = FALSE
+            )
+            SELECT
+                rw.deploy_id,
+                rw.version,
+                rw.deployed_at,
+                rw.window,
+                COUNT(DISTINCT rw.run_id)     AS total_runs,
+                COUNT(DISTINCT sf.run_id)     AS signal_runs
+            FROM run_windows rw
+            LEFT JOIN signal_flags sf ON sf.run_id = rw.run_id
+            GROUP BY rw.deploy_id, rw.version, rw.deployed_at, rw.window
+            ORDER BY rw.deployed_at DESC, rw.window
+            """,
+            agent_id,
+        )
+
+    # Group by deploy_id
+    from collections import defaultdict
+    by_deploy: dict = defaultdict(dict)
+    for r in rows:
+        by_deploy[(r["deploy_id"], r["version"], r["deployed_at"])][r["window"]] = {
+            "total_runs":  int(r["total_runs"]),
+            "signal_runs": int(r["signal_runs"]),
+        }
+
+    results = []
+    for (deploy_id, version, deployed_at), windows in by_deploy.items():
+        before = windows.get("before", {"total_runs": 0, "signal_runs": 0})
+        after  = windows.get("after",  {"total_runs": 0, "signal_runs": 0})
+
+        # Need at least 3 runs per window for a meaningful comparison
+        if before["total_runs"] < 3 or after["total_runs"] < 3:
+            continue
+
+        before_rate = before["signal_runs"] / before["total_runs"]
+        after_rate  = after["signal_runs"]  / after["total_runs"]
+        delta       = after_rate - before_rate
+
+        ts = deployed_at.timestamp() if hasattr(deployed_at, "timestamp") else float(deployed_at)
+        results.append({
+            "deploy_id":      int(deploy_id),
+            "version":        version,
+            "deployed_at":    ts,
+            "before_runs":    before["total_runs"],
+            "before_signals": before["signal_runs"],
+            "before_rate":    round(before_rate, 3),
+            "after_runs":     after["total_runs"],
+            "after_signals":  after["signal_runs"],
+            "after_rate":     round(after_rate, 3),
+            "delta_rate":     round(delta, 3),
+            "is_regression":  delta > 0.15,  # >15pp increase is a regression
+        })
+
+    return sorted(results, key=lambda x: x["deployed_at"], reverse=True)
+
+
+# ── Agent fixes list ───────────────────────────────────────────────────────────
+
+async def list_agent_fixes(agent_id: str) -> list:
+    """
+    All fixes applied to signals for this agent, with recurrence status computed inline.
+
+    Returns: [{id, signal_id, run_id, failure_type, severity, fix_type, applied_via,
+               langfuse_prompt_name, langfuse_version, applied_at,
+               runs_after, recurrences_after, verdict}]
+    """
+    if not _pool:
+        return []
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                f.id,
+                f.run_id,
+                f.signal_id,
+                f.fix_type,
+                f.applied_via,
+                f.langfuse_prompt_name,
+                f.langfuse_version,
+                f.applied_at,
+                fs.failure_type,
+                fs.severity,
+                fs.agent_version,
+                -- Runs completed after this fix was applied
+                (
+                    SELECT COUNT(DISTINCT e.run_id)
+                    FROM events e
+                    WHERE e.agent_id = $1
+                      AND e.received_at > f.applied_at
+                ) AS runs_after,
+                -- Recurrences of the same failure type after fix
+                (
+                    SELECT COUNT(*)
+                    FROM failure_signals fs2
+                    WHERE fs2.agent_id   = $1
+                      AND fs2.failure_type = fs.failure_type
+                      AND fs2.detected_at  > f.applied_at
+                      AND fs2.shadow       = FALSE
+                ) AS recurrences_after
+            FROM fixes f
+            JOIN failure_signals fs ON fs.id = f.signal_id
+            WHERE fs.agent_id = $1
+            ORDER BY f.applied_at DESC
+            LIMIT 100
+            """,
+            agent_id,
+        )
+
+    def _ts(v):
+        return v.timestamp() if hasattr(v, "timestamp") else float(v)
+
+    results = []
+    for r in rows:
+        runs = int(r["runs_after"] or 0)
+        recs = int(r["recurrences_after"] or 0)
+        verdict = (
+            "verified"          if runs >= 10 and recs == 0 else
+            "likely_fixed"      if runs >= 5  and recs == 0 else
+            "still_occurring"   if recs > 0   else
+            "insufficient_data"
+        )
+        results.append({
+            "id":                   int(r["id"]),
+            "signal_id":            int(r["signal_id"]),
+            "run_id":               r["run_id"],
+            "failure_type":         r["failure_type"],
+            "severity":             r["severity"],
+            "agent_version":        r["agent_version"],
+            "fix_type":             r["fix_type"],
+            "applied_via":          r["applied_via"],
+            "langfuse_prompt_name": r["langfuse_prompt_name"],
+            "langfuse_version":     r["langfuse_version"],
+            "applied_at":           _ts(r["applied_at"]),
+            "runs_after":           runs,
+            "recurrences_after":    recs,
+            "verdict":              verdict,
+        })
+    return results
+
+
+# ── User impact ────────────────────────────────────────────────────────────────
+
+async def agent_user_impact(agent_id: str) -> list:
+    """
+    Unique users (proxied by input_hash from run.started) affected per failure type
+    over the last 30 days.
+
+    Returns: [{failure_type, affected_users, total_users, user_impact_rate}]
+    """
+    if not _pool:
+        return []
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH run_inputs AS (
+                SELECT
+                    e.run_id,
+                    e.payload->>'input_hash' AS input_hash
+                FROM events e
+                WHERE e.agent_id    = $1
+                  AND e.event_type  = 'run.started'
+                  AND e.payload->>'input_hash' IS NOT NULL
+                  AND e.received_at >= NOW() - INTERVAL '30 days'
+            ),
+            total_users AS (
+                SELECT COUNT(DISTINCT input_hash) AS cnt FROM run_inputs
+            ),
+            affected AS (
+                SELECT
+                    fs.failure_type,
+                    COUNT(DISTINCT ri.input_hash) AS affected_users
+                FROM failure_signals fs
+                JOIN run_inputs ri ON ri.run_id = fs.run_id
+                WHERE fs.agent_id   = $1
+                  AND fs.shadow     = FALSE
+                  AND fs.detected_at >= NOW() - INTERVAL '30 days'
+                GROUP BY fs.failure_type
+            )
+            SELECT
+                a.failure_type,
+                a.affected_users::int        AS affected_users,
+                tu.cnt::int                  AS total_users,
+                ROUND(a.affected_users::numeric / NULLIF(tu.cnt, 0), 3) AS user_impact_rate
+            FROM affected a
+            CROSS JOIN total_users tu
+            ORDER BY a.affected_users DESC
+            """,
+            agent_id,
+        )
+
+    return [
+        {
+            "failure_type":     r["failure_type"],
+            "affected_users":   int(r["affected_users"]),
+            "total_users":      int(r["total_users"]),
+            "user_impact_rate": float(r["user_impact_rate"] or 0),
+        }
+        for r in rows
+    ]
 
 
 # ── Cross-run patterns ─────────────────────────────────────────────────────────

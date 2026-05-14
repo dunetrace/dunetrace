@@ -1,4 +1,4 @@
-.PHONY: up down logs build test
+.PHONY: up down logs build test test-sdk-ts
 
 up:
 	docker compose up -d
@@ -27,5 +27,11 @@ test-alerts:
 test-api:
 	PYTHONPATH=packages/sdk-py:services/explainer:services/api python -m pytest services/api/tests/ -v
 
+test-mcp:
+	python -m pytest packages/mcp-server/tests/ -v
+
+test-sdk-ts:
+	cd packages/sdk-ts && npm test
+
 test:
-	$(MAKE) test-ingest test-detector test-explainer test-alerts test-api
+	$(MAKE) test-ingest test-detector test-explainer test-alerts test-api test-mcp test-sdk-ts

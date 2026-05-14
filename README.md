@@ -61,14 +61,22 @@ cd dunetrace && cp .env.example .env && docker compose build && docker compose u
 
 ### 2. Install the SDK
 
+**Python**
 ```bash
 pip install dunetrace
 pip install 'dunetrace[langchain]'          # LangChain / LangGraph
 pip install 'dunetrace[langchain,langfuse]' # + Langfuse deep analysis
+pip install dunetrace-mcp                   # MCP server for Claude Code / Cursor
+```
+
+**Node.js / TypeScript**
+```bash
+npm install dunetrace                       # zero runtime dependencies, Node 18+
 ```
 
 ### 3. Instrument your agent
 
+**Python**
 ```python
 from dunetrace import Dunetrace
 
@@ -80,6 +88,23 @@ def web_search(query: str) -> list: ...
 @dt.trace
 def my_agent(question: str) -> str:
     return web_search(question)[0]
+```
+
+**TypeScript / Node.js**
+```typescript
+import { Dunetrace } from "dunetrace";
+
+const dt = new Dunetrace();
+
+await dt.run("my-agent", { model: "gpt-4o", tools: ["search"] }, async (run) => {
+  run.llmCalled("gpt-4o", 150);
+  // ... call your LLM ...
+  run.llmResponded({ finishReason: "stop", completionTokens: 80 });
+  run.toolCalled("search", { query });
+  // ... call your tool ...
+  run.toolResponded("search", true, 256, 120);
+  run.finalAnswer();
+});
 ```
 
 
@@ -139,7 +164,6 @@ Each alert includes: what fired, why it matters, a concrete fix, and a rate cont
 ## Dashboard
 
 ![Dashboard overview](dashboard.png)
-![Analytics](analytics.png)
 ![Agent details](agent_detail.png)
 
 Live at **[http://localhost:3000](http://localhost:3000)**. Auto-refreshes every 15s.
@@ -215,6 +239,55 @@ The dashboard overlays blue dashed lines at each deploy boundary so you can imme
 
 ---
 
+## MCP server
+
+Query agent signals directly from Claude Code, Cursor, or Codex — without leaving your editor.
+
+```bash
+pip install dunetrace-mcp
+```
+
+Ten tools that cover the full diagnostic workflow:
+
+| Tool | What you can ask |
+|---|---|
+| `list_agents` | "Which agents are monitored and how healthy are they?" |
+| `get_agent_signals` | "What failures did my agent have today?" |
+| `get_agent_health` | "Show me the health score breakdown for my agent." |
+| `get_signal_detail` | "Show me signal #42 with full evidence and fix code." |
+| `get_agent_patterns` | "Is this failure systemic or a one-off?" |
+| `get_run_detail` | "Walk me through run abc123 step by step." |
+| `get_agent_runs` | "List recent runs for my agent with their status." |
+| `search_signals` | "Show me all CRITICAL signals in the last 24 hours." |
+| `summarize_agent` | "Give me a one-shot diagnosis of my agent." |
+| `get_instrumentation_guide` | "How do I instrument my LangChain agent?" |
+
+**Claude Code** — already registered in `~/.claude.json` after `pip install dunetrace-mcp`. Restart Claude Code to load.
+
+**Cursor** — add `.cursor/mcp.json` to your project root:
+
+```json
+{
+  "mcpServers": {
+    "dunetrace": {
+      "command": "dunetrace-mcp",
+      "env": {
+        "DUNETRACE_API_URL": "http://localhost:8002",
+        "DUNETRACE_API_KEY": "dt_dev_test"
+      }
+    }
+  }
+}
+```
+
+**Codex / SSE clients** — `python -c "from dunetrace_mcp.server import mcp; mcp.run(transport='sse')"` (listens on `:8000`).
+
+All MCP responses expose only hashed metadata — no raw prompts, arguments, or model outputs.
+
+→ [docs/mcp-server.md](docs/mcp-server.md)
+
+---
+
 ## Privacy
 
 No raw content ever leaves your agent process. Every prompt, tool argument, and model output is SHA-256 hashed before transmission.
@@ -242,8 +315,11 @@ Agent Code
 
 - [Custom Python agent](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
-- [TypeScript / JavaScript](docs/integrate-typescript-agent.md)
+- [CrewAI](docs/integrations.md#crewai)
+- [AutoGen (Microsoft)](docs/integrations.md#autogen)
+- [TypeScript / JavaScript — npm package](docs/integrate-typescript-agent.md)
 - [Langfuse, FastAPI, Flask, OpenTelemetry, Loki](docs/integrations.md)
+- [MCP server (Claude Code, Cursor, Codex)](docs/mcp-server.md)
 
 ---
 
@@ -258,6 +334,7 @@ make test
 ## Requirements
 
 - Python 3.11+
+- Node.js 18+ (TypeScript SDK)
 - Docker + Docker Compose
 
 ## Contributing

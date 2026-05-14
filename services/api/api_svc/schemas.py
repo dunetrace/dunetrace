@@ -55,6 +55,7 @@ if _PYDANTIC:
         completed_at:  Optional[float]
         exit_reason:   Optional[str]
         step_count:    int
+        total_tokens:  Optional[int] = None
         signal_count:  int
         has_signals:   bool
 
@@ -87,6 +88,7 @@ if _PYDANTIC:
         completed_at:  Optional[float]
         exit_reason:   Optional[str]
         step_count:    int
+        total_tokens:  Optional[int] = None
         events:        List[RunEvent]
         signals:       List[RunSignal]
 
@@ -184,15 +186,62 @@ if _PYDANTIC:
         deployed_at: float
         meta:        Dict[str, Any] = {}
 
+    class CostStat(_Model):
+        total_cost_usd:        float
+        wasted_cost_usd:       float
+        wasted_pct:            float
+        cost_by_failure_type:  List[Dict[str, Any]] = []
+
+    class DeployRegression(_Model):
+        deploy_id:      int
+        version:        str
+        deployed_at:    float
+        before_runs:    int
+        before_signals: int
+        before_rate:    float
+        after_runs:     int
+        after_signals:  int
+        after_rate:     float
+        delta_rate:     float
+        is_regression:  bool
+
+    class UserImpact(_Model):
+        failure_type:     str
+        affected_users:   int
+        total_users:      int
+        user_impact_rate: float
+
+    class FixRecord(_Model):
+        id:                   int
+        signal_id:            int
+        run_id:               str
+        failure_type:         str
+        severity:             str
+        agent_version:        str
+        fix_type:             str
+        applied_via:          str
+        langfuse_prompt_name: Optional[str]
+        langfuse_version:     Optional[int]
+        applied_at:           float
+        runs_after:           int
+        recurrences_after:    int
+        verdict:              str
+
+    class FixListResponse(_Model):
+        fixes: List[FixRecord]
+
     class AgentInsights(_Model):
-        input_patterns:    List[InputHashPattern]
-        signal_trends:     List[SignalTrendPoint]
-        versions:          List[VersionStat]
-        time_to_tool:      TimeToFirstTool
-        hourly_pattern:    List[HourlyPatternPoint]
-        failure_rates:     List[FailureRatePoint]
-        systemic_patterns: List[SystemicPattern]
-        deploy_events:     List[DeployEvent] = []
+        input_patterns:     List[InputHashPattern]
+        signal_trends:      List[SignalTrendPoint]
+        versions:           List[VersionStat]
+        time_to_tool:       TimeToFirstTool
+        hourly_pattern:     List[HourlyPatternPoint]
+        failure_rates:      List[FailureRatePoint]
+        systemic_patterns:  List[SystemicPattern]
+        deploy_events:      List[DeployEvent]      = []
+        cost_stats:         Optional[CostStat]     = None
+        deploy_regressions: List[DeployRegression] = []
+        user_impact:        List[UserImpact]       = []
 
     class Issue(_Model):
         id:               int
@@ -406,4 +455,46 @@ else:
     @dataclass
     class PatternsResponse:
         agents: List[Any]
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class CostStat:
+        total_cost_usd: float; wasted_cost_usd: float; wasted_pct: float
+        cost_by_failure_type: List[Any] = _field(default_factory=list)
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class DeployRegression:
+        deploy_id: int; version: str; deployed_at: float
+        before_runs: int; before_signals: int; before_rate: float
+        after_runs: int; after_signals: int; after_rate: float
+        delta_rate: float; is_regression: bool
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class UserImpact:
+        failure_type: str; affected_users: int; total_users: int; user_impact_rate: float
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class FixRecord:
+        id: int; signal_id: int; run_id: str; failure_type: str; severity: str
+        agent_version: str; fix_type: str; applied_via: str
+        langfuse_prompt_name: Optional[str]; langfuse_version: Optional[int]
+        applied_at: float; runs_after: int; recurrences_after: int; verdict: str
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class FixListResponse:
+        fixes: List[Any]
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class AgentInsights:
+        input_patterns: List[Any]; signal_trends: List[Any]; versions: List[Any]
+        time_to_tool: Any; hourly_pattern: List[Any]; failure_rates: List[Any]
+        systemic_patterns: List[Any]; deploy_events: List[Any] = _field(default_factory=list)
+        cost_stats: Optional[Any] = None
+        deploy_regressions: List[Any] = _field(default_factory=list)
+        user_impact: List[Any] = _field(default_factory=list)
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)

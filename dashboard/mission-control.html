@@ -35,6 +35,35 @@
 html,body{height:100%;background:var(--bg);color:var(--chalk2);font-family:'IBM Plex Sans',sans-serif;font-size:14px;line-height:1.5;overflow:hidden}
 .mono{font-family:'IBM Plex Mono',monospace}
 
+/* ── LIGHT MODE ── */
+body.light{
+  --bg:#f0f2f6;
+  --s1:#ffffff;
+  --s2:#f5f7fa;
+  --s3:#eaecf2;
+  --wire:#d0d7e5;
+  --wire2:#b8c3d8;
+  --chalk:#1a1e2e;
+  --chalk2:#2d3748;
+  --chalk3:#4a5568;
+  --chalk4:#718096;
+  --orange-d:rgba(232,105,42,0.1);
+  --red-d:rgba(229,62,62,0.08);
+  --amber-d:rgba(212,146,10,0.08);
+  --green-d:rgba(46,184,114,0.07);
+  --purple-d:rgba(155,114,232,0.08);
+}
+body.light::before{background-image:linear-gradient(rgba(100,130,180,0.1) 1px,transparent 1px),linear-gradient(90deg,rgba(100,130,180,0.1) 1px,transparent 1px)}
+body.light #topbar{background:rgba(240,242,246,0.96)}
+body.light #sidebar{background:rgba(240,242,246,0.98)}
+body.light .search-input{background:var(--s1)}
+body.light .search-dropdown{background:var(--s1)}
+body.light .trend-select,body.light .cmp-select{background:var(--s1)}
+body.light .run-table tr:hover td{background:rgba(0,0,0,0.025)}
+body.light .event-row:hover{background:rgba(0,0,0,0.02)}
+body.light .ev-details{background:var(--s2)}
+body.light .ag-header:hover{background:var(--s2)}
+
 /* Grid bg */
 body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(30,48,80,0.15) 1px,transparent 1px),linear-gradient(90deg,rgba(30,48,80,0.15) 1px,transparent 1px);background-size:48px 48px;pointer-events:none;z-index:0}
 
@@ -593,6 +622,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div id="search-dropdown" class="search-dropdown" style="display:none"></div>
   </div>
   <div class="top-right">
+    <button id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" style="background:none;border:1px solid var(--wire2);border-radius:4px;padding:4px 8px;cursor:pointer;color:var(--chalk4);font-size:14px;line-height:1;transition:border-color .15s,color .15s" onmouseover="this.style.color='var(--chalk2)';this.style.borderColor='var(--chalk4)'" onmouseout="this.style.color='var(--chalk4)';this.style.borderColor='var(--wire2)'">☀</button>
     <div class="live-badge"><div class="live-dot"></div>LIVE</div>
     <div class="top-time mono" id="clock">00:00:00 UTC</div>
   </div>
@@ -1100,7 +1130,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   </div>
   <div class="table-card">
     <table class="run-table">
-      <thead><tr><th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th><th>Failure types</th><th>Duration</th><th>Steps</th><th></th></tr></thead>
+      <thead><tr><th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th><th>Failure types</th><th>Time</th><th>Duration</th><th>Steps</th><th></th></tr></thead>
       <tbody id="runs-tbody">
         <tr><td colspan="8" class="loading">loading…</td></tr>
       </tbody>
@@ -1336,23 +1366,38 @@ async function apiFetch(path) {
 }
 
 // ── Data loading ──────────────────────────────────────────────────────────────
+let _healthScoresLoaded = false;
+
+async function loadHealthScores() {
+  if (_healthScoresLoaded) return;
+  _healthScoresLoaded = true;
+  await Promise.all(_agents.map(async a => {
+    try {
+      const hs = await apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/health-score');
+      if (hs) _healthScores[a.agent_id] = hs;
+    } catch(e) { /* health score optional */ }
+  }));
+  renderAgents();
+}
+
 async function loadAll() {
+  _healthScoresLoaded = false;
   try {
     const agentsData = await apiFetch('/v1/agents?limit=50');
     _agents = agentsData.agents || [];
 
+    // Fetch runs + signals for all agents in parallel.
+    // Health scores are deferred — loaded lazily on first visit to the Agents page.
     await Promise.all(_agents.map(async a => {
       try {
-        const [rd, sd, hs] = await Promise.all([
+        const [rd, sd] = await Promise.all([
           apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/runs?limit=200'),
           apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/signals?limit=500&include_shadow=true'),
-          apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/health-score').catch(() => null),
         ]);
         a._runs          = rd.runs || [];
         const allSigs    = sd.signals || [];
         a._signals       = allSigs.filter(s => !s.shadow);
         a._shadowSignals = allSigs.filter(s =>  s.shadow);
-        if (hs) _healthScores[a.agent_id] = hs;
       } catch(e) {
         a._runs = []; a._signals = []; a._shadowSignals = [];
       }
@@ -1382,10 +1427,19 @@ async function loadAll() {
 function updateSidebarCounts() {
   const critTotal = _agents.reduce((n, a) => n + (a.critical_count || 0), 0);
   const runsWithSigs = _allRuns.filter(r => r.has_signals).length;
-  const unreadAlerts = _allSigs.filter(s => !s.alerted).length;
+  // Count visible, non-dismissed alert groups — matches what the Alerts page shows
+  const _badgeGroups = {};
+  filteredSigs().forEach(s => {
+    if (!_badgeGroups[s.failure_type]) _badgeGroups[s.failure_type] = [];
+    _badgeGroups[s.failure_type].push(s);
+  });
+  Object.keys(_badgeGroups).forEach(ft => {
+    if (_badgeGroups[ft].every(s => _ackedSignals.has(String(s.id)))) delete _badgeGroups[ft];
+  });
+  const alertCount = Object.keys(_badgeGroups).length;
   document.getElementById('badge-overview').textContent = critTotal || '0';
   document.getElementById('badge-runs').textContent     = runsWithSigs || '0';
-  document.getElementById('badge-alerts').textContent   = unreadAlerts || '0';
+  document.getElementById('badge-alerts').textContent   = alertCount || '0';
   document.getElementById('badge-agents').textContent   = _agents.length || '0';
 }
 
@@ -1500,7 +1554,7 @@ function renderRuns() {
   const sorted = filtered.sort((a, b) => b.started_at - a.started_at);
   document.getElementById('runs-tbody').innerHTML = sorted.length
     ? sorted.map(r => runRow(r)).join('')
-    : '<tr><td colspan="8" class="loading">no runs in this period</td></tr>';
+    : '<tr><td colspan="9" class="loading">no runs in this period</td></tr>';
 }
 
 function runRow(r) {
@@ -1519,6 +1573,7 @@ function runRow(r) {
     <td class="mono">${signals.length}</td>
     <td>${sev ? `<span class="sev-badge sb-${sev.toLowerCase()}">${sev}</span>` : '<span class="sev-badge sb-low">CLEAN</span>'}</td>
     <td style="font-size:11px">${fts}</td>
+    <td class="mono" style="font-size:11px;color:var(--chalk4)">${r.started_at ? timeAgo(r.started_at) : '—'}</td>
     <td class="mono">${dur}</td>
     <td class="mono">${r.step_count || 0}</td>
     <td><button class="view-btn" onclick="showDetail('${esc(r.run_id)}','${esc(agentId)}');event.stopPropagation()">View →</button></td>
@@ -1575,7 +1630,7 @@ function renderAlerts() {
       const c  = Math.max(...s.map(x => x.confidence)).toFixed(2);
       const sv = topSev(s);
       const r  = _allRuns.find(x => x.run_id === rid);
-      const tk = fmtTok(tokEst(r?.step_count));
+      const tk = fmtTok(realTok(r));
       return `<div class="ag-run-item" onclick="showDetail('${esc(rid)}','${esc(agentId)}')">
         <span class="run-id">${shortId(rid)}</span>
         <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
@@ -1615,7 +1670,7 @@ function renderAnalytics() {
   const sigRunIds = new Set(fSigs.map(s => s.run_id));
   const totalWasted = fRuns
     .filter(r => sigRunIds.has(r.run_id))
-    .reduce((sum, r) => sum + tokEst(r.step_count), 0);
+    .reduce((sum, r) => sum + realTok(r), 0);
 
   document.getElementById('analytics-runs').textContent           = runTotal;
   document.getElementById('analytics-agent-count').textContent    = _agents.length;
@@ -1659,7 +1714,7 @@ function renderAnalytics() {
         const agentSigRunIds = new Set(aFSigs.map(s => s.run_id));
         const agentWasted    = aFRuns
           .filter(r => agentSigRunIds.has(r.run_id))
-          .reduce((sum, r) => sum + tokEst(r.step_count), 0);
+          .reduce((sum, r) => sum + realTok(r), 0);
         return `<tr>
           <td>${esc(a.agent_id)}</td>
           <td class="mono">${aFRuns.length}</td>
@@ -1682,7 +1737,7 @@ function updateCostSaved() {
   const cut7d  = now - 7 * 86400;
   const weekSigRunIds = new Set(_allSigs.filter(s => s.detected_at >= cut7d).map(s => s.run_id));
   const weekRuns      = _allRuns.filter(r => weekSigRunIds.has(r.run_id));
-  const weekTokens    = weekRuns.reduce((sum, r) => sum + tokEst(r.step_count), 0);
+  const weekTokens    = weekRuns.reduce((sum, r) => sum + realTok(r), 0);
   const avgTk         = weekRuns.length ? Math.round(weekTokens / weekRuns.length) : 0;
   const savedDollars  = weekTokens / 1000 * costPer1k;
 
@@ -1819,9 +1874,13 @@ function renderRunDetail(run, events, signals) {
   document.getElementById('detail-title').innerHTML  =
     fts.length ? fts.map(ftLabel).join(' + ') : 'Clean run — no signals fired';
 
+  const tokDisplay = run.total_tokens
+    ? fmtTok(run.total_tokens)
+    : fmtTok(tokEst(run.step_count)) + ' ~est';
   document.getElementById('detail-meta').innerHTML = [
     ['Duration', dur],
     ['Steps', run.step_count || events.length],
+    ['Tokens', tokDisplay],
     ['Model', model],
     ['Agent', run.agent_id],
     ['Signals', signals.length],
@@ -2465,7 +2524,7 @@ function nav(id, el) {
   if (page) page.classList.add('active');
   if (el)   el.classList.add('active');
   if (id === 'heatmap')  renderHeatmap();
-  if (id === 'agents')   renderAgents();
+  if (id === 'agents')   { renderAgents(); loadHealthScores(); }
   if (id === 'policies') loadAndRenderPolicies();
 }
 
@@ -2901,9 +2960,11 @@ function _cmpDiff(runA, sigsA, runB, sigsB) {
 }
 
 // ── Token helpers ─────────────────────────────────────────────────────────────
-const TK_PER_STEP    = 250;    // rough estimate: tokens consumed per agent step
+const TK_PER_STEP    = 250;    // fallback estimate when no real token data is recorded
 const COST_PER_1M_TK = 10.00;  // $ per 1M tokens (~$0.010/1k, blended mid-tier model)
 function tokEst(stepCount) { return (stepCount || 0) * TK_PER_STEP; }
+// Use real total_tokens from the API when available; fall back to step estimate.
+function realTok(r) { return (r && r.total_tokens) ? r.total_tokens : tokEst(r ? r.step_count : 0); }
 function fmtTok(n) {
   if (!n) return '0 tokens';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M tokens';
@@ -2922,7 +2983,7 @@ function fmtCost(tokens) {
 function wastedTok(runIds) {
   return runIds.reduce((sum, rid) => {
     const r = _allRuns.find(x => x.run_id === rid);
-    return sum + tokEst(r?.step_count);
+    return sum + realTok(r);
   }, 0);
 }
 
@@ -2943,7 +3004,7 @@ function renderDriftPanel() {
     const age = now - r.started_at;
     if (age < 0 || age >= HOURS * 3600) return;
     const idx = HOURS - 1 - Math.floor(age / 3600);
-    if (idx >= 0 && idx < HOURS) hourWaste[idx] += tokEst(r.step_count);
+    if (idx >= 0 && idx < HOURS) hourWaste[idx] += realTok(r);
   });
 
   // 7-day baseline: avg hourly token waste over last 7 days
@@ -2952,7 +3013,7 @@ function renderDriftPanel() {
   _allRuns.forEach(r => {
     if (!sigRunIds.has(r.run_id)) return;
     const age = now - r.started_at;
-    if (age >= 0 && age < SEC_7D) waste7d += tokEst(r.step_count);
+    if (age >= 0 && age < SEC_7D) waste7d += realTok(r);
   });
   const baselineHrAvg = waste7d / totalHours7d;
 
@@ -3082,7 +3143,7 @@ function renderTopDrivers() {
     const confCol  = avgConf >= 0.75 ? 'var(--red)' : avgConf >= 0.5 ? 'var(--amber)' : 'var(--green)';
     const runIds   = [...new Set(g.sigs.map(s => s.run_id))];
     const affected  = runIds.map(id => _allRuns.find(r => r.run_id === id)).filter(Boolean);
-    const wastedTks = affected.reduce((sum, r) => sum + tokEst(r.step_count), 0);
+    const wastedTks = affected.reduce((sum, r) => sum + realTok(r), 0);
 
     return `<div class="driver-item">
       <div class="driver-bar" style="background:${color}"></div>
@@ -3578,6 +3639,21 @@ async function handleDeepLink() {
     console.error('Deep-link failed:', e);
   }
 }
+
+// ── Theme toggle ──────────────────────────────────────────────────────────────
+function toggleTheme() {
+  const light = document.body.classList.toggle('light');
+  localStorage.setItem('dt-theme', light ? 'light' : 'dark');
+  document.getElementById('theme-toggle').textContent = light ? '🌙' : '☀';
+}
+(function initTheme() {
+  const saved = localStorage.getItem('dt-theme');
+  if (saved === 'light') {
+    document.body.classList.add('light');
+    const btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = '🌙';
+  }
+})();
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 loadAll().then(handleDeepLink);

@@ -10,13 +10,21 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 ┌───────────────────────────────────────────────────────────────────────────┐
 │                              Your Agent                                   │
 │                                                                           │
-│   with dt.run(user_input) as run:                                         │
-│       run.tool_called("web_search", {...})                                │
-│       run.tool_responded("web_search", ...)                               │
-│       run.external_signal("rate_limit", source="openai")                  │
+│   Python SDK                        TypeScript / Node.js SDK              │
+│   ──────────────────────────────    ─────────────────────────────────     │
+│   with dt.run(input) as run:        await dt.run(id, opts, async run => { │
+│       run.tool_called(name, {})         run.toolCalled(name, {})          │
+│       run.tool_responded(name, …)       run.toolResponded(name, …)        │
+│       run.llm_called(model, n)          run.llmCalled(model, n)           │
+│       run.llm_responded(…)              run.llmResponded(…)               │
+│       run.final_answer()                run.finalAnswer()                 │
+│                                     })                                    │
+│                                                                           │
+│   Framework integrations: LangChain · CrewAI · AutoGen · OTel             │
 └──────┬──────────────────────────────┬──────────────────────────┬──────────┘
        │  HTTP POST /v1/ingest        │  stdout NDJSON           │  OTel spans
        │  (async, 202)                │  (emit_as_json=True)     │  (otel_exporter=…)
+       │  (Python + TypeScript)       │  (Python + TypeScript)   │  (Python only)
        ▼                              ▼                          ▼
 ┌─────────────────────┐  ┌────────────────────────┐  ┌──────────────────────┐
 │  Ingest API  :8001  │  │  Loki / Grafana Alloy  │  │  OTel Collector      │
@@ -68,9 +76,33 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 
 ---
 
+## SDKs
+
+Two first-class SDKs send events to the same ingest API — runs from either appear together in the dashboard under the same `agent_id`.
+
+| SDK | Install | Entry point |
+|---|---|---|
+| Python (`dunetrace`) | `pip install dunetrace` | `from dunetrace import Dunetrace` |
+| TypeScript / Node.js (`dunetrace`) | `npm install dunetrace` | `import { Dunetrace } from "dunetrace"` |
+
+The Python SDK supports all three output modes (HTTP ingest, Loki NDJSON, OTel spans) and ships framework integrations for LangChain, CrewAI, AutoGen, and Langfuse. The TypeScript SDK currently supports HTTP ingest only.
+
+**Framework integrations (Python SDK):**
+
+| Framework | Class | Install |
+|---|---|---|
+| LangChain / LangGraph | `DunetraceCallbackHandler` | `pip install 'dunetrace[langchain]'` |
+| CrewAI 1.x | `DunetraceCrewCallback` | `pip install dunetrace crewai` |
+| AutoGen (autogen-agentchat ≥ 0.4) | `DunetraceAutoGenObserver` | `pip install dunetrace autogen-agentchat autogen-ext` |
+| OpenLLMetry / OTel receiver | `DunetraceOTelReceiver` | `pip install 'dunetrace[otel]'` |
+
+See [integrations.md](./integrations.md) for full setup code for each framework.
+
+---
+
 ## SDK Output Modes
 
-The SDK supports three independent output modes that can be combined:
+The Python SDK supports three independent output modes that can be combined:
 
 | Mode | How to enable | Destination | Use case |
 |---|---|---|---|
@@ -79,6 +111,8 @@ The SDK supports three independent output modes that can be combined:
 | OTel spans | `otel_exporter=DunetraceOTelExporter(provider)` | OTel collector → Tempo / Honeycomb / Datadog | Infra metric correlation |
 
 All three modes can be active simultaneously. OTel and NDJSON are zero-cost when disabled. Pass `endpoint=None` to use OTel or NDJSON without any HTTP ingest (useful for local testing or pure-OTel deployments).
+
+The TypeScript SDK supports HTTP ingest and `emitAsJson` (Loki NDJSON). `otel_exporter` is Python-only.
 
 ### emit_as_json=True
 
