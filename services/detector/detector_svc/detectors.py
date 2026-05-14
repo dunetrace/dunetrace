@@ -11,6 +11,7 @@ from dunetrace.detectors import (
     BaseDetector,
     CascadingToolFailureDetector,
     ContextBloatDetector,
+    CostSpikeDetector,
     EmptyLlmResponseDetector,
     FirstStepFailureDetector,
     GoalAbandonmentDetector,
@@ -19,6 +20,7 @@ from dunetrace.detectors import (
     RagEmptyRetrievalDetector,
     ReasoningSpinDetector,
     RetryStormDetector,
+    SessionLatencyDetector,
     SlowStepDetector,
     StepCountInflationDetector,
     ToolAvoidanceDetector,
@@ -44,6 +46,8 @@ _DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
     "cascading_tool_failure":  CascadingToolFailureDetector,
     "first_step_failure":      FirstStepFailureDetector,
     "reasoning_stall":         ReasoningSpinDetector,
+    "cost_spike":              CostSpikeDetector,
+    "session_latency":         SessionLatencyDetector,
 }
 
 # Load config once at import time

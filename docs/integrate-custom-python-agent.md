@@ -9,7 +9,7 @@ This guide covers how to instrument a Python agent already running in production
 
 ## What Dunetrace Captures
 
-Dunetrace detects behavioral failures in AI agents — tool loops, reasoning stalls, context bloat, and 12 more patterns — within ~15 seconds of a run completing. It never transmits raw prompts or outputs: all user content, tool arguments, and completions are SHA-256 hashed in-process before any data leaves your agent.
+Dunetrace detects behavioral failures in AI agents — tool loops, cost spikes, session latency, context bloat, and 13 more patterns — within ~15 seconds of a run completing. It never transmits raw prompts or outputs: all user content, tool arguments, and completions are SHA-256 hashed in-process before any data leaves your agent.
 
 What does transmit: model names, token counts, latencies, tool names, finish reasons, and step counts.
 
@@ -462,7 +462,7 @@ Hashing happens in-process. Raw content never leaves your agent.
 
 Within ~15 seconds of each run, Dunetrace:
 
-1. **Detects** — 15 structural detectors run against the reconstructed run state
+1. **Detects** — 17 structural detectors run against the reconstructed run state (16 Tier 1 + prompt injection signal detection)
 2. **Explains** — each signal produces a plain-English title, cause, and fix using deterministic templates (no LLM); if Langfuse is connected, clicking "Explain with Langfuse ↗" in the dashboard fetches the full trace and returns an LLM-generated root-cause specific to that run
 3. **Trends** — the dashboard Health Record panel shows failure rate per failure type over 30 days, a 7-day systemic pattern flag (≥10% of runs affected), and a sparkline showing rate over time
 4. **Alerts** — Slack messages include a one-line rate context: "First occurrence", "5/20 runs affected (25%)", or "Systemic pattern — 8/12 runs affected (67%)"

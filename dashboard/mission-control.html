@@ -1043,12 +1043,12 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="stat-card" style="border-top:2px solid var(--red)">
       <div class="stat-label">Total signals</div>
       <div class="stat-val" style="color:var(--chalk)" id="analytics-signal-count">—</div>
-      <div class="stat-sub">all time</div>
+      <div class="stat-sub">in selected period</div>
     </div>
     <div class="stat-card" style="border-top:2px solid var(--purple)">
       <div class="stat-label">Critical signals</div>
       <div class="stat-val" style="color:var(--chalk)" id="analytics-critical-count">—</div>
-      <div class="stat-sub">highest severity</div>
+      <div class="stat-sub">in selected period</div>
     </div>
     <div class="stat-card" style="border-top:2px solid var(--amber)">
       <div class="stat-label">Signal rate</div>
@@ -1060,11 +1060,15 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="sec-head"><span class="sec-title">Top failure patterns across all agents</span></div>
   <div class="table-card">
     <table class="run-table">
-      <thead><tr><th>Pattern</th><th>Count</th><th>Agents affected</th><th>Est. tokens wasted</th></tr></thead>
+      <thead><tr><th>Pattern</th><th>Signals (unique runs)</th><th>Agents affected</th><th>Est. tokens wasted †</th></tr></thead>
       <tbody id="analytics-patterns-tbody">
         <tr><td colspan="4" class="loading">loading…</td></tr>
       </tbody>
     </table>
+    <div style="font-size:10px;color:var(--chalk4);margin-top:6px;padding:0 4px">
+      † Token values may overlap: a run that triggered multiple detectors is counted in each applicable row.
+      "Issues stopped" in the cost card counts unique affected runs only.
+    </div>
   </div>
 
   <div class="sec-head"><span class="sec-title">Per-agent breakdown</span></div>
@@ -1666,11 +1670,7 @@ function renderAnalytics() {
   const critTotal = fSigs.filter(s => s.severity === 'CRITICAL').length;
   const rate      = runTotal ? (sigTotal / runTotal).toFixed(2) : '0.00';
 
-  // Total wasted tokens: runs that have at least one live signal
-  const sigRunIds = new Set(fSigs.map(s => s.run_id));
-  const totalWasted = fRuns
-    .filter(r => sigRunIds.has(r.run_id))
-    .reduce((sum, r) => sum + realTok(r), 0);
+  const periodLabel = _globalPeriod === '1d' ? 'last 24h' : _globalPeriod === '7d' ? 'last 7 days' : _globalPeriod === '30d' ? 'last 30 days' : 'all time';
 
   document.getElementById('analytics-runs').textContent           = runTotal;
   document.getElementById('analytics-agent-count').textContent    = _agents.length;
@@ -1678,9 +1678,21 @@ function renderAnalytics() {
   document.getElementById('analytics-critical-count').textContent = critTotal;
   document.getElementById('analytics-signal-rate').textContent    = rate;
   document.getElementById('analytics-agents-sub').textContent     = 'across ' + _agents.length + ' agent' + (_agents.length !== 1 ? 's' : '');
+
+  // Update stat-sub labels to reflect the selected period
+  const sigSubEl = document.querySelector('#analytics-signal-count')?.closest('.stat-card')?.querySelector('.stat-sub');
+  if (sigSubEl) sigSubEl.textContent = periodLabel;
+  const critSubEl = document.querySelector('#analytics-critical-count')?.closest('.stat-card')?.querySelector('.stat-sub');
+  if (critSubEl) critSubEl.textContent = periodLabel;
+  const rateSubEl = document.querySelector('#analytics-signal-rate')?.closest('.stat-card')?.querySelector('.stat-sub');
+  if (rateSubEl) rateSubEl.textContent = 'signals per run · ' + periodLabel;
+
   updateCostSaved();
 
-  // Top patterns — per-type wasted tokens (using filtered signals)
+  // Top patterns — per-type: unique runs and wasted tokens (using filtered signals)
+  // Note: a single run can appear in multiple rows if it triggered multiple detectors.
+  // "Signals" = total signals fired; "Unique runs" = distinct runs with this failure type.
+  // Token values may overlap across rows for that reason.
   const ftRunMap = {};   // ft → Set of run_ids
   fSigs.forEach(s => {
     if (!ftRunMap[s.failure_type]) ftRunMap[s.failure_type] = new Set();
@@ -1695,12 +1707,13 @@ function renderAnalytics() {
   const ptSorted = Object.entries(ftMap).sort((a, b) => b[1].count - a[1].count);
   document.getElementById('analytics-patterns-tbody').innerHTML = ptSorted.length
     ? ptSorted.map(([ft, d]) => {
+        const uniqRuns = ftRunMap[ft] ? ftRunMap[ft].size : 0;
         const wasted = wastedTok([...(ftRunMap[ft] || new Set())]);
         return `<tr>
           <td>${ftLabel(ft)}</td>
-          <td class="mono">${d.count}</td>
+          <td class="mono" title="${d.count} signals across ${uniqRuns} unique run${uniqRuns !== 1 ? 's' : ''}">${d.count} <span style="font-size:10px;color:var(--chalk4)">(${uniqRuns} runs)</span></td>
           <td class="mono">${d.agents.size}</td>
-          <td class="mono" style="color:var(--amber)">${fmtTok(wasted)}</td>
+          <td class="mono" style="color:var(--amber)" title="Tokens from runs where this failure type fired. A run with multiple failure types is counted in each applicable row.">${fmtTok(wasted)}</td>
         </tr>`;
       }).join('')
     : '<tr><td colspan="4" class="loading">no signals yet</td></tr>';
@@ -1738,7 +1751,10 @@ function updateCostSaved() {
   const weekSigRunIds = new Set(_allSigs.filter(s => s.detected_at >= cut7d).map(s => s.run_id));
   const weekRuns      = _allRuns.filter(r => weekSigRunIds.has(r.run_id));
   const weekTokens    = weekRuns.reduce((sum, r) => sum + realTok(r), 0);
-  const avgTk         = weekRuns.length ? Math.round(weekTokens / weekRuns.length) : 0;
+  // Divide by weekSigRunIds.size (= the displayed "issues stopped" count) so that
+  // issues_stopped × avgTk × rate = savedDollars. Using weekRuns.length would give a
+  // different denominator when some runs are not in the loaded cache.
+  const avgTk         = weekSigRunIds.size ? Math.round(weekTokens / weekSigRunIds.size) : 0;
   const savedDollars  = weekTokens / 1000 * costPer1k;
 
   const savedEl = document.getElementById('analytics-cost-saved');

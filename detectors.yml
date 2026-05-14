@@ -56,6 +56,16 @@ default:
     min_llm_calls: 5      # ignore short runs with fewer LLM calls
     inflation_factor: 2.0 # fire when ratio > P75_baseline × this (requires ≥10 historical runs)
 
+  cost_spike:
+    inflation_factor: 3.0        # fire when total tokens > P75_baseline × this (requires ≥10 historical runs)
+    static_threshold_tokens: 50000  # fallback threshold when no baseline exists
+    min_llm_calls: 1             # ignore runs with no LLM calls
+
+  session_latency:
+    inflation_factor: 3.0        # fire when duration > P75_baseline × this (requires ≥10 historical runs)
+    static_threshold_secs: 300   # fallback threshold when no baseline exists (5 min)
+    min_events: 2                # need at least two events to compute a duration
+
 
 # ── Per-agent-category overrides ─────────────────────────────────────────────
 #

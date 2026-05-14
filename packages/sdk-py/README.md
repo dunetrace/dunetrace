@@ -1,6 +1,6 @@
 # Dunetrace SDK
 
-Runtime observability for AI agents. Detects tool loops, context bloat, prompt injection, and 12 other failure patterns in real-time — with a Slack alert while the run is still live.
+Runtime observability for AI agents. Detects tool loops, context bloat, prompt injection, and 14 other failure patterns in real-time — with a Slack alert while the run is still live.
 
 Zero external dependencies.
 
@@ -76,8 +76,8 @@ def run_agent(query: str) -> str:
 | `REASONING_STALL`         | LLM:tool-call ratio ≥4× — reasoning without acting         | MEDIUM      |
 | `RAG_EMPTY_RETRIEVAL`     | Retrieval returned 0 results but agent answered anyway     | MEDIUM      |
 | `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns         | CRITICAL    |
-| `COST_SPIKE`              | Total tokens 3× above per-agent P75 baseline               | HIGH        |
-| `SESSION_LATENCY`         | Wall-clock run duration 3× above per-agent P75 baseline    | HIGH        |
+| `COST_SPIKE`              | Total tokens 3× above per-agent P75 baseline               | MEDIUM      |
+| `SESSION_LATENCY`         | Wall-clock run duration 3× above per-agent P75 baseline    | MEDIUM      |
 
 
 ## Output modes

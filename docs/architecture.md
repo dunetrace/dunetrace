@@ -51,7 +51,7 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 │  Reconstructs       │              │  Fetches unalerted      │
 │  RunState from      │              │  shadow=FALSE signals   │
 │  events             │              │  → explain()            │
-│  Runs 15 detectors  │              │  → format Slack/webhook │
+│  Runs 17 detectors  │              │  → format Slack/webhook │
 │  Writes signals     │              │  → HTTP POST with retry │
 └─────────────────────┘              └─────────────────────────┘
 
@@ -85,7 +85,7 @@ Two first-class SDKs send events to the same ingest API — runs from either app
 | Python (`dunetrace`) | `pip install dunetrace` | `from dunetrace import Dunetrace` |
 | TypeScript / Node.js (`dunetrace`) | `npm install dunetrace` | `import { Dunetrace } from "dunetrace"` |
 
-The Python SDK supports all three output modes (HTTP ingest, Loki NDJSON, OTel spans) and ships framework integrations for LangChain, CrewAI, AutoGen, and Langfuse. The TypeScript SDK currently supports HTTP ingest only.
+The Python SDK supports all three output modes (HTTP ingest, Loki NDJSON, OTel spans) and ships framework integrations for LangChain, CrewAI, AutoGen, and Langfuse. The TypeScript SDK supports HTTP ingest and Loki NDJSON (`emitAsJson`); OTel spans are Python-only.
 
 **Framework integrations (Python SDK):**
 
@@ -208,7 +208,7 @@ A background polling loop that runs every 5 seconds. It is the only process that
 1. Fetches runs completed since last poll (terminal events `run.completed` or `run.errored`) plus any runs that have stalled (no new events for `STALL_TIMEOUT_SECS`, default 90s)
 2. Checks `processed_runs` to skip already-processed runs
 3. Reconstructs `RunState` by fetching and replaying all events for each run
-4. Runs 14 Tier 1 detectors against the `RunState`. `PROMPT_INJECTION_SIGNAL` is handled separately — the SDK detects injection on raw input before hashing and embeds evidence in the `run.started` payload; the worker extracts it from there rather than running the detector on `RunState`
+4. Runs 16 Tier 1 detectors against the `RunState`. `PROMPT_INJECTION_SIGNAL` is handled separately — the SDK detects injection on raw input before hashing and embeds evidence in the `run.started` payload; the worker extracts it from there rather than running the detector on `RunState`
 5. Writes any `FailureSignal` rows to Postgres
 6. Updates the `issues` table: UPSERTs an issue row for each live signal fired (`upsert_fired_issues`) and increments the clean-run counter for any open issues that did not fire this run (`advance_clean_runs`). An issue auto-resolves after 5 consecutive clean runs. Issue tracking failures are caught and logged — they do not affect run processing.
 7. Marks the run as processed

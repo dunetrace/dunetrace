@@ -1,6 +1,6 @@
 # Detectors
 
-Dunetrace runs 15 structural detectors against every completed agent run. All thresholds are configurable i.e. no code changes required.
+Dunetrace runs 17 structural detectors against every completed agent run — 16 Tier 1 detectors plus prompt injection signal detection. All thresholds are configurable i.e. no code changes required.
 
 ---
 
@@ -16,6 +16,8 @@ Dunetrace runs 15 structural detectors against every completed agent run. All th
 | `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent ¹ | MEDIUM |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
 | `REASONING_STALL` | LLM:tool-call ratio exceeds 2× P75 baseline ¹ or static fallback (≥4×) — MEDIUM if run finished, HIGH if it stalled | MEDIUM/HIGH |
+| `COST_SPIKE` | Total token consumption exceeds 3× P75 baseline ¹ or static fallback (>50,000 tokens) | MEDIUM |
+| `SESSION_LATENCY` | Total wall-clock run duration exceeds 3× P75 baseline ¹ or static fallback (>5 min) | MEDIUM |
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
@@ -24,7 +26,7 @@ Dunetrace runs 15 structural detectors against every completed agent run. All th
 | `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
 | `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
 
-¹ **Four detectors use per-agent learned baselines.** `STEP_COUNT_INFLATION`, `SLOW_STEP`, `CONTEXT_BLOAT`, and `REASONING_STALL` compute a P75 from the last 50 successfully completed runs (errored runs excluded) for the same `agent_id` + `agent_version` pair. The threshold fires at **2× that baseline**. Each detector falls back to its static threshold until at least **20** historical runs exist — below that the P75 estimate is too sensitive to individual outliers to be useful — then switches to the adaptive baseline automatically. Tune the multiplier per agent category with `inflation_factor` in `detectors.yml`.
+¹ **Six detectors use per-agent learned baselines.** `STEP_COUNT_INFLATION`, `SLOW_STEP`, `CONTEXT_BLOAT`, `REASONING_STALL`, `COST_SPIKE`, and `SESSION_LATENCY` compute a P75 from the last 50 successfully completed runs (errored runs excluded) for the same `agent_id` + `agent_version` pair. The threshold fires at **2× that baseline** (3× for COST_SPIKE and SESSION_LATENCY). Each detector falls back to its static threshold until at least **20** historical runs exist — below that the P75 estimate is too sensitive to individual outliers to be useful — then switches to the adaptive baseline automatically. Tune the multiplier per agent category with `inflation_factor` in `detectors.yml`.
 
 ---
 
@@ -69,7 +71,7 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-All 15 built-in detectors are live (`shadow = false`) by default. Custom detectors start in shadow mode — signals are stored and visible in the dashboard, but no Slack/webhook alert fires — until you add them to `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`:
+All 17 built-in detectors are live (`shadow = false`) by default. Custom detectors start in shadow mode — signals are stored and visible in the dashboard, but no Slack/webhook alert fires — until you add them to `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`:
 
 ```python
 LIVE_DETECTORS: set[str] = {
@@ -136,8 +138,8 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
-3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio) and attaches them to the `RunState`
-4. Runs all 15 detectors against the `RunState`
+3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
+4. Runs all 16 Tier 1 detectors against the `RunState`
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`

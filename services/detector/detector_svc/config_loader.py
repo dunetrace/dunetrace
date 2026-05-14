@@ -35,6 +35,16 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
         "min_llm_calls":   "MIN_LLM_CALLS",
         "inflation_factor": "INFLATION_FACTOR",
     },
+    "cost_spike":              {
+        "inflation_factor":         "INFLATION_FACTOR",
+        "static_threshold_tokens":  "STATIC_THRESHOLD_TOKENS",
+        "min_llm_calls":            "MIN_LLM_CALLS",
+    },
+    "session_latency":         {
+        "inflation_factor":        "INFLATION_FACTOR",
+        "static_threshold_secs":   "STATIC_THRESHOLD_SECS",
+        "min_events":              "MIN_EVENTS",
+    },
 }
 
 

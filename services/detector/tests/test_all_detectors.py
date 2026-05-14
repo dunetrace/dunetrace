@@ -1,5 +1,5 @@
 """
-Comprehensive detector tests — all 15 failure types.
+Comprehensive detector tests — all 16 failure types (+ PROMPT_INJECTION handled separately).
 
 Each detector gets:
   - A "fires" test (canonical triggering scenario)
@@ -31,6 +31,8 @@ from dunetrace.detectors import (
     CascadingToolFailureDetector,
     FirstStepFailureDetector,
     ReasoningSpinDetector,
+    CostSpikeDetector,
+    SessionLatencyDetector,
     PROMPT_INJECTION_DETECTOR,
 )
 from dunetrace.models import (
@@ -1018,6 +1020,159 @@ class TestReasoningStallDetector(unittest.TestCase):
         self.assertAlmostEqual(ev["ratio"], 5.0)
         self.assertEqual(ev["llm_calls"], 20)
         self.assertEqual(ev["tool_calls"], 4)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 16. COST_SPIKE
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCostSpikeDetector(unittest.TestCase):
+    def setUp(self):
+        self.d = CostSpikeDetector()
+
+    def _state(self, total_tokens: int, baseline: float | None = None) -> RunState:
+        state = base_state()
+        state.llm_calls = [
+            LlmCall(
+                model="gpt-4o",
+                prompt_tokens=total_tokens,
+                finish_reason="stop",
+                latency_ms=100,
+                step_index=0,
+                timestamp=0.0,
+                output_length=10,
+            )
+        ]
+        state.baseline_p75_total_tokens = baseline
+        return state
+
+    def test_fires_above_static_threshold(self):
+        # Default STATIC_THRESHOLD_TOKENS=50_000; 60_000 > 50_000
+        sig = self.d.check(self._state(60_000))
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.failure_type, FailureType.COST_SPIKE)
+
+    def test_does_not_fire_below_static_threshold(self):
+        self.assertIsNone(self.d.check(self._state(40_000)))
+
+    def test_fires_above_baseline(self):
+        # baseline=10_000, INFLATION_FACTOR=3.0 → threshold=30_000; 35_000 fires
+        sig = self.d.check(self._state(35_000, baseline=10_000.0))
+        self.assertIsNotNone(sig)
+
+    def test_does_not_fire_below_baseline_threshold(self):
+        # baseline=10_000, threshold=30_000; 25_000 does not fire
+        self.assertIsNone(self.d.check(self._state(25_000, baseline=10_000.0)))
+
+    def test_does_not_fire_on_empty_run(self):
+        state = base_state()
+        self.assertIsNone(self.d.check(state))
+
+    def test_does_not_fire_when_zero_tokens(self):
+        state = base_state()
+        state.llm_calls = [
+            LlmCall(model="gpt-4o", prompt_tokens=0, finish_reason="stop",
+                    latency_ms=10, step_index=0, timestamp=0.0, output_length=0)
+        ]
+        self.assertIsNone(self.d.check(state))
+
+    def test_evidence_has_inflation_ratio(self):
+        ev = self.d.check(self._state(60_000)).evidence
+        self.assertIn("total_tokens", ev)
+        self.assertIn("threshold", ev)
+        self.assertIn("inflation_ratio", ev)
+        self.assertEqual(ev["total_tokens"], 60_000)
+
+    def test_evidence_includes_baseline_when_present(self):
+        ev = self.d.check(self._state(35_000, baseline=10_000.0)).evidence
+        self.assertIn("baseline_p75", ev)
+        self.assertEqual(ev["baseline_p75"], 10_000)
+
+    def test_custom_threshold(self):
+        d = CostSpikeDetector(STATIC_THRESHOLD_TOKENS=20_000)
+        self.assertIsNone(d.check(self._state(18_000)))
+        self.assertIsNotNone(d.check(self._state(25_000)))
+
+    def test_custom_inflation_factor(self):
+        d = CostSpikeDetector(INFLATION_FACTOR=2.0)
+        # baseline=10_000, threshold=20_000; 21_000 fires; 19_000 does not
+        self.assertIsNone(d.check(self._state(19_000, baseline=10_000.0)))
+        self.assertIsNotNone(d.check(self._state(21_000, baseline=10_000.0)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 17. SESSION_LATENCY
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSessionLatencyDetector(unittest.TestCase):
+    def setUp(self):
+        self.d = SessionLatencyDetector()
+
+    def _state(self, duration_s: float, baseline: float | None = None) -> RunState:
+        state = base_state()
+        state.events = [
+            make_event(EventType.RUN_STARTED,   step=0, ts=0.0),
+            make_event(EventType.RUN_COMPLETED,  step=1, ts=float(duration_s)),
+        ]
+        state.baseline_p75_duration_s = baseline
+        return state
+
+    def test_fires_above_static_threshold(self):
+        # Default STATIC_THRESHOLD_SECS=300; 400 s fires
+        sig = self.d.check(self._state(400))
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.failure_type, FailureType.SESSION_LATENCY)
+
+    def test_does_not_fire_below_static_threshold(self):
+        self.assertIsNone(self.d.check(self._state(200)))
+
+    def test_fires_above_baseline(self):
+        # baseline=60s, INFLATION_FACTOR=3.0 → threshold=180s; 200s fires
+        sig = self.d.check(self._state(200, baseline=60.0))
+        self.assertIsNotNone(sig)
+
+    def test_does_not_fire_below_baseline_threshold(self):
+        # baseline=60s, threshold=180s; 150s does not fire
+        self.assertIsNone(self.d.check(self._state(150, baseline=60.0)))
+
+    def test_does_not_fire_on_zero_duration(self):
+        state = base_state()
+        state.events = [
+            make_event(EventType.RUN_STARTED,  step=0, ts=0.0),
+            make_event(EventType.RUN_STARTED,  step=1, ts=0.0),
+        ]
+        self.assertIsNone(self.d.check(state))
+
+    def test_does_not_fire_with_single_event(self):
+        state = base_state()
+        state.events = [make_event(EventType.RUN_STARTED, step=0, ts=0.0)]
+        self.assertIsNone(self.d.check(state))
+
+    def test_does_not_fire_on_empty_run(self):
+        self.assertIsNone(self.d.check(base_state()))
+
+    def test_evidence_has_duration_and_threshold(self):
+        ev = self.d.check(self._state(400)).evidence
+        self.assertIn("duration_s", ev)
+        self.assertIn("threshold_s", ev)
+        self.assertIn("inflation_ratio", ev)
+        self.assertAlmostEqual(ev["duration_s"], 400.0, places=0)
+
+    def test_evidence_includes_baseline_when_present(self):
+        ev = self.d.check(self._state(200, baseline=60.0)).evidence
+        self.assertIn("baseline_p75_s", ev)
+        self.assertAlmostEqual(ev["baseline_p75_s"], 60.0, places=0)
+
+    def test_custom_threshold(self):
+        d = SessionLatencyDetector(STATIC_THRESHOLD_SECS=100)
+        self.assertIsNone(d.check(self._state(90)))
+        self.assertIsNotNone(d.check(self._state(110)))
+
+    def test_custom_inflation_factor(self):
+        d = SessionLatencyDetector(INFLATION_FACTOR=2.0)
+        # baseline=60s, threshold=120s; 130s fires; 110s does not
+        self.assertIsNone(d.check(self._state(110, baseline=60.0)))
+        self.assertIsNotNone(d.check(self._state(130, baseline=60.0)))
 
 
 if __name__ == "__main__":

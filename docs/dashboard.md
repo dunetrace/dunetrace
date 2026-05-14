@@ -114,6 +114,8 @@ Every failure type label in the dashboard (Alerts, All Runs, run detail, heatmap
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned no results — knowledge base gap |
 | `STEP_COUNT_INFLATION` | Far more steps than baseline — inefficiency or runaway loop |
 | `FIRST_STEP_FAILURE` | Failed on the very first step — likely config or setup issue |
+| `COST_SPIKE` | Token consumption far exceeds baseline — runaway cost or context explosion |
+| `SESSION_LATENCY` | Total run duration far exceeds baseline — hanging tools or infrastructure issues |
 
 ---
 

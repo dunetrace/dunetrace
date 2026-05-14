@@ -884,25 +884,38 @@ async def agent_failure_rates(agent_id: str) -> list:
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
+            WITH per_day AS (
+                SELECT
+                    DATE_TRUNC('day', processed_at AT TIME ZONE 'UTC')::date AS day,
+                    COUNT(DISTINCT run_id) AS total_runs
+                FROM processed_runs
+                WHERE agent_id = $1
+                  AND processed_at >= NOW() - INTERVAL '30 days'
+                GROUP BY day
+            ),
+            per_day_type AS (
+                SELECT
+                    DATE_TRUNC('day', pr.processed_at AT TIME ZONE 'UTC')::date AS day,
+                    fs.failure_type,
+                    COUNT(DISTINCT fs.run_id)::int AS affected_runs
+                FROM processed_runs pr
+                JOIN failure_signals fs
+                    ON fs.run_id    = pr.run_id
+                    AND fs.agent_id = pr.agent_id
+                    AND fs.shadow   = FALSE
+                WHERE pr.agent_id = $1
+                  AND pr.processed_at >= NOW() - INTERVAL '30 days'
+                GROUP BY day, fs.failure_type
+            )
             SELECT
-                fs.failure_type,
-                DATE_TRUNC('day', pr.processed_at AT TIME ZONE 'UTC')::date AS day,
-                COUNT(DISTINCT pr.run_id)::int  AS total_runs,
-                COUNT(DISTINCT fs.run_id)::int  AS affected_runs,
-                ROUND(
-                    COUNT(DISTINCT fs.run_id)::numeric
-                    / NULLIF(COUNT(DISTINCT pr.run_id), 0),
-                    3
-                ) AS rate
-            FROM processed_runs pr
-            JOIN failure_signals fs
-                ON fs.run_id    = pr.run_id
-                AND fs.agent_id = pr.agent_id
-                AND fs.shadow   = FALSE
-            WHERE pr.agent_id = $1
-              AND pr.processed_at >= NOW() - INTERVAL '30 days'
-            GROUP BY fs.failure_type, day
-            ORDER BY day DESC, affected_runs DESC
+                pdt.failure_type,
+                pdt.day,
+                pd.total_runs::int,
+                pdt.affected_runs,
+                ROUND(pdt.affected_runs::numeric / NULLIF(pd.total_runs, 0), 3) AS rate
+            FROM per_day_type pdt
+            JOIN per_day pd ON pd.day = pdt.day
+            ORDER BY pdt.day DESC, pdt.affected_runs DESC
             LIMIT 300
             """,
             agent_id,
@@ -933,26 +946,33 @@ async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
+            WITH total AS (
+                SELECT COUNT(DISTINCT run_id) AS total_runs
+                FROM processed_runs
+                WHERE agent_id = $1
+                  AND processed_at >= NOW() - INTERVAL '7 days'
+            )
             SELECT
                 fs.failure_type,
-                COUNT(DISTINCT pr.run_id)::int  AS total_runs,
-                COUNT(DISTINCT fs.run_id)::int  AS affected_runs,
+                (SELECT total_runs FROM total)::int AS total_runs,
+                COUNT(DISTINCT fs.run_id)::int       AS affected_runs,
                 ROUND(
                     COUNT(DISTINCT fs.run_id)::numeric
-                    / NULLIF(COUNT(DISTINCT pr.run_id), 0),
+                    / NULLIF((SELECT total_runs FROM total), 0),
                     3
-                )                               AS rate,
-                MIN(fs.detected_at)             AS first_seen,
-                MAX(fs.detected_at)             AS last_seen
-            FROM processed_runs pr
-            JOIN failure_signals fs
-                ON fs.run_id    = pr.run_id
-                AND fs.agent_id = pr.agent_id
-                AND fs.shadow   = FALSE
-            WHERE pr.agent_id = $1
-              AND pr.processed_at >= NOW() - INTERVAL '7 days'
+                )                                   AS rate,
+                MIN(fs.detected_at)                 AS first_seen,
+                MAX(fs.detected_at)                 AS last_seen
+            FROM failure_signals fs
+            WHERE fs.agent_id = $1
+              AND fs.shadow   = FALSE
+              AND fs.run_id IN (
+                  SELECT run_id FROM processed_runs
+                  WHERE agent_id = $1
+                    AND processed_at >= NOW() - INTERVAL '7 days'
+              )
             GROUP BY fs.failure_type
-            ORDER BY rate DESC
+            ORDER BY affected_runs DESC
             """,
             agent_id,
         )
