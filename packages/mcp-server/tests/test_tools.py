@@ -670,6 +670,52 @@ class TestGetInstrumentationGuide(unittest.TestCase):
         self.assertIn("@dt.tool", out)
 
 
+class TestMainCLI(unittest.TestCase):
+    """Tests for the main() entry point CLI argument handling."""
+
+    def test_no_args_runs_stdio(self):
+        import sys
+        with patch.object(sys, "argv", ["dunetrace-mcp"]):
+            with patch.object(srv.mcp, "run") as mock_run:
+                srv.main()
+        mock_run.assert_called_once_with(transport="stdio")
+
+    def test_sse_flag_runs_sse(self):
+        import sys
+        with patch.object(sys, "argv", ["dunetrace-mcp", "--sse"]):
+            with patch.object(srv.mcp, "run") as mock_run:
+                srv.main()
+        mock_run.assert_called_once_with(transport="sse", port=8000)
+
+    def test_sse_with_custom_port(self):
+        import sys
+        with patch.object(sys, "argv", ["dunetrace-mcp", "--sse", "--port", "9000"]):
+            with patch.object(srv.mcp, "run") as mock_run:
+                srv.main()
+        mock_run.assert_called_once_with(transport="sse", port=9000)
+
+    def test_port_without_sse_still_runs_stdio(self):
+        import sys
+        with patch.object(sys, "argv", ["dunetrace-mcp", "--port", "9000"]):
+            with patch.object(srv.mcp, "run") as mock_run:
+                srv.main()
+        mock_run.assert_called_once_with(transport="stdio")
+
+    def test_help_exits_zero(self):
+        import sys
+        with patch.object(sys, "argv", ["dunetrace-mcp", "--help"]):
+            with self.assertRaises(SystemExit) as ctx:
+                srv.main()
+        self.assertEqual(ctx.exception.code, 0)
+
+    def test_version_exits_zero(self):
+        import sys
+        with patch.object(sys, "argv", ["dunetrace-mcp", "--version"]):
+            with self.assertRaises(SystemExit) as ctx:
+                srv.main()
+        self.assertEqual(ctx.exception.code, 0)
+
+
 class TestResources(unittest.TestCase):
     """Verify resources are registered and readable."""
 
@@ -701,6 +747,182 @@ class TestResources(unittest.TestCase):
         with patch.object(srv, "_DOCS", pathlib.Path("/nonexistent")):
             content = srv.doc_integrate_python()
         self.assertIn("doc not found", content)
+
+
+class TestGetRunDetailExtra(unittest.TestCase):
+    """Additional get_run_detail edge cases."""
+
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_shows_total_tokens(self):
+        run_with_tokens = {**RUN_DETAIL, "total_tokens": 45000}
+        with patch("dunetrace_mcp.client.get", return_value=run_with_tokens):
+            out = srv.get_run_detail("run-abc-123")
+        self.assertIn("45,000", out)
+
+    def test_no_tokens_field_omitted(self):
+        # Default fixture has total_tokens=None — Tokens line should not appear
+        out = srv.get_run_detail("run-abc-123")
+        self.assertNotIn("Tokens:", out)
+
+    def test_parent_run_id_event_does_not_crash(self):
+        events_with_parent = [
+            {**RUN_DETAIL["events"][0], "parent_run_id": "parent-run-xyz"},
+            *RUN_DETAIL["events"][1:],
+        ]
+        run_with_parent = {**RUN_DETAIL, "events": events_with_parent}
+        with patch("dunetrace_mcp.client.get", return_value=run_with_parent):
+            out = srv.get_run_detail("run-abc-123")
+        self.assertIn("run.started", out)
+
+
+class TestGetAgentHealthExtra(unittest.TestCase):
+    """Additional get_agent_health edge cases."""
+
+    def test_baseline_not_ready(self):
+        not_ready = {**HEALTH_SCORE, "baseline_ready": False, "sample_runs": 15}
+        with patch("dunetrace_mcp.client.get", return_value=not_ready):
+            out = srv.get_agent_health("my-agent")
+        self.assertIn("no (need ≥30", out)
+        self.assertNotIn("yes", out)
+
+
+class TestSearchSignalsExtra(unittest.TestCase):
+    """Additional search_signals edge cases."""
+
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_combined_failure_type_and_severity(self):
+        out = srv.search_signals(failure_type="TOOL_LOOP", severity="HIGH")
+        self.assertIn("TOOL_LOOP", out)
+        self.assertNotIn("COST_SPIKE", out)
+
+    def test_session_latency_signal_rendered(self):
+        session_sig = {
+            "id": 45,
+            "failure_type": "SESSION_LATENCY",
+            "severity": "MEDIUM",
+            "run_id": "run-slow-789",
+            "agent_id": "my-agent",
+            "agent_version": "v1.2.3",
+            "step_index": 12,
+            "confidence": 0.85,
+            "detected_at": time.time() - 1800,
+            "evidence": {"duration_s": 350.0, "baseline_p75": 90.0},
+            "alerted": False,
+            "shadow": False,
+            "co_signal_count": 0,
+            "title": "Session latency: 350s (3.9× baseline)",
+            "what": "Run took far longer than typical.",
+            "why_it_matters": "Indicates hanging tools or infrastructure.",
+            "evidence_summary": "350s vs 90s baseline.",
+            "suggested_fixes": [{"description": "Add timeout guards", "language": "python", "code": ""}],
+        }
+        sig_list = {"signals": [session_sig], "page": {"total": 1, "offset": 0, "limit": 200, "has_more": False}}
+        with patch("dunetrace_mcp.client.get", side_effect=lambda path, **p: AGENT_LIST if path == "/v1/agents" else sig_list):
+            out = srv.search_signals(failure_type="SESSION_LATENCY")
+        self.assertIn("SESSION_LATENCY", out)
+        self.assertIn("🟡", out)   # MEDIUM icon
+
+
+class TestGetAgentPatternsExtra(unittest.TestCase):
+    """Additional get_agent_patterns edge cases."""
+
+    def test_occasional_pattern_label(self):
+        occasional_insights = {
+            **INSIGHTS,
+            "systemic_patterns": [
+                {
+                    "failure_type": "COST_SPIKE",
+                    "total_runs": 10,
+                    "affected_runs": 2,
+                    "rate": 0.2,
+                    "first_seen": time.time() - 86400,
+                    "last_seen": time.time() - 3600,
+                    "is_systemic": False,
+                },
+            ],
+        }
+        with patch("dunetrace_mcp.client.get", return_value=occasional_insights):
+            out = srv.get_agent_patterns("my-agent")
+        self.assertIn("Occasional", out)
+        self.assertNotIn("SYSTEMIC", out)
+
+
+class TestSummarizeAgentExtra(unittest.TestCase):
+    """Additional summarize_agent edge cases."""
+
+    def test_no_signals_section_absent(self):
+        def _no_signals(path, **params):
+            if path.endswith("/signals"):
+                return {"signals": [], "page": {"total": 0}}
+            return _mock_get(path, **params)
+
+        with patch("dunetrace_mcp.client.get", side_effect=_no_signals):
+            out = srv.summarize_agent("clean-agent")
+        self.assertIn("clean-agent", out)
+        self.assertIn("Total runs", out)
+        self.assertNotIn("Most recent signals", out)
+
+
+class TestGetAgentRunsExtra(unittest.TestCase):
+    """Additional get_agent_runs edge cases."""
+
+    def test_custom_limit_does_not_error(self):
+        with patch("dunetrace_mcp.client.get", side_effect=_mock_get):
+            out = srv.get_agent_runs("my-agent", limit=5)
+        self.assertIn("run-abc-123", out)
+
+    def test_limit_capped_at_100(self):
+        captured = {}
+
+        def _capturing_get(path, **params):
+            if path.endswith("/runs"):
+                captured["limit"] = params.get("limit")
+            return _mock_get(path, **params)
+
+        with patch("dunetrace_mcp.client.get", side_effect=_capturing_get):
+            srv.get_agent_runs("my-agent", limit=999)
+        self.assertEqual(captured.get("limit"), 100)
+
+
+class TestGetInstrumentationGuideExtra(unittest.TestCase):
+    """Additional get_instrumentation_guide alias and edge cases."""
+
+    def test_lc_graph_hyphen_alias(self):
+        out = srv.get_instrumentation_guide("lc-graph")
+        self.assertIn("DunetraceCallbackHandler", out)
+
+    def test_lc_graph_underscore_alias(self):
+        out = srv.get_instrumentation_guide("lc_graph")
+        self.assertIn("DunetraceCallbackHandler", out)
+
+    def test_crewai_unknown(self):
+        out = srv.get_instrumentation_guide("crewai")
+        self.assertIn("Unknown framework", out)
+        self.assertIn("langchain", out)
+
+    def test_autogen_unknown(self):
+        out = srv.get_instrumentation_guide("autogen")
+        self.assertIn("Unknown framework", out)
+
+    def test_py_alias(self):
+        out = srv.get_instrumentation_guide("py")
+        self.assertIn("@dt.tool", out)
+
+    def test_nodejs_alias(self):
+        out = srv.get_instrumentation_guide("nodejs")
+        self.assertIn("sendEvent", out)
 
 
 if __name__ == "__main__":

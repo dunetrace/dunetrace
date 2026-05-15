@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace-mcp"
-version = "0.1.0"
-description = "Dunetrace MCP server — expose agent signals to Claude Code, Cursor, and Codex"
+version = "0.1.1"
+description = "Dunetrace MCP server - expose agent signals to Claude Code, Cursor, and Codex"
+readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]

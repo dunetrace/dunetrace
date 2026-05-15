@@ -1,6 +1,6 @@
 # Dunetrace MCP Server
 
-Query agent signals, run details, and health scores directly from Claude Code, Cursor, Codex, or any MCP-compatible client — without leaving your editor.
+Query agent signals, run details, and health scores directly from Claude Code, Cursor, Codex, or any MCP-compatible client - without leaving your editor.
 
 ---
 
@@ -14,7 +14,7 @@ The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](
 - *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
 - *"Walk me through run `abc123` step by step."*
 
-All data is read-only. Only hashed metadata is exposed — no raw prompts, tool arguments, or model outputs ever leave your process.
+All data is read-only. Only hashed metadata is exposed - no raw prompts, tool arguments, or model outputs ever leave your process.
 
 ---
 
@@ -424,29 +424,6 @@ Get a quick-start code snippet for instrumenting an agent with Dunetrace. Works 
 
 Aliases accepted: `lc`, `lc-graph`, `lc_graph`, `langgraph`, `ts`, `js`, `javascript`, `node`, `tracking`, `tool_calls` (and more).
 
-**Example:**
-```python
-get_instrumentation_guide("langchain")
-```
-
-**Example output:**
-```
-Quick-start for langchain
-
-from dunetrace import Dunetrace
-from dunetrace.integrations.langchain import DunetraceCallbackHandler
-
-dt = Dunetrace()
-callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
-
-result = agent.invoke(input, config={"callbacks": [callback]})
-dt.shutdown()
-
-── Full guide ─────────────────────────────────────────────
-# Integrating a LangChain / LangGraph Agent with Dunetrace
-…
-```
-
 ---
 
 ## Typical workflows
@@ -510,7 +487,7 @@ All data served by the MCP tools comes from the Dunetrace Customer API, which st
 - Token counts, latency, step counts → stored as plain numbers
 - Run and signal metadata → stored as plain text
 
-The `evidence` dict in signal responses contains the hashed fingerprints the detector used — not the original content. This is by design: the detector runs inside your agent process and only ships the hash.
+The `evidence` dict in signal responses contains the hashed fingerprints the detector used — not the original content.
 
 ---
 
@@ -521,7 +498,7 @@ cd packages/mcp-server
 python -m pytest tests/ -v
 ```
 
-83 tests, all offline — no running stack required. Tests cover every tool including edge cases: unknown IDs, empty results, `None` health scores, time-window filters, evidence truncation, code snippet truncation, all instrumentation guide aliases, and resource registration.
+83 tests, all offline — no running stack required.
 
 ---
 
@@ -537,4 +514,5 @@ dunetrace_mcp/
 tests/
   test_tools.py  # 83 unit tests (all offline)
 pyproject.toml
+README.md
 ```

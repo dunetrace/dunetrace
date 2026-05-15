@@ -5,7 +5,11 @@ Exposes Dunetrace agent signals, run details, and health scores as MCP tools
 so Claude Code, Cursor, Codex, and any MCP-compatible client can query them.
 
 Usage:
-    python -m dunetrace_mcp.server          # stdio (Claude Code / Cursor)
+    dunetrace-mcp                           # stdio (Claude Code / Cursor)
+    dunetrace-mcp --sse                     # HTTP/SSE on :8000
+    dunetrace-mcp --sse --port 9000         # HTTP/SSE on :9000
+    dunetrace-mcp --help                    # show usage
+    dunetrace-mcp --version                 # show version
 
 Environment:
     DUNETRACE_API_URL   Customer API base URL  (default: http://localhost:8002)
@@ -947,6 +951,8 @@ _ALIASES: dict[str, str] = {
     "langchain": "langchain",
     "langgraph": "langchain",
     "lc": "langchain",
+    "lc-graph": "langchain",
+    "lc_graph": "langchain",
     "python": "python",
     "custom-python": "python",
     "custom python": "python",
@@ -1009,7 +1015,52 @@ def get_instrumentation_guide(framework: str) -> str:
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    mcp.run(transport="stdio")
+    import argparse, os
+
+    parser = argparse.ArgumentParser(
+        prog="dunetrace-mcp",
+        description=(
+            "Dunetrace MCP server — expose agent signals to Claude Code, Cursor, and Codex.\n\n"
+            "Normally invoked automatically by your MCP client (stdio transport).\n"
+            "Run with --sse to start an HTTP/SSE server instead."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--sse",
+        action="store_true",
+        help="Run in SSE mode (HTTP server on --port) instead of stdio",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for SSE mode (default: 8000)",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="dunetrace-mcp 0.1.0",
+    )
+
+    api_url = os.environ.get("DUNETRACE_API_URL", "http://localhost:8002")
+    api_key = os.environ.get("DUNETRACE_API_KEY", "dt_dev_test")
+
+    parser.epilog = (
+        f"Environment:\n"
+        f"  DUNETRACE_API_URL  Customer API base URL  (current: {api_url})\n"
+        f"  DUNETRACE_API_KEY  Bearer token           (current: {'set' if api_key != 'dt_dev_test' else 'dt_dev_test (dev default)'})\n\n"
+        f"Client config (Claude Code — add to ~/.claude.json):\n"
+        f'  {{"mcpServers": {{"dunetrace": {{"command": "dunetrace-mcp", '
+        f'"env": {{"DUNETRACE_API_URL": "{api_url}", "DUNETRACE_API_KEY": "..."}}}}}}}}'
+    )
+
+    args = parser.parse_args()
+
+    if args.sse:
+        mcp.run(transport="sse", port=args.port)
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
