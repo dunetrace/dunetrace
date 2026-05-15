@@ -66,7 +66,7 @@ cd dunetrace && cp .env.example .env && docker compose build && docker compose u
 pip install dunetrace
 pip install 'dunetrace[langchain]'          # LangChain / LangGraph
 pip install 'dunetrace[langchain,langfuse]' # + Langfuse deep analysis
-pip install dunetrace-mcp                   # MCP server for Claude Code / Cursor
+pip install dunetrace-mcp                   # MCP server for Claude Code / Cursor / Codex
 ```
 
 **Node.js / TypeScript**
@@ -262,9 +262,9 @@ Ten tools that cover the full diagnostic workflow:
 | `summarize_agent` | "Give me a one-shot diagnosis of my agent." |
 | `get_instrumentation_guide` | "How do I instrument my LangChain agent?" |
 
-**Claude Code** — already registered in `~/.claude.json` after `pip install dunetrace-mcp`. Restart Claude Code to load.
+**Claude Code**: already registered in `~/.claude.json` after `pip install dunetrace-mcp`. Restart Claude Code to load.
 
-**Cursor** — add `.cursor/mcp.json` to your project root:
+**Cursor**: add `.cursor/mcp.json` to your project root:
 
 ```json
 {
@@ -280,7 +280,7 @@ Ten tools that cover the full diagnostic workflow:
 }
 ```
 
-**Codex / SSE clients** — `python -c "from dunetrace_mcp.server import mcp; mcp.run(transport='sse')"` (listens on `:8000`).
+**Codex / SSE clients**: `python -c "from dunetrace_mcp.server import mcp; mcp.run(transport='sse')"` (listens on `:8000`).
 
 All MCP responses expose only hashed metadata — no raw prompts, arguments, or model outputs.
 
