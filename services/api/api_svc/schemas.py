@@ -55,7 +55,8 @@ if _PYDANTIC:
         completed_at:  Optional[float]
         exit_reason:   Optional[str]
         step_count:    int
-        total_tokens:  Optional[int] = None
+        total_tokens:  Optional[int]   = None
+        cost_usd:      Optional[float] = None
         signal_count:  int
         has_signals:   bool
 
@@ -88,7 +89,8 @@ if _PYDANTIC:
         completed_at:  Optional[float]
         exit_reason:   Optional[str]
         step_count:    int
-        total_tokens:  Optional[int] = None
+        total_tokens:  Optional[int]   = None
+        cost_usd:      Optional[float] = None
         events:        List[RunEvent]
         signals:       List[RunSignal]
 

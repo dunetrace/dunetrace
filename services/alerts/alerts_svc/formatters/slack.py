@@ -9,6 +9,18 @@ _SEVERITY_EMOJI  = {"CRITICAL": ":red_circle:", "HIGH": ":large_orange_circle:",
 _DASHBOARD_BASE  = os.getenv("DASHBOARD_URL", "https://app.dunetrace.io")
 
 
+def _fmt_tok(n: int) -> str:
+    if n >= 1_000_000: return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:     return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _fmt_cost(usd: float) -> str:
+    if usd < 0.01:  return "<$0.01"
+    if usd < 1000:  return f"${usd:.2f}"
+    return f"${usd:,.0f}"
+
+
 def _rate_context_text(explanation: Explanation) -> str:
     """Build a one-line rate context string for the Slack message, or empty string if unavailable."""
     rc = getattr(explanation, "rate_context", {})
@@ -55,6 +67,16 @@ def format_slack(explanation: Explanation) -> dict:
                 ),
             }],
         },
+        *([{
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": (
+                    f":moneybag: *Tokens:* {_fmt_tok(explanation.total_tokens)} (wasted)  "
+                    f"*Cost:* ~{_fmt_cost(explanation.cost_usd)}"
+                ),
+            }],
+        }] if explanation.total_tokens and explanation.cost_usd else []),
         {"type": "divider"},
     ]
 

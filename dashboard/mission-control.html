@@ -860,11 +860,11 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <thead>
         <tr>
           <th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th>
-          <th>Failure types</th><th>Duration</th><th>Steps</th><th></th>
+          <th>Failure types</th><th>Duration</th><th>Steps</th><th>Wasted tokens</th><th>Wasted $</th><th></th>
         </tr>
       </thead>
       <tbody id="live-feed-tbody">
-        <tr><td colspan="8" class="loading">loading…</td></tr>
+        <tr><td colspan="10" class="loading">loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -1134,9 +1134,9 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   </div>
   <div class="table-card">
     <table class="run-table">
-      <thead><tr><th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th><th>Failure types</th><th>Time</th><th>Duration</th><th>Steps</th><th></th></tr></thead>
+      <thead><tr><th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th><th>Failure types</th><th>Time</th><th>Duration</th><th>Steps</th><th>Wasted tokens</th><th>Wasted $</th><th></th></tr></thead>
       <tbody id="runs-tbody">
-        <tr><td colspan="8" class="loading">loading…</td></tr>
+        <tr><td colspan="11" class="loading">loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -1558,7 +1558,7 @@ function renderRuns() {
   const sorted = filtered.sort((a, b) => b.started_at - a.started_at);
   document.getElementById('runs-tbody').innerHTML = sorted.length
     ? sorted.map(r => runRow(r)).join('')
-    : '<tr><td colspan="9" class="loading">no runs in this period</td></tr>';
+    : '<tr><td colspan="11" class="loading">no runs in this period</td></tr>';
 }
 
 function runRow(r) {
@@ -1580,6 +1580,8 @@ function runRow(r) {
     <td class="mono" style="font-size:11px;color:var(--chalk4)">${r.started_at ? timeAgo(r.started_at) : '—'}</td>
     <td class="mono">${dur}</td>
     <td class="mono">${r.step_count || 0}</td>
+    <td class="mono" style="font-size:11px;color:${riskColor}">${signals.length && r.total_tokens ? fmtTok(r.total_tokens) : '—'}</td>
+    <td class="mono" style="font-size:11px;color:${riskColor}">${signals.length && r.cost_usd ? fmtUsd(r.cost_usd) : '—'}</td>
     <td><button class="view-btn" onclick="showDetail('${esc(r.run_id)}','${esc(agentId)}');event.stopPropagation()">View →</button></td>
   </tr>`;
 }
@@ -1890,17 +1892,20 @@ function renderRunDetail(run, events, signals) {
   document.getElementById('detail-title').innerHTML  =
     fts.length ? fts.map(ftLabel).join(' + ') : 'Clean run — no signals fired';
 
-  const tokDisplay = run.total_tokens
-    ? fmtTok(run.total_tokens)
-    : fmtTok(tokEst(run.step_count)) + ' ~est';
-  document.getElementById('detail-meta').innerHTML = [
+  const hasFaults   = signals.length > 0;
+  const wastedToks  = hasFaults && run.total_tokens ? fmtTok(run.total_tokens) : '—';
+  const wastedCost  = hasFaults && run.cost_usd     ? fmtUsd(run.cost_usd)     : '—';
+  const metaItems = [
     ['Duration', dur],
     ['Steps', run.step_count || events.length],
-    ['Tokens', tokDisplay],
+    ['Wasted tokens', wastedToks],
+    ['Wasted cost', wastedCost],
     ['Model', model],
     ['Agent', run.agent_id],
     ['Signals', signals.length],
-  ].map(([k, v]) => `<div class="rdh-meta-item">${k} <span>${esc(String(v))}</span></div>`).join('');
+  ];
+  document.getElementById('detail-meta').innerHTML = metaItems
+    .map(([k, v]) => `<div class="rdh-meta-item">${k} <span>${esc(String(v))}</span></div>`).join('');
 
   const riskColor = maxConf >= 0.8 ? 'var(--red)' : maxConf >= 0.5 ? 'var(--amber)' : 'var(--green)';
   document.getElementById('detail-risk-val').textContent = maxConf ? maxConf.toFixed(2) : '0.00';
@@ -2985,7 +2990,7 @@ function fmtTok(n) {
   if (!n) return '0 tokens';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M tokens';
   if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k tokens';
-  return n + ' tokens';
+  return parseFloat(n.toFixed(2)) + ' tokens';
 }
 function fmtCost(tokens) {
   const dollars = tokens / 1_000_000 * COST_PER_1M_TK;
@@ -2993,6 +2998,12 @@ function fmtCost(tokens) {
   if (dollars >= 1)    return '$' + dollars.toFixed(2);
   if (dollars >= 0.01) return '$' + dollars.toFixed(3);
   return '<$0.01';
+}
+function fmtUsd(usd) {
+  if (!usd || usd <= 0) return '—';
+  if (usd < 0.01) return '<$0.01';
+  if (usd >= 1000) return '$' + (usd / 1000).toFixed(1) + 'k';
+  return '$' + usd.toFixed(2);
 }
 
 // Returns estimated wasted tokens for a set of run_ids (runs that had signals)

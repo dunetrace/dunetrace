@@ -31,9 +31,7 @@ function fmtTime(tsMs) {
 function fmtCost(usd) {
   if (usd == null) return "—";
   if (usd === 0) return "$0.00";
-  if (usd < 0.001) return `$${usd.toFixed(5)}`;
-  if (usd < 0.01)  return `$${usd.toFixed(4)}`;
-  if (usd < 1)     return `$${usd.toFixed(3)}`;
+  if (usd < 0.01)  return `<$0.01`;
   if (usd < 1000)  return `$${usd.toFixed(2)}`;
   return `$${Math.round(usd).toLocaleString()}`;
 }
@@ -1379,7 +1377,7 @@ function Dashboard() {
                   {/* Header */}
                   <div style={{
                     display: "grid",
-                    gridTemplateColumns: "200px 70px 70px 60px 80px 130px 1fr",
+                    gridTemplateColumns: "200px 70px 70px 60px 80px 70px 70px 130px 1fr",
                     padding: "8px 20px",
                     borderBottom: `1px solid ${C.border}`,
                     background: C.surface,
@@ -1391,6 +1389,8 @@ function Dashboard() {
                       ["DUR",      "duration"],
                       ["STEPS",    "step_count"],
                       ["SIGNALS",  "signal_count"],
+                      ["TOKENS",   "total_tokens"],
+                      ["COST",     "cost_usd"],
                       ["TIME",     "started_at"],
                       ["VERSION",  "agent_version"],
                     ].map(([label, col]) => (
@@ -1415,7 +1415,7 @@ function Dashboard() {
                         onClick={() => setSelectedRun(isSel ? null : r)}
                         style={{
                           display: "grid",
-                          gridTemplateColumns: "200px 70px 70px 60px 80px 130px 1fr",
+                          gridTemplateColumns: "200px 70px 70px 60px 80px 70px 70px 130px 1fr",
                           padding: "8px 20px",
                           borderBottom: `1px solid ${C.border}22`,
                           background: isSel      ? `${C.orange}12`
@@ -1441,6 +1441,12 @@ function Dashboard() {
                           color: r.signal_count > 0 ? C.orange : C.textD,
                         }}>
                           {r.signal_count > 0 ? `▲ ${r.signal_count}` : "—"}
+                        </span>
+                        <span style={{ fontSize: 10, color: r.signal_count > 0 ? C.orange : C.textD, fontFamily: "monospace" }}>
+                          {r.total_tokens ? fmtTok(r.total_tokens) : "—"}
+                        </span>
+                        <span style={{ fontSize: 10, color: r.signal_count > 0 ? C.orange : C.textD, fontFamily: "monospace" }}>
+                          {r.cost_usd ? fmtCost(r.cost_usd) : "—"}
                         </span>
                         <span style={{ fontSize: 10, color: C.textD }}>
                           {fmtDate(toMs(r.started_at))} {fmtTime(toMs(r.started_at))}
@@ -1615,7 +1621,7 @@ function Dashboard() {
                   {/* ── Section 2: Metrics ── */}
                   <div style={{ background: C.surfaceB, borderRadius: 6, padding: 12, border: `1px solid ${C.border}` }}>
                     <div style={{ fontSize: 9, color: C.textD, marginBottom: 10, letterSpacing: "0.1em" }}>METRICS</div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: tokenSeries.length > 0 ? 12 : 0 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
                       {[
                         { label: "STEPS",    value: runDetail.step_count,           color: C.text },
                         { label: "SIGNALS",  value: runDetail.signals?.length || 0,
@@ -1628,6 +1634,28 @@ function Dashboard() {
                         </div>
                       ))}
                     </div>
+                    {(runDetail.total_tokens || runDetail.cost_usd) && (
+                      <div style={{ paddingTop: 8, borderTop: `1px solid ${C.border}`, display: "flex", gap: 16 }}>
+                        {runDetail.total_tokens && (
+                          <div>
+                            <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.1em", marginBottom: 2 }}>TOKENS</div>
+                            <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "monospace",
+                              color: (runDetail.signals?.length || 0) > 0 ? C.orange : C.text }}>
+                              {fmtTok(runDetail.total_tokens)}
+                            </div>
+                          </div>
+                        )}
+                        {runDetail.cost_usd && (
+                          <div>
+                            <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.1em", marginBottom: 2 }}>COST</div>
+                            <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "monospace",
+                              color: (runDetail.signals?.length || 0) > 0 ? C.orange : C.text }}>
+                              ~{fmtCost(runDetail.cost_usd)}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {tokenSeries.length > 0 && (
                       <div style={{ paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>

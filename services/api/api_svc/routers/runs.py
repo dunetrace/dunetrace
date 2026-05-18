@@ -41,6 +41,8 @@ async def get_runs(
             completed_at=_ts(r.get("completed_at")),
             exit_reason=r.get("exit_reason"),
             step_count=r.get("step_count") or 0,
+            total_tokens=r.get("total_tokens"),
+            cost_usd=r.get("cost_usd"),
             signal_count=r.get("signal_count") or 0,
             has_signals=(r.get("signal_count") or 0) > 0,
         )
@@ -75,6 +77,8 @@ async def get_run(
         completed_at=data.get("completed_at"),
         exit_reason=data.get("exit_reason"),
         step_count=data["step_count"],
+        total_tokens=data.get("total_tokens"),
+        cost_usd=data.get("cost_usd"),
         events=[RunEvent(**e) for e in data["events"]],
         signals=[RunSignal(**s) for s in data["signals"]],
     )

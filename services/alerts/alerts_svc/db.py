@@ -287,3 +287,28 @@ async def fetch_signal_rate_context(agent_id: str, failure_type: str) -> dict[st
     except Exception as exc:
         logger.warning("fetch_signal_rate_context failed: %s", exc)
         return {}
+
+
+async def fetch_run_tokens(run_ids: list[str]) -> dict[str, dict]:
+    """Fetch total prompt+completion tokens and model for a batch of run_ids."""
+    if not _pool or not run_ids:
+        return {}
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                r.run_id,
+                SUM(COALESCE((r.payload->>'prompt_tokens')::integer, 0))    AS prompt_tokens,
+                SUM(COALESCE((r.payload->>'completion_tokens')::integer, 0)) AS completion_tokens,
+                (SELECT MIN(c.payload->>'model') FROM events c
+                 WHERE c.run_id = r.run_id AND c.event_type = 'llm.called'
+                   AND c.payload->>'model' IS NOT NULL) AS model
+            FROM events r
+            WHERE r.run_id = ANY($1::text[])
+              AND r.event_type = 'llm.responded'
+              AND r.payload->>'prompt_tokens' IS NOT NULL
+            GROUP BY r.run_id
+            """,
+            run_ids,
+        )
+    return {r["run_id"]: dict(r) for r in rows}

@@ -29,7 +29,8 @@ from explainer_svc.models import Explanation
 from alerts_svc.formatters.slack   import format_slack
 from alerts_svc.formatters.webhook import build_signed_request      # type: ignore
 from alerts_svc.sender  import send_slack, send_webhook, SendResult
-from alerts_svc.db      import init_pool, close_pool, fetch_unalerted_signals, mark_alerted_batch, fetch_signal_rate_context, ensure_digest_schema
+from alerts_svc.db      import init_pool, close_pool, fetch_unalerted_signals, mark_alerted_batch, fetch_signal_rate_context, fetch_run_tokens, ensure_digest_schema
+from explainer_svc.cost import estimate_cost
 from alerts_svc.digest  import send_weekly_digest
 from alerts_svc.config  import settings, SEVERITY_ORDER
 
@@ -120,10 +121,18 @@ async def poll_once() -> tuple[int, int]:
         for row, _ in signals_by_row
     ])
 
+    run_token_map = await fetch_run_tokens([row["run_id"] for row, _ in signals_by_row])
+
     work: list[tuple[int, Explanation]] = []
     for (row, signal), rate_ctx in zip(signals_by_row, rate_contexts):
         try:
             explanation = explain(signal, rate_context=rate_ctx)
+            tk = run_token_map.get(row["run_id"], {})
+            if tk:
+                pt = int(tk.get("prompt_tokens") or 0)
+                ct = int(tk.get("completion_tokens") or 0)
+                explanation.total_tokens = pt + ct or None
+                explanation.cost_usd = estimate_cost(tk.get("model") or "", pt, ct) or None
             work.append((row["id"], explanation))
         except Exception as exc:
             logger.error("Failed to build explanation for signal_id=%d: %s", row["id"], exc)

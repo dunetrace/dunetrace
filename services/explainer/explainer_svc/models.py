@@ -42,6 +42,10 @@ class Explanation:
     # Cross-run rate context (optional — populated by alert worker, not by explain())
     rate_context:     Dict[str, Any] = field(default_factory=dict)
 
+    # Per-run cost (optional — populated by alert worker from events table)
+    total_tokens:     Optional[int]   = None
+    cost_usd:         Optional[float] = None
+
     def confidence_pct(self) -> str:
         return f"{int(self.confidence * 100)}%"
 

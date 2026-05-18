@@ -275,15 +275,31 @@ async def list_runs(
                  LIMIT 1) AS completed_at,
                 -- step_count
                 (SELECT MAX(e.step_index) FROM events e WHERE e.run_id = pr.run_id) AS step_count,
-                -- total tokens (prompt + completion) from LLM call events; NULL when no LLM data
+                -- total tokens from llm.responded events (SDK writes tokens there, not llm.called)
                 (SELECT SUM(
                     COALESCE((e.payload->>'prompt_tokens')::integer, 0) +
                     COALESCE((e.payload->>'completion_tokens')::integer, 0)
                  ) FROM events e
                  WHERE e.run_id = pr.run_id
-                   AND e.event_type = 'llm.called'
+                   AND e.event_type = 'llm.responded'
                    AND e.payload->>'prompt_tokens' IS NOT NULL
                 )                                                       AS total_tokens,
+                -- prompt tokens only (for cost split)
+                (SELECT SUM(COALESCE((e.payload->>'prompt_tokens')::integer, 0))
+                 FROM events e
+                 WHERE e.run_id = pr.run_id AND e.event_type = 'llm.responded'
+                   AND e.payload->>'prompt_tokens' IS NOT NULL
+                )                                                       AS prompt_tokens,
+                -- completion tokens only
+                (SELECT SUM(COALESCE((e.payload->>'completion_tokens')::integer, 0))
+                 FROM events e
+                 WHERE e.run_id = pr.run_id AND e.event_type = 'llm.responded'
+                   AND e.payload->>'completion_tokens' IS NOT NULL
+                )                                                       AS completion_tokens,
+                -- model from first llm.called event
+                (SELECT e.payload->>'model' FROM events e
+                 WHERE e.run_id = pr.run_id AND e.event_type = 'llm.called'
+                 LIMIT 1)                                               AS model,
                 -- live signal count
                 (SELECT COUNT(*) FROM failure_signals s
                  WHERE s.run_id = pr.run_id AND s.shadow = FALSE)      AS signal_count
@@ -296,7 +312,17 @@ async def list_runs(
             agent_id, limit, offset,
         )
 
-    return [dict(r) for r in rows], total or 0
+    from explainer_svc.cost import estimate_cost
+    results = []
+    for r in rows:
+        rd = dict(r)
+        pt    = int(rd.pop("prompt_tokens") or 0)
+        ct    = int(rd.pop("completion_tokens") or 0)
+        model = rd.pop("model") or ""
+        raw = estimate_cost(model, pt, ct) if (pt or ct) else None
+        rd["cost_usd"] = round(raw, 6) if raw else None
+        results.append(rd)
+    return results, total or 0
 
 
 async def get_run_detail(run_id: str) -> Optional[dict]:
@@ -401,11 +427,15 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
             ],
         })
 
-    total_tokens = sum(
-        (e["payload"].get("prompt_tokens") or 0) + (e["payload"].get("completion_tokens") or 0)
-        for e in event_list
-        if e["event_type"] == "llm.called"
-    ) or None  # None when no LLM token data recorded
+    llm_responded    = [e for e in event_list if e["event_type"] == "llm.responded"]
+    llm_called       = [e for e in event_list if e["event_type"] == "llm.called"]
+    prompt_tokens    = sum(e["payload"].get("prompt_tokens")    or 0 for e in llm_responded)
+    completion_tokens= sum(e["payload"].get("completion_tokens") or 0 for e in llm_responded)
+    total_tokens     = (prompt_tokens + completion_tokens) or None
+    model            = next((e["payload"].get("model") for e in llm_called if e["payload"].get("model")), None)
+    from explainer_svc.cost import estimate_cost
+    raw_cost = estimate_cost(model or "", prompt_tokens, completion_tokens) if total_tokens else None
+    cost_usd = round(raw_cost, 6) if raw_cost else None
 
     pr_dict = dict(pr)
     return {
@@ -417,6 +447,7 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
         "completed_at":  completed_at,
         "step_count":    max((e["step_index"] for e in event_list), default=0) if event_list else 0,
         "total_tokens":  total_tokens,
+        "cost_usd":      cost_usd,
         "events":        event_list,
         "signals":       signal_list,
     }
@@ -1696,7 +1727,7 @@ async def agent_cost_stats(agent_id: str) -> dict:
         return {"total_cost_usd": 0.0, "wasted_cost_usd": 0.0, "wasted_pct": 0.0,
                 "cost_by_failure_type": []}
 
-    from api_svc.cost import estimate_cost
+    from explainer_svc.cost import estimate_cost
 
     async with _pool.acquire() as conn:
         # Prompt tokens + model per run (MAX picks any model name — they should match within a run)
