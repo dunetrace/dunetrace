@@ -11,7 +11,10 @@ def _load_dotenv(path: str = ".env") -> None:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, val = line.partition("=")
-                os.environ.setdefault(key.strip(), val.strip())
+                val = val.strip()
+                if " #" in val:
+                    val = val[:val.index(" #")].strip()
+                os.environ.setdefault(key.strip(), val)
     except FileNotFoundError:
         pass
 

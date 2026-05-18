@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 
 from ingest_svc.config import settings
 from ingest_svc.db import init_pool, close_pool, ensure_schema
-from ingest_svc.routers import ingest, health
+from ingest_svc.routers import ingest, health, otlp
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -78,7 +78,8 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=["*"] if settings.is_dev else [],
         allow_methods=["POST", "GET"],
-        allow_headers=["Content-Type", "X-Dunetrace-Agent"],
+        allow_headers=["Content-Type", "X-Dunetrace-Agent", "Authorization",
+                       "X-Dunetrace-Agent-Id", "X-Dunetrace-Agent-Version"],
     )
 
     # Rate limiting + request timing
@@ -101,6 +102,7 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(ingest.router)
+    app.include_router(otlp.router)
     app.include_router(health.router)
 
     return app

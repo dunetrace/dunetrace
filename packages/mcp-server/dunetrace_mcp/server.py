@@ -672,6 +672,14 @@ def doc_integrations() -> str:
     return _read_doc("integrations.md")
 
 
+@mcp.resource("dunetrace://docs/integrate-langdock")
+def doc_integrate_langdock() -> str:
+    """Full guide: integrate Langdock (or any OTLP-emitting platform) with
+    Dunetrace via the zero-code OTel receiver. Covers ngrok setup, Langdock
+    workspace configuration, verification steps, and the MCP server path."""
+    return _read_doc("integrate-langdock.md")
+
+
 @mcp.resource("dunetrace://docs/detectors")
 def doc_detectors() -> str:
     """Reference: all 17 detectors, thresholds, evidence fields, and tuning."""
@@ -944,6 +952,74 @@ _GUIDES: dict[str, str] = {
         - **TOOL_AVOIDANCE** — agent gives a final answer without using any tools
         - **SLOW_STEP** — any tool call takes longer than 15 seconds
     """).strip(),
+
+    "otel": textwrap.dedent("""
+        # Zero-code monitoring via OpenTelemetry (OTLP receiver)
+
+        If your agent or platform already emits OpenTelemetry traces, point its
+        exporter at Dunetrace — no SDK, no code change required.
+
+        ## Endpoint
+
+        ```
+        POST http://<dunetrace-host>:8001/v1/otlp/traces
+        ```
+
+        Auth: `Authorization: Bearer <api_key>` header (optional in dev mode).
+
+        ## Python (OTLP/HTTP exporter)
+
+        ```python
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+
+        resource = Resource.create({"service.name": "my-agent"})
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(BatchSpanProcessor(
+            OTLPSpanExporter(
+                endpoint="http://localhost:8001/v1/otlp/traces",
+                headers={"Authorization": "Bearer YOUR_API_KEY"},
+            )
+        ))
+        ```
+
+        ## Node.js / TypeScript
+
+        ```typescript
+        import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+        const exporter = new OTLPTraceExporter({
+            url: "http://localhost:8001/v1/otlp/traces",
+            headers: { Authorization: "Bearer YOUR_API_KEY" },
+        });
+        ```
+
+        ## No-code platforms (Langdock, Dify, etc.)
+
+        Set the tracing/OTLP endpoint in your platform's workspace settings:
+        ```
+        https://<your-ngrok-or-deployed-host>/v1/otlp/traces
+        ```
+        Note: cloud platforms cannot reach localhost — use ngrok for local testing.
+
+        ## Supported span types
+
+        | Span | Events emitted |
+        |---|---|
+        | Root span (no parent) | run.started + run.completed / run.errored |
+        | gen_ai.* attributes or name contains openai/anthropic/gpt/chat | llm.called + llm.responded |
+        | tool.name attribute or name contains tool/function_call | tool.called + tool.responded |
+        | vector_db.* / retrieval.* attributes or name contains pinecone/rag/search | retrieval.called + retrieval.responded |
+
+        All 16 detectors activate automatically on each completed trace.
+
+        ## Agent identity
+
+        - `service.name` resource attribute → agent_id
+        - `service.version` resource attribute → agent_version
+        - Override per-request with `X-Dunetrace-Agent-Id` header
+    """).strip(),
 }
 
 # Aliases map natural-language variants to canonical guide keys
@@ -968,6 +1044,14 @@ _ALIASES: dict[str, str] = {
     "tool-calls": "tools",
     "tool_calls": "tools",
     "tracking": "tools",
+    "otel": "otel",
+    "otlp": "otel",
+    "opentelemetry": "otel",
+    "open-telemetry": "otel",
+    "langdock": "otel",
+    "dify": "otel",
+    "no-code": "otel",
+    "zero-code": "otel",
 }
 
 
@@ -983,9 +1067,11 @@ def get_instrumentation_guide(framework: str) -> str:
                               auto-instrumentation, FastAPI, Flask)
             - "typescript"  — TypeScript / Node.js agents (raw HTTP ingest)
             - "tools"       — How to track tool calls specifically (all languages)
+            - "otel"        — Zero-code OTel/OTLP receiver (Langdock, Dify, OpenLLMetry,
+                              any platform that emits OTLP traces)
 
     Aliases accepted: langgraph, lc, custom-python, ts, javascript, js, node,
-    tool-calls, tracking.
+    tool-calls, tracking, otlp, opentelemetry, langdock, dify, no-code.
     """
     key = _ALIASES.get(framework.lower().strip())
     if key is None:
@@ -1003,6 +1089,7 @@ def get_instrumentation_guide(framework: str) -> str:
         "python": "integrate-custom-python-agent.md",
         "typescript": "integrate-typescript-agent.md",
         "tools": "integrations.md",
+        "otel": "integrate-langdock.md",
     }
     doc_path = _DOCS / doc_map[key]
     if doc_path.exists():

@@ -22,7 +22,7 @@ The run detail panel shows a dynamic back button ("← back to alerts", "← bac
 | Page | What it shows |
 |---|---|
 | **Overview** | Four stat cards (Critical / High / Signals / Runs) with configurable trend deltas (↑↓ vs last hour / yesterday / last week). Risk Trend 24h bar chart (hourly signal count, colour-coded by intensity). Token Waste Drift panel — 24h sparkline of wasted tokens vs 7-day baseline, dashed baseline line, WARNING ZONE badge. Failure Posture gauge — half-circle SVG with needle at avg confidence, daily signals, avg confidence, false positive rate. Top Failure Drivers — ranked by signal count, shows failure type · estimated wasted tokens · confidence · severity. Clicking any failure type navigates to All Runs filtered to the agent most affected by that pattern. Agent Signal Drift — horizontal bars per agent showing 24h signal rate vs 7-day baseline, red/amber/green. Top failure patterns with ↑↓ trend arrows. Live run feed. |
-| **All Runs** | Full run table with composable filters: **Day / Week / Month** time range, free-text search (run ID or agent name), severity dropdown, and agent dropdown. Click any row to open run detail. |
+| **All Runs** | Full run table with composable filters: **Day / Week / Month** time range, free-text search (run ID or agent name), severity dropdown, and agent dropdown. Columns include **Wasted tokens** and **Wasted $** — shown only for failed runs, colored by severity. Click any row to open run detail. |
 | **Alerts** | Signals grouped by failure type, filtered by the global time range. Each group header shows run count, estimated wasted tokens, and a **dismiss** button that hides the group (persisted to `localStorage`). Dismissed groups show a count and a "restore all" link. Shadow signals rendered below with dashed border + SHADOW badge. |
 | **Analytics** | Estimated token cost saved this week (configurable $/1k rate). Cross-agent totals. Top failure patterns with per-type token waste. Per-agent breakdown with estimated wasted tokens. All figures respect the global time range. |
 | **Risk Heatmap** | Failure type × agent intensity grid. Counts respect the global time range. |
@@ -138,11 +138,21 @@ Each stat card has an `ⓘ` button explaining the threshold for that severity le
 
 ---
 
-## Token waste estimates
+## Token waste
 
-Token waste figures across the dashboard are computed client-side from run `step_count` using a fixed estimate of **250 tokens per step**. Dollar costs use a configurable rate — default $0.010/1k tokens, editable on the Analytics page.
+The dashboard shows **wasted tokens** and **wasted cost** — tokens and dollars spent on runs that had at least one failure signal.
 
-These are approximations. Actual token counts depend on model, prompt length, and output verbosity.
+**Per-run tables (All Runs, Live feed):**
+- **Wasted tokens** column — shows real token count for failed runs (colored red/amber by severity); `—` for clean runs.
+- **Wasted $** column — cost for failed runs only; `—` for clean runs.
+
+Token counts come from `llm.responded` events recorded by the SDK (`prompt_tokens + completion_tokens`). When no LLM event data is available, a step-count estimate is used as fallback (250 tokens/step).
+
+**Run detail panel:** Failed runs show "Wasted tokens" and "Wasted cost" in the metadata row. Clean runs show `—`.
+
+**Analytics and Overview panels:** Aggregate waste figures (token waste drift, top failure drivers, per-agent breakdown) use the same real token data when available, falling back to the step-count estimate.
+
+Dollar costs use a configurable rate — default $0.010/1k tokens, editable on the Analytics page.
 
 ---
 

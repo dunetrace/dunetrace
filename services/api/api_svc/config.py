@@ -14,8 +14,10 @@ def _load_dotenv(path: str = ".env") -> None:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, val = line.partition("=")
-                val = val.split("#")[0]  # strip inline comments
-                os.environ.setdefault(key.strip(), val.strip())
+                val = val.strip()
+                if " #" in val:
+                    val = val[:val.index(" #")].strip()
+                os.environ.setdefault(key.strip(), val)
     except FileNotFoundError:
         pass
 
@@ -46,6 +48,10 @@ class Settings:
     GITHUB_TOKEN: str       = os.getenv("GITHUB_TOKEN", "")
     GITHUB_REPO: str        = os.getenv("GITHUB_REPO", "")        # e.g. "owner/repo"
     GITHUB_BASE_BRANCH: str = os.getenv("GITHUB_BASE_BRANCH", "main")
+
+    # Slack interactive callbacks — from Settings > Basic Information > Signing Secret
+    # Required to verify that button-click payloads actually come from Slack.
+    SLACK_SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
 
     @property
     def langfuse_configured(self) -> bool:

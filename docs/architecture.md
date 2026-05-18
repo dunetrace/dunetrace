@@ -29,9 +29,13 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 ┌─────────────────────┐  ┌────────────────────────┐  ┌──────────────────────┐
 │  Ingest API  :8001  │  │  Loki / Grafana Alloy  │  │  OTel Collector      │
 │                     │  │                        │  │  (Tempo / Honeycomb  │
-│  FastAPI ·          │  │  Promtail pipeline     │  │   / Datadog / Jaeger)│
-│  validates ·        │  │  → Grafana dashboards  │  │                      │
-│  202 immediately    │  └────────────────────────┘  └──────────────────────┘
+│  POST /v1/ingest    │  │  Promtail pipeline     │  │   / Datadog / Jaeger)│
+│  POST /v1/otlp/     │  │  → Grafana dashboards  │  │                      │
+│    traces  ◄────────┼──┼──────────────────────── ──┼── Langdock · Dify   │
+│  (OTLP/HTTP)        │  └────────────────────────┘  │  OpenLLMetry · any  │
+│                     │                               │  OTLP exporter      │
+│  validates ·        │                               └──────────────────────┘
+│  202 immediately    │
 │  BackgroundTask     │
 │  writes to Postgres │
 └──────────┬──────────┘

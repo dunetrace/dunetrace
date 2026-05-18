@@ -1042,6 +1042,101 @@ pipeline_stages:
 
 ## OpenTelemetry
 
+Dunetrace has two OTel integration modes:
+
+| Mode | When to use |
+|---|---|
+| **OTel receiver** (receive traces) | Your agent already sends OTLP spans — Langdock, Dify, OpenLLMetry, LangChain auto-instrumentation, traceloop, etc. Point their exporter at Dunetrace, zero code change. |
+| **OTel exporter** (emit traces) | You want Dunetrace to forward spans to Tempo, Honeycomb, Datadog, or Jaeger for infra correlation. Requires the SDK. |
+
+---
+
+### OTel receiver — zero-code path
+
+The ingest service exposes an OTLP/HTTP endpoint at:
+
+```
+POST http://<dunetrace-host>:8001/v1/otlp/traces
+```
+
+Configure any OTel exporter to point here instead of (or alongside) your existing collector. Dunetrace maps spans to its event model automatically — no SDK, no code change in your agent.
+
+**Supported instrumentation:**
+
+| Library | What gets captured |
+|---|---|
+| `opentelemetry-instrumentation-openai` | LLM calls, token counts, model |
+| `opentelemetry-instrumentation-anthropic` | LLM calls, token counts |
+| `opentelemetry-instrumentation-langchain` | Chains, LLM calls, tools |
+| `traceloop-sdk` (OpenLLMetry) | 40+ framework integrations |
+| `langfuse-sdk` (with OTel bridge) | All GENERATION observations |
+| Any Gen AI semantic convention exporter | Automatic |
+
+**Python (OTLP/HTTP exporter):**
+
+```python
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+
+resource = Resource.create({"service.name": "my-agent"})
+provider = TracerProvider(resource=resource)
+provider.add_span_processor(BatchSpanProcessor(
+    OTLPSpanExporter(
+        endpoint="http://localhost:8001/v1/otlp/traces",
+        headers={"Authorization": "Bearer YOUR_API_KEY"},
+    )
+))
+```
+
+**Node.js (OTLP/HTTP exporter):**
+
+```typescript
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-node";
+
+const exporter = new OTLPTraceExporter({
+    url: "http://localhost:8001/v1/otlp/traces",
+    headers: { Authorization: "Bearer YOUR_API_KEY" },
+});
+provider.addSpanProcessor(new BatchSpanProcessor(exporter));
+```
+
+**No-code platforms (Langdock, Dify, similar):**
+
+For platforms with an OTLP/tracing endpoint setting, configure it to your Dunetrace ingest URL. Because these platforms send traces from their cloud, `localhost` is not reachable — use ngrok for local testing or a deployed hostname for production:
+```
+# Local testing via ngrok tunnel
+https://abc123.ngrok-free.app/v1/otlp/traces
+
+# Production
+https://dunetrace.your-company.com/v1/otlp/traces
+```
+
+All 16 detectors activate immediately on any OTLP-compatible agent execution — no agent code change required. For a detailed Langdock walkthrough including the MCP server path, see [integrate-langdock.md](./integrate-langdock.md).
+
+**Agent identity:**
+- `service.name` resource attribute → `agent_id`
+- `service.version` resource attribute → `agent_version`
+- Override for the entire request with headers: `X-Dunetrace-Agent-Id` / `X-Dunetrace-Agent-Version`
+
+**Dev mode:** the `Authorization` header is optional when `AUTH_MODE=dev` (local Docker).
+
+**Span → event mapping:**
+
+| Span type | Detection criteria | Events emitted |
+|---|---|---|
+| Root span (no parent) | `parentSpanId` absent or all-zeros | `run.started` + `run.completed` / `run.errored` |
+| LLM span | `gen_ai.system` / `gen_ai.request.model` / `llm.vendor` attribute, or name contains `openai`/`anthropic`/`gpt`/`chat`/… | `llm.called` + `llm.responded` |
+| Tool span | `tool.name` / `gen_ai.tool.name` attribute, or name contains `tool`/`function_call` | `tool.called` + `tool.responded` |
+| Retrieval span | `vector_db.vendor` / `retrieval.index_name` attribute, or name contains `pinecone`/`weaviate`/`rag`/… | `retrieval.called` + `retrieval.responded` |
+| Lifecycle span | name contains `chain`/`agent`/`workflow`/`graph`/… | skipped (covered by root span) |
+
+---
+
+### OTel exporter — SDK path
+
 ```bash
 pip install 'dunetrace[otel]' opentelemetry-exporter-otlp-proto-grpc
 ```
@@ -1161,6 +1256,13 @@ The alerts service test suite is in `services/alerts/tests/`:
 | `tests/test_worker.py` | `poll_once()` integration: signal fetch, mark-alerted, skip-already-alerted, deliver |
 | `tests/test_rate_context.py` | `_rate_context_text()` helper (systemic / first-occurrence / recurring branches, edge cases); `format_slack()` block ordering with rate context; `poll_once()` with mocked `fetch_signal_rate_context` |
 | `tests/test_digest.py` | `should_send_digest()` day/hour guards; `format_digest_slack()` Block Kit structure (header, totals, failure types, systemic patterns, issue counts, dashboard button, colour, pct rounding, no-failures path); `send_weekly_digest()` all skip/send/fail paths |
+
+The ingest service test suite is in `services/ingest/tests/`:
+
+| Test file | What it covers |
+|---|---|
+| `tests/test_ingest.py` | SDK event batch ingestion, auth, deploy markers, policy fetch |
+| `tests/test_otlp.py` | OTLP span→event mapper: `_val`, `_classify`, `_trace_to_uuid`, `otlp_to_events` (root span, LLM, tool, retrieval, lifecycle, error, multi-trace, agent_id override) |
 
 The detector service test suite is in `services/detector/tests/`:
 

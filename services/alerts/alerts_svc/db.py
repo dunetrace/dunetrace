@@ -289,6 +289,178 @@ async def fetch_signal_rate_context(agent_id: str, failure_type: str) -> dict[st
         return {}
 
 
+async def fetch_agent_overrides(
+    pairs: list[tuple[str, str]],
+) -> dict[tuple[str, str], dict]:
+    """Return agent_detector_overrides rows keyed by (agent_id, failure_type).
+    Gracefully returns {} if the table doesn't exist yet."""
+    if not _pool or not pairs:
+        return {}
+    pair_set    = set(pairs)
+    agent_ids   = [p[0] for p in pairs]
+    ftypes      = [p[1] for p in pairs]
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT agent_id, failure_type, fp_count, confidence_floor, silenced
+                FROM agent_detector_overrides
+                WHERE agent_id = ANY($1::text[])
+                  AND failure_type = ANY($2::text[])
+                """,
+                agent_ids, ftypes,
+            )
+        return {
+            (r["agent_id"], r["failure_type"]): dict(r)
+            for r in rows
+            if (r["agent_id"], r["failure_type"]) in pair_set
+        }
+    except Exception as exc:
+        logger.warning("fetch_agent_overrides failed (table may not exist yet): %s", exc)
+        return {}
+
+
+async def evaluate_alert_policy(
+    agent_id: str,
+    failure_type: str,
+    mode: str,
+    threshold: int,
+    window_runs: int,
+) -> tuple[bool, str]:
+    """Return (policy_met, human_readable_reason).
+    Queries processed_runs and failure_signals to check consecutive / frequency.
+    `immediate` always returns (True, "").
+    """
+    if mode == "immediate":
+        return True, ""
+
+    if not _pool:
+        return True, ""  # can't check — fail open
+
+    async with _pool.acquire() as conn:
+        # Last window_runs completed runs for this agent, newest first
+        run_rows = await conn.fetch(
+            """
+            SELECT run_id FROM processed_runs
+            WHERE agent_id = $1
+            ORDER BY processed_at DESC
+            LIMIT $2
+            """,
+            agent_id, window_runs,
+        )
+        if not run_rows:
+            return False, f"no run history yet for {agent_id}"
+
+        run_ids = [r["run_id"] for r in run_rows]
+
+        # Which of those runs had this failure type (any shadow=FALSE signal)?
+        flagged_rows = await conn.fetch(
+            """
+            SELECT DISTINCT run_id FROM failure_signals
+            WHERE agent_id = $1
+              AND failure_type = $2
+              AND shadow = FALSE
+              AND run_id = ANY($3::text[])
+            """,
+            agent_id, failure_type, run_ids,
+        )
+    flagged = {r["run_id"] for r in flagged_rows}
+
+    if mode == "consecutive":
+        # The last `threshold` runs must ALL have triggered
+        last_n = run_ids[:threshold]
+        hit = sum(1 for rid in last_n if rid in flagged)
+        met = len(last_n) == threshold and hit == threshold
+        if met:
+            return True, ""
+        return False, f"{hit}/{threshold} consecutive runs — waiting for {threshold - hit} more"
+
+    if mode == "frequency":
+        hit = sum(1 for rid in run_ids if rid in flagged)
+        met = hit >= threshold
+        if met:
+            return True, ""
+        return False, f"{hit}/{threshold} of last {len(run_ids)} runs — need {threshold - hit} more"
+
+    # Unknown mode — fail open
+    return True, f"unknown mode '{mode}'"
+
+
+async def ensure_dedup_schema() -> None:
+    """Create alert_dedup table if it doesn't exist."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alert_dedup (
+                agent_id         TEXT        NOT NULL,
+                failure_type     TEXT        NOT NULL,
+                last_alerted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                suppressed_count INTEGER     NOT NULL DEFAULT 0,
+                PRIMARY KEY (agent_id, failure_type)
+            )
+            """
+        )
+
+
+async def fetch_dedup_states(
+    pairs: list[tuple[str, str]],
+) -> dict[tuple[str, str], dict]:
+    """Return dedup records keyed by (agent_id, failure_type) for the given pairs."""
+    if not _pool or not pairs:
+        return {}
+    pair_set    = set(pairs)
+    agent_ids   = [p[0] for p in pairs]
+    ftypes      = [p[1] for p in pairs]
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT agent_id, failure_type, last_alerted_at, suppressed_count
+            FROM alert_dedup
+            WHERE agent_id = ANY($1::text[])
+              AND failure_type = ANY($2::text[])
+            """,
+            agent_ids, ftypes,
+        )
+    return {
+        (r["agent_id"], r["failure_type"]): dict(r)
+        for r in rows
+        if (r["agent_id"], r["failure_type"]) in pair_set
+    }
+
+
+async def record_alert_sent(agent_id: str, failure_type: str) -> None:
+    """Upsert dedup record: reset suppressed_count, stamp now as last_alerted_at."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO alert_dedup (agent_id, failure_type, last_alerted_at, suppressed_count)
+            VALUES ($1, $2, NOW(), 0)
+            ON CONFLICT (agent_id, failure_type)
+            DO UPDATE SET last_alerted_at = NOW(), suppressed_count = 0
+            """,
+            agent_id, failure_type,
+        )
+
+
+async def increment_suppressed_count(agent_id: str, failure_type: str, count: int) -> None:
+    """Increment suppressed_count for a key that is within its silence window."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE alert_dedup
+            SET suppressed_count = suppressed_count + $3
+            WHERE agent_id = $1 AND failure_type = $2
+            """,
+            agent_id, failure_type, count,
+        )
+
+
 async def fetch_run_tokens(run_ids: list[str]) -> dict[str, dict]:
     """Fetch total prompt+completion tokens and model for a batch of run_ids."""
     if not _pool or not run_ids:

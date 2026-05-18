@@ -1,5 +1,6 @@
 """Formats an Explanation as a Slack Block Kit payload."""
 from __future__ import annotations
+import json
 import os
 
 from explainer_svc.models import Explanation
@@ -40,7 +41,21 @@ def _rate_context_text(explanation: Explanation) -> str:
         return f":bar_chart: {affected}/{total} runs affected ({pct}) in the last 7 days"
 
 
-def format_slack(explanation: Explanation) -> dict:
+def _fmt_window(seconds: int) -> str:
+    if seconds >= 3600 and seconds % 3600 == 0:
+        h = seconds // 3600
+        return f"{h}h"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def format_slack(
+    explanation: Explanation,
+    suppressed_count: int = 0,
+    dedup_window: int = 3600,
+    signal_id: int | None = None,
+) -> dict:
     """Block Kit payload for Slack Incoming Webhook."""
     severity = explanation.severity
     color    = _SEVERITY_COLORS.get(severity, "#CCCCCC")
@@ -77,6 +92,17 @@ def format_slack(explanation: Explanation) -> dict:
                 ),
             }],
         }] if explanation.total_tokens and explanation.cost_usd else []),
+        *([{
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": (
+                    f":mute: *{suppressed_count} occurrence{'s' if suppressed_count != 1 else ''} "
+                    f"suppressed* since the last alert "
+                    f"({_fmt_window(dedup_window)} silence window)"
+                ),
+            }],
+        }] if suppressed_count > 0 else []),
         {"type": "divider"},
     ]
 
@@ -97,11 +123,36 @@ def format_slack(explanation: Explanation) -> dict:
         blocks.append({"type": "divider"})
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": fix_text}})
 
+    _btn_val = json.dumps({
+        "signal_id":    signal_id,
+        "agent_id":     explanation.agent_id,
+        "failure_type": explanation.failure_type,
+    })
+
     blocks.append({"type": "divider"})
     blocks.append({
         "type": "actions",
-        "elements": [{"type": "button", "text": {"type": "plain_text", "text": "View Run", "emoji": True},
-                      "url": dashboard_url, "style": "primary"}],
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "View Run", "emoji": True},
+                "url": dashboard_url,
+                "style": "primary",
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Mark resolved", "emoji": True},
+                "action_id": "mark_resolved",
+                "value": _btn_val,
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Not a problem", "emoji": True},
+                "action_id": "false_positive",
+                "value": _btn_val,
+                "style": "danger",
+            },
+        ],
     })
 
     return {"attachments": [{"color": color, "blocks": blocks}]}

@@ -73,6 +73,8 @@ services:
       context: .
       dockerfile: services/alerts/Dockerfile
     restart: unless-stopped
+    volumes:
+      - ./detectors.yml:/app/detectors.yml:ro
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       POLL_INTERVAL: 10
@@ -115,6 +117,7 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_REPO: ${GITHUB_REPO:-}
       GITHUB_BASE_BRANCH: ${GITHUB_BASE_BRANCH:-main}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy

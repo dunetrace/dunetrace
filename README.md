@@ -139,22 +139,21 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 | Signal | What it catches |
 |---|---|
 | `TOOL_LOOP` | Same tool called repeatedly with identical args |
-| `COST_SPIKE` | Total token consumption unusually high vs per-agent baseline |
-| `SESSION_LATENCY` | Wall-clock run time anomalously long vs per-agent baseline |
-| `CONTEXT_BLOAT` | Prompt tokens growing unsustainably across LLM calls |
+| `TOOL_THRASHING` | Oscillating between two tools, unable to commit |
 | `RETRY_STORM` | Tool failing, agent retrying it repeatedly |
 | `CASCADING_TOOL_FAILURE` | Multiple different tools failing in sequence |
-| `STEP_COUNT_INFLATION` | Far more steps than the agent's baseline |
-| `SLOW_STEP` | Single step latency well above threshold |
+| `CONTEXT_BLOAT` | Prompt tokens growing unsustainably across LLM calls |
+| `LLM_TRUNCATION_LOOP` | Model output truncated repeatedly |
 | `GOAL_ABANDONMENT` | Agent stopped using tools before finishing |
 | `REASONING_STALL` | Too many LLM calls per tool call — agent deliberating in circles |
-| `LLM_TRUNCATION_LOOP` | Model output truncated repeatedly |
-| `CONTEXT_BLOAT` | Prompt token count growing unsustainably |
-| `TOOL_THRASHING` | Oscillating between two tools, unable to commit |
 | `TOOL_AVOIDANCE` | Agent answered without using any tools |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned nothing, agent answered anyway |
 | `EMPTY_LLM_RESPONSE` | Model returned an empty response |
 | `FIRST_STEP_FAILURE` | Failed on the first step — config or setup issue |
+| `SLOW_STEP` | Single step latency well above threshold |
+| `STEP_COUNT_INFLATION` | Far more steps than the agent's baseline |
+| `SESSION_LATENCY` | Wall-clock run time anomalously long vs per-agent baseline |
+| `COST_SPIKE` | Total token consumption unusually high vs per-agent baseline |
 | `PROMPT_INJECTION_SIGNAL` | Input matched adversarial injection patterns |
 
 Each alert includes: what fired, why it matters, a concrete fix, and a rate context line (first occurrence / recurring / systemic).
@@ -176,7 +175,7 @@ Live at **[http://localhost:3000](http://localhost:3000)**. Auto-refreshes every
 
 ## Alerts
 
-Slack and generic webhook (PagerDuty, Linear, custom). 
+Slack and generic webhook (PagerDuty, Linear, custom).
 
 ![Slack alert](slack-alert.png)
 
@@ -187,7 +186,7 @@ SLACK_MIN_SEVERITY=LOW   # LOW | MEDIUM | HIGH | CRITICAL
 
 A weekly digest (Monday 9am UTC) summarises top failure types, most-affected agents, and systemic patterns. Enable with `DIGEST_ENABLED=true`.
 
-→ [docs/alerts.md](docs/alerts.md)
+→ [docs/alerts.md](docs/alerts.md) for deduplication, multi-run confirmation policy, and user feedback loop.
 
 ---
 

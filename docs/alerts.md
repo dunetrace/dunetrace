@@ -21,7 +21,9 @@ Get a webhook URL from [api.slack.com/messaging/webhooks](https://api.slack.com/
 docker compose up -d --force-recreate alerts
 ```
 
-Each Slack alert includes: failure type, severity, what happened, why it matters, a concrete code fix targeted at the specific failure pattern detected, a one-line rate context summary showing how common this pattern is for the agent, and a **View Run** button that deep-links directly to that run's detail panel in the dashboard.
+Each Slack alert includes: failure type, severity, confidence, what happened, why it matters, a concrete code fix targeted at the specific failure pattern detected, a one-line rate context summary showing how common this pattern is for the agent, and a **View Run** button that deep-links directly to that run's detail panel in the dashboard.
+
+When token data is available for the run, a `:moneybag:` line is included showing total tokens consumed and estimated cost (e.g. `:moneybag: *Tokens:* 581 (wasted)  *Cost:* ~$0.00`). This uses actual `prompt_tokens + completion_tokens` from SDK-recorded `llm.responded` events.
 
 > **Note:** `docker compose restart alerts` does not re-read `.env`. Use `docker compose up -d alerts` to recreate the container and pick up env var changes.
 

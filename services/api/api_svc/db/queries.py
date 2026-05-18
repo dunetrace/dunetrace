@@ -58,6 +58,20 @@ CREATE TABLE IF NOT EXISTS policies (
 CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
 """
 
+_FEEDBACK_DDL = """
+ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS agent_detector_overrides (
+    agent_id         TEXT        NOT NULL,
+    failure_type     TEXT        NOT NULL,
+    fp_count         INTEGER     NOT NULL DEFAULT 0,
+    confidence_floor FLOAT       NOT NULL DEFAULT 0.0,
+    silenced         BOOLEAN     NOT NULL DEFAULT FALSE,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (agent_id, failure_type)
+);
+"""
+
 
 async def init_pool() -> None:
     global _pool
@@ -73,6 +87,7 @@ async def init_pool() -> None:
         await conn.execute(_MIGRATIONS_DDL)
         await conn.execute(_FIXES_DDL)
         await conn.execute(_POLICIES_DDL)
+        await conn.execute(_FEEDBACK_DDL)
     logger.info("DB pool ready")
 
 
@@ -2179,3 +2194,71 @@ async def cross_run_patterns(customer_id: str) -> list:
         }
         for agent_id, rows in sorted(agent_map.items())
     ]
+
+
+# ── User feedback (Slack buttons) ──────────────────────────────────────────────
+
+async def mark_signal_resolved(signal_id: int) -> bool:
+    """Set resolved_at=NOW() on the signal. Returns True if the row was found."""
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE failure_signals SET resolved_at = NOW() WHERE id = $1 AND resolved_at IS NULL",
+            signal_id,
+        )
+    return result.split()[-1] != "0"
+
+
+async def record_false_positive(
+    signal_id: int,
+    agent_id: str,
+    failure_type: str,
+) -> dict:
+    """Increment fp_count and raise confidence_floor by 0.1.
+    Sets silenced=TRUE when fp_count reaches 3.
+    Returns the updated override row."""
+    if not _pool:
+        return {}
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO agent_detector_overrides (agent_id, failure_type, fp_count, confidence_floor, silenced)
+            VALUES ($1, $2, 1, 0.1, FALSE)
+            ON CONFLICT (agent_id, failure_type) DO UPDATE
+              SET fp_count         = agent_detector_overrides.fp_count + 1,
+                  confidence_floor = LEAST(1.0, agent_detector_overrides.confidence_floor + 0.1),
+                  silenced         = (agent_detector_overrides.fp_count + 1) >= 3,
+                  updated_at       = NOW()
+            RETURNING agent_id, failure_type, fp_count, confidence_floor, silenced
+            """,
+            agent_id, failure_type,
+        )
+    return dict(row) if row else {}
+
+
+async def reset_detector_override(agent_id: str, failure_type: str) -> bool:
+    """Reset false-positive suppression for a detector on an agent."""
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE agent_detector_overrides
+            SET fp_count=0, confidence_floor=0.0, silenced=FALSE, updated_at=NOW()
+            WHERE agent_id=$1 AND failure_type=$2
+            """,
+            agent_id, failure_type,
+        )
+    return result.split()[-1] != "0"
+
+
+async def get_detector_override(agent_id: str, failure_type: str) -> Optional[dict]:
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM agent_detector_overrides WHERE agent_id=$1 AND failure_type=$2",
+            agent_id, failure_type,
+        )
+    return dict(row) if row else None

@@ -292,10 +292,10 @@ class TestSlackFormatterRateContext(unittest.TestCase):
 
 class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
-    def _make_row(self, signal_id: int = 1) -> dict:
+    def _make_row(self, signal_id: int = 1, failure_type: str = "TOOL_LOOP") -> dict:
         return {
             "id":            signal_id,
-            "failure_type":  "TOOL_LOOP",
+            "failure_type":  failure_type,
             "severity":      "HIGH",
             "run_id":        f"run-{signal_id}",
             "agent_id":      "agent-rc",
@@ -307,8 +307,9 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
         }
 
     async def test_rate_context_fetched_per_signal(self):
-        """fetch_signal_rate_context is called once per signal."""
-        rows = [self._make_row(1), self._make_row(2)]
+        """fetch_signal_rate_context is called once per delivered (agent_id, failure_type) group."""
+        # Two signals with different failure types → two separate groups → two rate_context calls
+        rows = [self._make_row(1, "TOOL_LOOP"), self._make_row(2, "RETRY_STORM")]
         rate_ctx = {"total_runs": 10, "affected_runs": 3, "rate": 0.3, "is_systemic": False}
 
         with patch("alerts_svc.worker.fetch_unalerted_signals",
@@ -320,7 +321,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
                    return_value={"slack": SendResult(True, "slack", 1, 200)}):
             await worker_module.poll_once()
 
-        # Called once per signal
+        # Called once per delivered group
         self.assertEqual(mock_rc.call_count, 2)
 
     async def test_rate_context_passed_to_explain(self):
@@ -392,8 +393,9 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
                 pass  # expected if gather propagates the exception
 
     async def test_multiple_signals_each_get_own_rate_context(self):
-        """Each signal gets rate context for its own agent_id + failure_type pair."""
-        rows = [self._make_row(1), self._make_row(2)]
+        """Each delivered (agent_id, failure_type) group gets its own rate context call."""
+        # Two different failure types → two groups → two rate_context calls
+        rows = [self._make_row(1, "TOOL_LOOP"), self._make_row(2, "RETRY_STORM")]
         call_args_list = []
 
         async def track_rc(agent_id, failure_type):
@@ -410,10 +412,8 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
             await worker_module.poll_once()
 
         self.assertEqual(len(call_args_list), 2)
-        # Both calls should be for agent-rc with TOOL_LOOP
-        for agent_id, failure_type in call_args_list:
-            self.assertEqual(agent_id, "agent-rc")
-            self.assertEqual(failure_type, "TOOL_LOOP")
+        failure_types = {ft for _, ft in call_args_list}
+        self.assertEqual(failure_types, {"TOOL_LOOP", "RETRY_STORM"})
 
 
 if __name__ == "__main__":
