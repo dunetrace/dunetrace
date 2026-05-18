@@ -48,6 +48,8 @@ Dunetrace answers a different question: **is something breaking right now?**  an
 
 Dunetrace is not a replacement for tracing tools, it's the layer that tells you *when to look*.
 
+**If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
+
 ---
 
 ## Quick Start

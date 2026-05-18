@@ -4,6 +4,7 @@ Runtime observability for AI agents. Detects tool loops, cost spikes, context bl
 
 Zero runtime dependencies. Works with any Node.js AI framework. Node 18+.
 
+
 ## Install
 
 ```bash
