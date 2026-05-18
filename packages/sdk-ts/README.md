@@ -1,8 +1,8 @@
 # Dunetrace SDK for Node.js / TypeScript
 
-Runtime observability for AI agents. Detects tool loops, context bloat, prompt injection, and more — in real-time.
+Runtime observability for AI agents. Detects tool loops, cost spikes, context bloat, and 14 more failure patterns — automatically, on every run.
 
-Zero runtime dependencies. Works with any Node.js AI framework.
+Zero runtime dependencies. Works with any Node.js AI framework. Node 18+.
 
 ## Install
 
@@ -10,34 +10,31 @@ Zero runtime dependencies. Works with any Node.js AI framework.
 npm install dunetrace
 ```
 
-Node 18+ required (uses built-in `fetch` and `AsyncLocalStorage`).
-
 ## Quickstart
 
 ```typescript
 import { Dunetrace } from "dunetrace";
 
-const dt = new Dunetrace();   // default: http://localhost:8001, no key required
+const dt = new Dunetrace();  // default: http://localhost:8001
 
-await dt.run("my-agent", {
-  model:     "gpt-4o",
-  tools:     ["web_search"],
-  userInput: query,           // hashed before transmission — never sent raw
-}, async (run) => {
+await dt.run("my-agent", { model: "gpt-4o", tools: ["web_search"] }, async (run) => {
 
-  run.llmCalled("gpt-4o", 150);
+  // Before + after each LLM call
+  run.llmCalled("gpt-4o", promptTokens);
   const t0  = Date.now();
   const res = await openai.chat.completions.create({ /* ... */ });
   run.llmResponded({
     completionTokens: res.usage?.completion_tokens,
     latencyMs:        Date.now() - t0,
     finishReason:     res.choices[0].finish_reason ?? "stop",
-    outputText:       res.choices[0].message.content ?? "",  // hashed, not transmitted
+    outputText:       res.choices[0].message.content ?? "",  // hashed, never sent raw
   });
 
-  run.toolCalled("web_search", { query });  // args are SHA-256 hashed
+  // Before + after each tool call
+  const toolStart = Date.now();
+  run.toolCalled("web_search", { query });          // args are SHA-256 hashed
   const results = await webSearch(query);
-  run.toolResponded("web_search", true, results.length, Date.now() - t0);
+  run.toolResponded("web_search", true, results.length, Date.now() - toolStart);
 
   run.finalAnswer();
 });
@@ -48,21 +45,20 @@ await dt.shutdown();
 ## Auto-wrap tools with `dt.tool()`
 
 ```typescript
+// Wraps the function — emits tool.called + tool.responded automatically
 const search = dt.tool(webSearch, "web_search");
-// or infer name from function.name:
+// or infer the name from function.name:
 const search = dt.tool(webSearch);
 
-// Inside dt.run(), tool.called / tool.responded are emitted automatically.
-// Outside a run, the function runs normally — dt.tool() is a no-op.
+// Inside dt.run() it's tracked; outside a run it passes through unchanged
 const results = await search(query);
 ```
 
 ## Auto-wrap agents with `dt.trace()`
 
 ```typescript
+// Wraps the agent function — starts and ends a Dunetrace run for each call
 const monitoredAgent = dt.trace(myAgent, "my-agent", { model: "gpt-4o" });
-// or infer agentId from function name:
-const monitoredAgent = dt.trace(myAgent);
 
 const answer = await monitoredAgent(userQuery);
 ```
@@ -71,7 +67,7 @@ const answer = await monitoredAgent(userQuery);
 
 ```typescript
 await dt.run("rag-agent", { model: "gpt-4o" }, async (run) => {
-  run.retrievalCalled("product-docs", query);   // query is SHA-256 hashed
+  run.retrievalCalled("product-docs", query);
   const t0   = Date.now();
   const docs = await vectorStore.search(query);
   run.retrievalResponded("product-docs", docs.length, docs[0]?.score, Date.now() - t0);
@@ -82,7 +78,7 @@ await dt.run("rag-agent", { model: "gpt-4o" }, async (run) => {
 });
 ```
 
-## Infrastructure signals
+## Rate limits and errors
 
 ```typescript
 await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
@@ -100,13 +96,13 @@ await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
 });
 ```
 
-## Access current run from nested code
+## Access the current run from nested code
 
 ```typescript
 import { getCurrentRun } from "dunetrace";
 
 function myHelper() {
-  const run = getCurrentRun();  // works inside any async code within dt.run()
+  const run = getCurrentRun();  // works anywhere inside an active dt.run()
   if (run) run.externalSignal("cache_miss");
 }
 ```
@@ -114,35 +110,25 @@ function myHelper() {
 ## Deploy markers
 
 ```typescript
-// Call from CI/CD or app startup — fire-and-forget
+// Call from CI/CD or app startup — correlates signal spikes with releases
 dt.markDeploy("my-agent", "v1.4.2", { env: "production", commit: "abc1234" });
 ```
 
-## Output modes
-
-| Mode | How to enable | Destination |
-|---|---|---|
-| HTTP ingest (default) | `new Dunetrace({ endpoint: "http://…" })` | Dunetrace backend → detection + alerts |
-| Loki NDJSON | `new Dunetrace({ emitAsJson: true })` | stdout → Promtail / Grafana Alloy |
-
 ## Langfuse integration
 
-Correlate a Dunetrace run with a Langfuse trace using a shared UUID. Pass the same ID to both — Dunetrace stores it as `run_id` and Langfuse stores it as the trace ID, so you can jump from a detected signal straight to the full trace.
+Correlate a Dunetrace run with a Langfuse trace using a shared UUID — jump straight from a detected signal to the full Langfuse trace.
 
 ```typescript
 import { randomUUID } from "node:crypto";
 import { Langfuse } from "langfuse";
 
 const langfuse = new Langfuse({ publicKey: "pk-lf-…", secretKey: "sk-lf-…" });
-
 const sharedId = randomUUID();
 
-// Langfuse trace — use sharedId as the trace ID
 const trace = langfuse.trace({ id: sharedId, name: "my-agent" });
 
-// Dunetrace run — same ID links the two
 await dt.run("my-agent", { runId: sharedId, model: "gpt-4o" }, async (run) => {
-  // … instrument as normal …
+  // run.runId === sharedId === Langfuse trace ID
   run.finalAnswer();
 });
 
@@ -156,22 +142,27 @@ See the full example: `examples/langfuse_agent.ts`
 OPENAI_API_KEY=sk-… LANGFUSE_PUBLIC_KEY=pk-lf-… LANGFUSE_SECRET_KEY=sk-lf-… \
   npm run example:langfuse
 
-# Tool loop — triggers TOOL_LOOP signal + explain
+# Tool loop — triggers TOOL_LOOP signal + LLM root cause analysis
 SCENARIO=tool_loop … npm run example:langfuse:loop
 ```
 
+## Output modes
+
+| Mode | How to enable | Destination |
+|---|---|---|
+| HTTP ingest (default) | `new Dunetrace({ endpoint: "http://…" })` | Dunetrace backend → detection + alerts |
+| Loki NDJSON | `new Dunetrace({ emitAsJson: true })` | stdout → Promtail / Grafana Alloy |
+
 ## Configuration
 
-```typescript
-const dt = new Dunetrace({
-  endpoint:        "http://localhost:8001",  // ingest service URL
-  apiKey:          "",                       // required for production
-  flushIntervalMs: 200,                      // background drain interval
-  emitAsJson:      false,                   // Loki NDJSON mode
-});
-```
+| Option | Default | Description |
+|---|---|---|
+| `endpoint` | `http://localhost:8001` | Ingest service URL |
+| `apiKey` | `""` | API key (required for production) |
+| `flushIntervalMs` | `200` | Background buffer drain interval (ms) |
+| `emitAsJson` | `false` | Loki NDJSON mode |
 
-## RunContext API
+## Run API
 
 | Method | When to call |
 |---|---|
@@ -183,25 +174,33 @@ const dt = new Dunetrace({
 | `run.retrievalResponded(indexName, resultCount, topScore?, latencyMs?)` | After retrieval returns |
 | `run.externalSignal(signalName, source?, meta?)` | Rate limits, cache misses, upstream errors |
 | `run.finalAnswer()` | When agent produces its final output |
-| `run.runId` | Read-only UUID for this run — pass as Langfuse trace ID for correlation |
+| `run.runId` | Read-only UUID — pass to Langfuse as the trace ID for correlation |
 
 ## Privacy
 
-No raw content is ever transmitted. All content fields are SHA-256 hashed (16 chars) inside your process before being sent to the backend.
+All content fields are SHA-256 hashed inside your process before transmission — raw content never leaves your agent.
 
-- User input → `input_hash`
-- Tool arguments → `args_hash`
-- LLM outputs → `output_hash`
-- Error messages → `error_hash`
-- Retrieval queries → `query_hash`
+| Field | Transmitted as |
+|---|---|
+| User input | `input_hash` (16-char hex) |
+| Tool arguments | `args_hash` |
+| LLM outputs | `output_hash` |
+| Error messages | `error_hash` |
+| Retrieval queries | `query_hash` |
 
-Token counts, latencies, step counts, and model names are transmitted as plain metadata.
+Token counts, latencies, step counts, and model names are sent as plain metadata.
 
 ## What it detects
 
-17 structural detectors run on every completed run. No LLM, no configuration required.
+17 structural detectors run on every completed run — no LLM, no configuration required.
 
-`TOOL_LOOP` · `TOOL_THRASHING` · `RETRY_STORM` · `CONTEXT_BLOAT` · `COST_SPIKE` · `SESSION_LATENCY` · `SLOW_STEP` · `GOAL_ABANDONMENT` · `REASONING_STALL` · `LLM_TRUNCATION_LOOP` · `EMPTY_LLM_RESPONSE` · `CASCADING_TOOL_FAILURE` · `STEP_COUNT_INFLATION` · `FIRST_STEP_FAILURE` · `RAG_EMPTY_RETRIEVAL` · `TOOL_AVOIDANCE` · `PROMPT_INJECTION_SIGNAL`
+| Category | Detectors |
+|---|---|
+| Loops | `TOOL_LOOP` `TOOL_THRASHING` `RETRY_STORM` `LLM_TRUNCATION_LOOP` |
+| Cost & latency | `COST_SPIKE` `SESSION_LATENCY` `CONTEXT_BLOAT` `SLOW_STEP` |
+| Goal failures | `GOAL_ABANDONMENT` `TOOL_AVOIDANCE` `FIRST_STEP_FAILURE` `STEP_COUNT_INFLATION` |
+| Quality | `REASONING_STALL` `EMPTY_LLM_RESPONSE` `RAG_EMPTY_RETRIEVAL` `CASCADING_TOOL_FAILURE` |
+| Security | `PROMPT_INJECTION_SIGNAL` |
 
 ## Backend
 
@@ -222,5 +221,6 @@ npm test
 
 ## Links
 
-- [Full integration guide](../../docs/integrate-typescript-agent.md)
+- [Full integration guide](https://github.com/dunetrace/dunetrace/blob/main/docs/integrate-typescript-agent.md)
+- [MCP server](https://github.com/dunetrace/dunetrace/blob/main/docs/mcp-server.md) — query agent signals from Claude Code or Cursor
 - [GitHub](https://github.com/dunetrace/dunetrace)
