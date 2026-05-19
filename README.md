@@ -165,7 +165,7 @@ Each alert includes: what fired, why it matters, a concrete fix, and a rate cont
 
 ## Dashboard
 
-![Dashboard overview](dashboard.png)
+![Token usage overview](token-usage.png)
 ![Agent details](agent_detail.png)
 
 Live at **[http://localhost:3000](http://localhost:3000)**. Auto-refreshes every 15s.
