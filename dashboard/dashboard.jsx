@@ -35,6 +35,12 @@ function fmtCost(usd) {
   if (usd < 1000)  return `$${usd.toFixed(2)}`;
   return `$${Math.round(usd).toLocaleString()}`;
 }
+function fmtTok(n) {
+  if (n == null) return "—";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
 
 function verdictColor(verdict, C) {
   if (verdict === "verified")        return C.green;
@@ -327,10 +333,12 @@ function Dashboard() {
   const [failurePatternLoading, setFailurePatternLoading] = useState(false);
   const PAGE_SIZE = 15;
 
-  const [activeView,    setActiveView]    = useState("runs");   // "runs" | "patterns" | "fixes"
+  const [activeView,    setActiveView]    = useState("runs");   // "runs" | "patterns" | "fixes" | "tokens"
   const [patterns,      setPatterns]      = useState(null);
   const [agentFixes,    setAgentFixes]    = useState([]);
   const [fixesLoading,  setFixesLoading]  = useState(false);
+  const [tokenStats,    setTokenStats]    = useState(null);
+  const [tokenWindow,   setTokenWindow]   = useState("7d");
 
   // ── Autofix state ──────────────────────────────────────────────────────────
   // explainStates[signalId] = { loading, error, rootCause, fixContent,
@@ -377,21 +385,23 @@ function Dashboard() {
     return () => clearInterval(t);
   }, [loadAgents]);
 
-  // Load runs + signals + insights + fixes when agent selected
+  // Load runs + signals + insights + fixes + token-stats when agent selected
   const loadAgentData = useCallback(async (agentId) => {
-    if (!agentId) { setRuns([]); setSignals([]); setInsights(null); setAgentFixes([]); return; }
+    if (!agentId) { setRuns([]); setSignals([]); setInsights(null); setAgentFixes([]); setTokenStats(null); return; }
     setLoading(true);
     try {
-      const [rd, sd, id, fx] = await Promise.all([
+      const [rd, sd, id, fx, ts] = await Promise.all([
         apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/runs?limit=200`),
         apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/signals?limit=500`),
         apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/insights`).catch(() => null),
         apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/fixes`).catch(() => null),
+        apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/token-stats`).catch(() => null),
       ]);
       setRuns(rd.runs       || []);
       setSignals(sd.signals || []);
       setInsights(id        || null);
       setAgentFixes((fx?.fixes) || []);
+      setTokenStats(ts      || null);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   }, []);
@@ -405,6 +415,7 @@ function Dashboard() {
     setSelectedFailureType(null);
     setFailurePattern(null);
     setAgentFixes([]);
+    setTokenStats(null);
     setActiveView("runs");
     loadAgentData(selectedAgent);
   }, [selectedAgent, loadAgentData]);
@@ -694,6 +705,17 @@ function Dashboard() {
           </button>
         )}
 
+        {selectedAgent && (
+          <button onClick={() => setActiveView(v => v === "tokens" ? "runs" : "tokens")} style={{
+            padding: "3px 10px", borderRadius: 4, border: "none", cursor: "pointer",
+            fontSize: 10, fontFamily: "inherit", whiteSpace: "nowrap", letterSpacing: "0.04em",
+            background: activeView === "tokens" ? C.blue : C.surfaceB,
+            color:      activeView === "tokens" ? "#fff" : C.textM,
+          }}>
+            TOKENS
+          </button>
+        )}
+
         <div style={{ marginLeft: "auto", display: "flex", gap: 20, fontSize: 11, color: C.textD }}>
           <span>auto-refresh 10s</span>
           <span style={{ color: C.green }}>● LIVE</span>
@@ -977,6 +999,98 @@ function Dashboard() {
                     </div>
                   </div>
                 ))}
+              </div>
+            );
+          })()}
+
+          {/* ── Token usage view ── */}
+          {activeView === "tokens" && selectedAgent && (() => {
+            const windows = ["1d", "7d", "30d"];
+            const windowLabel = { "1d": "Last 24 h", "7d": "Last 7 days", "30d": "Last 30 days" };
+            const w = tokenStats?.windows?.[tokenWindow] || {};
+            const wasteByFt = tokenStats?.waste_by_failure_type || [];
+            const maxWaste = wasteByFt[0]?.wasted_cost_usd || 0;
+
+            return (
+              <div style={{ padding: 20 }}>
+                <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.15em", marginBottom: 16 }}>
+                  TOKEN USAGE & WASTE
+                </div>
+
+                {/* Window selector */}
+                <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>
+                  {windows.map(win => (
+                    <button key={win} onClick={() => setTokenWindow(win)} style={{
+                      padding: "3px 12px", borderRadius: 4, border: "none", cursor: "pointer",
+                      fontSize: 10, fontFamily: "inherit", letterSpacing: "0.04em",
+                      background: tokenWindow === win ? C.blue : C.surfaceB,
+                      color:      tokenWindow === win ? "#fff" : C.textM,
+                    }}>
+                      {win.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+
+                {!tokenStats ? (
+                  <div style={{ fontSize: 11, color: C.textD, padding: "40px 0", textAlign: "center" }}>
+                    No token data available — make sure the agent is sending LLM events.
+                  </div>
+                ) : (
+                  <>
+                    {/* Summary cards */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
+                      {[
+                        { label: "Total runs",     value: (w.run_count || 0).toLocaleString(),           sub: `${w.wasted_run_count || 0} with failures` },
+                        { label: "Total tokens",   value: fmtTok(w.total_tokens || 0),                   sub: `${fmtTok(w.prompt_tokens || 0)} prompt · ${fmtTok(w.completion_tokens || 0)} completion` },
+                        { label: "Wasted tokens",  value: fmtTok(w.wasted_tokens || 0),                  sub: w.total_tokens ? `${Math.round((w.wasted_tokens || 0) / w.total_tokens * 100)}% of total` : "0%", accent: C.orange },
+                        { label: "Total cost",     value: fmtCost(w.total_cost_usd || 0),                sub: `${fmtCost(w.wasted_cost_usd || 0)} wasted (${Math.round((w.wasted_pct || 0) * 100)}%)`, accent: w.wasted_pct > 0.2 ? C.red : undefined },
+                      ].map(({ label, value, sub, accent }) => (
+                        <div key={label} style={{
+                          background: C.surface, border: `1px solid ${C.border}`,
+                          borderRadius: 6, padding: "12px 16px",
+                        }}>
+                          <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.1em", marginBottom: 4 }}>{label}</div>
+                          <div style={{ fontSize: 18, fontWeight: 700, color: accent || C.text, marginBottom: 2 }}>{value}</div>
+                          <div style={{ fontSize: 9, color: C.textD }}>{sub}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Context line */}
+                    <div style={{ fontSize: 9, color: C.textD, marginBottom: 16 }}>
+                      {windowLabel[tokenWindow]} · waste = tokens spent on runs with at least one detected failure
+                    </div>
+
+                    {/* Waste by failure type (30-day when on 30d tab, always shown if data) */}
+                    {wasteByFt.length > 0 && (
+                      <>
+                        <div style={{ fontSize: 9, color: C.textD, letterSpacing: "0.15em", marginBottom: 10 }}>
+                          WASTE BY FAILURE TYPE — 30 DAYS
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {wasteByFt.map(ft => (
+                            <div key={ft.failure_type} style={{
+                              background: C.surface, border: `1px solid ${C.border}`,
+                              borderRadius: 6, padding: "10px 14px",
+                            }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                                <span style={{ fontSize: 11, fontWeight: 600, color: C.text }}>
+                                  {ft.failure_type.replace(/_/g, " ")}
+                                </span>
+                                <div style={{ display: "flex", gap: 14, fontSize: 9, color: C.textD }}>
+                                  <span>{ft.affected_runs} run{ft.affected_runs !== 1 ? "s" : ""}</span>
+                                  <span style={{ color: C.orange, fontWeight: 600 }}>{fmtTok(ft.wasted_tokens)} tok</span>
+                                  <span style={{ color: C.red, fontWeight: 600 }}>{fmtCost(ft.wasted_cost_usd)}</span>
+                                </div>
+                              </div>
+                              <MiniBar value={ft.wasted_cost_usd} max={maxWaste} color={C.orange} width={560} height={3} />
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
               </div>
             );
           })()}
@@ -1586,8 +1700,11 @@ function Dashboard() {
               const st  = exitStatus(runDetail.exit_reason);
               const dur = runDetail.completed_at && runDetail.started_at
                 ? runDetail.completed_at - runDetail.started_at : null;
+              // prompt_tokens is in llm.called for direct SDK, llm.responded for LangChain
               const llmEvents  = (runDetail.events || []).filter(e => e.event_type === "llm.called");
-              const tokenSeries = llmEvents.map(e => e.payload?.prompt_tokens || 0).filter(t => t > 0);
+              const tokenSeries = (runDetail.events || [])
+                .filter(e => (e.event_type === "llm.called" || e.event_type === "llm.responded") && (e.payload?.prompt_tokens || 0) > 0)
+                .map(e => e.payload.prompt_tokens);
               const lastTokens  = tokenSeries[tokenSeries.length - 1] || 0;
               const tokenGrowth = tokenSeries.length > 1
                 ? Math.round(((tokenSeries[tokenSeries.length - 1] - tokenSeries[0]) / (tokenSeries[0] || 1)) * 100)

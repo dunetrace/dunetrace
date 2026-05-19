@@ -100,7 +100,7 @@ The Python SDK supports all three output modes (HTTP ingest, Loki NDJSON, OTel s
 | AutoGen (autogen-agentchat ≥ 0.4) | `DunetraceAutoGenObserver` | `pip install dunetrace autogen-agentchat autogen-ext` |
 | OpenLLMetry / OTel receiver | `DunetraceOTelReceiver` | `pip install 'dunetrace[otel]'` |
 
-See [integrations.md](./integrations.md) for full setup code for each framework.
+See the [docs/](.) directory for per-framework integration guides (LangChain, CrewAI, AutoGen, TypeScript, Langdock, Langfuse).
 
 ---
 

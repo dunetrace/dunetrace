@@ -250,7 +250,16 @@ def get_run_detail(run_id: str, agent_id: str = "") -> str:
                 if p.get("latency_ms"):
                     detail += f"  {p['latency_ms']}ms"
             elif e["event_type"] == "llm.called":
-                detail = f"model={p.get('model', '?')}  p={p.get('prompt_tokens', '?')} c={p.get('completion_tokens', '?')}"
+                # prompt_tokens may be absent here for LangChain (they're in llm.responded)
+                pt = p.get('prompt_tokens', '?')
+                detail = f"model={p.get('model', '?')}  p={pt}"
+            elif e["event_type"] == "llm.responded":
+                # completion_tokens and latency always land here; prompt_tokens here for LangChain
+                pt = p.get('prompt_tokens')
+                ct = p.get('completion_tokens', '?')
+                detail = f"c={ct}"
+                if pt:
+                    detail = f"p={pt}  {detail}"
                 if p.get("latency_ms"):
                     detail += f"  {p['latency_ms']}ms"
             elif e["event_type"] in ("run.started", "run.completed"):
@@ -665,11 +674,11 @@ def doc_integrate_typescript() -> str:
     return _read_doc("integrate-typescript-agent.md")
 
 
-@mcp.resource("dunetrace://docs/integrations")
-def doc_integrations() -> str:
-    """Reference: all integrations — TypeScript, OpenTelemetry, Langfuse,
-    FastAPI, Flask, auto-instrumentation, policies, manual instrumentation."""
-    return _read_doc("integrations.md")
+@mcp.resource("dunetrace://docs/policies")
+def doc_policies() -> str:
+    """Reference: runtime policies — conditions, actions, remote fetch,
+    dashboard CRUD, stop/switch_model/inject_prompt/log action details."""
+    return _read_doc("policies.md")
 
 
 @mcp.resource("dunetrace://docs/integrate-langdock")
@@ -1088,7 +1097,7 @@ def get_instrumentation_guide(framework: str) -> str:
         "langchain": "integrate-langchain-agent.md",
         "python": "integrate-custom-python-agent.md",
         "typescript": "integrate-typescript-agent.md",
-        "tools": "integrations.md",
+        "tools": "integrate-custom-python-agent.md",
         "otel": "integrate-langdock.md",
     }
     doc_path = _DOCS / doc_map[key]
@@ -1097,6 +1106,77 @@ def get_instrumentation_guide(framework: str) -> str:
         return guide + "\n\n---\n\n" + full
 
     return guide
+
+
+@mcp.tool()
+def get_agent_token_stats(agent_id: str) -> str:
+    """
+    Per-window token usage and waste breakdown for an agent (1d / 7d / 30d).
+
+    Shows how many tokens were spent, how many were wasted (on runs with detected
+    failures), and the estimated API cost for each time window.  The 30-day view
+    also breaks waste down by failure type so you can prioritise which failures
+    to fix first.
+
+    Use this when you want to understand the financial impact of agent failures or
+    answer questions like "how much money is my agent wasting?".
+
+    Args:
+        agent_id: The agent ID to query.
+    """
+    try:
+        data = client.get(f"/v1/agents/{agent_id}/token-stats")
+    except Exception as exc:
+        return f"Could not fetch token stats for '{agent_id}': {exc}"
+
+    windows    = data.get("windows", {})
+    waste_by_ft = data.get("waste_by_failure_type", [])
+
+    def _fmt_tok(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f}k"
+        return str(n)
+
+    def _fmt_cost(usd: float) -> str:
+        if usd == 0:
+            return "$0.00"
+        if usd < 0.001:
+            return f"${usd * 100:.4f}¢"
+        if usd < 1:
+            return f"${usd:.4f}"
+        return f"${usd:.2f}"
+
+    lines = [f"═══ Token stats: {agent_id} ═══", ""]
+
+    for win in ("1d", "7d", "30d"):
+        w = windows.get(win, {})
+        if not w:
+            continue
+        label    = {"1d": "Last 24 h", "7d": "Last 7 days", "30d": "Last 30 days"}[win]
+        wst_pct  = int(round((w.get("wasted_pct") or 0) * 100))
+        lines += [
+            f"── {label} ──",
+            f"  Runs:            {w.get('run_count', 0):>6}  ({w.get('wasted_run_count', 0)} with failures)",
+            f"  Total tokens:    {_fmt_tok(w.get('total_tokens', 0)):>8}",
+            f"  Wasted tokens:   {_fmt_tok(w.get('wasted_tokens', 0)):>8}  ({wst_pct}% of total)",
+            f"  Total cost:      {_fmt_cost(w.get('total_cost_usd', 0)):>10}",
+            f"  Wasted cost:     {_fmt_cost(w.get('wasted_cost_usd', 0)):>10}  ({wst_pct}% of total)",
+            "",
+        ]
+
+    if waste_by_ft:
+        lines.append("Waste by failure type (30 days):")
+        for ft in waste_by_ft:
+            lines.append(
+                f"  {ft['failure_type']:<35}  "
+                f"{_fmt_tok(ft['wasted_tokens']):>7} tok  "
+                f"{_fmt_cost(ft['wasted_cost_usd']):>9}  "
+                f"({ft['affected_runs']} run{'s' if ft['affected_runs'] != 1 else ''})"
+            )
+
+    return "\n".join(lines)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

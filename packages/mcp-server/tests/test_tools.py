@@ -724,7 +724,7 @@ class TestResources(unittest.TestCase):
         self.assertIn("dunetrace://docs/integrate-python", uris)
         self.assertIn("dunetrace://docs/integrate-langchain", uris)
         self.assertIn("dunetrace://docs/integrate-typescript", uris)
-        self.assertIn("dunetrace://docs/integrations", uris)
+        self.assertIn("dunetrace://docs/policies", uris)
         self.assertIn("dunetrace://docs/detectors", uris)
         self.assertIn("dunetrace://docs/mcp-server", uris)
 

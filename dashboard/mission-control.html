@@ -663,6 +663,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       Agents
       <span class="sb-count" id="badge-agents" style="background:var(--s3);color:var(--chalk4)">—</span>
     </div>
+    <div class="sb-item" onclick="nav('tokens',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="4" width="14" height="8" rx="1.5"/><path d="M5 8h6M8 6v4"/></svg>
+      Token usage
+    </div>
   </div>
   <div class="sb-section">
     <div class="sb-label">Debug</div>
@@ -1337,6 +1341,72 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   </div>
 </div>
 
+<!-- ── TOKEN USAGE PAGE ── -->
+<div id="page-tokens" class="page">
+  <div class="sec-head" style="margin-bottom:1.5rem">
+    <span class="sec-title">Token usage &amp; waste</span>
+    <div style="display:flex;align-items:center;gap:16px">
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4)">cost rate $</span>
+        <input id="tok-rate-input" type="number" min="0" step="0.0001" placeholder="auto"
+          style="width:72px;background:var(--s3);border:1px solid var(--wire2);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:2px 5px;border-radius:3px;outline:none"
+          oninput="onTokenRateInput()"
+          onfocus="this.style.borderColor='var(--amber)'"
+          onblur="this.style.borderColor='var(--wire2)'">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4)">/1k tokens (blank = per-model)</span>
+      </div>
+      <div class="gp-bar">
+        <button class="gp-btn" data-tw="1d" onclick="setTokenWindow('1d',this)">1D</button>
+        <button class="gp-btn gp-btn-active" data-tw="7d" onclick="setTokenWindow('7d',this)">7D</button>
+        <button class="gp-btn" data-tw="30d" onclick="setTokenWindow('30d',this)">30D</button>
+      </div>
+    </div>
+  </div>
+  <!-- Summary banners -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:1.5rem">
+    <div class="cost-banner">
+      <div><div class="cb-val" id="tok-total-tokens">—</div></div>
+      <div>
+        <div class="cb-label">Total tokens consumed</div>
+        <div class="cb-sub" id="tok-total-runs-sub">across all agents</div>
+      </div>
+    </div>
+    <div class="cost-banner" style="background:linear-gradient(135deg,rgba(212,146,10,0.08),rgba(212,146,10,0.02));border-color:rgba(212,146,10,0.25)">
+      <div><div class="cb-val" id="tok-wasted-tokens" style="color:var(--amber)">—</div></div>
+      <div>
+        <div class="cb-label">Wasted tokens</div>
+        <div class="cb-sub" id="tok-wasted-pct-sub">on runs with failures</div>
+      </div>
+    </div>
+    <div class="cost-banner" style="background:linear-gradient(135deg,rgba(229,62,62,0.08),rgba(229,62,62,0.02));border-color:rgba(229,62,62,0.25)">
+      <div><div class="cb-val" id="tok-wasted-cost" style="color:var(--red)">—</div></div>
+      <div>
+        <div class="cb-label">Est. wasted cost</div>
+        <div class="cb-sub" id="tok-total-cost-sub">of total estimated cost</div>
+      </div>
+    </div>
+  </div>
+  <!-- Per-agent table -->
+  <div class="sec-head"><span class="sec-title">Per-agent breakdown</span></div>
+  <div class="table-card">
+    <table class="run-table">
+      <thead><tr>
+        <th>Agent</th>
+        <th>Runs (failed)</th>
+        <th>Total tokens</th>
+        <th>Wasted tokens</th>
+        <th>Waste %</th>
+        <th>Est. total cost</th>
+        <th>Est. wasted cost</th>
+        <th>Top waste cause</th>
+      </tr></thead>
+      <tbody id="tok-agents-tbody">
+        <tr><td colspan="8" class="loading">loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 </div><!-- /main -->
 
 <script>
@@ -1347,6 +1417,10 @@ const KEY = 'dt_dev_test';
 // ── State ────────────────────────────────────────────────────────────────────
 let _agents        = [];   // [{agent_id, run_count, signal_count, critical_count, high_count, failure_types, _runs, _signals, _shadowSignals}]
 let _healthScores  = {};   // { agent_id: {score, components, sample_runs} }
+let _tokenStats    = {};   // { agent_id: {windows:{1d,7d,30d}, waste_by_failure_type} }
+let _tokenWindow   = '7d'; // active time-window for token usage page
+let _tokenCostRate = null; // null = use per-model API costs; number = override $/1k tokens
+let _tokenStatsLoaded = false;
 let _allRuns       = [];   // flat list across agents
 let _allSigs       = [];   // live signals only
 let _allShadowSigs = [];   // shadow (not-yet-graduated) signals
@@ -1384,8 +1458,142 @@ async function loadHealthScores() {
   renderAgents();
 }
 
+async function loadTokenStats() {
+  if (_tokenStatsLoaded) return;
+  _tokenStatsLoaded = true;
+  await Promise.all(_agents.map(async a => {
+    try {
+      const ts = await apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/token-stats');
+      if (ts) _tokenStats[a.agent_id] = ts;
+    } catch(e) { /* token stats optional */ }
+  }));
+  renderTokens();
+}
+
+function onTokenRateInput() {
+  const v = parseFloat(document.getElementById('tok-rate-input')?.value);
+  _tokenCostRate = isNaN(v) || v <= 0 ? null : v;
+  renderTokens();
+}
+
+function setTokenWindow(w, btn) {
+  _tokenWindow = w;
+  document.querySelectorAll('[data-tw]').forEach(b => b.classList.remove('gp-btn-active'));
+  if (btn) btn.classList.add('gp-btn-active');
+  renderTokens();
+}
+
+function renderTokens() {
+  const allStats = Object.values(_tokenStats);
+  const win = _tokenWindow;
+
+  // Helper: use custom rate when set, otherwise use pre-calculated API cost
+  const tokCost = (tokens, apiUsd) =>
+    _tokenCostRate !== null ? tokens * _tokenCostRate / 1000 : (apiUsd || 0);
+
+  // Aggregate totals across all agents for banner
+  let totalTok = 0, wastedTok = 0, totalCost = 0, wastedCost = 0;
+  allStats.forEach(ts => {
+    const w = ts.windows?.[win] || {};
+    totalTok   += w.total_tokens  || 0;
+    wastedTok  += w.wasted_tokens || 0;
+    totalCost  += tokCost(w.total_tokens  || 0, w.total_cost_usd);
+    wastedCost += tokCost(w.wasted_tokens || 0, w.wasted_cost_usd);
+  });
+
+  const totalRunsAll  = allStats.reduce((n, ts) => n + (ts.windows?.[win]?.run_count || 0), 0);
+  const wastedRunsAll = allStats.reduce((n, ts) => n + (ts.windows?.[win]?.wasted_run_count || 0), 0);
+  const wastedPct     = totalTok ? Math.round(wastedTok / totalTok * 100) : 0;
+
+  const setEl = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setEl('tok-total-tokens',   fmtTok(totalTok));
+  setEl('tok-total-runs-sub', `${totalRunsAll} runs across ${allStats.length} agent${allStats.length !== 1 ? 's' : ''}`);
+  setEl('tok-wasted-tokens',  fmtTok(wastedTok));
+  setEl('tok-wasted-pct-sub', `${wastedPct}% of total · ${wastedRunsAll} failed run${wastedRunsAll !== 1 ? 's' : ''}`);
+  setEl('tok-wasted-cost',    fmtUsd(wastedCost));
+  setEl('tok-total-cost-sub', `of ${fmtUsd(totalCost)} total est. cost`);
+
+  // Per-agent table
+  const tbody = document.getElementById('tok-agents-tbody');
+  if (!tbody) return;
+
+  if (!_tokenStatsLoaded) {
+    tbody.innerHTML = '<tr><td colspan="8" class="loading">loading…</td></tr>';
+    return;
+  }
+
+  const rows = _agents.map(a => {
+    const ts  = _tokenStats[a.agent_id];
+    if (!ts) return null;
+    const w   = ts.windows?.[win] || {};
+    const top = ts.waste_by_failure_type?.[0];
+    const wp  = w.total_tokens ? Math.round((w.wasted_tokens || 0) / w.total_tokens * 100) : 0;
+    const wpColor = wp >= 50 ? 'var(--red)' : wp >= 25 ? 'var(--amber)' : 'var(--chalk4)';
+    return {
+      agent_id:    a.agent_id,
+      run_count:   w.run_count || 0,
+      wasted_runs: w.wasted_run_count || 0,
+      total_tok:   w.total_tokens || 0,
+      wasted_tok:  w.wasted_tokens || 0,
+      wp, wpColor,
+      total_cost:  tokCost(w.total_tokens  || 0, w.total_cost_usd),
+      wasted_cost: tokCost(w.wasted_tokens || 0, w.wasted_cost_usd),
+      top_ft:      top ? top.failure_type : null,
+      waste_by_ft: (ts.waste_by_failure_type || []).map(ft => ({
+        ...ft,
+        _cost: tokCost(ft.wasted_tokens, ft.wasted_cost_usd),
+      })),
+    };
+  }).filter(Boolean).sort((a, b) => b.wasted_cost - a.wasted_cost);
+
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="loading">no token data — make sure agents are sending LLM events</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => `
+    <tr style="cursor:pointer" onclick="toggleTokenRow(this,'${esc(r.agent_id)}')">
+      <td class="mono" style="font-weight:600">${esc(r.agent_id)}</td>
+      <td class="mono">${r.run_count} <span style="color:var(--amber)">(${r.wasted_runs})</span></td>
+      <td class="mono">${fmtTok(r.total_tok)}</td>
+      <td class="mono" style="color:var(--amber)">${fmtTok(r.wasted_tok)}</td>
+      <td class="mono" style="color:${r.wpColor};font-weight:600">${r.wp}%</td>
+      <td class="mono">${fmtUsd(r.total_cost)}</td>
+      <td class="mono" style="color:var(--red)">${fmtUsd(r.wasted_cost)}</td>
+      <td class="mono" style="color:var(--chalk4);font-size:10px">${r.top_ft ? r.top_ft.replace(/_/g,' ') : '—'}</td>
+    </tr>
+    <tr id="tok-detail-${esc(r.agent_id)}" style="display:none">
+      <td colspan="8" style="padding:0 0 8px 0;background:var(--s2)">
+        <table class="run-table" style="margin:0;border-top:none">
+          <thead style="background:var(--s2)"><tr>
+            <th style="padding-left:2rem">Failure type</th>
+            <th>Wasted tokens</th>
+            <th>Est. wasted cost</th>
+            <th>Affected runs</th>
+          </tr></thead>
+          <tbody>${r.waste_by_ft.map(ft => `
+            <tr>
+              <td class="mono" style="padding-left:2rem">${esc(ft.failure_type.replace(/_/g,' '))}</td>
+              <td class="mono" style="color:var(--amber)">${fmtTok(ft.wasted_tokens)}</td>
+              <td class="mono" style="color:var(--red)">${fmtUsd(ft._cost)}</td>
+              <td class="mono">${ft.affected_runs}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function toggleTokenRow(tr, agentId) {
+  const detail = document.getElementById('tok-detail-' + agentId);
+  if (!detail) return;
+  detail.style.display = detail.style.display === 'none' ? '' : 'none';
+}
+
 async function loadAll() {
   _healthScoresLoaded = false;
+  _tokenStatsLoaded   = false;
   try {
     const agentsData = await apiFetch('/v1/agents?limit=50');
     _agents = agentsData.agents || [];
@@ -1422,6 +1630,10 @@ async function loadAll() {
     populateCompareDropdowns();
     updateConfigPreview();
     updateCostSaved();
+    // If token usage page is currently active, refresh token stats automatically
+    if (document.getElementById('page-tokens')?.classList.contains('active')) {
+      loadTokenStats();
+    }
   } catch(e) {
     console.error('loadAll failed:', e);
   }
@@ -2546,6 +2758,7 @@ function nav(id, el) {
   if (el)   el.classList.add('active');
   if (id === 'heatmap')  renderHeatmap();
   if (id === 'agents')   { renderAgents(); loadHealthScores(); }
+  if (id === 'tokens')   { renderTokens(); loadTokenStats(); }
   if (id === 'policies') loadAndRenderPolicies();
 }
 

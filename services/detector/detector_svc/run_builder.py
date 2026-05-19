@@ -74,6 +74,7 @@ def build_run_state(events: list[dict]) -> RunState:
                     finish_reason=payload.get("finish_reason"),
                     latency_ms=payload.get("latency_ms"),
                     output_length=payload.get("output_length"),
+                    completion_tokens=payload.get("completion_tokens"),
                     step_index=pending.get("step_index", step_index),
                     timestamp=pending.get("timestamp", raw.get("timestamp", 0.0)),
                 )

@@ -95,18 +95,19 @@ def my_agent(question: str) -> str:
 **TypeScript / Node.js**
 ```typescript
 import { Dunetrace } from "dunetrace";
+import OpenAI from "openai";
 
-const dt = new Dunetrace();
+const dt     = new Dunetrace();
+const openai = dt.wrapOpenAI(new OpenAI());  // LLM calls tracked automatically
+const search = dt.tool(webSearch);           // tool calls tracked automatically
 
 await dt.run("my-agent", { model: "gpt-4o", tools: ["search"] }, async (run) => {
-  run.llmCalled("gpt-4o", 150);
-  // ... call your LLM ...
-  run.llmResponded({ finishReason: "stop", completionTokens: 80 });
-  run.toolCalled("search", { query });
-  // ... call your tool ...
-  run.toolResponded("search", true, 256, 120);
+  const response = await openai.chat.completions.create({ model: "gpt-4o", messages });
+  const results  = await search(query);
   run.finalAnswer();
 });
+
+await dt.shutdown();
 ```
 
 
@@ -196,12 +197,12 @@ Connect Langfuse to get LLM-powered root-cause analysis on any signal.
 
 Click **Explain +** on any alert in the dashboard. Dunetrace fetches the full trace, extracts the system prompt, and asks an LLM for the specific root cause and fix.
 
-- **Prompt fixes** (tool loops, goal abandonment, etc.)
-— **Apply via Langfuse** creates a new prompt version in one click.
-- **Code/infra fixes** (context bloat, slow steps, cost spikes, etc.) 
-— **Open PR on GitHub** creates a draft PR with a LLM-generated unified diff.
+- **Prompt fixes** (tool loops, goal abandonment, etc.) — **Apply via Langfuse** creates a new prompt version in one click.
+- **Code/infra fixes** (context bloat, slow steps, cost spikes, etc.) — **Open PR on GitHub** creates a draft PR with a LLM-generated unified diff.
 
 Fix effectiveness is tracked: the dashboard shows whether recurrence dropped after a fix was applied.
+
+→ [docs/integrate-langfuse.md](docs/integrate-langfuse.md)
 
 ---
 
@@ -224,7 +225,7 @@ dt.add_policy(
 
 Policies can also be created in the dashboard and are fetched automatically by the SDK (60s TTL).
 
-→ [docs/integrations.md#policies](docs/integrations.md#policies)
+→ [docs/policies.md](docs/policies.md)
 
 ---
 
@@ -316,11 +317,12 @@ Agent Code
 
 - [Custom Python agent](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
-- [CrewAI](docs/integrations.md#crewai)
-- [AutoGen (Microsoft)](docs/integrations.md#autogen)
-- [TypeScript / JavaScript — npm package](docs/integrate-typescript-agent.md)
+- [CrewAI](docs/integrate-crewai-agent.md)
+- [AutoGen (Microsoft)](docs/integrate-autogen-agent.md)
+- [TypeScript / JavaScript](docs/integrate-typescript-agent.md)
 - [Langdock](docs/integrate-langdock.md)
-- [Langfuse, FastAPI, Flask, OpenTelemetry, Loki](docs/integrations.md)
+- [Langfuse](docs/integrate-langfuse.md)
+- [Policies](docs/policies.md)
 - [MCP server (Claude Code, Cursor, Codex)](docs/mcp-server.md)
 
 ---

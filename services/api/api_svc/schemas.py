@@ -305,6 +305,22 @@ if _PYDANTIC:
         co_occurring:        List[CoOccurring]
         top_runs:            List[TopRun]
 
+    class TokenWindowStat(_Model):
+        total_tokens:      int
+        prompt_tokens:     int
+        completion_tokens: int
+        wasted_tokens:     int
+        total_cost_usd:    float
+        wasted_cost_usd:   float
+        wasted_pct:        float
+        run_count:         int
+        wasted_run_count:  int
+
+    class AgentTokenStats(_Model):
+        agent_id:              str
+        windows:               Dict[str, Any]   # "1d" | "7d" | "30d" → TokenWindowStat dict
+        waste_by_failure_type: List[Dict[str, Any]]
+
     class AgentHealthScore(_Model):
         agent_id:       str
         score:          Optional[int]       # None when <3 sample runs
@@ -430,6 +446,18 @@ else:
     class SystemicPattern:
         failure_type: str; total_runs: int; affected_runs: int
         rate: float; first_seen: Optional[float]; last_seen: Optional[float]; is_systemic: bool
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class TokenWindowStat:
+        total_tokens: int; prompt_tokens: int; completion_tokens: int; wasted_tokens: int
+        total_cost_usd: float; wasted_cost_usd: float; wasted_pct: float
+        run_count: int; wasted_run_count: int
+        def model_dump(self): import dataclasses; return dataclasses.asdict(self)
+
+    @dataclass
+    class AgentTokenStats:
+        agent_id: str; windows: Dict[str, Any]; waste_by_failure_type: List[Any]
         def model_dump(self): import dataclasses; return dataclasses.asdict(self)
 
     @dataclass

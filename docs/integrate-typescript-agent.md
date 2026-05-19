@@ -3,7 +3,7 @@
 This guide covers adding Dunetrace monitoring to a TypeScript or JavaScript agent using the `dunetrace` npm package.
 
 > **Using Python?** See [integrate-custom-python-agent.md](./integrate-custom-python-agent.md).
-> **Using LangChain, CrewAI, or AutoGen?** See [integrations.md](./integrations.md).
+> **Using LangChain?** See [integrate-langchain-agent.md](./integrate-langchain-agent.md). **Using CrewAI?** See [integrate-crewai-agent.md](./integrate-crewai-agent.md). **Using AutoGen?** See [integrate-autogen-agent.md](./integrate-autogen-agent.md).
 
 ---
 
@@ -65,37 +65,85 @@ npm install dunetrace
 
 ## Step 4: Basic Usage
 
+### Recommended: auto-instrument your LLM client
+
+Call `dt.wrapOpenAI()` or `dt.wrapAnthropic()` once and every LLM call inside a `dt.run()` context is tracked automatically — no per-call boilerplate.
+
 ```typescript
 import { Dunetrace } from "dunetrace";
+import OpenAI from "openai";
 
-const dt = new Dunetrace({
-  endpoint: process.env.DUNETRACE_ENDPOINT,   // default: http://localhost:8001
-  apiKey:   process.env.DUNETRACE_API_KEY,
-});
+const dt     = new Dunetrace();
+const openai = dt.wrapOpenAI(new OpenAI());   // patch once at startup
+const search = dt.tool(webSearch);            // wrap tools once at startup
 
-await dt.run("my-ts-agent", {
-  systemPrompt: "You are a helpful research assistant.",
-  model:        "gpt-4o",
-  tools:        ["web_search"],
-  userInput:    query,          // hashed before transmission — never sent raw
-}, async (run) => {
-
-  // Before each LLM call
-  run.llmCalled("gpt-4o", estimatedPromptTokens);
-  const t0 = Date.now();
+await dt.run("my-ts-agent", { model: "gpt-4o", tools: ["web_search"] }, async (run) => {
 
   const response = await openai.chat.completions.create({ model: "gpt-4o", messages });
-  const output   = response.choices[0].message.content ?? "";
+  // ↑ llm.called + llm.responded emitted automatically (tokens, latency, finish_reason)
 
-  // After LLM responds
+  const results = await search(query);
+  // ↑ tool.called + tool.responded emitted automatically
+
+  run.finalAnswer();
+});
+
+await dt.shutdown();
+```
+
+**Anthropic:**
+
+```typescript
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = dt.wrapAnthropic(new Anthropic());
+
+await dt.run("my-agent", { model: "claude-3-5-haiku-20241022" }, async (run) => {
+  const response = await anthropic.messages.create({
+    model: "claude-3-5-haiku-20241022", max_tokens: 1024, messages,
+  });
+  // ↑ tracked automatically
+  run.finalAnswer();
+});
+```
+
+> **Streaming:** `wrapOpenAI` / `wrapAnthropic` skip calls with `stream: true` — use `run.llmCalled` / `run.llmResponded` manually for streamed calls.
+
+---
+
+### Alternative: `run.llm()` per-call helper
+
+If you prefer not to patch the client, `run.llm()` wraps a single call and auto-extracts tokens and finish_reason from both OpenAI and Anthropic response shapes:
+
+```typescript
+await dt.run("my-ts-agent", { model: "gpt-4o" }, async (run) => {
+  const response = await run.llm("gpt-4o",
+    openai.chat.completions.create({ model: "gpt-4o", messages })
+  );
+  // response is the unmodified OpenAI response object
+
+  run.finalAnswer();
+});
+```
+
+---
+
+### Manual tracking (full control)
+
+Use `run.llmCalled` / `run.llmResponded` directly when you need fine-grained control (e.g. passing prompt token estimates before the call, or handling partial streaming results):
+
+```typescript
+await dt.run("my-ts-agent", { model: "gpt-4o" }, async (run) => {
+  run.llmCalled("gpt-4o", estimatedPromptTokens);
+  const t0       = Date.now();
+  const response = await openai.chat.completions.create({ model: "gpt-4o", messages });
   run.llmResponded({
     completionTokens: response.usage?.completion_tokens,
     latencyMs:        Date.now() - t0,
     finishReason:     response.choices[0].finish_reason ?? "stop",
-    outputText:       output,    // hashed before transmission — never sent raw
+    outputText:       response.choices[0].message.content ?? "",
   });
 
-  // Tool call
   run.toolCalled("web_search", { query });
   const t1      = Date.now();
   const results = await webSearch(query);
@@ -103,8 +151,6 @@ await dt.run("my-ts-agent", {
 
   run.finalAnswer();
 });
-
-await dt.shutdown();   // flush remaining events before process exits
 ```
 
 `dt.run()` emits `run.started` on entry, `run.completed` on clean return, and `run.errored` if an exception escapes (re-thrown after recording).
@@ -713,6 +759,14 @@ Opens a run, calls `fn(run)`, and emits `run.completed` on clean return. Emits `
 | `systemPrompt` | `string` | System prompt — used for agent version fingerprint only |
 | `parentRunId` | `string` | Link to a parent run for sub-agent tracking |
 
+### `dt.wrapOpenAI(client)`
+
+Patches `client.chat.completions.create` to auto-emit `llm.called` / `llm.responded` inside any `dt.run()` context. Mutates and returns the same client. Streaming calls (`stream: true`) are skipped. No-op outside a run context.
+
+### `dt.wrapAnthropic(client)`
+
+Patches `client.messages.create` to auto-emit `llm.called` / `llm.responded`. Same semantics as `wrapOpenAI`.
+
 ### `dt.tool(fn, name?)`
 
 Wraps a sync or async function to auto-emit `tool.called` / `tool.responded` events. The tool name defaults to `fn.name`. No-op outside a `dt.run()` context.
@@ -741,8 +795,9 @@ Immediately ship all buffered events. Useful in tests or when you need a synchro
 
 | Method | When to call |
 |---|---|
-| `run.llmCalled(model, promptTokens?)` | Before each LLM API call |
-| `run.llmResponded({ completionTokens?, latencyMs?, finishReason?, outputText? })` | After LLM responds — `outputText` is hashed, never transmitted raw |
+| `run.llm(model, callPromise)` | Wrap any OpenAI/Anthropic call — auto-extracts tokens, latency, finish_reason |
+| `run.llmCalled(model, promptTokens?)` | Manual: before each LLM API call |
+| `run.llmResponded({ completionTokens?, latencyMs?, finishReason?, outputText? })` | Manual: after LLM responds — `outputText` is hashed, never transmitted raw |
 | `run.toolCalled(toolName, args?)` | Before each tool execution — `args` is SHA-256 hashed |
 | `run.toolResponded(toolName, success, outputLength?, latencyMs?, error?)` | After tool returns — `error` is SHA-256 hashed |
 | `run.retrievalCalled(indexName, query?)` | Before vector search — `query` is SHA-256 hashed |
@@ -779,7 +834,7 @@ cd packages/sdk-ts
 npm test
 ```
 
-Tests cover: event emission, step counting, privacy (no raw content in events), error paths, `dt.tool()` wrapping (sync + async), `dt.trace()` decorator, `getCurrentRun()` context propagation, `dt.markDeploy()`, background buffering and drain, `emitAsJson` output, agent version fingerprinting, and `shutdown()` flush.
+Tests cover: event emission, step counting, privacy (no raw content in events), error paths, `dt.tool()` wrapping (sync + async), `dt.trace()` decorator, `getCurrentRun()` context propagation, `dt.markDeploy()`, background buffering and drain, `emitAsJson` output, agent version fingerprinting, `shutdown()` flush, `run.llm()` with OpenAI and Anthropic response shapes, `dt.wrapOpenAI()` / `dt.wrapAnthropic()` patching and streaming skip.
 
 ---
 

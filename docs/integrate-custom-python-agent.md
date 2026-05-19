@@ -3,7 +3,7 @@
 This guide covers how to instrument a Python agent already running in production so Dunetrace can monitor it for structural failures in real-time.
 
 > **Using TypeScript or Node.js?** See [integrate-typescript-agent.md](./integrate-typescript-agent.md) for the Node.js SDK guide.
-> **Using LangChain, CrewAI, or AutoGen?** See [integrations.md](./integrations.md) — those frameworks have dedicated integrations that require no manual event calls.
+> **Using LangChain or LangGraph?** See [integrate-langchain-agent.md](./integrate-langchain-agent.md). **Using CrewAI?** See [integrate-crewai-agent.md](./integrate-crewai-agent.md). **Using AutoGen?** See [integrate-autogen-agent.md](./integrate-autogen-agent.md). Those frameworks have dedicated integrations that require no manual event calls.
 
 ---
 
@@ -85,7 +85,6 @@ Pick the path that fits your agent's architecture:
 | `@dt.agent()` decorator | Single-function agents | Minimal |
 | ASGI/WSGI middleware | FastAPI / Flask / Django | One line |
 | `dt.run()` context manager | Full manual control | Moderate |
-| LangChain callback | LangChain / LangGraph agents | One line |
 | OTel receiver | Already instrumented with OpenLLMetry | Zero to agent |
 
 ---
@@ -97,7 +96,7 @@ Decorate your tool functions with `@dt.tool` and your agent entry point with `@d
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace(endpoint="https://your-dunetrace-ingest", api_key="dt_live_...")
+dt = Dunetrace(endpoint="http://localhost:8001")
 
 @dt.tool                                      # auto-emits tool.called / tool.responded
 def web_search(query: str) -> list:
@@ -130,10 +129,7 @@ Wrap your agent's entry point with `@dt.agent()`. Calls to OpenAI and Anthropic 
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace(
-    endpoint="https://your-dunetrace-ingest",  # or http://localhost:8001 locally
-    api_key="dt_live_...",
-)
+dt = Dunetrace(endpoint="http://localhost:8001")
 dt.init(agent_id="my-production-agent")
 dt.auto_instrument()  # patches openai, anthropic, httpx, requests
 
@@ -173,7 +169,7 @@ from dunetrace import Dunetrace, DunetraceASGIMiddleware
 from dunetrace.context import get_current_run
 from fastapi import FastAPI
 
-dt = Dunetrace(endpoint="https://your-dunetrace-ingest", api_key="dt_live_...")
+dt = Dunetrace(endpoint="http://localhost:8001")
 dt.auto_instrument()
 
 app = FastAPI()
@@ -207,7 +203,7 @@ Use this when you need full control over every event.
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace(endpoint="https://your-dunetrace-ingest", api_key="dt_live_...")
+dt = Dunetrace(endpoint="http://localhost:8001")
 dt.init(agent_id="my-production-agent")
 
 TOOLS = ["web_search", "calculator", "code_runner"]
@@ -270,26 +266,7 @@ run.final_answer()
 
 ---
 
-## Path E: LangChain / LangGraph
-
-```python
-from dunetrace import Dunetrace
-from dunetrace.integrations.langchain import DunetraceCallbackHandler
-
-dt = Dunetrace(endpoint="https://your-dunetrace-ingest", api_key="dt_live_...")
-dt.init(agent_id="my-langchain-agent")
-
-callback = DunetraceCallbackHandler(dt, agent_id="my-langchain-agent")
-
-result = agent.invoke(
-    {"messages": [("human", query)]},
-    config={"callbacks": [callback]},
-)
-```
-
----
-
-## Path F: OpenTelemetry (Already instrumented with OpenLLMetry)
+## Path E: OpenTelemetry (Already instrumented with OpenLLMetry)
 
 If your agent already emits `gen_ai.*` OTel spans via OpenLLMetry, attach the receiver to your existing TracerProvider:
 
@@ -297,11 +274,114 @@ If your agent already emits `gen_ai.*` OTel spans via OpenLLMetry, attach the re
 from dunetrace import Dunetrace
 from dunetrace.integrations.otel_receiver import DunetraceOTelReceiver
 
-dt = Dunetrace(endpoint="https://your-dunetrace-ingest", api_key="dt_live_...")
+dt = Dunetrace(endpoint="http://localhost:8001")
 DunetraceOTelReceiver.attach(tracer_provider, dt, agent_id="my-agent")
 ```
 
 No changes to agent code required.
+
+---
+
+## Path F: Flask / WSGI
+
+`DunetraceWSGIMiddleware` wraps any WSGI app. One run per request, cleaned up after the response.
+
+```python
+from flask import Flask, request as flask_request
+from dunetrace import Dunetrace, DunetraceWSGIMiddleware, get_current_run
+
+dt = Dunetrace(endpoint="http://localhost:8001")
+dt.auto_instrument()
+
+app = Flask(__name__)
+app.wsgi_app = DunetraceWSGIMiddleware(app.wsgi_app, dt=dt, agent_id="my-api")
+
+@app.post("/chat")
+def chat():
+    run = get_current_run()
+    query = flask_request.json["query"]
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": query}]
+    )
+    return resp.choices[0].message.content
+```
+
+**Django:**
+
+```python
+# wsgi.py
+from dunetrace import Dunetrace, DunetraceWSGIMiddleware
+
+dt = Dunetrace(endpoint="http://localhost:8001")
+dt.auto_instrument()
+
+from django.core.wsgi import get_wsgi_application
+application = DunetraceWSGIMiddleware(get_wsgi_application(), dt=dt, agent_id="django-api")
+```
+
+The run is also available in `environ["dunetrace.run"]` for direct WSGI environ access.
+
+---
+
+## Auto-instrumentation
+
+`dt.auto_instrument()` patches supported AI clients so every LLM call inside a run is tracked without manual `run.llm_called()` / `run.llm_responded()` calls.
+
+**Supported:** `openai`, `anthropic`, `httpx`, `requests`. Uninstalled frameworks are silently skipped.
+
+```python
+dt.auto_instrument()                          # patch all installed frameworks
+dt.auto_instrument(["openai", "anthropic"])   # LLM clients only
+dt.auto_instrument(["httpx", "requests"])     # HTTP clients only
+```
+
+**LLM calls** (`openai`, `anthropic`): model name, prompt + completion tokens, latency, finish reason, output length.
+
+**HTTP calls** (`httpx`, `requests`): hostname used as tool name (e.g. `serpapi.com`), success/failure based on HTTP status, response length, latency.
+
+---
+
+## `get_current_run()`
+
+Returns the active `RunContext` for the current async task or thread, or `None` if no run is active. Use inside helpers to access the run without threading it through your call stack.
+
+```python
+from dunetrace import get_current_run
+
+def some_helper():
+    run = get_current_run()
+    if run:
+        run.tool_called("cache_lookup")
+        result = cache.get(key)
+        run.tool_responded("cache_lookup", success=result is not None)
+        return result
+```
+
+Works with `@dt.agent()`, ASGI middleware, WSGI middleware, and `dt.run()` directly.
+
+---
+
+## Grafana / Loki
+
+```python
+dt = Dunetrace(emit_as_json=True)
+```
+
+Writes every event to stdout as a Loki-compatible NDJSON line. Each line includes `ts`, `level`, `logger`, `event_type`, `agent_id`, `run_id`, `step_index`, and `payload`. Works alongside HTTP ingest — both can be active simultaneously.
+
+Minimal Promtail pipeline stage:
+
+```yaml
+pipeline_stages:
+  - json:
+      expressions: {ts: ts, event_type: event_type, agent_id: agent_id}
+  - timestamp:
+      source: ts
+      format: RFC3339Nano
+  - labels:
+      agent_id:
+      event_type:
+```
 
 ---
 
@@ -454,7 +534,7 @@ Hashing happens in-process. Raw content never leaves your agent.
 - [ ] Restart the API container: `docker compose up -d api`
 - [ ] Pass `LangfuseCallbackHandler()` alongside `DunetraceCallbackHandler` in `config={"callbacks": [...]}`
 - [ ] Click "Explain with Langfuse" on any signal in the dashboard (button only appears when `LANGFUSE_PUBLIC_KEY` is configured)
-- [ ] See [docs/integrations.md#langfuse](integrations.md#langfuse) for the full setup guide
+- [ ] See [docs/integrate-langfuse.md](integrate-langfuse.md) for the full setup guide
 
 ---
 

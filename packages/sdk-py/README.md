@@ -54,7 +54,7 @@ def run_agent(query: str) -> str:
     return openai_client.chat.completions.create(...).choices[0].message.content
 ```
 
-**FastAPI / Flask** — one line each, see [docs/integrations.md](../../docs/integrations.md).
+**FastAPI / Flask** — one line each, see [docs/integrate-custom-python-agent.md](../../docs/integrate-custom-python-agent.md).
 
 ## What it detects
 
@@ -149,7 +149,7 @@ with dt.run("my-agent", user_input=query, tools=["search"]) as run:
     # After inject_prompt fires, check run.pop_prompt_addition()
 ```
 
-Policies can also be defined in the dashboard and fetched automatically at run start (60-second TTL cache per agent). See [docs/integrations.md](../../docs/integrations.md#policies) for the full reference.
+Policies can also be defined in the dashboard and fetched automatically at run start (60-second TTL cache per agent). See [docs/policies.md](../../docs/policies.md) for the full reference.
 
 ## MCP server
 
@@ -194,11 +194,11 @@ python -m unittest discover -s tests -v          # SDK tests (no network require
 cd ../mcp-server && python -m pytest tests/ -v   # MCP server tests (no network required)
 ```
 
-SDK: 307 tests · MCP server: 83 tests — both run fully offline.
+SDK: 307 tests · MCP server: 105 tests — both run fully offline.
 
 ## Links
 
-- [Full integration docs](../../docs/integrations.md)
+- [Integration guides](../../docs/)
 - [GitHub](https://github.com/dunetrace/dunetrace)
 - [Issues](https://github.com/dunetrace/dunetrace/issues)
 

@@ -412,3 +412,118 @@ describe("Dunetrace — flush / shutdown", () => {
     expect((dt as unknown as { _buffer: AgentEvent[] })._buffer.length).toBe(0);
   });
 });
+
+// ── wrapOpenAI / wrapAnthropic ────────────────────────────────────────────────
+
+describe("Dunetrace.wrapOpenAI()", () => {
+  it("emits llm.called + llm.responded for a chat.completions.create call", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (_opts: unknown) => ({
+            choices: [{ finish_reason: "stop", message: { content: "Paris" } }],
+            usage: { prompt_tokens: 60, completion_tokens: 5 },
+          }),
+        },
+      },
+    };
+    const wrapped = dt.wrapOpenAI(fakeClient);
+
+    await dt.run("wrap-agent", { model: "gpt-4o" }, async () => {
+      await wrapped.chat.completions.create({ model: "gpt-4o", messages: [] });
+    });
+
+    const llmCalled    = events.find(e => e.event_type === "llm.called");
+    const llmResponded = events.find(e => e.event_type === "llm.responded");
+
+    expect(llmCalled).toBeDefined();
+    expect(llmResponded).toBeDefined();
+    expect(llmCalled!.payload["prompt_tokens"]).toBe(60);
+    expect(llmResponded!.payload["completion_tokens"]).toBe(5);
+    expect(llmResponded!.payload["finish_reason"]).toBe("stop");
+
+    await dt.shutdown();
+  });
+
+  it("skips tracking for streaming calls", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (_opts: unknown) => ({ stream: true }),
+        },
+      },
+    };
+    const wrapped = dt.wrapOpenAI(fakeClient);
+
+    await dt.run("wrap-agent", {}, async () => {
+      await wrapped.chat.completions.create({ model: "gpt-4o", messages: [], stream: true });
+    });
+
+    expect(events.filter(e => e.event_type === "llm.called")).toHaveLength(0);
+    await dt.shutdown();
+  });
+
+  it("does not emit outside a run context", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (_opts: unknown) => ({
+            choices: [{ finish_reason: "stop", message: { content: "" } }],
+            usage: { prompt_tokens: 10, completion_tokens: 2 },
+          }),
+        },
+      },
+    };
+    const wrapped = dt.wrapOpenAI(fakeClient);
+    await wrapped.chat.completions.create({ model: "gpt-4o", messages: [] });
+
+    expect(events.filter(e => e.event_type === "llm.called")).toHaveLength(0);
+    await dt.shutdown();
+  });
+});
+
+describe("Dunetrace.wrapAnthropic()", () => {
+  it("emits llm.called + llm.responded for a messages.create call", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    const fakeClient = {
+      messages: {
+        create: async (_opts: unknown) => ({
+          content: [{ type: "text", text: "Bonjour" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 80, output_tokens: 20 },
+        }),
+      },
+    };
+    const wrapped = dt.wrapAnthropic(fakeClient);
+
+    await dt.run("wrap-agent", { model: "claude-3-5-haiku-20241022" }, async () => {
+      await wrapped.messages.create({ model: "claude-3-5-haiku-20241022", messages: [], max_tokens: 1024 });
+    });
+
+    const llmCalled    = events.find(e => e.event_type === "llm.called");
+    const llmResponded = events.find(e => e.event_type === "llm.responded");
+
+    expect(llmCalled).toBeDefined();
+    expect(llmResponded).toBeDefined();
+    expect(llmCalled!.payload["prompt_tokens"]).toBe(80);
+    expect(llmResponded!.payload["completion_tokens"]).toBe(20);
+    expect(llmResponded!.payload["finish_reason"]).toBe("end_turn");
+
+    await dt.shutdown();
+  });
+});

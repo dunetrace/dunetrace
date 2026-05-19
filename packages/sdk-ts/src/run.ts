@@ -118,6 +118,48 @@ export class DunetraceRun {
     this._client._emit(event);
   }
 
+  /**
+   * Wrap a single LLM call promise and auto-emit llm.called / llm.responded.
+   * Supports OpenAI chat completions and Anthropic messages response shapes.
+   *
+   * @example
+   * const response = await run.llm("gpt-4o",
+   *   openai.chat.completions.create({ model: "gpt-4o", messages })
+   * );
+   */
+  async llm<T extends Record<string, unknown>>(model: string, call: Promise<T>): Promise<T> {
+    const t0       = Date.now();
+    const response = await call;
+    const latencyMs = Date.now() - t0;
+    const r = response as Record<string, unknown>;
+
+    let promptTokens     = 0;
+    let completionTokens: number | undefined;
+    let finishReason     = "stop";
+    let outputText       = "";
+
+    if (Array.isArray(r["choices"])) {
+      // OpenAI chat completions format
+      const usage = r["usage"] as Record<string, number> | undefined;
+      const choice = (r["choices"] as Record<string, unknown>[])[0] ?? {};
+      promptTokens     = usage?.["prompt_tokens"]     ?? 0;
+      completionTokens = usage?.["completion_tokens"];
+      finishReason     = (choice["finish_reason"] as string | undefined) ?? "stop";
+      outputText       = ((choice["message"] as Record<string, unknown> | undefined)?.["content"] as string | undefined) ?? "";
+    } else if (Array.isArray(r["content"])) {
+      // Anthropic messages format
+      const usage = r["usage"] as Record<string, number> | undefined;
+      promptTokens     = usage?.["input_tokens"]  ?? 0;
+      completionTokens = usage?.["output_tokens"];
+      finishReason     = (r["stop_reason"] as string | undefined) ?? "stop";
+      outputText       = ((r["content"] as Record<string, unknown>[])[0]?.["text"] as string | undefined) ?? "";
+    }
+
+    this.llmCalled(model, promptTokens);
+    this.llmResponded({ completionTokens, latencyMs, finishReason, outputText });
+    return response;
+  }
+
   finalAnswer(): void {
     this._exitReason = "final_answer";
   }

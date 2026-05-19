@@ -39,14 +39,12 @@ Sub-chains (tool nodes, LLM nodes, retriever nodes) are automatically attributed
 pip install 'dunetrace[langchain]'
 ```
 
-This installs the SDK with the `langchain-core` dependency. Also install your LangChain stack:
+This installs the SDK along with `langchain` and `langgraph`. Also install the provider package for your LLM:
 
 ```bash
-# LangGraph (recommended)
-pip install langchain-openai langgraph
-
-# or LangChain with AgentExecutor (older pattern)
-pip install langchain langchain-openai
+pip install langchain-openai      # GPT-4o, GPT-4o-mini, etc.
+pip install langchain-anthropic   # Claude
+pip install langchain-google-genai # Gemini
 ```
 
 ---
@@ -375,7 +373,7 @@ Content-Type: application/json
 
 The "Explain with Langfuse" button only appears when `LANGFUSE_PUBLIC_KEY` is configured on the API container — if credentials are missing, a muted "Connect Langfuse to enable deep analysis" hint is shown instead.
 
-See [docs/integrations.md#langfuse](integrations.md#langfuse) for full setup — credentials, `.env` vars, and the complete runnable example.
+See [docs/integrate-langfuse.md](integrate-langfuse.md) for full setup — credentials, `.env` vars, and the complete runnable example.
 
 ---
 

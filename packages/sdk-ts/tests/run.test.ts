@@ -219,3 +219,65 @@ describe("DunetraceRun — event payloads", () => {
     expect(run.getEvents()[0].agent_version).toBe("abc12345");
   });
 });
+
+// ── run.llm() helper ──────────────────────────────────────────────────────────
+
+describe("DunetraceRun.llm() — OpenAI format", () => {
+  it("emits llm.called then llm.responded", async () => {
+    const { run, emitted } = makeRun();
+    const fakeResp = {
+      choices: [{ finish_reason: "stop", message: { content: "Paris" } }],
+      usage: { prompt_tokens: 50, completion_tokens: 10 },
+    };
+    await run.llm("gpt-4o", Promise.resolve(fakeResp as unknown as Record<string, unknown>));
+    expect(emitted[0].event_type).toBe("llm.called");
+    expect(emitted[1].event_type).toBe("llm.responded");
+  });
+
+  it("extracts prompt_tokens from usage", async () => {
+    const { run, emitted } = makeRun();
+    const fakeResp = {
+      choices: [{ finish_reason: "stop", message: { content: "" } }],
+      usage: { prompt_tokens: 120, completion_tokens: 40 },
+    };
+    await run.llm("gpt-4o", Promise.resolve(fakeResp as unknown as Record<string, unknown>));
+    expect(emitted[0].payload["prompt_tokens"]).toBe(120);
+    expect(emitted[1].payload["completion_tokens"]).toBe(40);
+  });
+
+  it("extracts finish_reason and output_length", async () => {
+    const { run, emitted } = makeRun();
+    const fakeResp = {
+      choices: [{ finish_reason: "tool_calls", message: { content: "Hello" } }],
+      usage: { prompt_tokens: 0, completion_tokens: 5 },
+    };
+    await run.llm("gpt-4o", Promise.resolve(fakeResp as unknown as Record<string, unknown>));
+    expect(emitted[1].payload["finish_reason"]).toBe("tool_calls");
+    expect(emitted[1].payload["output_length"]).toBe(5);
+  });
+
+  it("returns the original response", async () => {
+    const { run } = makeRun();
+    const fakeResp = {
+      choices: [{ finish_reason: "stop", message: { content: "result" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 3 },
+    };
+    const result = await run.llm("gpt-4o", Promise.resolve(fakeResp as unknown as Record<string, unknown>));
+    expect(result).toBe(fakeResp);
+  });
+});
+
+describe("DunetraceRun.llm() — Anthropic format", () => {
+  it("extracts Anthropic usage fields", async () => {
+    const { run, emitted } = makeRun();
+    const fakeResp = {
+      content: [{ type: "text", text: "Bonjour" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 80, output_tokens: 20 },
+    };
+    await run.llm("claude-3-5-haiku-20241022", Promise.resolve(fakeResp as unknown as Record<string, unknown>));
+    expect(emitted[0].payload["prompt_tokens"]).toBe(80);
+    expect(emitted[1].payload["completion_tokens"]).toBe(20);
+    expect(emitted[1].payload["finish_reason"]).toBe("end_turn");
+  });
+});

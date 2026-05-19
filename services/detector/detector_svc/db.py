@@ -425,6 +425,8 @@ async def fetch_total_tokens_baseline(
                 LIMIT $4
             ),
             run_tokens AS (
+                -- prompt_tokens may be in llm.called (direct SDK) or llm.responded (LangChain);
+                -- completion_tokens are always in llm.responded. Sum both event types to cover all paths.
                 SELECT
                     e.run_id,
                     SUM(
@@ -433,8 +435,7 @@ async def fetch_total_tokens_baseline(
                     ) AS total_tokens
                 FROM events e
                 WHERE e.run_id IN (SELECT run_id FROM recent)
-                  AND e.event_type = 'llm.called'
-                  AND e.payload->>'prompt_tokens' IS NOT NULL
+                  AND e.event_type IN ('llm.called', 'llm.responded')
                 GROUP BY e.run_id
                 HAVING SUM(COALESCE((e.payload->>'prompt_tokens')::integer, 0)) > 0
             )

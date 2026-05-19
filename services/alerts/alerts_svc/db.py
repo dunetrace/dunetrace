@@ -462,7 +462,9 @@ async def increment_suppressed_count(agent_id: str, failure_type: str, count: in
 
 
 async def fetch_run_tokens(run_ids: list[str]) -> dict[str, dict]:
-    """Fetch total prompt+completion tokens and model for a batch of run_ids."""
+    """Fetch total prompt+completion tokens and model for a batch of run_ids.
+    prompt_tokens may be in llm.called (direct SDK) or llm.responded (LangChain);
+    completion_tokens are always in llm.responded. Sum both event types."""
     if not _pool or not run_ids:
         return {}
     async with _pool.acquire() as conn:
@@ -477,8 +479,7 @@ async def fetch_run_tokens(run_ids: list[str]) -> dict[str, dict]:
                    AND c.payload->>'model' IS NOT NULL) AS model
             FROM events r
             WHERE r.run_id = ANY($1::text[])
-              AND r.event_type = 'llm.responded'
-              AND r.payload->>'prompt_tokens' IS NOT NULL
+              AND r.event_type IN ('llm.called', 'llm.responded')
             GROUP BY r.run_id
             """,
             run_ids,

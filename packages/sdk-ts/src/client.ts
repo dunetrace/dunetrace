@@ -171,6 +171,73 @@ export class Dunetrace {
     return wrapper as unknown as T;
   }
 
+  // ── Auto-instrumentation ───────────────────────────────────────────────────
+
+  /**
+   * Patch an OpenAI client so every chat.completions.create() call inside a
+   * dt.run() context is tracked automatically — no manual llmCalled /
+   * llmResponded calls needed. Mutates and returns the same client instance.
+   * Streaming calls (stream: true) are not patched and must be tracked manually.
+   *
+   * @example
+   * const openai = dt.wrapOpenAI(new OpenAI());
+   */
+  wrapOpenAI<T extends { chat: { completions: { create: (...args: unknown[]) => Promise<unknown> } } }>(client: T): T {
+    const orig = client.chat.completions.create.bind(client.chat.completions);
+    (client.chat.completions as Record<string, unknown>)["create"] = async (...args: unknown[]) => {
+      const opts  = args[0] as Record<string, unknown> | undefined;
+      if (opts?.["stream"]) return orig(...args);  // skip streaming
+      const run   = getCurrentRun();
+      const model = (opts?.["model"] as string | undefined) ?? "unknown";
+      const t0    = Date.now();
+      const resp  = await orig(...args) as Record<string, unknown>;
+      if (run) {
+        const usage  = resp["usage"]   as Record<string, number> | undefined;
+        const choice = (resp["choices"] as Record<string, unknown>[] | undefined)?.[0] ?? {};
+        run.llmCalled(model, usage?.["prompt_tokens"] ?? 0);
+        run.llmResponded({
+          completionTokens: usage?.["completion_tokens"],
+          latencyMs:        Date.now() - t0,
+          finishReason:     (choice["finish_reason"] as string | undefined) ?? "stop",
+          outputText:       ((choice["message"] as Record<string, unknown> | undefined)?.["content"] as string | undefined) ?? "",
+        });
+      }
+      return resp;
+    };
+    return client;
+  }
+
+  /**
+   * Patch an Anthropic client so every messages.create() call inside a
+   * dt.run() context is tracked automatically. Streaming calls are skipped.
+   *
+   * @example
+   * const anthropic = dt.wrapAnthropic(new Anthropic());
+   */
+  wrapAnthropic<T extends { messages: { create: (...args: unknown[]) => Promise<unknown> } }>(client: T): T {
+    const orig = client.messages.create.bind(client.messages);
+    (client.messages as Record<string, unknown>)["create"] = async (...args: unknown[]) => {
+      const opts  = args[0] as Record<string, unknown> | undefined;
+      if (opts?.["stream"]) return orig(...args);  // skip streaming
+      const run   = getCurrentRun();
+      const model = (opts?.["model"] as string | undefined) ?? "unknown";
+      const t0    = Date.now();
+      const resp  = await orig(...args) as Record<string, unknown>;
+      if (run) {
+        const usage = resp["usage"] as Record<string, number> | undefined;
+        run.llmCalled(model, usage?.["input_tokens"] ?? 0);
+        run.llmResponded({
+          completionTokens: usage?.["output_tokens"],
+          latencyMs:        Date.now() - t0,
+          finishReason:     (resp["stop_reason"] as string | undefined) ?? "stop",
+          outputText:       ((resp["content"] as Record<string, unknown>[] | undefined)?.[0]?.["text"] as string | undefined) ?? "",
+        });
+      }
+      return resp;
+    };
+    return client;
+  }
+
   // ── Deploy markers ─────────────────────────────────────────────────────────
 
   /** Fire-and-forget deploy marker. Call from CI/CD or app startup. */

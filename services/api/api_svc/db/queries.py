@@ -290,22 +290,22 @@ async def list_runs(
                  LIMIT 1) AS completed_at,
                 -- step_count
                 (SELECT MAX(e.step_index) FROM events e WHERE e.run_id = pr.run_id) AS step_count,
-                -- total tokens from llm.responded events (SDK writes tokens there, not llm.called)
+                -- total tokens: prompt_tokens from llm.called (direct SDK) or llm.responded (LangChain)
+                -- plus completion_tokens always from llm.responded — sum both to cover all SDK paths
                 (SELECT SUM(
                     COALESCE((e.payload->>'prompt_tokens')::integer, 0) +
                     COALESCE((e.payload->>'completion_tokens')::integer, 0)
                  ) FROM events e
                  WHERE e.run_id = pr.run_id
-                   AND e.event_type = 'llm.responded'
-                   AND e.payload->>'prompt_tokens' IS NOT NULL
+                   AND e.event_type IN ('llm.called', 'llm.responded')
                 )                                                       AS total_tokens,
-                -- prompt tokens only (for cost split)
+                -- prompt tokens only (for cost split) — covers both SDK paths
                 (SELECT SUM(COALESCE((e.payload->>'prompt_tokens')::integer, 0))
                  FROM events e
-                 WHERE e.run_id = pr.run_id AND e.event_type = 'llm.responded'
-                   AND e.payload->>'prompt_tokens' IS NOT NULL
+                 WHERE e.run_id = pr.run_id
+                   AND e.event_type IN ('llm.called', 'llm.responded')
                 )                                                       AS prompt_tokens,
-                -- completion tokens only
+                -- completion tokens only — always in llm.responded
                 (SELECT SUM(COALESCE((e.payload->>'completion_tokens')::integer, 0))
                  FROM events e
                  WHERE e.run_id = pr.run_id AND e.event_type = 'llm.responded'
@@ -444,7 +444,9 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
 
     llm_responded    = [e for e in event_list if e["event_type"] == "llm.responded"]
     llm_called       = [e for e in event_list if e["event_type"] == "llm.called"]
-    prompt_tokens    = sum(e["payload"].get("prompt_tokens")    or 0 for e in llm_responded)
+    llm_all          = llm_called + llm_responded
+    # prompt_tokens: direct SDK writes to llm.called; LangChain writes to llm.responded
+    prompt_tokens    = sum(e["payload"].get("prompt_tokens")    or 0 for e in llm_all)
     completion_tokens= sum(e["payload"].get("completion_tokens") or 0 for e in llm_responded)
     total_tokens     = (prompt_tokens + completion_tokens) or None
     model            = next((e["payload"].get("model") for e in llm_called if e["payload"].get("model")), None)
@@ -1238,8 +1240,10 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
             )
             SELECT
                 fs.failure_type,
-                COUNT(DISTINCT fs.run_id)                                              AS co_count,
-                ROUND(COUNT(DISTINCT fs.run_id)::numeric / COUNT(DISTINCT a.run_id), 3) AS co_rate
+                COUNT(DISTINCT fs.run_id)                                                   AS co_count,
+                -- Denominator is total affected runs, not the per-group co-count.
+                -- Using scalar subquery to avoid the JOIN collapsing the count to 1.0.
+                ROUND(COUNT(DISTINCT fs.run_id)::numeric / NULLIF((SELECT COUNT(*) FROM affected), 0), 3) AS co_rate
             FROM affected a
             JOIN failure_signals fs ON fs.run_id = a.run_id
             WHERE fs.agent_id    = $1
@@ -1566,12 +1570,13 @@ async def get_agent_health_score(agent_id: str) -> dict:
                   )
             ),
             token_data AS (
+                -- prompt_tokens is in llm.called for direct SDK, llm.responded for LangChain
                 SELECT
                     AVG((payload->>'prompt_tokens')::float)                                        AS avg_prompt_tokens,
                     COUNT(*)                                                                        AS token_sample
                 FROM events
                 WHERE agent_id = $1
-                  AND event_type = 'llm.called'
+                  AND event_type IN ('llm.called', 'llm.responded')
                   AND payload->>'prompt_tokens' IS NOT NULL
                   AND received_at >= NOW() - INTERVAL '30 days'
             ),
@@ -1597,7 +1602,7 @@ async def get_agent_health_score(agent_id: str) -> dict:
                     SELECT run_id, AVG((payload->>'prompt_tokens')::float) AS avg_tokens
                     FROM events
                     WHERE agent_id = $1
-                      AND event_type = 'llm.called'
+                      AND event_type IN ('llm.called', 'llm.responded')
                       AND payload->>'prompt_tokens' IS NOT NULL
                       AND received_at >= NOW() - INTERVAL '90 days'
                       AND received_at <  NOW() - INTERVAL '30 days'
@@ -1745,16 +1750,16 @@ async def agent_cost_stats(agent_id: str) -> dict:
     from explainer_svc.cost import estimate_cost
 
     async with _pool.acquire() as conn:
-        # Prompt tokens + model per run (MAX picks any model name — they should match within a run)
+        # Prompt tokens + model per run. prompt_tokens may be in llm.called (direct SDK)
+        # or llm.responded (LangChain) — sum both; model always comes from llm.called.
         prompt_rows = await conn.fetch(
             """
             SELECT run_id,
-                   MAX(payload->>'model') AS model,
+                   MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
                    SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens
             FROM events
             WHERE agent_id = $1
-              AND event_type = 'llm.called'
-              AND payload->>'prompt_tokens' IS NOT NULL
+              AND event_type IN ('llm.called', 'llm.responded')
               AND received_at >= NOW() - INTERVAL '30 days'
             GROUP BY run_id
             """,
@@ -1833,6 +1838,130 @@ async def agent_cost_stats(agent_id: str) -> dict:
         "wasted_pct":         round(wasted_cost / total_cost, 3) if total_cost else 0.0,
         "cost_by_failure_type": cost_by_ft,
     }
+
+
+async def agent_token_stats(agent_id: str) -> dict:
+    """
+    Per-window token usage and waste stats for 1d / 7d / 30d.
+
+    Returns:
+      windows: {"1d": {...}, "7d": {...}, "30d": {...}}
+        Each window: total_tokens, prompt_tokens, completion_tokens, wasted_tokens,
+                     total_cost_usd, wasted_cost_usd, wasted_pct, run_count, wasted_run_count
+      waste_by_failure_type: [{failure_type, wasted_tokens, wasted_cost_usd, affected_runs}]
+        (30d only, sorted by wasted_cost_usd desc)
+    """
+    if not _pool:
+        return {"windows": {}, "waste_by_failure_type": []}
+
+    from explainer_svc.cost import estimate_cost
+
+    async with _pool.acquire() as conn:
+        # Per-run token totals + run timestamp.
+        # prompt_tokens: direct SDK → llm.called, LangChain → llm.responded.
+        # completion_tokens: always in llm.responded.
+        token_rows = await conn.fetch(
+            """
+            SELECT
+                run_id,
+                MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
+                SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
+                SUM(CASE WHEN event_type = 'llm.responded'
+                    THEN COALESCE((payload->>'completion_tokens')::int, 0) ELSE 0 END) AS completion_tokens,
+                MIN(received_at) AS run_start
+            FROM events
+            WHERE agent_id = $1
+              AND event_type IN ('llm.called', 'llm.responded')
+              AND received_at >= NOW() - INTERVAL '30 days'
+            GROUP BY run_id
+            """,
+            agent_id,
+        )
+
+        signal_rows = await conn.fetch(
+            """
+            SELECT run_id, failure_type
+            FROM failure_signals
+            WHERE agent_id = $1
+              AND shadow = FALSE
+              AND detected_at >= NOW() - INTERVAL '30 days'
+            """,
+            agent_id,
+        )
+
+    now = time.time()
+    cutoffs = {"1d": now - 86400, "7d": now - 7 * 86400, "30d": now - 30 * 86400}
+
+    run_signals: dict[str, set] = {}
+    for r in signal_rows:
+        run_signals.setdefault(r["run_id"], set()).add(r["failure_type"])
+
+    runs = []
+    for r in token_rows:
+        prompt = int(r["prompt_tokens"])
+        comp   = int(r["completion_tokens"])
+        cost   = estimate_cost(r["model"] or "unknown", prompt, comp)
+        ts     = r["run_start"].timestamp() if r["run_start"] else 0.0
+        runs.append({
+            "run_id":            r["run_id"],
+            "prompt_tokens":     prompt,
+            "completion_tokens": comp,
+            "total_tokens":      prompt + comp,
+            "cost":              cost,
+            "ts":                ts,
+            "failure_types":     run_signals.get(r["run_id"], set()),
+        })
+
+    def _aggregate(filtered: list) -> dict:
+        total_tokens = prompt_tokens = completion_tokens = wasted_tokens = 0
+        total_cost = wasted_cost = 0.0
+        wasted_run_count = 0
+        for r in filtered:
+            total_tokens      += r["total_tokens"]
+            prompt_tokens     += r["prompt_tokens"]
+            completion_tokens += r["completion_tokens"]
+            total_cost        += r["cost"]
+            if r["failure_types"]:
+                wasted_tokens    += r["total_tokens"]
+                wasted_cost      += r["cost"]
+                wasted_run_count += 1
+        return {
+            "total_tokens":      total_tokens,
+            "prompt_tokens":     prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "wasted_tokens":     wasted_tokens,
+            "total_cost_usd":    round(total_cost,  4),
+            "wasted_cost_usd":   round(wasted_cost, 4),
+            "wasted_pct":        round(wasted_cost / total_cost, 3) if total_cost else 0.0,
+            "run_count":         len(filtered),
+            "wasted_run_count":  wasted_run_count,
+        }
+
+    windows = {w: _aggregate([r for r in runs if r["ts"] >= cut]) for w, cut in cutoffs.items()}
+
+    ft_stats: dict[str, dict] = {}
+    for r in runs:
+        for ft in r["failure_types"]:
+            e = ft_stats.setdefault(ft, {"wasted_tokens": 0, "wasted_cost": 0.0, "run_ids": set()})
+            e["wasted_tokens"] += r["total_tokens"]
+            e["wasted_cost"]   += r["cost"]
+            e["run_ids"].add(r["run_id"])
+
+    waste_by_ft = sorted(
+        [
+            {
+                "failure_type":    ft,
+                "wasted_tokens":   v["wasted_tokens"],
+                "wasted_cost_usd": round(v["wasted_cost"], 4),
+                "affected_runs":   len(v["run_ids"]),
+            }
+            for ft, v in ft_stats.items()
+        ],
+        key=lambda x: x["wasted_cost_usd"],
+        reverse=True,
+    )
+
+    return {"windows": windows, "waste_by_failure_type": waste_by_ft}
 
 
 # ── Deploy regression check ────────────────────────────────────────────────────

@@ -588,6 +588,23 @@ The `evidence` dict in signal responses contains the hashed fingerprints the det
 
 ---
 
+## Troubleshooting
+
+### `starlette` conflict with `fastapi`
+
+```
+ERROR: fastapi 0.115.x requires starlette<0.47.0, but you have starlette 1.0.0
+```
+
+The `mcp` package pulls in `starlette 1.0.0` (released 2025). FastAPI 0.115 and earlier capped starlette below that. FastAPI 0.136+ removed the upper bound and is fully compatible.
+
+**Fix:**
+```bash
+pip install --upgrade fastapi
+```
+
+---
+
 ## Tests
 
 ```bash

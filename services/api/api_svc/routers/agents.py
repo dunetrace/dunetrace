@@ -7,9 +7,9 @@ from api_svc.auth import require_customer
 from api_svc.config import settings
 from api_svc.db.queries import (
     list_agents, agent_signal_sparklines, agent_failure_type_counts,
-    get_agent_health_score, list_agent_fixes,
+    get_agent_health_score, list_agent_fixes, agent_token_stats,
 )
-from api_svc.schemas import AgentListResponse, AgentSummary, AgentHealthScore, Page, FixListResponse, FixRecord
+from api_svc.schemas import AgentListResponse, AgentSummary, AgentHealthScore, AgentTokenStats, Page, FixListResponse, FixRecord
 
 router = APIRouter(prefix="/v1/agents", tags=["Agents"])
 
@@ -72,6 +72,32 @@ async def get_agent_fixes(
     """
     fixes = await list_agent_fixes(agent_id)
     return FixListResponse(fixes=[FixRecord(**f) for f in fixes])
+
+
+@router.get(
+    "/{agent_id}/token-stats",
+    response_model=AgentTokenStats,
+    summary="Per-window token usage and waste for an agent (1d / 7d / 30d)",
+)
+async def get_token_stats(
+    agent_id:  str,
+    _customer: str = Depends(require_customer),
+) -> AgentTokenStats:
+    """
+    Token usage broken down by 1-day, 7-day, and 30-day windows.
+
+    Each window returns:
+    - **total_tokens** / **prompt_tokens** / **completion_tokens** — tokens consumed
+    - **wasted_tokens** — tokens from runs that had at least one live failure signal
+    - **total_cost_usd** / **wasted_cost_usd** — estimated API cost
+    - **wasted_pct** — fraction of cost on failed runs (0–1)
+    - **run_count** / **wasted_run_count** — run counts
+
+    `waste_by_failure_type` (30-day) lists which failure types caused the most wasted spend,
+    sorted by wasted_cost_usd descending.
+    """
+    data = await agent_token_stats(agent_id)
+    return AgentTokenStats(agent_id=agent_id, **data)
 
 
 @router.get(
