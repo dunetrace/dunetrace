@@ -8,11 +8,11 @@ Query agent signals, run details, and health scores directly from Claude Code, C
 
 The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](https://modelcontextprotocol.io). Your editor (or any LLM) can call it as a tool and ask things like:
 
-- *"Is my `research-agent` healthy?"*
+- *"Is my `langchain-example-agent` healthy?"*
 - *"What failed in the last 24 hours?"*
-- *"Show me signal #42 — what happened and how do I fix it?"*
+- *"Show me signal #518 — what happened and how do I fix it?"*
 - *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
-- *"Walk me through run `abc123` step by step."*
+- *"Walk me through run `019e2314-6b7` step by step."*
 
 All data is read-only. Only hashed metadata is exposed — no raw prompts, tool arguments, or model outputs ever leave your process.
 
@@ -124,84 +124,62 @@ List all monitored agents with their run counts, signal counts, and failure type
 **Example output:**
 ```
 AGENT                                RUNS  SIGS CRIT HIGH  LAST SEEN
-───────────────────────────────────────────────────────────────────────────────
-research-agent                        129    55    0   46  6h ago
-                                      TOOL_LOOP×46, STEP_COUNT_INFLATION×8
-billing-agent                          36    34    0   33  10h ago
-                                      TOOL_LOOP×33
+───────────────────────────────────────────────────────────────────────────
+langfuse-example-agent                 52    48    0   47  12h ago
+                                      FIRST_STEP_FAILURE×1, TOOL_LOOP×47
+langfuse-ts-example-agent               4     3    0    3  21h ago
+                                      TOOL_LOOP×3
+langchain-example-agent               134    57    0   48  5d ago
+                                      FIRST_STEP_FAILURE×1, TOOL_LOOP×48, STEP_COUNT_INFLATION×8
+crewai-example-crew                     5     4    0    0  5d ago
+                                      TOOL_AVOIDANCE×4
 ```
 
 ---
 
-### `get_agent_signals`
+### `summarize_agent`
 
-Get recent failure signals for a specific agent, with titles, explanations, and top fix suggestion.
-
-**Arguments:**
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `agent_id` | string | required | Agent ID (from `list_agents`) |
-| `limit` | int | 20 | Max signals to return (max 100) |
-| `severity` | string | — | Filter: `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW` |
-
-**Example:**
-```
-🟠 [HIGH] TOOL_LOOP  conf=90%  step=7  6h ago
-   Tool loop detected: `web_search` called 6× in steps 2–7
-   What: The agent called web_search 6 times with identical args.
-   Fix:  Deduplicate `web_search` calls — identical args hash seen 6×
-```
-
----
-
-### `get_signal_detail`
-
-Full detail for a specific signal: complete evidence dict, impact statement, and all suggested fixes with code snippets.
+One-shot diagnosis of an agent. Combines health score, failure breakdown, recent signals with their fixes, and health component bars. Start here before diving deeper.
 
 **Arguments:**
 
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `signal_id` | int | required | Integer signal ID (visible in `search_signals` output) |
-| `agent_id` | string | — | Agent ID (optional — omit to search all agents) |
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID (from `list_agents`) |
 
-**Example output:**
+**Example — `langchain-example-agent`:**
 ```
-🟠 Signal #495
-Type:      TOOL_LOOP
-Severity:  HIGH  confidence=90%
-Agent:     research-agent  vabcd1234
-Run:       019e217d-bd24-…
-Step:      7
-Detected:  2026-05-13 13:19 UTC  (6h ago)
+═══ Agent summary: langchain-example-agent ═══
 
-What happened:
-  The agent called `web_search` 6 times in steps 2–7 with identical
-  arguments every time. It is not tracking which queries it has tried.
+Health score:  🔴 48/100
+Total runs:    134
+Total signals: 57
+Last seen:     5d ago
 
-Why it matters:
-  Looping agents burn tokens without producing value. A 5-step loop at
-  typical gpt-4o pricing costs $0.15–$0.30 with nothing to show for it.
+Failure breakdown:
+  TOOL_LOOP                             48 signals  (36% of runs)
+  STEP_COUNT_INFLATION                   8 signals  (6% of runs)
+  FIRST_STEP_FAILURE                     1 signals  (1% of runs)
 
-Evidence (hashed/structural data):
-  tool: web_search
-  count: 6
-  args_identical: True
-  args_hashes: ['ffa8f58f', 'ffa8f58f', …+4 more]
+Most recent signals:
+  🟠 TOOL_LOOP  conf=90%  5d ago  run=019e2314…
+     The agent called `web_search` 6 times in steps 2–7 with identical
+     arguments every time (same args_hash across all calls). It is not
+     tracking which queries it has already tried.
+     Impact: Looping agents burn tokens and cost money without producing
+     value. A 5-step loop at typical gpt-4o pricing costs roughly
+     $0.15–$0.30 — with nothing to show for it.
+     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
 
-Suggested fixes (2):
-  1. Deduplicate `web_search` calls — identical args hash seen 6×
-     ```python
-     seen = set()
-     if args not in seen:
-         seen.add(args)
-         call_tool(args)
-     ```
-  2. Set a hard step limit as a circuit breaker
+  🟠 TOOL_LOOP  conf=90%  5d ago  run=019e230c…
+     [same pattern — web_search called 6× with identical args]
+
+Health components:
+  failure_rate         █████░░░░░░░░░░░░░░░  11/40
+  loop_avoidance       █████░░░░░░░░░░░░░░░  7/25
+  token_efficiency     ███████████████░░░░░  15/20
+  latency              ████████████████████  15/15
 ```
-
-> **Privacy note:** The `args_hashes` field contains SHA-256 hashes of the original tool arguments — the raw arguments never leave your agent process.
 
 ---
 
@@ -211,9 +189,9 @@ Health score (0–100) and per-component breakdown for an agent.
 
 **Arguments:**
 
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `agent_id` | string | required | Agent ID |
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID |
 
 **Scoring components:**
 
@@ -226,56 +204,153 @@ Health score (0–100) and per-component breakdown for an agent.
 
 Requires ≥3 runs for a score. Token/latency components return neutral (half points) until ≥30 runs accumulate a baseline.
 
-**Example output:**
-```
-🔴 Health score for research-agent: 41/100
-   Sample runs:     24
-   Baseline ready:  no (need ≥30 runs for token/latency)
+---
 
-Component breakdown:
-  failure_rate          7/40  (current: 83.3 % runs with failures)
-  loop_avoidance        4/25  (current: 83.3 % runs with loops)
-  token_efficiency     15/20
-  latency              15/15  (current: 3005.0 avg LLM latency ms)
+### `get_agent_patterns`
+
+Analyze failure patterns: systemic vs. one-off classification, daily signal trend, failure rates by type, and input hashes that consistently trigger failures.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID |
+
+**Systemic classification:** a failure marked `SYSTEMIC` has appeared in a high proportion of runs over an extended window. `⚠ Occasional` means isolated incidents.
+
+**Input patterns:** when the same input hash reliably triggers a specific failure type, it appears in this section. Only patterns with ≥50% hit rate are shown.
+
+**Example — `langchain-example-agent`:**
 ```
+Failure patterns for: langchain-example-agent
+
+Systemic patterns (recurring across many runs):
+  🚨 SYSTEMIC  TOOL_LOOP  12/16 runs (75%)
+            first seen 6d ago  last seen 5d ago
+
+Daily signal counts (last 7 days):
+  FAILURE TYPE              04-22  04-29  05-03  05-08  05-12  05-13
+  ────────────────────────────────────────────────────────────────────
+  TOOL_LOOP                     1      1      1      2      5      7
+
+Failure rate by type (worst single-day rate):
+  TOOL_LOOP     ████████████████████  100%  (5/5 runs on 2026-05-12)
+
+Input patterns that reliably trigger failures (rate ≥ 50%):
+  hash=e47617d3e1fdaa4f  TOOL_LOOP  40/41 runs (98%)
+    → This input hash consistently causes this failure.
+  hash=3d338680bc62299d  TOOL_LOOP  4/4 runs (100%)
+    → This input hash consistently causes this failure.
+  hash=3d338680bc62299d  STEP_COUNT_INFLATION  4/4 runs (100%)
+    → This input hash consistently causes this failure.
+```
+
+The escalating daily trend (1 → 7) and the 98% input pattern hit rate together indicate this is a deterministic bug, not flaky behaviour — the same query always causes the loop.
 
 ---
 
-### `get_run_detail`
+### `get_agent_runs`
 
-Full detail for a specific run: metadata, detected signals with fixes, and a step-by-step event timeline.
+List recent runs for an agent with durations and signal status.
 
 **Arguments:**
 
 | Argument | Type | Default | Description |
 |---|---|---|---|
-| `run_id` | string | required | Run UUID |
-| `agent_id` | string | — | Optional — not used for the lookup, reserved for future use |
+| `agent_id` | string | required | Agent ID |
+| `limit` | int | 20 | Max runs to return (max 100) |
 
-**Example output:**
+**Example — `langchain-example-agent`:**
 ```
-Run: 019e217d-bd24-7d72-a8be-4715c2dcf385
-Agent:    research-agent  vabcd1234
-Started:  2026-05-13 13:19 UTC  (6h ago)
-Duration: 5.6s
-Steps:    8
-Exit:     run.completed
+Recent runs for: langchain-example-agent
 
-Signals (1):
-  🟠 TOOL_LOOP  [HIGH]  conf=90%  step=7
-     Tool loop detected: `web_search` called 6× in steps 2–7
-     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
+RUN ID       STARTED                   DUR STEPS SIGS  STATUS
+──────────────────────────────────────────────────────────────────────
+019e2314-6b7 5d ago                   4.1s     8  🔴 1
+019e2314-53a 5d ago                   2.8s     4  ✅  0
+019e2314-018 5d ago                   3.3s     4  ✅  0
+019e230c-0c6 5d ago                   5.5s     8  🔴 1
+019e230b-e1a 5d ago                   4.9s     4  ✅  0
 
-Event timeline (18 events):
-  [  0]    +0.0s  run.started
-  [  1]    +0.0s  llm.called           model=gpt-4o-mini  p=512 c=98  800ms
-  [  2]    +2.8s  tool.called          tool=web_search  ok=True  200ms
-  [  3]    +2.8s  tool.called          tool=web_search  ok=True  200ms
-  …
-  [  8]    +3.1s  run.completed        final_answer
+5 of 134 runs shown.
 ```
 
-Event timeline is capped at 40 entries; longer runs show a count of remaining events.
+The alternating 🔴 / ✅ pattern here is a tell: runs with 8 steps consistently fail, runs with 4 steps are clean. The loop is adding 4 extra steps every time it fires.
+
+---
+
+### `get_agent_signals`
+
+Recent failure signals for a specific agent, with titles, explanations, and fix suggestions.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | required | Agent ID |
+| `limit` | int | 20 | Max signals to return (max 100) |
+| `severity` | string | — | Filter: `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW` |
+
+---
+
+### `get_signal_detail`
+
+Full detail for a specific signal: complete evidence dict, impact statement, and all suggested fixes with code snippets.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `signal_id` | int | Integer signal ID (visible in `search_signals` output) |
+| `agent_id` | string | Optional — omit to search all agents |
+
+**Example — signal #518 (`langchain-example-agent`):**
+```
+🟠 Signal #518
+Type:      TOOL_LOOP
+Severity:  HIGH  confidence=90%
+Agent:     langchain-example-agent  v1.0
+Run:       019e2314-6b7…
+Step:      7
+Detected:  5d ago
+
+What happened:
+  The agent called `web_search` 6 times in steps 2–7 with identical
+  arguments every time (same args_hash across all calls). It is not
+  tracking which queries it has already tried.
+
+Why it matters:
+  Looping agents burn tokens and cost money without producing value.
+  A 5-step loop at typical gpt-4o pricing costs roughly $0.15–$0.30
+  — with nothing to show for it. Users waiting on a response will
+  time out or give up.
+
+Evidence:
+  tool: web_search
+  count: 6
+  window: 6
+  args_identical: True
+  first_step: 2
+  last_step: 7
+  args_hashes: ['ffa8f58f', 'ffa8f58f', 'ffa8f58f', 'ffa8f58f', ...]
+
+Suggested fixes:
+  1. Deduplicate `web_search` calls — identical args hash seen 6×
+     ```python
+     seen_queries = set()
+     def web_search(query):
+         if query in seen_queries:
+             return "Already searched. Try rephrasing."
+         seen_queries.add(query)
+         return _do_search(query)
+     ```
+  2. Add to system prompt:
+     "Do not repeat a search query you have already tried.
+      If a search returned no useful results, reformulate
+      the query before trying again."
+```
+
+> **Privacy note:** `args_hashes` contains SHA-256 hashes of the original tool arguments — raw arguments never leave your agent process.
 
 ---
 
@@ -293,210 +368,209 @@ Search signals across all agents with combined filters. Useful for cross-agent a
 | `agent_id` | string | — | Restrict to one agent; searches all agents if omitted |
 | `limit` | int | 30 | Max signals to return (max 200) |
 
-**Example:**
-```python
-# All CRITICAL signals in the past 24 hours
-search_signals(severity="CRITICAL", since_hours=24)
-
-# All TOOL_LOOP signals for one agent
-search_signals(failure_type="TOOL_LOOP", agent_id="research-agent")
+**Example — all TOOL_LOOP signals for `langchain-example-agent`:**
 ```
+Signals (3 shown, 48 matched):
 
-**Example output:**
-```
-Signals (3 shown, 6 matched):
+🟠     5d ago  [HIGH    ]  TOOL_LOOP          agent=langchain-example-agent
+   id=518  run=019e2314-6b7…  conf=90%
+   Tool loop detected: `web_search` called 6× in steps 2–7
 
-🟠     6h ago  [HIGH    ]  TOOL_LOOP                       agent=research-agent
+🟠     5d ago  [HIGH    ]  TOOL_LOOP          agent=langchain-example-agent
+   id=496  run=019e230c-0c6…  conf=90%
+   Tool loop detected: `web_search` called 6× in steps 2–7
+
+🟠     5d ago  [HIGH    ]  TOOL_LOOP          agent=langchain-example-agent
    id=495  run=019e217d-bd2…  conf=90%
    Tool loop detected: `web_search` called 6× in steps 2–7
 ```
 
 ---
 
-### `get_agent_patterns`
+### `get_run_detail`
 
-Analyze failure patterns for an agent: systemic vs. one-off classification, daily signal trend, failure rates by type, and input hashes that consistently trigger failures.
-
-**Arguments:**
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `agent_id` | string | required | Agent ID |
-
-**Systemic classification:** a failure is marked `SYSTEMIC` when it has appeared in a high proportion of runs over an extended window. A `⚠ Occasional` label means isolated incidents.
-
-**Input patterns:** when the same input hash (a structural fingerprint of the user query) reliably triggers a specific failure type, it appears in the "Input patterns" section. Only patterns with a hit rate ≥50% are shown — lower rates are noise.
-
-**Example output:**
-```
-Failure patterns for: research-agent
-
-Systemic patterns:
-  🚨 SYSTEMIC  TOOL_LOOP  12/12 runs (100%)
-            first seen 5d ago  last seen 6h ago
-
-Daily signal counts (last 7 days):
-  FAILURE TYPE                    05-07  05-08  05-09  05-12  05-13
-  ─────────────────────────────────────────────────────────────────
-  TOOL_LOOP                           1      2      1      5      5
-
-Failure rate by type:
-  TOOL_LOOP     ████████████████████  100%  (5/5 runs on 2026-05-13)
-
-Input patterns that reliably trigger failures (rate ≥ 50%):
-  hash=e47617d3  TOOL_LOOP  38/39 runs (97%)
-    → This input hash consistently causes this failure.
-```
-
----
-
-### `summarize_agent`
-
-One-shot diagnosis of an agent. Combines health score, failure breakdown, recent signals with their fixes, and health component bars. Start here before diving deeper.
+Full event timeline for a specific run.
 
 **Arguments:**
 
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `agent_id` | string | required | Agent ID |
+| Argument | Type | Description |
+|---|---|---|
+| `run_id` | string | Run UUID |
+| `agent_id` | string | Optional |
 
-**Example output:**
+**Example — run `019e2314-6b7` (`langchain-example-agent`):**
 ```
-═══ Agent summary: research-agent ═══
+Run: 019e2314-6b7…
+Agent:    langchain-example-agent  v1.0
+Started:  5d ago
+Duration: 4.1s
+Steps:    8
+Exit:     run.completed
 
-Health score:  🔴 41/100
-Total runs:    129
-Total signals: 55
-Last seen:     6h ago
-
-Failure breakdown:
-  TOOL_LOOP                             46 signals  (36% of runs)
-  STEP_COUNT_INFLATION                   8 signals  (6% of runs)
-
-Most recent signals:
-  🟠 TOOL_LOOP  conf=90%  6h ago  run=019e217d…
-     The agent called `web_search` 6 times with identical args.
-     Impact: Looping agents burn tokens without producing value.
+Signals (1):
+  🟠 TOOL_LOOP  [HIGH]  conf=90%  step=7
+     Tool loop detected: `web_search` called 6× in steps 2–7
      Fix: Deduplicate `web_search` calls — identical args hash seen 6×
 
-Health components:
-  failure_rate         ███░░░░░░░░░░░░░░░░░  7/40
-  loop_avoidance       ███░░░░░░░░░░░░░░░░░  4/25
-  token_efficiency     ███████████████░░░░░  15/20
-  latency              ████████████████████  15/15
+Event timeline:
+  [  0]  +0.0s  run.started
+  [  1]  +0.0s  llm.called        model=gpt-4o-mini  512 tokens  →  820ms
+  [  2]  +0.8s  tool.called       tool=web_search  ok=True  195ms
+  [  3]  +1.0s  llm.called        model=gpt-4o-mini  612 tokens  →  780ms
+  [  4]  +1.8s  tool.called       tool=web_search  ok=True  190ms
+  [  5]  +2.0s  llm.called        model=gpt-4o-mini  710 tokens  →  810ms
+  [  6]  +2.8s  tool.called       tool=web_search  ok=True  188ms
+  [  7]  +3.0s  llm.called        model=gpt-4o-mini  805 tokens  →  800ms
+  [  8]  +3.8s  run.completed
 ```
 
----
-
-### `get_agent_runs`
-
-List recent runs for an agent with durations and signal status.
-
-**Arguments:**
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `agent_id` | string | required | Agent ID |
-| `limit` | int | 20 | Max runs to return (max 100) |
-
-**Example output:**
-```
-Recent runs for: research-agent
-
-RUN ID       STARTED                  DUR  STEPS SIGS  STATUS
-──────────────────────────────────────────────────────────────────────
-019e217d-bd2 6h ago                   5.6s     8  🔴 1
-019e2163-a89 6h ago                   4.7s     8  🔴 1
-019e2163-66f 6h ago                   4.8s     4  ✅  0
-```
+The prompt token growth across LLM calls (512 → 612 → 710 → 805) is a secondary signal: context is inflating with each redundant search result even though the queries are identical.
 
 ---
 
 ### `get_instrumentation_guide`
 
-Get a quick-start code snippet for instrumenting an agent with Dunetrace. Works for Python, LangChain/LangGraph, TypeScript, and plain tool-call tracking.
+Quick-start code snippet for instrumenting an agent with Dunetrace.
 
 **Arguments:**
 
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `framework` | string | required | Framework name: `python`, `langchain`, `langgraph`, `typescript`, or `tools` |
+| Argument | Type | Description |
+|---|---|---|
+| `framework` | string | `langchain`, `python`, `typescript`, `tools`, or `otel` |
 
-Aliases accepted: `lc`, `lc-graph`, `lc_graph`, `langgraph`, `ts`, `js`, `javascript`, `node`, `tracking`, `tool_calls` (and more).
+Aliases: `langgraph`, `lc`, `ts`, `js`, `node`, `otlp`, `opentelemetry`, `langdock`, `dify`, `tool-calls`, `tracking`.
 
-**Example:**
-```python
-get_instrumentation_guide("langchain")
+---
+
+## Worked example: diagnosing `langchain-example-agent`
+
+This is a real diagnostic session using actual data from the agent.
+
+**Step 1 — triage**
+
+```
+You:   Is my LangChain agent healthy?
+
+Claude: [calls list_agents]
+        langchain-example-agent — 134 runs, 57 signals, health 48/100.
+        Dominant failure: TOOL_LOOP (48 signals, 36% of runs).
+        Let me dig in.
+
+        [calls summarize_agent("langchain-example-agent")]
+        Health is 🔴 48/100. TOOL_LOOP is the main issue — 48 signals
+        across 36% of runs, confidence 90% on every one. The agent is
+        calling web_search 6 times with identical arguments (steps 2–7)
+        without tracking which queries it's already tried.
 ```
 
-**Example output:**
+**Step 2 — check if it's systemic**
+
 ```
-Quick-start for langchain
+You:   Is it getting worse?
 
-from dunetrace import Dunetrace
-from dunetrace.integrations.langchain import DunetraceCallbackHandler
+Claude: [calls get_agent_patterns("langchain-example-agent")]
+        Yes — it's confirmed SYSTEMIC (75% of runs), and escalating:
+        TOOL_LOOP signals went 1 → 1 → 1 → 2 → 5 → 7 over the last 7 days.
+        Three specific input hashes trigger it at 98–100% rate — these are
+        likely your standard test queries. It's a deterministic bug, not flaky.
+```
 
-dt = Dunetrace()
-callback = DunetraceCallbackHandler(dt, agent_id="my-agent")
+**Step 3 — look at a specific failing run**
 
-result = agent.invoke(input, config={"callbacks": [callback]})
-dt.shutdown()
+```
+You:   Show me a failing run.
 
-── Full guide ─────────────────────────────────────────────
-# Integrating a LangChain / LangGraph Agent with Dunetrace
-…
+Claude: [calls get_agent_runs("langchain-example-agent", limit=5)]
+        Most recent failing run: 019e2314-6b7 (4.1s, 8 steps, 1 signal).
+        Clean runs have 4 steps. Failing runs always have 8 — the loop
+        is adding exactly 4 extra steps every time.
+
+        [calls get_run_detail("019e2314-6b7")]
+        Event timeline confirms it: web_search is called at steps 2, 4, 6
+        with identical args each time. Prompt tokens also growing 512 → 805
+        as the redundant results accumulate in context.
+```
+
+**Step 4 — get the fix**
+
+```
+You:   What's the fix?
+
+Claude: [calls get_signal_detail(518, "langchain-example-agent")]
+        Two options:
+
+        1. Code fix — add dedup in your tool wrapper:
+           seen_queries = set()
+           def web_search(query):
+               if query in seen_queries:
+                   return "Already searched. Try rephrasing."
+               seen_queries.add(query)
+               return _do_search(query)
+
+        2. Prompt addition (faster to ship):
+           "Do not repeat a search query you have already tried.
+            If a search returned no useful results, reformulate
+            the query before trying again."
+
+        Option 2 can be applied via Langfuse in one click from the dashboard.
 ```
 
 ---
 
 ## Typical workflows
 
-### Triage an alert
+### Investigate a run from a Slack alert
+
+The Slack alert includes a "View Run" button linking to the dashboard. You can also pass the run ID directly:
 
 ```
-You:   I got a Slack alert for TOOL_LOOP on research-agent. What's happening?
+You:   Check run 019e2314-6b7
 
-Agent: [calls summarize_agent("research-agent")]
-       Health is 41/100. TOOL_LOOP is systemic — 46 signals across 36% of
-       runs. The fix is to deduplicate web_search calls (identical args hash
-       seen 6× per run). Signal #495 is the most recent. Want the code?
-
-You:   Yes, show me signal #495.
-
-Agent: [calls get_signal_detail(495, "research-agent")]
-       Here's the evidence and fix code…
-```
-
-### Investigate a specific run from Slack
-
-The Slack alert includes a "View Run" link: `http://localhost:3000/runs/<run_id>`. You can also pass the run ID directly:
-
-```
-You:   Check run 019e217d-bd24-7d72-a8be-4715c2dcf385
-
-Agent: [calls get_run_detail("019e217d-…")]
-       Duration 5.6s, 8 steps. TOOL_LOOP at step 7 — web_search called
-       6× with identical args. Fix: add a dedup set.
+Claude: [calls get_run_detail("019e2314-6b7")]
+        4.1s, 8 steps. TOOL_LOOP at step 7 — web_search called 6×
+        with identical args. Context growing 512→805 tokens per call.
+        Fix: add a dedup set or prompt instruction.
 ```
 
 ### Cross-agent audit
 
 ```
-You:   Are there any CRITICAL signals in the last 24 hours?
+You:   Which agents had issues in the last 24 hours?
 
-Agent: [calls search_signals(severity="CRITICAL", since_hours=24)]
-       2 CRITICAL signals: PROMPT_INJECTION_SIGNAL on billing-agent (2h ago)
-       and COST_SPIKE on data-agent (5h ago). Want details on either?
+Claude: [calls list_agents]
+        langfuse-example-agent — 47 HIGH signals (TOOL_LOOP), last seen 12h ago.
+        langfuse-ts-example-agent — 3 HIGH signals (TOOL_LOOP), last seen 21h ago.
+        Both are looping on web_search. Likely the same root cause — want me
+        to compare?
 ```
 
 ### Before a deploy
 
 ```
-You:   Is research-agent stable enough to deploy to production?
+You:   Is langchain-example-agent stable enough to deploy?
 
-Agent: [calls get_agent_patterns("research-agent")]
-       TOOL_LOOP is systemic — 100% of runs in the last 7 days.
-       Recommending you fix the dedup issue before deploying.
+Claude: [calls get_agent_patterns("langchain-example-agent")]
+        No — TOOL_LOOP is systemic (75% of runs) and escalating daily.
+        Three input hashes trigger it at 98–100%. Ship the dedup fix first.
+```
+
+### How to instrument a new agent
+
+```
+You:   How do I add Dunetrace to my LangChain agent?
+
+Claude: [calls get_instrumentation_guide("langchain")]
+        pip install 'dunetrace[langchain]'
+
+        from dunetrace import Dunetrace
+        from dunetrace.integrations.langchain import DunetraceCallbackHandler
+
+        dt = Dunetrace(endpoint="http://localhost:8001")
+        callback = DunetraceCallbackHandler(dt, agent_id="my-agent",
+                                            model="gpt-4o-mini",
+                                            tools=["web_search"])
+        agent.invoke(input, config={"callbacks": [callback]})
+        dt.shutdown()
 ```
 
 ---
@@ -510,7 +584,7 @@ All data served by the MCP tools comes from the Dunetrace Customer API, which st
 - Token counts, latency, step counts → stored as plain numbers
 - Run and signal metadata → stored as plain text
 
-The `evidence` dict in signal responses contains the hashed fingerprints the detector used — not the original content. This is by design: the detector runs inside your agent process and only ships the hash.
+The `evidence` dict in signal responses contains the hashed fingerprints the detector used — not the original content.
 
 ---
 
@@ -521,7 +595,7 @@ cd packages/mcp-server
 python -m pytest tests/ -v
 ```
 
-83 tests, all offline — no running stack required. Tests cover every tool including edge cases: unknown IDs, empty results, `None` health scores, time-window filters, evidence truncation, code snippet truncation, all instrumentation guide aliases, and resource registration.
+105 tests, all offline — no running stack required. Tests cover every tool including edge cases: unknown IDs, empty results, `None` health scores, time-window filters, evidence truncation, code snippet truncation, all instrumentation guide aliases, and resource registration.
 
 ---
 
@@ -533,8 +607,8 @@ python -m pytest tests/ -v
 dunetrace_mcp/
   __init__.py
   client.py      # thin httpx wrapper around the Customer API
-  server.py      # FastMCP server with 10 tools + 6 doc resources
+  server.py      # FastMCP server with 10 tools + 7 doc resources
 tests/
-  test_tools.py  # 83 unit tests (all offline)
+  test_tools.py  # 105 unit tests (all offline)
 pyproject.toml
 ```
