@@ -319,6 +319,7 @@ Agent Code
 - [CrewAI](docs/integrations.md#crewai)
 - [AutoGen (Microsoft)](docs/integrations.md#autogen)
 - [TypeScript / JavaScript — npm package](docs/integrate-typescript-agent.md)
+- [Langdock](docs/integrate-langdock.md)
 - [Langfuse, FastAPI, Flask, OpenTelemetry, Loki](docs/integrations.md)
 - [MCP server (Claude Code, Cursor, Codex)](docs/mcp-server.md)
 
