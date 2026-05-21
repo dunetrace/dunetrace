@@ -681,6 +681,14 @@ def doc_policies() -> str:
     return _read_doc("policies.md")
 
 
+@mcp.resource("dunetrace://docs/integrate-haystack")
+def doc_integrate_haystack() -> str:
+    """Full guide: add Dunetrace monitoring to a Haystack 2.x pipeline using
+    DunetraceHaystackTracer — covers simple pipelines, RAG, Agent component,
+    AsyncPipeline, token extraction, and troubleshooting."""
+    return _read_doc("integrate-haystack-agent.md")
+
+
 @mcp.resource("dunetrace://docs/integrate-langdock")
 def doc_integrate_langdock() -> str:
     """Full guide: integrate Langdock (or any OTLP-emitting platform) with
@@ -962,6 +970,79 @@ _GUIDES: dict[str, str] = {
         - **SLOW_STEP** — any tool call takes longer than 15 seconds
     """).strip(),
 
+    "haystack": textwrap.dedent("""
+        # Instrument a Haystack 2.x pipeline with Dunetrace
+
+        ## Install
+        ```bash
+        pip install 'dunetrace[haystack]'
+        ```
+
+        ## Register the tracer (one-time, before any pipeline.run())
+        ```python
+        import haystack.tracing
+        from dunetrace import Dunetrace
+        from dunetrace.integrations.haystack import DunetraceHaystackTracer
+
+        dt = Dunetrace(endpoint="http://localhost:8001")  # or set DUNETRACE_ENDPOINT
+
+        haystack.tracing.enable_tracing(
+            DunetraceHaystackTracer(
+                dt,
+                agent_id="my-pipeline",      # identifies this agent in the dashboard
+                system_prompt=SYSTEM_PROMPT, # optional — helps pattern analysis
+                model="gpt-4o-mini",         # optional
+                tools=["web_search"],        # optional — for TOOL_AVOIDANCE detector
+            )
+        )
+        ```
+
+        ## Run your pipeline normally — nothing else changes
+        ```python
+        from haystack import Pipeline
+        from haystack.components.generators.chat import OpenAIChatGenerator
+        from haystack.dataclasses import ChatMessage
+
+        pipeline = Pipeline()
+        pipeline.add_component("llm", OpenAIChatGenerator(model="gpt-4o-mini"))
+
+        result = pipeline.run({
+            "llm": {"messages": [ChatMessage.from_user("What is the capital of France?")]}
+        })
+        dt.shutdown(timeout=5)
+        ```
+
+        ## What gets tracked automatically
+        - Every LLM call: model, token counts (prompt + completion), latency, finish reason
+        - Every retriever call: result count, top similarity score
+        - Every tool invocation via ToolInvoker / ComponentTool: success/failure, latency
+        - Run start / completion / error
+
+        ## RAG pipeline (retriever + generator)
+        ```python
+        from haystack.components.retrievers.in_memory import InMemoryBM25Retriever
+        from haystack.components.builders import ChatPromptBuilder
+
+        rag = Pipeline()
+        rag.add_component("retriever", InMemoryBM25Retriever(document_store=store))
+        rag.add_component("prompt",    ChatPromptBuilder(template=[...]))
+        rag.add_component("llm",       OpenAIChatGenerator(model="gpt-4o-mini"))
+        rag.connect("retriever.documents", "prompt.documents")
+        rag.connect("prompt.prompt",       "llm.messages")
+        # Both RETRIEVAL_CALLED/RESPONDED and LLM_CALLED/RESPONDED fire automatically.
+        ```
+
+        ## AsyncPipeline support
+        Works out of the box — ContextVar-based span tracking isolates concurrent coroutines.
+
+        ## Deploy marker (optional — correlate failures with releases)
+        ```python
+        dt.mark_deploy("my-pipeline", version="v2.1.0", commit="abc1234", env="production")
+        ```
+
+        Full guide: docs/integrate-haystack-agent.md
+    """).strip(),
+
     "otel": textwrap.dedent("""
         # Zero-code monitoring via OpenTelemetry (OTLP receiver)
 
@@ -1053,6 +1134,10 @@ _ALIASES: dict[str, str] = {
     "tool-calls": "tools",
     "tool_calls": "tools",
     "tracking": "tools",
+    "haystack": "haystack",
+    "haystack-ai": "haystack",
+    "haystack2": "haystack",
+    "hs": "haystack",
     "otel": "otel",
     "otlp": "otel",
     "opentelemetry": "otel",
@@ -1076,15 +1161,16 @@ def get_instrumentation_guide(framework: str) -> str:
                               auto-instrumentation, FastAPI, Flask)
             - "typescript"  — TypeScript / Node.js agents (raw HTTP ingest)
             - "tools"       — How to track tool calls specifically (all languages)
+            - "haystack"    — Haystack 2.x pipelines (simple, RAG, Agent component)
             - "otel"        — Zero-code OTel/OTLP receiver (Langdock, Dify, OpenLLMetry,
                               any platform that emits OTLP traces)
 
     Aliases accepted: langgraph, lc, custom-python, ts, javascript, js, node,
-    tool-calls, tracking, otlp, opentelemetry, langdock, dify, no-code.
+    tool-calls, tracking, haystack-ai, hs, otlp, opentelemetry, langdock, dify, no-code.
     """
     key = _ALIASES.get(framework.lower().strip())
     if key is None:
-        supported = "langchain, python, typescript, tools"
+        supported = "langchain, python, typescript, tools, haystack"
         return (
             f"Unknown framework '{framework}'. Supported values: {supported}.\n\n"
             "Use list_agents to check what agents are already instrumented."
@@ -1098,6 +1184,7 @@ def get_instrumentation_guide(framework: str) -> str:
         "python": "integrate-custom-python-agent.md",
         "typescript": "integrate-typescript-agent.md",
         "tools": "integrate-custom-python-agent.md",
+        "haystack": "integrate-haystack-agent.md",
         "otel": "integrate-langdock.md",
     }
     doc_path = _DOCS / doc_map[key]

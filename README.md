@@ -68,6 +68,7 @@ cd dunetrace && cp .env.example .env && docker compose build && docker compose u
 pip install dunetrace
 pip install 'dunetrace[langchain]'          # LangChain / LangGraph
 pip install 'dunetrace[langchain,langfuse]' # + Langfuse deep analysis
+pip install 'dunetrace[haystack]'           # Haystack 2.x
 pip install dunetrace-mcp                   # MCP server for Claude Code / Cursor / Codex
 ```
 
@@ -320,6 +321,7 @@ Agent Code
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
 - [CrewAI](docs/integrate-crewai-agent.md)
 - [AutoGen (Microsoft)](docs/integrate-autogen-agent.md)
+- [Haystack 2.x](docs/integrate-haystack-agent.md)
 - [TypeScript / JavaScript](docs/integrate-typescript-agent.md)
 - [Langdock](docs/integrate-langdock.md)
 - [Langfuse](docs/integrate-langfuse.md)
