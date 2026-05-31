@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace-mcp"
-version = "0.1.3"
+version = "0.1.4"
 description = "Dunetrace MCP server - expose agent signals to Claude Code, Cursor, and Codex"
 readme = "README.md"
 license = {text = "Apache-2.0"}
