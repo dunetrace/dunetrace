@@ -1,4 +1,4 @@
-name: Python Tests
+name: CI
 
 on:
   pull_request:
@@ -6,6 +6,18 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    name: Lint (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
   sdk-py:
     name: SDK (Python)
     runs-on: ubuntu-latest
@@ -66,3 +78,20 @@ jobs:
           cache: pip
       - run: pip install -e "packages/mcp-server" pytest
       - run: python -m pytest packages/mcp-server/tests/ -v
+
+  sdk-ts:
+    name: SDK (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/sdk-ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: packages/sdk-ts/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
