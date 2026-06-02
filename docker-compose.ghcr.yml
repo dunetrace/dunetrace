@@ -1,0 +1,122 @@
+# Pre-built images from GHCR — no build step required.
+# Usage: docker compose -f docker-compose.ghcr.yml up -d
+#
+# To pin a specific version replace 'latest' with a tag, e.g. '0.3.17'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dunetrace
+      POSTGRES_PASSWORD: dunetrace
+      POSTGRES_DB: dunetrace
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dunetrace -d dunetrace"]
+      interval: 3s
+      timeout: 5s
+      retries: 5
+
+  ingest:
+    image: ghcr.io/dunetrace/dunetrace-ingest:latest
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      ENV: dev
+      AUTH_MODE: dev
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  detector:
+    image: ghcr.io/dunetrace/dunetrace-detector:latest
+    restart: unless-stopped
+    volumes:
+      - ./detectors.yml:/app/detectors.yml:ro
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      POLL_INTERVAL: 5
+      STALL_TIMEOUT_SECS: 60
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+
+  alerts:
+    image: ghcr.io/dunetrace/dunetrace-alerts:latest
+    restart: unless-stopped
+    volumes:
+      - ./detectors.yml:/app/detectors.yml:ro
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      POLL_INTERVAL: 10
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      SLACK_CHANNEL: ${SLACK_CHANNEL:-}
+      SLACK_MIN_SEVERITY: ${SLACK_MIN_SEVERITY:-LOW}
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      detector:
+        condition: service_started
+
+  api:
+    image: ghcr.io/dunetrace/dunetrace-api:latest
+    ports:
+      - "8002:8002"
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      AUTH_MODE: dev
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      GITHUB_BASE_BRANCH: ${GITHUB_BASE_BRANCH:-main}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  dashboard:
+    image: nginx:alpine
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    volumes:
+      - ./dashboard:/usr/share/nginx/html:ro
+      - ./dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  postgres_data:

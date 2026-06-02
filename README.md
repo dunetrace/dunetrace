@@ -57,6 +57,14 @@ Dunetrace is not a replacement for tracing tools, it's the layer that tells you 
 
 ### 1. Start the backend
 
+**Option A — pre-built images (fastest)**
+```bash
+git clone https://github.com/dunetrace/dunetrace
+cd dunetrace && cp .env.example .env
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+**Option B — build from source**
 ```bash
 git clone https://github.com/dunetrace/dunetrace
 cd dunetrace && cp .env.example .env && docker compose build && docker compose up -d
