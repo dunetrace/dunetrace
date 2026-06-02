@@ -15,7 +15,7 @@ import urllib.request
 import urllib.error
 from contextlib import contextmanager
 from threading import Event, Lock, Thread
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 from dunetrace.buffer import RingBuffer
 from dunetrace.context import _current_run
@@ -422,7 +422,7 @@ class Dunetrace:
 
     def trace(
         self,
-        agent_id_or_fn: "Union[str, Callable, None]" = None,
+        agent_id_or_fn: Union[str, Callable, None] = None,
         *,
         model:         str              = "unknown",
         tools:         Optional[List[str]] = None,
@@ -461,7 +461,7 @@ class Dunetrace:
 
     def tool(
         self,
-        name_or_fn: "Union[str, Callable, None]" = None,
+        name_or_fn: Union[str, Callable, None] = None,
     ) -> Callable:
         """
         Decorator that auto-emits ``tool.called`` / ``tool.responded`` around the
