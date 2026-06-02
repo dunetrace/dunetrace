@@ -25,6 +25,7 @@ Usage::
 
 Compatible with crewai >= 1.0.
 """
+
 from __future__ import annotations
 
 import logging
@@ -36,6 +37,7 @@ try:
     from crewai import hooks as _crewai_hooks
     from crewai.hooks.llm_hooks import LLMCallHookContext
     from crewai.hooks.tool_hooks import ToolCallHookContext
+
     _CREWAI_AVAILABLE = True
 except ImportError:
     _CREWAI_AVAILABLE = False
@@ -59,22 +61,20 @@ class DunetraceCrewCallback:
 
     def __init__(
         self,
-        client:   "Dunetrace",
+        client: "Dunetrace",
         agent_id: str = "crewai-crew",
-        model:    str = "unknown",
-        tools:    Optional[List[str]] = None,
+        model: str = "unknown",
+        tools: Optional[List[str]] = None,
     ) -> None:
         if not _CREWAI_AVAILABLE:
-            raise ImportError(
-                "crewai >= 1.0 is not installed. Run: pip install crewai"
-            )
-        self._client   = client
+            raise ImportError("crewai >= 1.0 is not installed. Run: pip install crewai")
+        self._client = client
         self._agent_id = agent_id
-        self._model    = model
-        self._tools    = tools or []
+        self._model = model
+        self._tools = tools or []
 
         # Per-call timers keyed by thread-id so concurrent crews don't collide.
-        self._llm_start: dict[int, float]  = {}
+        self._llm_start: dict[int, float] = {}
         self._tool_start: dict[str, float] = {}
         self._lock = threading.Lock()
 
@@ -98,10 +98,10 @@ class DunetraceCrewCallback:
     def uninstall(self) -> None:
         """Remove the Dunetrace hooks. Safe to call even if not installed."""
         for fn, unreg in [
-            (self._before_llm,  _crewai_hooks.unregister_before_llm_call_hook),
-            (self._after_llm,   _crewai_hooks.unregister_after_llm_call_hook),
+            (self._before_llm, _crewai_hooks.unregister_before_llm_call_hook),
+            (self._after_llm, _crewai_hooks.unregister_after_llm_call_hook),
             (self._before_tool, _crewai_hooks.unregister_before_tool_call_hook),
-            (self._after_tool,  _crewai_hooks.unregister_after_tool_call_hook),
+            (self._after_tool, _crewai_hooks.unregister_after_tool_call_hook),
         ]:
             try:
                 unreg(fn)
@@ -113,6 +113,7 @@ class DunetraceCrewCallback:
 
     def _before_llm(self, ctx: "LLMCallHookContext") -> None:
         from dunetrace.context import _current_run
+
         run = _current_run.get(None)
         if run is None:
             return
@@ -130,12 +131,13 @@ class DunetraceCrewCallback:
     def _after_llm(self, ctx: "LLMCallHookContext") -> None:
         from dunetrace.context import _current_run
         from dunetrace.models import hash_content
+
         run = _current_run.get(None)
         if run is None:
             return
         with self._lock:
             t0 = self._llm_start.pop(threading.get_ident(), None)
-        latency     = int((time.time() - (t0 or time.time())) * 1000)
+        latency = int((time.time() - (t0 or time.time())) * 1000)
         output_text = ctx.response or ""
         run.llm_responded(
             latency_ms=latency,
@@ -148,6 +150,7 @@ class DunetraceCrewCallback:
 
     def _before_tool(self, ctx: "ToolCallHookContext") -> None:
         from dunetrace.context import _current_run
+
         run = _current_run.get(None)
         if run is None:
             return
@@ -158,14 +161,15 @@ class DunetraceCrewCallback:
 
     def _after_tool(self, ctx: "ToolCallHookContext") -> None:
         from dunetrace.context import _current_run
+
         run = _current_run.get(None)
         if run is None:
             return
         key = f"{threading.get_ident()}:{ctx.tool_name}"
         with self._lock:
             t0 = self._tool_start.pop(key, None)
-        latency  = int((time.time() - (t0 or time.time())) * 1000)
-        result   = ctx.tool_result or ""
+        latency = int((time.time() - (t0 or time.time())) * 1000)
+        result = ctx.tool_result or ""
         run.tool_responded(
             ctx.tool_name,
             success=True,
@@ -175,6 +179,7 @@ class DunetraceCrewCallback:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def _estimate_tokens(messages: Any) -> int:
     if not messages:

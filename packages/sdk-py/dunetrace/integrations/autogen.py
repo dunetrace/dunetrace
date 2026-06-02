@@ -41,6 +41,7 @@ Usage::
 Compatible with autogen-agentchat >= 0.4 (tested with 0.7.x).
 For older pyautogen 0.2.x, use the manual dt.run() + run.llm_called() approach instead.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -56,6 +57,7 @@ try:
         LLMMessage,
     )
     from autogen_core import CancellationToken
+
     _AUTOGEN_AVAILABLE = True
 except ImportError:
     _AUTOGEN_AVAILABLE = False
@@ -116,7 +118,7 @@ class DunetraceModelClient(ChatCompletionClient):  # type: ignore[misc]
                 cancellation_token=cancellation_token,
             )
             if run:
-                latency     = int((time.time() - t0) * 1000)
+                latency = int((time.time() - t0) * 1000)
                 output_text = result.content if isinstance(result.content, str) else ""
                 run.llm_responded(
                     completion_tokens=result.usage.completion_tokens,
@@ -174,10 +176,7 @@ class DunetraceModelClient(ChatCompletionClient):  # type: ignore[misc]
         if not messages:
             return 0
         try:
-            total = sum(
-                len(str(getattr(m, "content", m) or ""))
-                for m in messages
-            )
+            total = sum(len(str(getattr(m, "content", m) or "")) for m in messages)
             return total // 4
         except Exception:
             return 0
@@ -204,20 +203,20 @@ class DunetraceAutoGenObserver:
 
     def __init__(
         self,
-        client:   "Dunetrace",
+        client: "Dunetrace",
         agent_id: str = "autogen-agent",
-        model:    str = "unknown",
-        tools:    Optional[List[str]] = None,
+        model: str = "unknown",
+        tools: Optional[List[str]] = None,
     ) -> None:
         if not _AUTOGEN_AVAILABLE:
             raise ImportError(
                 "autogen-agentchat and autogen-core are not installed. "
                 "Run: pip install autogen-agentchat autogen-ext"
             )
-        self._client   = client
+        self._client = client
         self._agent_id = agent_id
-        self._model    = model
-        self._tools    = tools or []
+        self._model = model
+        self._tools = tools or []
 
     def wrap_client(self, inner_client: Any) -> DunetraceModelClient:
         """

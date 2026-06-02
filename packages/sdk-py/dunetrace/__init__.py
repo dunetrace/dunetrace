@@ -2,11 +2,17 @@ from dunetrace.client import Dunetrace, DunetraceClient
 from dunetrace.context import get_current_run
 from dunetrace.middleware import DunetraceASGIMiddleware, DunetraceWSGIMiddleware
 from dunetrace.models import RunState, FailureType, Severity, RiskScore
-from dunetrace.detectors import BaseDetector, TIER1_DETECTORS, run_detectors, PROMPT_INJECTION_DETECTOR
+from dunetrace.detectors import (
+    BaseDetector,
+    TIER1_DETECTORS,
+    run_detectors,
+    PROMPT_INJECTION_DETECTOR,
+)
 from dunetrace.policies import Policy, PolicyViolation
 from dunetrace.risk_engine import RiskEngine
 
 from importlib.metadata import version, PackageNotFoundError
+
 try:
     __version__ = version("dunetrace")
 except PackageNotFoundError:

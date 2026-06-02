@@ -19,6 +19,7 @@ TypeError immediately — no silent fallbacks:
 The defaults in TIER1_DETECTORS are conservative starting points.
 Tuned values belong in the detector service config, not here.
 """
+
 from __future__ import annotations
 
 import re
@@ -39,6 +40,7 @@ def _scale_confidence(ratio: float) -> float:
 
 
 # ── Base ──────────────────────────────────────────────────────────────────────
+
 
 class BaseDetector:
     name: str = "base"
@@ -71,6 +73,7 @@ class BaseDetector:
 
 # ── TOOL_LOOP ─────────────────────────────────────────────────────────────────
 
+
 class ToolLoopDetector(BaseDetector):
     """
     Same tool called >= THRESHOLD times within a WINDOW of steps. High confidence — the
@@ -80,35 +83,40 @@ class ToolLoopDetector(BaseDetector):
     burst the same tool (e.g. paginated search). THRESHOLD (default 3) — repetitions needed
     to fire; lower values increase sensitivity and false-positive rate.
     """
-    name      = "TOOL_LOOP"
-    WINDOW    = 5
+
+    name = "TOOL_LOOP"
+    WINDOW = 5
     THRESHOLD = 3
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.tool_calls) < self.WINDOW:
             return None
 
-        window = state.tool_calls[-self.WINDOW:]
+        window = state.tool_calls[-self.WINDOW :]
         counts = Counter(c.tool_name for c in window)
 
         for tool, count in counts.items():
             if count >= self.THRESHOLD:
-                all_calls   = [c for c in state.tool_calls if c.tool_name == tool]
+                all_calls = [c for c in state.tool_calls if c.tool_name == tool]
                 args_hashes = [c.args_hash for c in all_calls]
                 unique_hashes = len(set(args_hashes))
                 calls_with_result = [c for c in all_calls if c.success is not None]
                 success_rate = (
                     sum(1 for c in calls_with_result if c.success) / len(calls_with_result)
-                    if calls_with_result else None
+                    if calls_with_result
+                    else None
                 )
                 first_step = all_calls[0].step_index
-                last_step  = all_calls[-1].step_index
+                last_step = all_calls[-1].step_index
                 loop_steps = set(range(first_step + 1, last_step + 1))
-                wasted_tokens = sum(
-                    lc.prompt_tokens
-                    for lc in state.llm_calls
-                    if lc.step_index in loop_steps and lc.prompt_tokens is not None
-                ) or None
+                wasted_tokens = (
+                    sum(
+                        lc.prompt_tokens
+                        for lc in state.llm_calls
+                        if lc.step_index in loop_steps and lc.prompt_tokens is not None
+                    )
+                    or None
+                )
                 return FailureSignal(
                     failure_type=FailureType.TOOL_LOOP,
                     severity=Severity.HIGH,
@@ -118,23 +126,24 @@ class ToolLoopDetector(BaseDetector):
                     step_index=window[-1].step_index,
                     confidence=_scale_confidence(len(all_calls) / self.THRESHOLD),
                     evidence={
-                        "tool":           tool,
-                        "count":          len(all_calls),
-                        "window":         self.WINDOW,
-                        "first_step":     first_step,
-                        "last_step":      last_step,
-                        "step_indices":   [c.step_index for c in all_calls],
-                        "args_hashes":    args_hashes,
+                        "tool": tool,
+                        "count": len(all_calls),
+                        "window": self.WINDOW,
+                        "first_step": first_step,
+                        "last_step": last_step,
+                        "step_indices": [c.step_index for c in all_calls],
+                        "args_hashes": args_hashes,
                         "args_identical": unique_hashes == 1,
-                        "args_similar":   unique_hashes <= 2,
-                        "success_rate":   success_rate,
-                        "wasted_tokens":  wasted_tokens,
+                        "args_similar": unique_hashes <= 2,
+                        "success_rate": success_rate,
+                        "wasted_tokens": wasted_tokens,
                     },
                 )
         return None
 
 
 # ── TOOL_THRASHING ─────────────────────────────────────────────────────────────
+
 
 class ToolThrashingDetector(BaseDetector):
     """
@@ -144,21 +153,19 @@ class ToolThrashingDetector(BaseDetector):
     Tunable: WINDOW (default 6) — must be even for a clean alternating-pair check. Larger
     values require the oscillation to be sustained longer before firing.
     """
-    name   = "TOOL_THRASHING"
+
+    name = "TOOL_THRASHING"
     WINDOW = 6
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.tool_calls) < self.WINDOW:
             return None
 
-        names = [c.tool_name for c in state.tool_calls[-self.WINDOW:]]
+        names = [c.tool_name for c in state.tool_calls[-self.WINDOW :]]
         unique = set(names)
 
         if len(unique) == 2:
-            alternating = all(
-                names[i] != names[i + 1]
-                for i in range(len(names) - 1)
-            )
+            alternating = all(names[i] != names[i + 1] for i in range(len(names) - 1))
             if alternating:
                 tools = list(unique)
                 return FailureSignal(
@@ -170,16 +177,17 @@ class ToolThrashingDetector(BaseDetector):
                     step_index=state.current_step,
                     confidence=0.90,
                     evidence={
-                        "tool_a":  tools[0],
-                        "tool_b":  tools[1],
+                        "tool_a": tools[0],
+                        "tool_b": tools[1],
                         "pattern": names,
-                        "count":   len(names),
+                        "count": len(names),
                     },
                 )
         return None
 
 
 # ── TOOL_AVOIDANCE ─────────────────────────────────────────────────────────────
+
 
 class ToolAvoidanceDetector(BaseDetector):
     """
@@ -191,7 +199,8 @@ class ToolAvoidanceDetector(BaseDetector):
     real chance to decide about tool use — those inflate the false-positive rate a lot.
     Raise if your agent routinely answers in 1–2 turns without tools by design.
     """
-    name          = "TOOL_AVOIDANCE"
+
+    name = "TOOL_AVOIDANCE"
     MIN_LLM_CALLS = 2
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
@@ -215,12 +224,13 @@ class ToolAvoidanceDetector(BaseDetector):
             evidence={
                 "available_tools": state.available_tools,
                 "tool_calls_made": 0,
-                "llm_calls":       len(state.llm_calls),
+                "llm_calls": len(state.llm_calls),
             },
         )
 
 
 # ── GOAL_ABANDONMENT ──────────────────────────────────────────────────────────
+
 
 class GoalAbandonmentDetector(BaseDetector):
     """
@@ -230,7 +240,8 @@ class GoalAbandonmentDetector(BaseDetector):
     Tunable: STALL_STEPS (default 4). Increase for agents that do multi-step reasoning
     between tool calls; decrease to catch abandonment faster.
     """
-    name        = "GOAL_ABANDONMENT"
+
+    name = "GOAL_ABANDONMENT"
     STALL_STEPS = 4
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
@@ -239,14 +250,11 @@ class GoalAbandonmentDetector(BaseDetector):
         if not state.tool_calls:
             return None
 
-        recent = state.events[-self.STALL_STEPS:]
+        recent = state.events[-self.STALL_STEPS :]
         if len(recent) < self.STALL_STEPS:
             return None
 
-        all_llm = all(
-            e.event_type.value.startswith("llm.")
-            for e in recent
-        )
+        all_llm = all(e.event_type.value.startswith("llm.") for e in recent)
         if all_llm:
             steps_since_last_tool = state.current_step - state.tool_calls[-1].step_index
             return FailureSignal(
@@ -258,12 +266,12 @@ class GoalAbandonmentDetector(BaseDetector):
                 step_index=state.current_step,
                 confidence=_scale_confidence(steps_since_last_tool / self.STALL_STEPS),
                 evidence={
-                    "stall_steps":           self.STALL_STEPS,
-                    "last_tool_step":        state.tool_calls[-1].step_index,
-                    "last_tool_used":        state.tool_calls[-1].tool_name,
-                    "current_step":          state.current_step,
+                    "stall_steps": self.STALL_STEPS,
+                    "last_tool_step": state.tool_calls[-1].step_index,
+                    "last_tool_used": state.tool_calls[-1].tool_name,
+                    "current_step": state.current_step,
                     "steps_since_last_tool": steps_since_last_tool,
-                    "stall_event_sequence":  [e.event_type.value for e in recent],
+                    "stall_event_sequence": [e.event_type.value for e in recent],
                 },
             )
         return None
@@ -274,24 +282,27 @@ class GoalAbandonmentDetector(BaseDetector):
 _INJECTION_PATTERNS_COMPILED = [
     (label, re.compile(p, re.IGNORECASE))
     for label, p in [
-        ("ignore_instructions",    r"ignore\s+(all\s+)?(previous|prior|above|earlier)\s+instructions?"),
+        (
+            "ignore_instructions",
+            r"ignore\s+(all\s+)?(previous|prior|above|earlier)\s+instructions?",
+        ),
         ("disregard_instructions", r"disregard\s+(all\s+)?(previous|prior|above)\s+instructions?"),
-        ("forget_instructions",    r"forget\s+(all\s+)?(previous|prior|above)\s+instructions?"),
-        ("you_are_now",            r"you\s+are\s+now\s+"),
-        ("new_role",               r"your\s+new\s+(role|persona|identity|instructions?)\s+(is|are)"),
-        ("act_as",                 r"act\s+as\s+(if\s+you\s+are\s+)?(a|an|the)\s+"),
-        ("pretend",                r"pretend\s+(you\s+are|to\s+be)\s+"),
-        ("do_not_follow",          r"do\s+not\s+follow\s+(your\s+)?(previous|prior|original)\s+"),
-        ("system_colon",           r"system\s*:\s*you\s+are"),
-        ("system_tag",             r"\[system\]"),
-        ("im_start",               r"<\|im_start\|>"),
-        ("system_pipe",            r"<\|system\|>"),
-        ("hash_system",            r"###\s*system"),
-        ("jailbreak",              r"jailbreak"),
-        ("dan_mode",               r"dan\s+mode"),
-        ("developer_mode",         r"developer\s+mode\s+(enabled|on)"),
-        ("override_safety",        r"override\s+(safety|guidelines|restrictions)"),
-        ("bypass_safety",          r"bypass\s+(safety|restrictions|filters)"),
+        ("forget_instructions", r"forget\s+(all\s+)?(previous|prior|above)\s+instructions?"),
+        ("you_are_now", r"you\s+are\s+now\s+"),
+        ("new_role", r"your\s+new\s+(role|persona|identity|instructions?)\s+(is|are)"),
+        ("act_as", r"act\s+as\s+(if\s+you\s+are\s+)?(a|an|the)\s+"),
+        ("pretend", r"pretend\s+(you\s+are|to\s+be)\s+"),
+        ("do_not_follow", r"do\s+not\s+follow\s+(your\s+)?(previous|prior|original)\s+"),
+        ("system_colon", r"system\s*:\s*you\s+are"),
+        ("system_tag", r"\[system\]"),
+        ("im_start", r"<\|im_start\|>"),
+        ("system_pipe", r"<\|system\|>"),
+        ("hash_system", r"###\s*system"),
+        ("jailbreak", r"jailbreak"),
+        ("dan_mode", r"dan\s+mode"),
+        ("developer_mode", r"developer\s+mode\s+(enabled|on)"),
+        ("override_safety", r"override\s+(safety|guidelines|restrictions)"),
+        ("bypass_safety", r"bypass\s+(safety|restrictions|filters)"),
     ]
 ]
 
@@ -301,13 +312,12 @@ class PromptInjectionDetector(BaseDetector):
     Pattern-matches user input against known injection signatures, before any LLM call.
     No tunable parameters — extend by adding entries to _INJECTION_PATTERNS_COMPILED.
     """
+
     name = "PROMPT_INJECTION_SIGNAL"
 
     def check_input(self, input_text: str, state: RunState) -> Optional[FailureSignal]:
         matched = [
-            label
-            for label, pattern in _INJECTION_PATTERNS_COMPILED
-            if pattern.search(input_text)
+            label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(input_text)
         ]
         if not matched:
             return None
@@ -322,8 +332,8 @@ class PromptInjectionDetector(BaseDetector):
             confidence=_scale_confidence(len(matched)),
             evidence={
                 "matched_pattern_count": len(matched),
-                "matched_patterns":      matched[:5],
-                "input_length":          len(input_text),
+                "matched_patterns": matched[:5],
+                "input_length": len(input_text),
             },
         )
 
@@ -332,6 +342,7 @@ class PromptInjectionDetector(BaseDetector):
 
 
 # ── RAG_EMPTY_RETRIEVAL ───────────────────────────────────────────────────────
+
 
 class RagEmptyRetrievalDetector(BaseDetector):
     """
@@ -342,8 +353,9 @@ class RagEmptyRetrievalDetector(BaseDetector):
     system uses a compressed score range. MIN_RESULTS (default 1) — raise if the agent needs
     multiple grounding documents before answering.
     """
-    name        = "RAG_EMPTY_RETRIEVAL"
-    MIN_SCORE   = 0.3
+
+    name = "RAG_EMPTY_RETRIEVAL"
+    MIN_SCORE = 0.3
     MIN_RESULTS = 1
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
@@ -353,7 +365,8 @@ class RagEmptyRetrievalDetector(BaseDetector):
             return None
 
         bad_retrievals = [
-            r for r in state.retrievals
+            r
+            for r in state.retrievals
             if r.result_count < self.MIN_RESULTS
             or (r.top_score is not None and r.top_score < self.MIN_SCORE)
         ]
@@ -371,15 +384,16 @@ class RagEmptyRetrievalDetector(BaseDetector):
             step_index=state.current_step,
             confidence=0.88,
             evidence={
-                "index_name":     worst.index_name,
-                "result_count":   worst.result_count,
-                "top_score":      worst.top_score,
+                "index_name": worst.index_name,
+                "result_count": worst.result_count,
+                "top_score": worst.top_score,
                 "bad_retrievals": len(bad_retrievals),
             },
         )
 
 
 # ── LLM_TRUNCATION_LOOP ───────────────────────────────────────────────────────
+
 
 class LlmTruncationLoopDetector(BaseDetector):
     """
@@ -392,17 +406,15 @@ class LlmTruncationLoopDetector(BaseDetector):
     Tunable: THRESHOLD (default 2). Set to 1 for zero tolerance; raise for models where
     a single truncation is expected and handled by the agent.
     """
-    name      = "LLM_TRUNCATION_LOOP"
+
+    name = "LLM_TRUNCATION_LOOP"
     THRESHOLD = 2
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.llm_calls) < self.THRESHOLD:
             return None
 
-        truncated = [
-            c for c in state.llm_calls
-            if c.finish_reason == "length"
-        ]
+        truncated = [c for c in state.llm_calls if c.finish_reason == "length"]
 
         if len(truncated) < self.THRESHOLD:
             return None
@@ -416,17 +428,20 @@ class LlmTruncationLoopDetector(BaseDetector):
             step_index=state.current_step,
             confidence=_scale_confidence(len(truncated) / self.THRESHOLD),
             evidence={
-                "truncation_count":            len(truncated),
-                "total_llm_calls":             len(state.llm_calls),
-                "first_truncation_step":       truncated[0].step_index,
-                "last_truncation_step":        truncated[-1].step_index,
-                "token_counts_at_truncation":  [c.prompt_tokens for c in truncated if c.prompt_tokens is not None],
-                "models":                      sorted({c.model for c in truncated if c.model}),
+                "truncation_count": len(truncated),
+                "total_llm_calls": len(state.llm_calls),
+                "first_truncation_step": truncated[0].step_index,
+                "last_truncation_step": truncated[-1].step_index,
+                "token_counts_at_truncation": [
+                    c.prompt_tokens for c in truncated if c.prompt_tokens is not None
+                ],
+                "models": sorted({c.model for c in truncated if c.model}),
             },
         )
 
 
 # ── CONTEXT_BLOAT ─────────────────────────────────────────────────────────────
+
 
 class ContextBloatDetector(BaseDetector):
     """
@@ -442,23 +457,23 @@ class ContextBloatDetector(BaseDetector):
     MIN_LAST_TOKENS (default 2000) — suppresses false positives where proportional growth
     on a tiny context isn't actually a problem.
     """
-    name             = "CONTEXT_BLOAT"
-    MIN_CALLS        = 3
-    GROWTH_FACTOR    = 3.0
-    MIN_LAST_TOKENS  = 2000
+
+    name = "CONTEXT_BLOAT"
+    MIN_CALLS = 3
+    GROWTH_FACTOR = 3.0
+    MIN_LAST_TOKENS = 2000
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         calls_with_tokens = [
-            c for c in state.llm_calls
-            if c.prompt_tokens is not None and c.prompt_tokens > 0
+            c for c in state.llm_calls if c.prompt_tokens is not None and c.prompt_tokens > 0
         ]
 
         if len(calls_with_tokens) < self.MIN_CALLS:
             return None
 
         first_tokens = calls_with_tokens[0].prompt_tokens
-        last_tokens  = calls_with_tokens[-1].prompt_tokens
+        last_tokens = calls_with_tokens[-1].prompt_tokens
 
         if first_tokens < 10:
             return None
@@ -477,16 +492,15 @@ class ContextBloatDetector(BaseDetector):
             return None
 
         evidence: dict = {
-            "first_tokens":          first_tokens,
-            "last_tokens":           last_tokens,
-            "growth_factor":         round(growth, 2),
-            "threshold_factor":      round(effective_threshold, 2),
-            "llm_call_count":        len(calls_with_tokens),
-            "first_call_step":       calls_with_tokens[0].step_index,
-            "last_call_step":        calls_with_tokens[-1].step_index,
+            "first_tokens": first_tokens,
+            "last_tokens": last_tokens,
+            "growth_factor": round(growth, 2),
+            "threshold_factor": round(effective_threshold, 2),
+            "llm_call_count": len(calls_with_tokens),
+            "first_call_step": calls_with_tokens[0].step_index,
+            "last_call_step": calls_with_tokens[-1].step_index,
             "token_growth_sequence": [
-                {"step": c.step_index, "tokens": c.prompt_tokens}
-                for c in calls_with_tokens
+                {"step": c.step_index, "tokens": c.prompt_tokens} for c in calls_with_tokens
             ],
         }
         if state.baseline_p75_token_growth is not None:
@@ -506,6 +520,7 @@ class ContextBloatDetector(BaseDetector):
 
 # ── SLOW_STEP ──────────────────────────────────────────────────────────────────
 
+
 class SlowStepDetector(BaseDetector):
     """
     Any single step takes longer than a type-specific threshold. Thresholds are set by what
@@ -517,12 +532,13 @@ class SlowStepDetector(BaseDetector):
     matching prefix wins; the empty-string entry is a catch-all and must stay last.
     Default: [("tool.called", 15_000, ...), ("llm.called", 30_000, ...), ("", 60_000, ...)].
     """
+
     name = "SLOW_STEP"
 
     THRESHOLDS = [
         ("tool.called", 15_000, "tool execution"),
-        ("llm.called",  30_000, "LLM call"),
-        ("",            60_000, "step"),
+        ("llm.called", 30_000, "LLM call"),
+        ("", 60_000, "step"),
     ]
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
@@ -541,18 +557,18 @@ class SlowStepDetector(BaseDetector):
         if not state.step_durations_ms or not state.events:
             return None
 
-        worst_step_idx   = None
-        worst_duration   = 0
-        worst_threshold  = 1
-        worst_label      = "step"
+        worst_step_idx = None
+        worst_duration = 0
+        worst_threshold = 1
+        worst_label = "step"
         worst_event_type = ""
 
         # Exclude external.signal events — they share the step_index of the
         # agent event they annotate and must not overwrite its event_type or
         # timestamp in the lookup dicts.
-        agent_events    = [e for e in state.events if e.event_type is not EventType.EXTERNAL_SIGNAL]
+        agent_events = [e for e in state.events if e.event_type is not EventType.EXTERNAL_SIGNAL]
         step_event_type = {e.step_index: e.event_type.value for e in agent_events}
-        step_timestamp  = {e.step_index: e.timestamp       for e in agent_events}
+        step_timestamp = {e.step_index: e.timestamp for e in agent_events}
 
         for step_idx, duration_ms in state.step_durations_ms.items():
             event_type = step_event_type.get(step_idx, "")
@@ -561,35 +577,41 @@ class SlowStepDetector(BaseDetector):
             if duration_ms > threshold_ms:
                 ratio = duration_ms / threshold_ms
                 if ratio > (worst_duration / max(worst_threshold, 1)):
-                    worst_step_idx   = step_idx
-                    worst_duration   = duration_ms
-                    worst_threshold  = threshold_ms
-                    worst_label      = label
+                    worst_step_idx = step_idx
+                    worst_duration = duration_ms
+                    worst_threshold = threshold_ms
+                    worst_label = label
                     worst_event_type = event_type
 
         if worst_step_idx is None:
             return None
 
-        ratio    = worst_duration / worst_threshold
+        ratio = worst_duration / worst_threshold
         severity = Severity.HIGH if ratio >= 5 else Severity.MEDIUM
 
         evidence: dict = {
-            "step_index":   worst_step_idx,
-            "duration_ms":  worst_duration,
+            "step_index": worst_step_idx,
+            "duration_ms": worst_duration,
             "threshold_ms": worst_threshold,
-            "event_type":   worst_event_type,
-            "step_label":   worst_label,
-            "ratio":        round(ratio, 1),
+            "event_type": worst_event_type,
+            "step_label": worst_label,
+            "ratio": round(ratio, 1),
             "all_slow_steps": {
-                k: v for k, v in state.step_durations_ms.items()
+                k: v
+                for k, v in state.step_durations_ms.items()
                 if v > self._threshold_for(step_event_type.get(k, ""), state)[0]
             },
         }
 
         # Include the raw P75 baseline so dashboards can show what normal looks like.
-        if worst_event_type.startswith("tool.called") and state.baseline_p75_latency_tool is not None:
+        if (
+            worst_event_type.startswith("tool.called")
+            and state.baseline_p75_latency_tool is not None
+        ):
             evidence["baseline_p75"] = round(state.baseline_p75_latency_tool, 1)
-        elif worst_event_type.startswith("llm.called") and state.baseline_p75_latency_llm is not None:
+        elif (
+            worst_event_type.startswith("llm.called") and state.baseline_p75_latency_llm is not None
+        ):
             evidence["baseline_p75"] = round(state.baseline_p75_latency_llm, 1)
 
         # Correlate with external signals that occurred during the slow step.
@@ -597,13 +619,17 @@ class SlowStepDetector(BaseDetector):
         # [step_start, step_start + duration].
         if state.external_signals:
             step_start = step_timestamp.get(worst_step_idx, 0.0)
-            step_end   = step_start + worst_duration / 1000.0
+            step_end = step_start + worst_duration / 1000.0
             coincident = [
-                {k: v for k, v in [
-                    ("signal_name", sig.signal_name),
-                    ("source",      sig.source),
-                    ("meta",        sig.meta or None),
-                ] if v}
+                {
+                    k: v
+                    for k, v in [
+                        ("signal_name", sig.signal_name),
+                        ("source", sig.source),
+                        ("meta", sig.meta or None),
+                    ]
+                    if v
+                }
                 for sig in state.external_signals
                 if step_start <= sig.timestamp <= step_end
             ]
@@ -624,6 +650,7 @@ class SlowStepDetector(BaseDetector):
 
 # ── RETRY_STORM ───────────────────────────────────────────────────────────────
 
+
 class RetryStormDetector(BaseDetector):
     """
     Same tool called THRESHOLD or more times in a row, all returning success=False.
@@ -638,15 +665,16 @@ class RetryStormDetector(BaseDetector):
     Tunable: THRESHOLD (default 3). Lower to catch dependency failures faster; raise for agents
     with built-in retry logic where 2 failures before escalation are expected.
     """
-    name      = "RETRY_STORM"
+
+    name = "RETRY_STORM"
     THRESHOLD = 3
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.tool_calls) < self.THRESHOLD:
             return None
 
-        best_tool   = None
-        best_count  = 0
+        best_tool = None
+        best_count = 0
         best_streak: list = []
 
         i = len(state.tool_calls) - 1
@@ -656,16 +684,20 @@ class RetryStormDetector(BaseDetector):
                 i -= 1
                 continue
 
-            tool   = tc.tool_name
-            j      = i
+            tool = tc.tool_name
+            j = i
             streak = []
-            while j >= 0 and state.tool_calls[j].tool_name == tool and state.tool_calls[j].success is False:
+            while (
+                j >= 0
+                and state.tool_calls[j].tool_name == tool
+                and state.tool_calls[j].success is False
+            ):
                 streak.append(state.tool_calls[j])
                 j -= 1
 
             if len(streak) >= self.THRESHOLD and len(streak) > best_count:
-                best_count  = len(streak)
-                best_tool   = tool
+                best_count = len(streak)
+                best_tool = tool
                 best_streak = streak  # ordered newest-first
 
             i = j - 1
@@ -676,7 +708,7 @@ class RetryStormDetector(BaseDetector):
         # Analyse the streak for args identity and failure reason identity.
         # streak is newest-first; reverse for chronological ordering in evidence.
         best_streak.reverse()
-        args_hashes  = [tc.args_hash  for tc in best_streak]
+        args_hashes = [tc.args_hash for tc in best_streak]
         error_hashes = [tc.error_hash for tc in best_streak]
 
         # Self-correction check: if the tool subsequently succeeded after the streak,
@@ -689,9 +721,9 @@ class RetryStormDetector(BaseDetector):
         if recovered:
             return None
 
-        args_identical    = len(set(args_hashes)) == 1
-        all_have_reason   = all(h is not None for h in error_hashes)
-        reason_identical  = all_have_reason and len(set(error_hashes)) == 1
+        args_identical = len(set(args_hashes)) == 1
+        all_have_reason = all(h is not None for h in error_hashes)
+        reason_identical = all_have_reason and len(set(error_hashes)) == 1
         failure_reason_hash = error_hashes[0] if reason_identical else None
 
         return FailureSignal(
@@ -703,20 +735,21 @@ class RetryStormDetector(BaseDetector):
             step_index=state.current_step,
             confidence=_scale_confidence(best_count / self.THRESHOLD),
             evidence={
-                "tool":                best_tool,
-                "consecutive_fails":   best_count,
-                "threshold":           self.THRESHOLD,
-                "first_fail_step":     best_streak[0].step_index,
-                "step_indices":        [tc.step_index for tc in best_streak],
-                "args_identical":      args_identical,
-                "error_hashes":        error_hashes,
+                "tool": best_tool,
+                "consecutive_fails": best_count,
+                "threshold": self.THRESHOLD,
+                "first_fail_step": best_streak[0].step_index,
+                "step_indices": [tc.step_index for tc in best_streak],
+                "args_identical": args_identical,
+                "error_hashes": error_hashes,
                 "failure_reason_hash": failure_reason_hash,
-                "reason_identical":    reason_identical,
+                "reason_identical": reason_identical,
             },
         )
 
 
 # ── EMPTY_LLM_RESPONSE ─────────────────────────────────────────────────────────
+
 
 class EmptyLlmResponseDetector(BaseDetector):
     """
@@ -725,13 +758,14 @@ class EmptyLlmResponseDetector(BaseDetector):
     silently produces a blank answer. High precision — a legitimate zero-length stop
     response is effectively impossible in normal operation. No tunable parameters.
     """
+
     name = "EMPTY_LLM_RESPONSE"
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         empty = [
-            c for c in state.llm_calls
-            if c.finish_reason == "stop"
-            and getattr(c, "output_length", None) == 0
+            c
+            for c in state.llm_calls
+            if c.finish_reason == "stop" and getattr(c, "output_length", None) == 0
         ]
         if not empty:
             return None
@@ -746,14 +780,15 @@ class EmptyLlmResponseDetector(BaseDetector):
             step_index=first.step_index,
             confidence=0.95,
             evidence={
-                "occurrences":   len(empty),
-                "first_step":    first.step_index,
+                "occurrences": len(empty),
+                "first_step": first.step_index,
                 "finish_reason": "stop",
             },
         )
 
 
 # ── STEP_COUNT_INFLATION ───────────────────────────────────────────────────────
+
 
 class StepCountInflationDetector(BaseDetector):
     """
@@ -765,7 +800,8 @@ class StepCountInflationDetector(BaseDetector):
     raise for research agents with high step variance (2.5–3.0) or lower for coding agents
     with tight, predictable step counts (1.5).
     """
-    name             = "STEP_COUNT_INFLATION"
+
+    name = "STEP_COUNT_INFLATION"
     INFLATION_FACTOR = 2.0
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
@@ -788,15 +824,16 @@ class StepCountInflationDetector(BaseDetector):
             step_index=state.current_step,
             confidence=_scale_confidence(state.current_step / effective_threshold),
             evidence={
-                "current_steps":    state.current_step,
-                "baseline_p75":     round(state.baseline_p75_steps, 1),
-                "inflation_ratio":  round(ratio, 2),
+                "current_steps": state.current_step,
+                "baseline_p75": round(state.baseline_p75_steps, 1),
+                "inflation_ratio": round(ratio, 2),
                 "threshold_factor": self.INFLATION_FACTOR,
             },
         )
 
 
 # ── CASCADING_TOOL_FAILURE ─────────────────────────────────────────────────────
+
 
 class CascadingToolFailureDetector(BaseDetector):
     """
@@ -808,7 +845,8 @@ class CascadingToolFailureDetector(BaseDetector):
     Tunable: THRESHOLD (default 3). Raise for agents that handle partial dependency failures
     gracefully where 2 consecutive failures before recovery are expected.
     """
-    name      = "CASCADING_TOOL_FAILURE"
+
+    name = "CASCADING_TOOL_FAILURE"
     THRESHOLD = 3
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
@@ -840,14 +878,15 @@ class CascadingToolFailureDetector(BaseDetector):
             confidence=_scale_confidence(len(failed_run) / self.THRESHOLD),
             evidence={
                 "consecutive_failures": len(failed_run),
-                "distinct_tools":       sorted(distinct_tools),
-                "threshold":            self.THRESHOLD,
-                "first_fail_step":      first_fail_step,
+                "distinct_tools": sorted(distinct_tools),
+                "threshold": self.THRESHOLD,
+                "first_fail_step": first_fail_step,
             },
         )
 
 
 # ── FIRST_STEP_FAILURE ─────────────────────────────────────────────────────────
+
 
 class FirstStepFailureDetector(BaseDetector):
     """
@@ -859,7 +898,8 @@ class FirstStepFailureDetector(BaseDetector):
     Tunable: MAX_STEP (default 2). Raise for agents with a longer init sequence (auth + warmup
     before the first real tool call).
     """
-    name     = "FIRST_STEP_FAILURE"
+
+    name = "FIRST_STEP_FAILURE"
     MAX_STEP = 2
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
@@ -873,14 +913,15 @@ class FirstStepFailureDetector(BaseDetector):
                 step_index=state.current_step,
                 confidence=0.90,
                 evidence={
-                    "trigger":     "run_errored",
+                    "trigger": "run_errored",
                     "failed_step": state.current_step,
-                    "max_step":    self.MAX_STEP,
+                    "max_step": self.MAX_STEP,
                 },
             )
 
         early_empty = [
-            c for c in state.llm_calls
+            c
+            for c in state.llm_calls
             if c.step_index <= self.MAX_STEP
             and getattr(c, "output_length", None) == 0
             and c.finish_reason == "stop"
@@ -895,15 +936,14 @@ class FirstStepFailureDetector(BaseDetector):
                 step_index=early_empty[0].step_index,
                 confidence=0.88,
                 evidence={
-                    "trigger":     "empty_llm_response",
+                    "trigger": "empty_llm_response",
                     "failed_step": early_empty[0].step_index,
-                    "max_step":    self.MAX_STEP,
+                    "max_step": self.MAX_STEP,
                 },
             )
 
         early_fail = [
-            tc for tc in state.tool_calls
-            if tc.step_index <= self.MAX_STEP and tc.success is False
+            tc for tc in state.tool_calls if tc.step_index <= self.MAX_STEP and tc.success is False
         ]
         if early_fail:
             return FailureSignal(
@@ -915,10 +955,10 @@ class FirstStepFailureDetector(BaseDetector):
                 step_index=early_fail[0].step_index,
                 confidence=0.85,
                 evidence={
-                    "trigger":     "tool_failure",
+                    "trigger": "tool_failure",
                     "failed_step": early_fail[0].step_index,
-                    "tool":        early_fail[0].tool_name,
-                    "max_step":    self.MAX_STEP,
+                    "tool": early_fail[0].tool_name,
+                    "max_step": self.MAX_STEP,
                 },
             )
 
@@ -926,6 +966,7 @@ class FirstStepFailureDetector(BaseDetector):
 
 
 # ── REASONING_SPIN ─────────────────────────────────────────────────────────────
+
 
 class ReasoningSpinDetector(BaseDetector):
     """
@@ -940,9 +981,10 @@ class ReasoningSpinDetector(BaseDetector):
     RATIO_THRESHOLD (default 4.0) — LLM calls / tool calls. Raise for agents with intentional
     multi-step chain-of-thought designs where high ratios are expected.
     """
-    name             = "REASONING_STALL"
-    MIN_LLM_CALLS    = 5
-    RATIO_THRESHOLD  = 4.0
+
+    name = "REASONING_STALL"
+    MIN_LLM_CALLS = 5
+    RATIO_THRESHOLD = 4.0
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
@@ -950,7 +992,7 @@ class ReasoningSpinDetector(BaseDetector):
         if state.exit_reason == "error":
             return None
 
-        llm_count  = len(state.llm_calls)
+        llm_count = len(state.llm_calls)
         tool_count = len(state.tool_calls)
 
         if llm_count < self.MIN_LLM_CALLS:
@@ -971,20 +1013,21 @@ class ReasoningSpinDetector(BaseDetector):
         severity = Severity.MEDIUM if state.exit_reason == "final_answer" else Severity.HIGH
 
         action_events = [
-            e for e in state.events
-            if e.event_type.value.startswith("llm.called") or e.event_type.value.startswith("tool.called")
+            e
+            for e in state.events
+            if e.event_type.value.startswith("llm.called")
+            or e.event_type.value.startswith("tool.called")
         ]
         event_sequence = [
-            "llm" if e.event_type.value.startswith("llm.") else "tool"
-            for e in action_events
+            "llm" if e.event_type.value.startswith("llm.") else "tool" for e in action_events
         ]
 
         evidence: dict = {
-            "llm_calls":      llm_count,
-            "tool_calls":     tool_count,
-            "ratio":          round(ratio, 2),
-            "threshold":      round(effective_threshold, 2),
-            "exit_reason":    state.exit_reason,
+            "llm_calls": llm_count,
+            "tool_calls": tool_count,
+            "ratio": round(ratio, 2),
+            "threshold": round(effective_threshold, 2),
+            "exit_reason": state.exit_reason,
             "event_sequence": event_sequence,
         }
         if state.baseline_p75_llm_tool_ratio is not None:
@@ -1004,6 +1047,7 @@ class ReasoningSpinDetector(BaseDetector):
 
 # ── COST_SPIKE ────────────────────────────────────────────────────────────────
 
+
 class CostSpikeDetector(BaseDetector):
     """
     Total token consumption (prompt + completion) for this run is unusually high
@@ -1016,18 +1060,18 @@ class CostSpikeDetector(BaseDetector):
     STATIC_THRESHOLD_TOKENS (default 50 000) — fallback when no baseline is available.
     MIN_LLM_CALLS (default 1) — skip runs with no LLM activity.
     """
-    name                    = "COST_SPIKE"
-    INFLATION_FACTOR        = 3.0
+
+    name = "COST_SPIKE"
+    INFLATION_FACTOR = 3.0
     STATIC_THRESHOLD_TOKENS = 50_000
-    MIN_LLM_CALLS           = 1
+    MIN_LLM_CALLS = 1
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.llm_calls) < self.MIN_LLM_CALLS:
             return None
 
         total_tokens = sum(
-            (c.prompt_tokens or 0) + (c.completion_tokens or 0)
-            for c in state.llm_calls
+            (c.prompt_tokens or 0) + (c.completion_tokens or 0) for c in state.llm_calls
         )
         if total_tokens == 0:
             return None
@@ -1042,10 +1086,10 @@ class CostSpikeDetector(BaseDetector):
 
         ratio = total_tokens / max(threshold, 1)
         evidence: dict = {
-            "total_tokens":   total_tokens,
-            "threshold":      int(threshold),
+            "total_tokens": total_tokens,
+            "threshold": int(threshold),
             "inflation_ratio": round(ratio, 2),
-            "llm_calls":      len(state.llm_calls),
+            "llm_calls": len(state.llm_calls),
         }
         if state.baseline_p75_total_tokens is not None:
             evidence["baseline_p75"] = int(state.baseline_p75_total_tokens)
@@ -1064,6 +1108,7 @@ class CostSpikeDetector(BaseDetector):
 
 # ── SESSION_LATENCY ───────────────────────────────────────────────────────────
 
+
 class SessionLatencyDetector(BaseDetector):
     """
     Total wall-clock run duration is unusually high compared to the agent's own P75 baseline.
@@ -1075,10 +1120,11 @@ class SessionLatencyDetector(BaseDetector):
     STATIC_THRESHOLD_SECS (default 300) — fallback threshold when no baseline exists (5 min).
     MIN_EVENTS (default 2) — need at least two events to compute a duration.
     """
-    name                   = "SESSION_LATENCY"
-    INFLATION_FACTOR       = 3.0
-    STATIC_THRESHOLD_SECS  = 300
-    MIN_EVENTS             = 2
+
+    name = "SESSION_LATENCY"
+    INFLATION_FACTOR = 3.0
+    STATIC_THRESHOLD_SECS = 300
+    MIN_EVENTS = 2
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.events) < self.MIN_EVENTS:
@@ -1100,8 +1146,8 @@ class SessionLatencyDetector(BaseDetector):
 
         ratio = duration_s / max(threshold, 1)
         evidence: dict = {
-            "duration_s":     round(duration_s, 1),
-            "threshold_s":    round(threshold, 1),
+            "duration_s": round(duration_s, 1),
+            "threshold_s": round(threshold, 1),
             "inflation_ratio": round(ratio, 2),
         }
         if state.baseline_p75_duration_s is not None:

@@ -2,6 +2,7 @@
 The object returned by `dt.run(...)`. Provides emit helpers like tool_called
 and llm_called, and builds up a RunState for local detection.
 """
+
 from __future__ import annotations
 
 import time
@@ -32,20 +33,20 @@ class RunContext:
 
     def __init__(
         self,
-        client:          "Dunetrace",
-        agent_id:        str,
-        agent_version:   str,
+        client: "Dunetrace",
+        agent_id: str,
+        agent_version: str,
         available_tools: list,
         input_text_hash: str,
-        parent_run_id:   Optional[str] = None,
-        run_id:          Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> None:
-        self._client       = client
-        self.run_id        = run_id or str(uuid.uuid4())
-        self.agent_id      = agent_id
+        self._client = client
+        self.run_id = run_id or str(uuid.uuid4())
+        self.agent_id = agent_id
         self.agent_version = agent_version
-        self.step          = 0
-        self.exit_reason:  Optional[str] = None
+        self.step = 0
+        self.exit_reason: Optional[str] = None
         self._parent_run_id = parent_run_id
 
         self.state = RunState(
@@ -57,84 +58,98 @@ class RunContext:
         )
 
         # Policy enforcement state
-        self.model_override:    str | None  = None  # set by switch_model action
-        self.prompt_additions:  list        = []    # appended by inject_prompt action
-        self._triggered_policies: set       = set() # policy keys fired in this run
+        self.model_override: str | None = None  # set by switch_model action
+        self.prompt_additions: list = []  # appended by inject_prompt action
+        self._triggered_policies: set = set()  # policy keys fired in this run
 
     # ── LLM hooks ─────────────────────────────────────────────────────────────
 
     def llm_called(self, model: str, prompt_tokens: int = 0) -> None:
-        self.state.llm_calls.append(LlmCall(
-            model=model,
-            prompt_tokens=prompt_tokens,
-            finish_reason=None,
-            latency_ms=None,
-            step_index=self.step,
-            timestamp=time.time(),
-        ))
-        self._emit(EventType.LLM_CALLED, {
-            "model":         model,
-            "prompt_tokens": prompt_tokens,
-        })
+        self.state.llm_calls.append(
+            LlmCall(
+                model=model,
+                prompt_tokens=prompt_tokens,
+                finish_reason=None,
+                latency_ms=None,
+                step_index=self.step,
+                timestamp=time.time(),
+            )
+        )
+        self._emit(
+            EventType.LLM_CALLED,
+            {
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+            },
+        )
 
     def llm_responded(
         self,
         completion_tokens: int = 0,
-        latency_ms:        int = 0,
-        finish_reason:     str = "stop",
-        output_hash:       str = "",
-        output_length:     int = 0,
+        latency_ms: int = 0,
+        finish_reason: str = "stop",
+        output_hash: str = "",
+        output_length: int = 0,
     ) -> None:
         # Back-fill the most recent LlmCall with response data.
         if self.state.llm_calls:
             lc = self.state.llm_calls[-1]
-            lc.finish_reason      = finish_reason
-            lc.latency_ms         = latency_ms
-            lc.output_length      = output_length
-            lc.completion_tokens  = completion_tokens or None
-        self._emit(EventType.LLM_RESPONDED, {
-            "completion_tokens": completion_tokens,
-            "latency_ms":        latency_ms,
-            "finish_reason":     finish_reason,
-            "output_hash":       output_hash,
-            "output_length":     output_length,
-        }, advance=False)
+            lc.finish_reason = finish_reason
+            lc.latency_ms = latency_ms
+            lc.output_length = output_length
+            lc.completion_tokens = completion_tokens or None
+        self._emit(
+            EventType.LLM_RESPONDED,
+            {
+                "completion_tokens": completion_tokens,
+                "latency_ms": latency_ms,
+                "finish_reason": finish_reason,
+                "output_hash": output_hash,
+                "output_length": output_length,
+            },
+            advance=False,
+        )
 
     # ── Tool hooks ────────────────────────────────────────────────────────────
 
     def tool_called(self, tool_name: str, args: Optional[Dict[str, Any]] = None) -> None:
         args_hash = hash_content(str(args or {}))
-        self.state.tool_calls.append(ToolCall(
-            tool_name=tool_name,
-            args_hash=args_hash,
-            step_index=self.step,
-            timestamp=time.time(),
-        ))
-        self._emit(EventType.TOOL_CALLED, {
-            "tool_name": tool_name,
-            "args_hash": args_hash,
-        })
+        self.state.tool_calls.append(
+            ToolCall(
+                tool_name=tool_name,
+                args_hash=args_hash,
+                step_index=self.step,
+                timestamp=time.time(),
+            )
+        )
+        self._emit(
+            EventType.TOOL_CALLED,
+            {
+                "tool_name": tool_name,
+                "args_hash": args_hash,
+            },
+        )
 
     def tool_responded(
         self,
-        tool_name:     str,
-        success:       bool = True,
-        output_length: int  = 0,
-        latency_ms:    int  = 0,
-        error:         Optional[str] = None,
+        tool_name: str,
+        success: bool = True,
+        output_length: int = 0,
+        latency_ms: int = 0,
+        error: Optional[str] = None,
     ) -> None:
         error_hash = hash_content(error) if (not success and error) else None
         # Back-fill success and error_hash on the most recent matching ToolCall
         for tc in reversed(self.state.tool_calls):
             if tc.tool_name == tool_name and tc.success is None:
-                tc.success    = success
+                tc.success = success
                 tc.error_hash = error_hash
                 break
         payload: dict = {
-            "tool_name":     tool_name,
-            "success":       success,
+            "tool_name": tool_name,
+            "success": success,
             "output_length": output_length,
-            "latency_ms":    latency_ms,
+            "latency_ms": latency_ms,
         }
         if error_hash:
             payload["error_hash"] = error_hash
@@ -143,30 +158,39 @@ class RunContext:
     # ── Retrieval hooks (RAG) ─────────────────────────────────────────────────
 
     def retrieval_called(self, index_name: str, query_hash: str = "") -> None:
-        self._emit(EventType.RETRIEVAL_CALLED, {
-            "index_name": index_name,
-            "query_hash": query_hash,
-        })
+        self._emit(
+            EventType.RETRIEVAL_CALLED,
+            {
+                "index_name": index_name,
+                "query_hash": query_hash,
+            },
+        )
 
     def retrieval_responded(
         self,
-        index_name:   str,
+        index_name: str,
         result_count: int,
-        top_score:    Optional[float] = None,
-        latency_ms:   int = 0,
+        top_score: Optional[float] = None,
+        latency_ms: int = 0,
     ) -> None:
-        self.state.retrievals.append(RetrievalResult(
-            index_name=index_name,
-            result_count=result_count,
-            top_score=top_score,
-            step_index=self.step,
-        ))
-        self._emit(EventType.RETRIEVAL_RESPONDED, {
-            "index_name":   index_name,
-            "result_count": result_count,
-            "top_score":    top_score,
-            "latency_ms":   latency_ms,
-        }, advance=False)
+        self.state.retrievals.append(
+            RetrievalResult(
+                index_name=index_name,
+                result_count=result_count,
+                top_score=top_score,
+                step_index=self.step,
+            )
+        )
+        self._emit(
+            EventType.RETRIEVAL_RESPONDED,
+            {
+                "index_name": index_name,
+                "result_count": result_count,
+                "top_score": top_score,
+                "latency_ms": latency_ms,
+            },
+            advance=False,
+        )
 
     # ── External signal hooks ─────────────────────────────────────────────────
 
@@ -184,13 +208,15 @@ class RunContext:
         "tool took 100s — coincided with rate_limit from openai" rather than just "tool took 100s".
         """
         ts = time.time()
-        self.state.external_signals.append(ExternalSignal(
-            signal_name=signal_name,
-            step_index=self.step,
-            timestamp=ts,
-            source=source,
-            meta=dict(meta),
-        ))
+        self.state.external_signals.append(
+            ExternalSignal(
+                signal_name=signal_name,
+                step_index=self.step,
+                timestamp=ts,
+                source=source,
+                meta=dict(meta),
+            )
+        )
         payload: dict = {"signal_name": signal_name}
         if source:
             payload["source"] = source
@@ -216,7 +242,7 @@ class RunContext:
 
     def final_answer(self) -> None:
         """Call when the agent produces its final answer."""
-        self.exit_reason       = "final_answer"
+        self.exit_reason = "final_answer"
         self.state.exit_reason = "final_answer"
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -245,6 +271,7 @@ class RunContext:
             )
         if needs_signal:
             from dunetrace.detectors import run_detectors
+
             sigs = run_detectors(self.state)
             metrics["signal"] = [s.failure_type.value for s in sigs] if sigs else []
 
@@ -254,20 +281,27 @@ class RunContext:
 
         policy, action = result
         action_type = action.get("type", "log")
-        params       = action.get("params") or {}
+        params = action.get("params") or {}
 
         # Emit a policy.triggered event for all action types
-        self._emit(EventType.POLICY_TRIGGERED, {
-            "policy_name": policy.name,
-            "action_type": action_type,
-            "trigger":     policy.condition.get("trigger"),
-            "value":       metrics.get(policy.condition.get("trigger", "")),
-        }, advance=False)
+        self._emit(
+            EventType.POLICY_TRIGGERED,
+            {
+                "policy_name": policy.name,
+                "action_type": action_type,
+                "trigger": policy.condition.get("trigger"),
+                "value": metrics.get(policy.condition.get("trigger", "")),
+            },
+            advance=False,
+        )
 
         if action_type == "stop":
             self._triggered_policies.add(policy.key)
-            raise PolicyViolation(policy.name, action,
-                params.get("message", f"Policy '{policy.name}' stopped the run"))
+            raise PolicyViolation(
+                policy.name,
+                action,
+                params.get("message", f"Policy '{policy.name}' stopped the run"),
+            )
 
         elif action_type == "switch_model":
             model = params.get("model")
@@ -285,8 +319,12 @@ class RunContext:
 
         elif action_type == "log":
             # Log policies fire every time; don't add to triggered_already
-            logger.info("Policy '%s' logged: %s=%s", policy.name,
-                        policy.condition.get("trigger"), metrics.get(policy.condition.get("trigger", "")))
+            logger.info(
+                "Policy '%s' logged: %s=%s",
+                policy.name,
+                policy.condition.get("trigger"),
+                metrics.get(policy.condition.get("trigger", "")),
+            )
 
     def _emit(self, event_type: EventType, payload: dict, *, advance: bool = True) -> None:
         if advance:

@@ -2,6 +2,7 @@
 SDK client. No external dependencies.
 All network I/O runs on a background drain thread so the agent is never blocked.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -50,25 +51,25 @@ class Dunetrace:
 
     def __init__(
         self,
-        endpoint:          str           = "http://localhost:8001",
-        api_key:           Optional[str] = None,
+        endpoint: str = "http://localhost:8001",
+        api_key: Optional[str] = None,
         *,
-        buffer_size:       int  = 10_000,
-        flush_interval_ms: int  = 200,
-        emit_as_json:      bool = False,
-        otel_exporter:     Optional[object] = None,
-        debug:             bool = False,
+        buffer_size: int = 10_000,
+        flush_interval_ms: int = 200,
+        emit_as_json: bool = False,
+        otel_exporter: Optional[object] = None,
+        debug: bool = False,
     ) -> None:
-        self._ingest_url        = endpoint.rstrip("/") + "/v1/ingest" if endpoint else None
-        self._api_key           = api_key or ""
-        self._buffer            = RingBuffer[AgentEvent](maxsize=buffer_size)
-        self._stop_evt          = Event()
-        self._flush_interval    = flush_interval_ms / 1000.0
-        self._emit_json         = emit_as_json
-        self._otel_exporter     = otel_exporter   # DunetraceOTelExporter or None
-        self._stdout_lock       = Lock()  # one JSON line per write, no interleaving
-        self._default_agent_id  = ""      # set by init()
-        self._policy_engine     = PolicyEngine()
+        self._ingest_url = endpoint.rstrip("/") + "/v1/ingest" if endpoint else None
+        self._api_key = api_key or ""
+        self._buffer = RingBuffer[AgentEvent](maxsize=buffer_size)
+        self._stop_evt = Event()
+        self._flush_interval = flush_interval_ms / 1000.0
+        self._emit_json = emit_as_json
+        self._otel_exporter = otel_exporter  # DunetraceOTelExporter or None
+        self._stdout_lock = Lock()  # one JSON line per write, no interleaving
+        self._default_agent_id = ""  # set by init()
+        self._policy_engine = PolicyEngine()
 
         if debug:
             logging.basicConfig(level=logging.DEBUG)
@@ -83,7 +84,9 @@ class Dunetrace:
         self._drain_thread.start()
         logger.debug(
             "Dunetrace started. endpoint=%s emit_as_json=%s otel=%s",
-            endpoint, emit_as_json, otel_exporter is not None,
+            endpoint,
+            emit_as_json,
+            otel_exporter is not None,
         )
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -91,12 +94,12 @@ class Dunetrace:
     @contextmanager
     def run(
         self,
-        agent_id:      str,
+        agent_id: str,
         *,
-        user_input:    str = "",
+        user_input: str = "",
         system_prompt: str = "",
-        model:         str = "unknown",
-        tools:         Optional[List[str]] = None,
+        model: str = "unknown",
+        tools: Optional[List[str]] = None,
         parent_run_id: Optional[str] = None,
     ):
         """
@@ -105,9 +108,9 @@ class Dunetrace:
         Emits ``run.started`` on enter, ``run.completed`` on clean exit,
         and ``run.errored`` if an exception escapes the block.
         """
-        tools   = tools or []
+        tools = tools or []
         version = agent_version(system_prompt, model, tools)
-        ctx     = RunContext(
+        ctx = RunContext(
             client=self,
             agent_id=agent_id,
             agent_version=version,
@@ -126,21 +129,23 @@ class Dunetrace:
 
         payload: dict = {
             "input_hash": hash_content(user_input) if user_input else "",
-            "model":      model,
-            "tools":      tools,
+            "model": model,
+            "tools": tools,
         }
         if _injection_evidence:
             payload["injection_signal"] = _injection_evidence
 
-        self._emit(AgentEvent(
-            event_type=EventType.RUN_STARTED,
-            run_id=ctx.run_id,
-            agent_id=agent_id,
-            agent_version=version,
-            step_index=0,
-            parent_run_id=parent_run_id,
-            payload=payload,
-        ))
+        self._emit(
+            AgentEvent(
+                event_type=EventType.RUN_STARTED,
+                run_id=ctx.run_id,
+                agent_id=agent_id,
+                agent_version=version,
+                step_index=0,
+                parent_run_id=parent_run_id,
+                payload=payload,
+            )
+        )
 
         # Fetch remote policies in a background thread so run start isn't delayed.
         if self._ingest_url and self._api_key and self._policy_engine.needs_fetch(agent_id):
@@ -153,63 +158,69 @@ class Dunetrace:
             ctx.state.current_step = ctx.step
             if self._otel_exporter is not None:
                 self._otel_exporter.notify_run_state(ctx.run_id, ctx.state)
-            self._emit(AgentEvent(
-                event_type=EventType.RUN_COMPLETED,
-                run_id=ctx.run_id,
-                agent_id=agent_id,
-                agent_version=version,
-                step_index=ctx.step,
-                payload={
-                    "total_steps":     ctx.step,
-                    "exit_reason":     ctx.exit_reason or "completed",
-                    "tool_call_count": len(ctx.state.tool_calls),
-                },
-            ))
+            self._emit(
+                AgentEvent(
+                    event_type=EventType.RUN_COMPLETED,
+                    run_id=ctx.run_id,
+                    agent_id=agent_id,
+                    agent_version=version,
+                    step_index=ctx.step,
+                    payload={
+                        "total_steps": ctx.step,
+                        "exit_reason": ctx.exit_reason or "completed",
+                        "tool_call_count": len(ctx.state.tool_calls),
+                    },
+                )
+            )
         except PolicyViolation as exc:
             ctx.state.current_step = ctx.step
-            ctx.state.exit_reason  = "policy_violation"
+            ctx.state.exit_reason = "policy_violation"
             if self._otel_exporter is not None:
                 self._otel_exporter.notify_run_state(ctx.run_id, ctx.state)
-            self._emit(AgentEvent(
-                event_type=EventType.RUN_ERRORED,
-                run_id=ctx.run_id,
-                agent_id=agent_id,
-                agent_version=version,
-                step_index=ctx.step,
-                payload={
-                    "error_type":  "PolicyViolation",
-                    "error_hash":  hash_content(str(exc)),
-                    "exit_reason": "policy_violation",
-                    "policy_name": exc.policy_name,
-                    "step_index":  ctx.step,
-                },
-            ))
+            self._emit(
+                AgentEvent(
+                    event_type=EventType.RUN_ERRORED,
+                    run_id=ctx.run_id,
+                    agent_id=agent_id,
+                    agent_version=version,
+                    step_index=ctx.step,
+                    payload={
+                        "error_type": "PolicyViolation",
+                        "error_hash": hash_content(str(exc)),
+                        "exit_reason": "policy_violation",
+                        "policy_name": exc.policy_name,
+                        "step_index": ctx.step,
+                    },
+                )
+            )
             raise
         except Exception as exc:
             ctx.state.current_step = ctx.step
-            ctx.state.exit_reason  = "error"
+            ctx.state.exit_reason = "error"
             if self._otel_exporter is not None:
                 self._otel_exporter.notify_run_state(ctx.run_id, ctx.state)
-            self._emit(AgentEvent(
-                event_type=EventType.RUN_ERRORED,
-                run_id=ctx.run_id,
-                agent_id=agent_id,
-                agent_version=version,
-                step_index=ctx.step,
-                payload={
-                    "error_type": type(exc).__name__,
-                    "error_hash": hash_content(str(exc)),
-                    "step_index": ctx.step,
-                },
-            ))
+            self._emit(
+                AgentEvent(
+                    event_type=EventType.RUN_ERRORED,
+                    run_id=ctx.run_id,
+                    agent_id=agent_id,
+                    agent_version=version,
+                    step_index=ctx.step,
+                    payload={
+                        "error_type": type(exc).__name__,
+                        "error_hash": hash_content(str(exc)),
+                        "step_index": ctx.step,
+                    },
+                )
+            )
             raise
         finally:
             _current_run.reset(_token)
 
     def init(
         self,
-        agent_id:   str                    = "",
-        frameworks: Optional[List[str]]    = None,
+        agent_id: str = "",
+        frameworks: Optional[List[str]] = None,
     ) -> "Dunetrace":
         """
         Primary entry point. Patches supported AI/HTTP clients globally and
@@ -237,6 +248,7 @@ class Dunetrace:
         """
         self._default_agent_id = agent_id
         from dunetrace.auto import auto_instrument as _auto_instrument
+
         _auto_instrument(frameworks=frameworks)
         logger.debug("Dunetrace.init() agent_id=%r frameworks=%r", agent_id, frameworks)
         return self
@@ -262,17 +274,18 @@ class Dunetrace:
                 response = openai_client.chat.completions.create(...)
         """
         from dunetrace.auto import auto_instrument as _auto_instrument
+
         _auto_instrument(frameworks=frameworks)
 
     def add_policy(
         self,
-        name:      str,
+        name: str,
         condition: dict,
-        action:    dict,
+        action: dict,
         *,
-        agent_id:  str = "*",
-        priority:  int = 100,
-        enabled:   bool = True,
+        agent_id: str = "*",
+        priority: int = 100,
+        enabled: bool = True,
     ) -> Policy:
         """
         Register a runtime policy that fires mid-run when the condition is met.
@@ -309,8 +322,12 @@ class Dunetrace:
             enabled=enabled,
         )
         self._policy_engine.add(policy)
-        logger.debug("Policy registered: %r trigger=%s action=%s",
-                     name, condition.get("trigger"), action.get("type"))
+        logger.debug(
+            "Policy registered: %r trigger=%s action=%s",
+            name,
+            condition.get("trigger"),
+            action.get("type"),
+        )
         return policy
 
     def _fetch_policies(self, agent_id: str) -> None:
@@ -329,7 +346,7 @@ class Dunetrace:
 
         try:
             base = self._ingest_url.replace("/v1/ingest", "")
-            url  = (
+            url = (
                 f"{base}/v1/policies"
                 f"?agent_id={urllib.request.quote(agent_id, safe='')}"
                 f"&api_key={urllib.request.quote(self._api_key, safe='')}"
@@ -337,6 +354,7 @@ class Dunetrace:
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=3) as resp:
                 import json as _json
+
                 data = _json.loads(resp.read())
                 self._policy_engine.load(data.get("policies", []))
         except Exception as exc:
@@ -344,12 +362,12 @@ class Dunetrace:
 
     def agent(
         self,
-        agent_id:      str = "",
+        agent_id: str = "",
         *,
-        model:         str              = "unknown",
-        tools:         Optional[List[str]] = None,
-        system_prompt: str              = "",
-        input_from:    Optional[str]    = None,
+        model: str = "unknown",
+        tools: Optional[List[str]] = None,
+        system_prompt: str = "",
+        input_from: Optional[str] = None,
     ) -> Callable:
         """
         Decorator that wraps a function in a ``dt.run()`` context.
@@ -388,6 +406,7 @@ class Dunetrace:
 
         def decorator(fn: Callable) -> Callable:
             if inspect.iscoroutinefunction(fn):
+
                 @functools.wraps(fn)
                 async def async_wrapper(*args, **kwargs):
                     user_input = _extract_input(fn, args, kwargs, input_from)
@@ -401,8 +420,10 @@ class Dunetrace:
                         result = await fn(*args, **kwargs)
                         run.final_answer()
                         return result
+
                 return async_wrapper
             else:
+
                 @functools.wraps(fn)
                 def sync_wrapper(*args, **kwargs):
                     user_input = _extract_input(fn, args, kwargs, input_from)
@@ -416,6 +437,7 @@ class Dunetrace:
                         result = fn(*args, **kwargs)
                         run.final_answer()
                         return result
+
                 return sync_wrapper
 
         return decorator
@@ -424,10 +446,10 @@ class Dunetrace:
         self,
         agent_id_or_fn: Union[str, Callable, None] = None,
         *,
-        model:         str              = "unknown",
-        tools:         Optional[List[str]] = None,
-        system_prompt: str              = "",
-        input_from:    Optional[str]    = None,
+        model: str = "unknown",
+        tools: Optional[List[str]] = None,
+        system_prompt: str = "",
+        input_from: Optional[str] = None,
     ) -> Callable:
         """
         Decorator that wraps a function in a ``dt.run()`` context.
@@ -448,15 +470,26 @@ class Dunetrace:
         # @dt.trace (no parens) — agent_id_or_fn is the decorated function
         if callable(agent_id_or_fn):
             fn = agent_id_or_fn
-            return self.agent(fn.__name__, model=model, tools=tools,
-                              system_prompt=system_prompt, input_from=input_from)(fn)
+            return self.agent(
+                fn.__name__,
+                model=model,
+                tools=tools,
+                system_prompt=system_prompt,
+                input_from=input_from,
+            )(fn)
 
         # @dt.trace("name") or @dt.trace(model="gpt-4o")
         _agent_id = agent_id_or_fn or ""
 
         def decorator(fn: Callable) -> Callable:
-            return self.agent(_agent_id or fn.__name__, model=model, tools=tools,
-                              system_prompt=system_prompt, input_from=input_from)(fn)
+            return self.agent(
+                _agent_id or fn.__name__,
+                model=model,
+                tools=tools,
+                system_prompt=system_prompt,
+                input_from=input_from,
+            )(fn)
+
         return decorator
 
     def tool(
@@ -482,8 +515,10 @@ class Dunetrace:
             @dt.tool
             async def fetch_page(url: str) -> str: ...    # async works identically
         """
+
         def _wrap(fn: Callable, tool_name: str) -> Callable:
             if inspect.iscoroutinefunction(fn):
+
                 @functools.wraps(fn)
                 async def async_wrapper(*args, **kwargs):
                     run = _current_run.get(None)
@@ -495,17 +530,25 @@ class Dunetrace:
                         result = await fn(*args, **kwargs)
                     except Exception as exc:
                         if run:
-                            run.tool_responded(tool_name, success=False,
-                                               latency_ms=int((time.time() - t0) * 1000),
-                                               error=str(exc))
+                            run.tool_responded(
+                                tool_name,
+                                success=False,
+                                latency_ms=int((time.time() - t0) * 1000),
+                                error=str(exc),
+                            )
                         raise
                     if run:
-                        run.tool_responded(tool_name, success=True,
-                                           output_length=len(str(result)),
-                                           latency_ms=int((time.time() - t0) * 1000))
+                        run.tool_responded(
+                            tool_name,
+                            success=True,
+                            output_length=len(str(result)),
+                            latency_ms=int((time.time() - t0) * 1000),
+                        )
                     return result
+
                 return async_wrapper
             else:
+
                 @functools.wraps(fn)
                 def sync_wrapper(*args, **kwargs):
                     run = _current_run.get(None)
@@ -517,15 +560,22 @@ class Dunetrace:
                         result = fn(*args, **kwargs)
                     except Exception as exc:
                         if run:
-                            run.tool_responded(tool_name, success=False,
-                                               latency_ms=int((time.time() - t0) * 1000),
-                                               error=str(exc))
+                            run.tool_responded(
+                                tool_name,
+                                success=False,
+                                latency_ms=int((time.time() - t0) * 1000),
+                                error=str(exc),
+                            )
                         raise
                     if run:
-                        run.tool_responded(tool_name, success=True,
-                                           output_length=len(str(result)),
-                                           latency_ms=int((time.time() - t0) * 1000))
+                        run.tool_responded(
+                            tool_name,
+                            success=True,
+                            output_length=len(str(result)),
+                            latency_ms=int((time.time() - t0) * 1000),
+                        )
                     return result
+
                 return sync_wrapper
 
         # @dt.tool (no parens) — name_or_fn is the function
@@ -534,14 +584,16 @@ class Dunetrace:
 
         # @dt.tool("name") — returns a decorator
         _tool_name = name_or_fn or ""
+
         def decorator(fn: Callable) -> Callable:
             return _wrap(fn, _tool_name or fn.__name__)
+
         return decorator
 
     def mark_deploy(
         self,
         agent_id: str,
-        version:  str,
+        version: str,
         **meta,
     ) -> None:
         """
@@ -568,13 +620,15 @@ class Dunetrace:
         ).start()
 
     def _ship_deploy(self, agent_id: str, version: str, meta: dict) -> None:
-        base    = self._ingest_url.replace("/v1/ingest", "")
-        payload = json.dumps({
-            "api_key":  self._api_key,
-            "agent_id": agent_id,
-            "version":  version,
-            "meta":     meta,
-        }).encode()
+        base = self._ingest_url.replace("/v1/ingest", "")
+        payload = json.dumps(
+            {
+                "api_key": self._api_key,
+                "agent_id": agent_id,
+                "version": version,
+                "meta": meta,
+            }
+        ).encode()
         req = urllib.request.Request(
             base + "/v1/deploy",
             data=payload,
@@ -583,8 +637,12 @@ class Dunetrace:
         )
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:
-                logger.debug("Deploy marked. agent_id=%s version=%s status=%d",
-                             agent_id, version, resp.status)
+                logger.debug(
+                    "Deploy marked. agent_id=%s version=%s status=%d",
+                    agent_id,
+                    version,
+                    resp.status,
+                )
         except Exception as exc:
             logger.warning("mark_deploy failed: %s", exc)
 
@@ -627,19 +685,17 @@ class Dunetrace:
         as Loki stream labels, run_id/step_index/payload as structured fields.
         payload contains hashes only — never raw content.
         """
-        ts = datetime.datetime.utcfromtimestamp(event.timestamp).strftime(
-            "%Y-%m-%dT%H:%M:%S.%fZ"
-        )
+        ts = datetime.datetime.utcfromtimestamp(event.timestamp).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         line = {
-            "ts":            ts,
-            "level":         "info",
-            "logger":        "dunetrace",
-            "event_type":    event.event_type.value,
-            "agent_id":      event.agent_id,
-            "run_id":        event.run_id,
+            "ts": ts,
+            "level": "info",
+            "logger": "dunetrace",
+            "event_type": event.event_type.value,
+            "agent_id": event.agent_id,
+            "run_id": event.run_id,
             "agent_version": event.agent_version,
-            "step_index":    event.step_index,
-            "payload":       event.payload,
+            "step_index": event.step_index,
+            "payload": event.payload,
         }
         if event.parent_run_id:
             line["parent_run_id"] = event.parent_run_id
@@ -666,17 +722,19 @@ class Dunetrace:
             self._ship(remaining)
 
     def _ship(self, batch: List[AgentEvent]) -> None:
-        payload = json.dumps({
-            "api_key":  self._api_key,
-            "agent_id": batch[0].agent_id if batch else "",
-            "events":   [e.to_dict() for e in batch],
-        }).encode()
+        payload = json.dumps(
+            {
+                "api_key": self._api_key,
+                "agent_id": batch[0].agent_id if batch else "",
+                "events": [e.to_dict() for e in batch],
+            }
+        ).encode()
 
         req = urllib.request.Request(
             self._ingest_url,
             data=payload,
             headers={
-                "Content-Type":      "application/json",
+                "Content-Type": "application/json",
                 "X-Dunetrace-Agent": batch[0].agent_id if batch else "",
             },
             method="POST",
@@ -690,7 +748,8 @@ class Dunetrace:
                     "DuneTrace backend not reachable at %s — is it running?\n"
                     "  Start it with: docker compose up -d\n"
                     "  %d events dropped.",
-                    self._ingest_url, len(batch),
+                    self._ingest_url,
+                    len(batch),
                 )
             else:
                 logger.warning("Failed to ship %d events: %s", len(batch), exc)
@@ -722,7 +781,7 @@ def _extract_input(fn: Callable, args: tuple, kwargs: dict, input_from: Optional
     3. Empty string (no input available)
     """
     try:
-        sig    = inspect.signature(fn)
+        sig = inspect.signature(fn)
         params = list(sig.parameters.keys())
 
         if input_from:

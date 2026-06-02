@@ -23,6 +23,7 @@ Content tracing is enabled (so Haystack passes component I/O to us), but all tex
 is SHA-256 hashed before any network transmission — raw content never leaves the
 process.
 """
+
 from __future__ import annotations
 
 import logging
@@ -35,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 try:
     import haystack.tracing as _hs_tracing  # noqa: F401
+
     _HAYSTACK_AVAILABLE = True
 except ImportError:
     _HAYSTACK_AVAILABLE = False
@@ -56,12 +58,22 @@ _CURRENT_SPAN: ContextVar[Optional["_DunetraceSpan"]] = ContextVar(
 
 # ── component classification ─────────────────────────────────────────────────
 
-_LLM_KEYWORDS        = ("Generator", "LLM", "ChatModel")
-_RETRIEVAL_KEYWORDS  = ("Retriever",)
-_TOOL_KEYWORDS       = ("ToolInvoker", "ComponentTool", "SuperComponent")
+_LLM_KEYWORDS = ("Generator", "LLM", "ChatModel")
+_RETRIEVAL_KEYWORDS = ("Retriever",)
+_TOOL_KEYWORDS = ("ToolInvoker", "ComponentTool", "SuperComponent")
 # Components that wrap other components — don't emit events for them directly.
-_WRAPPER_KEYWORDS    = ("Agent", "Pipeline", "Builder", "Converter", "Adapter",
-                        "Joiner", "Writer", "Extractor", "Router", "Classifier")
+_WRAPPER_KEYWORDS = (
+    "Agent",
+    "Pipeline",
+    "Builder",
+    "Converter",
+    "Adapter",
+    "Joiner",
+    "Writer",
+    "Extractor",
+    "Router",
+    "Classifier",
+)
 
 
 def _classify_component(comp_type: str) -> str:
@@ -115,12 +127,12 @@ def _extract_tool_calls(inp: Any, output: Any, exc_type: Any) -> List[tuple]:
     if isinstance(output, dict):
         tool_messages = output.get("tool_messages") or []
     for msg in tool_messages:
-        for tcr in (getattr(msg, "tool_call_results", None) or []):
+        for tcr in getattr(msg, "tool_call_results", None) or []:
             origin = getattr(tcr, "origin", None)
             if origin:
-                name  = getattr(origin, "tool_name", "unknown")
-                args  = getattr(origin, "arguments", {})
-                ok    = not getattr(tcr, "error", True)
+                name = getattr(origin, "tool_name", "unknown")
+                args = getattr(origin, "arguments", {})
+                ok = not getattr(tcr, "error", True)
                 results.append((name, hash_content(str(args)), ok))
 
     if results:
@@ -131,7 +143,7 @@ def _extract_tool_calls(inp: Any, output: Any, exc_type: Any) -> List[tuple]:
     if isinstance(inp, dict):
         inp_messages = inp.get("messages") or []
     for msg in inp_messages:
-        for tc in (getattr(msg, "tool_calls", None) or []):
+        for tc in getattr(msg, "tool_calls", None) or []:
             name = getattr(tc, "tool_name", "unknown")
             args = getattr(tc, "arguments", {})
             results.append((name, hash_content(str(args)), exc_type is None))
@@ -154,12 +166,14 @@ def _extract_tokens(output: Any) -> tuple[Optional[int], Optional[int], str, str
         meta = reply.get("meta", {}) or {}
 
     usage = meta.get("usage") or meta.get("token_usage") or {}
-    pt = (usage.get("prompt_tokens") or usage.get("input_tokens")
-          or usage.get("prompt_token_count"))
-    ct = (usage.get("completion_tokens") or usage.get("output_tokens")
-          or usage.get("generated_token_count"))
+    pt = usage.get("prompt_tokens") or usage.get("input_tokens") or usage.get("prompt_token_count")
+    ct = (
+        usage.get("completion_tokens")
+        or usage.get("output_tokens")
+        or usage.get("generated_token_count")
+    )
     finish = meta.get("finish_reason", "stop") or "stop"
-    model  = str(meta.get("model", "")) if meta.get("model") else ""
+    model = str(meta.get("model", "")) if meta.get("model") else ""
     return pt, ct, finish, model
 
 
@@ -205,20 +219,22 @@ def _flatten_input(data: Any, depth: int = 0) -> str:
 
 # ── span + run state ──────────────────────────────────────────────────────────
 
+
 @dataclass
 class _RunState:
-    run_id:     str
-    step:       int   = 0
+    run_id: str
+    step: int = 0
     start_time: float = field(default_factory=time.time)
 
 
 @dataclass
 class _ProviderTokens:
     """Token data collected from provider-level child spans (e.g. haystack.openai.*)."""
-    model:             str            = ""
-    prompt_tokens:     Optional[int]  = None
-    completion_tokens: Optional[int]  = None
-    finish_reason:     str            = "stop"
+
+    model: str = ""
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    finish_reason: str = "stop"
 
 
 class _DunetraceSpan:
@@ -226,28 +242,28 @@ class _DunetraceSpan:
 
     def __init__(
         self,
-        tracer:         "DunetraceHaystackTracer",
+        tracer: "DunetraceHaystackTracer",
         operation_name: str,
-        tags:           Dict[str, Any],
-        parent_span:    Optional["_DunetraceSpan"],
+        tags: Dict[str, Any],
+        parent_span: Optional["_DunetraceSpan"],
     ) -> None:
-        self._tracer        = tracer
-        self._operation     = operation_name
-        self._tags:   Dict[str, Any] = dict(tags)
-        self._ctags:  Dict[str, Any] = {}   # content tags (locally only, never transmitted)
-        self._parent        = parent_span
-        self._start         = time.time()
+        self._tracer = tracer
+        self._operation = operation_name
+        self._tags: Dict[str, Any] = dict(tags)
+        self._ctags: Dict[str, Any] = {}  # content tags (locally only, never transmitted)
+        self._parent = parent_span
+        self._start = time.time()
         # Set by root pipeline spans:
-        self._run_state:    Optional[_RunState]      = None
+        self._run_state: Optional[_RunState] = None
         # Set by component.run spans on __enter__:
-        self._comp_kind:    str          = "other"
-        self._comp_name:    str          = ""
-        self._comp_type:    str          = ""
-        self._comp_step:    int          = 0
+        self._comp_kind: str = "other"
+        self._comp_name: str = ""
+        self._comp_type: str = ""
+        self._comp_step: int = 0
         # Filled in by provider child spans (haystack.openai.*, etc.):
         self._provider_tok: _ProviderTokens = _ProviderTokens()
         # ContextVar token for restoring on __exit__:
-        self._cv_token:     Any          = None
+        self._cv_token: Any = None
 
     # ── Span protocol ────────────────────────────────────────────────────────
 
@@ -303,10 +319,15 @@ class _DunetraceSpan:
     def _maybe_propagate_provider_tags(self, key: str, value: Any) -> None:
         """Copy provider token/model tags up to the nearest component.run parent."""
         op = self._operation
-        if not (op.startswith("haystack.openai.") or op.startswith("haystack.anthropic.")
-                or op.startswith("haystack.amazon.") or op.startswith("haystack.cohere.")
-                or op.startswith("haystack.google.") or op.startswith("haystack.mistral.")
-                or op.startswith("haystack.ollama.")):
+        if not (
+            op.startswith("haystack.openai.")
+            or op.startswith("haystack.anthropic.")
+            or op.startswith("haystack.amazon.")
+            or op.startswith("haystack.cohere.")
+            or op.startswith("haystack.google.")
+            or op.startswith("haystack.mistral.")
+            or op.startswith("haystack.ollama.")
+        ):
             return
         parent = self._parent
         while parent:
@@ -325,7 +346,7 @@ class _DunetraceSpan:
             parent = parent._parent
 
     def _on_enter(self) -> None:
-        t  = self._tracer
+        t = self._tracer
         op = self._operation
 
         if op == "haystack.pipeline.run":
@@ -343,18 +364,21 @@ class _DunetraceSpan:
             user_input = _flatten_input(input_data)
 
             from dunetrace.models import AgentEvent, EventType
-            t._client._emit(AgentEvent(
-                event_type=EventType.RUN_STARTED,
-                run_id=state.run_id,
-                agent_id=t._agent_id,
-                agent_version=t._version,
-                step_index=state.step,
-                payload={
-                    "input_hash": hash_content(user_input),
-                    "tools":      t._tools,
-                    "model":      t._model,
-                },
-            ))
+
+            t._client._emit(
+                AgentEvent(
+                    event_type=EventType.RUN_STARTED,
+                    run_id=state.run_id,
+                    agent_id=t._agent_id,
+                    agent_version=t._version,
+                    step_index=state.step,
+                    payload={
+                        "input_hash": hash_content(user_input),
+                        "tools": t._tools,
+                        "model": t._model,
+                    },
+                )
+            )
             state.step += 1
 
         elif op == "haystack.component.run":
@@ -364,7 +388,7 @@ class _DunetraceSpan:
 
             comp_type = self._tags.get("haystack.component.type", "")
             comp_name = self._tags.get("haystack.component.name", comp_type)
-            kind      = _classify_component(comp_type)
+            kind = _classify_component(comp_type)
 
             self._comp_kind = kind
             self._comp_name = comp_name
@@ -375,33 +399,37 @@ class _DunetraceSpan:
             from dunetrace.models import AgentEvent, EventType
 
             if kind == "llm":
-                t._client._emit(AgentEvent(
-                    event_type=EventType.LLM_CALLED,
-                    run_id=state.run_id,
-                    agent_id=t._agent_id,
-                    agent_version=t._version,
-                    step_index=self._comp_step,
-                    payload={"model": _model_hint_from_type(comp_type)},
-                ))
+                t._client._emit(
+                    AgentEvent(
+                        event_type=EventType.LLM_CALLED,
+                        run_id=state.run_id,
+                        agent_id=t._agent_id,
+                        agent_version=t._version,
+                        step_index=self._comp_step,
+                        payload={"model": _model_hint_from_type(comp_type)},
+                    )
+                )
             elif kind == "retrieval":
-                inp   = self._tags.get("haystack.component.input") or {}
+                inp = self._tags.get("haystack.component.input") or {}
                 query = _flatten_input(inp)
-                t._client._emit(AgentEvent(
-                    event_type=EventType.RETRIEVAL_CALLED,
-                    run_id=state.run_id,
-                    agent_id=t._agent_id,
-                    agent_version=t._version,
-                    step_index=self._comp_step,
-                    payload={
-                        "index_name": comp_name,
-                        "query_hash": hash_content(query),
-                    },
-                ))
+                t._client._emit(
+                    AgentEvent(
+                        event_type=EventType.RETRIEVAL_CALLED,
+                        run_id=state.run_id,
+                        agent_id=t._agent_id,
+                        agent_version=t._version,
+                        step_index=self._comp_step,
+                        payload={
+                            "index_name": comp_name,
+                            "query_hash": hash_content(query),
+                        },
+                    )
+                )
             elif kind == "tool":
                 pass  # TOOL_CALLED deferred to _on_exit where actual tool names are known
 
     def _on_exit(self, exc_type: Any, exc_val: Any) -> None:
-        t  = self._tracer
+        t = self._tracer
         op = self._operation
 
         if op == "haystack.pipeline.run":
@@ -413,30 +441,34 @@ class _DunetraceSpan:
             from dunetrace.models import AgentEvent, EventType
 
             if exc_type is not None:
-                t._client._emit(AgentEvent(
-                    event_type=EventType.RUN_ERRORED,
-                    run_id=state.run_id,
-                    agent_id=t._agent_id,
-                    agent_version=t._version,
-                    step_index=state.step,
-                    payload={
-                        "error_type": exc_type.__name__ if exc_type else "unknown",
-                        "error_hash": hash_content(str(exc_val)),
-                    },
-                ))
+                t._client._emit(
+                    AgentEvent(
+                        event_type=EventType.RUN_ERRORED,
+                        run_id=state.run_id,
+                        agent_id=t._agent_id,
+                        agent_version=t._version,
+                        step_index=state.step,
+                        payload={
+                            "error_type": exc_type.__name__ if exc_type else "unknown",
+                            "error_hash": hash_content(str(exc_val)),
+                        },
+                    )
+                )
             else:
-                t._client._emit(AgentEvent(
-                    event_type=EventType.RUN_COMPLETED,
-                    run_id=state.run_id,
-                    agent_id=t._agent_id,
-                    agent_version=t._version,
-                    step_index=state.step,
-                    payload={
-                        "exit_reason":  "final_answer",
-                        "total_steps":  state.step,
-                        "latency_ms":   latency_ms,
-                    },
-                ))
+                t._client._emit(
+                    AgentEvent(
+                        event_type=EventType.RUN_COMPLETED,
+                        run_id=state.run_id,
+                        agent_id=t._agent_id,
+                        agent_version=t._version,
+                        step_index=state.step,
+                        payload={
+                            "exit_reason": "final_answer",
+                            "total_steps": state.step,
+                            "latency_ms": latency_ms,
+                        },
+                    )
+                )
 
             with t._lock:
                 t._active_runs.pop(id(self), None)
@@ -447,11 +479,11 @@ class _DunetraceSpan:
             if not state or self._comp_kind == "other":
                 return
 
-            kind       = self._comp_kind
-            step       = self._comp_step
-            comp_name  = self._comp_name
+            kind = self._comp_kind
+            step = self._comp_step
+            comp_name = self._comp_name
             latency_ms = int((time.time() - self._start) * 1000)
-            tok        = self._provider_tok
+            tok = self._provider_tok
             from dunetrace.models import AgentEvent, EventType
 
             if kind == "llm":
@@ -460,18 +492,18 @@ class _DunetraceSpan:
                 pt, ct, finish, model_from_reply = _extract_tokens(output)
 
                 # Provider child spans (set_tag propagation) take precedence.
-                pt       = tok.prompt_tokens     if tok.prompt_tokens     is not None else pt
-                ct       = tok.completion_tokens if tok.completion_tokens is not None else ct
-                finish   = tok.finish_reason     if tok.finish_reason     != "stop"   else finish
-                model    = tok.model             or model_from_reply
+                pt = tok.prompt_tokens if tok.prompt_tokens is not None else pt
+                ct = tok.completion_tokens if tok.completion_tokens is not None else ct
+                finish = tok.finish_reason if tok.finish_reason != "stop" else finish
+                model = tok.model or model_from_reply
 
                 reply_text = _extract_reply_text(output)
 
                 payload: Dict[str, Any] = {
                     "finish_reason": "error" if exc_type else (finish or "stop"),
-                    "output_hash":   hash_content(reply_text),
+                    "output_hash": hash_content(reply_text),
                     "output_length": len(reply_text),
-                    "latency_ms":    latency_ms,
+                    "latency_ms": latency_ms,
                 }
                 if model:
                     payload["model"] = model
@@ -482,77 +514,88 @@ class _DunetraceSpan:
                 if exc_type is not None:
                     payload["error_hash"] = hash_content(str(exc_val))
 
-                t._client._emit(AgentEvent(
-                    event_type=EventType.LLM_RESPONDED,
-                    run_id=state.run_id,
-                    agent_id=t._agent_id,
-                    agent_version=t._version,
-                    step_index=step,
-                    payload=payload,
-                ))
+                t._client._emit(
+                    AgentEvent(
+                        event_type=EventType.LLM_RESPONDED,
+                        run_id=state.run_id,
+                        agent_id=t._agent_id,
+                        agent_version=t._version,
+                        step_index=step,
+                        payload=payload,
+                    )
+                )
 
             elif kind == "retrieval":
                 output = self._ctags.get("haystack.component.output") or {}
-                docs   = output.get("documents", []) if isinstance(output, dict) else []
+                docs = output.get("documents", []) if isinstance(output, dict) else []
                 result_count = len(docs) if docs else 0
 
                 top_score: Optional[float] = None
-                for doc in (docs or []):
-                    score = getattr(doc, "score", None) if hasattr(doc, "score") else (
-                        doc.get("score") if isinstance(doc, dict) else None
+                for doc in docs or []:
+                    score = (
+                        getattr(doc, "score", None)
+                        if hasattr(doc, "score")
+                        else (doc.get("score") if isinstance(doc, dict) else None)
                     )
                     if score is not None:
                         top_score = max(top_score or 0.0, float(score))
 
-                t._client._emit(AgentEvent(
-                    event_type=EventType.RETRIEVAL_RESPONDED,
-                    run_id=state.run_id,
-                    agent_id=t._agent_id,
-                    agent_version=t._version,
-                    step_index=step,
-                    payload={
-                        "result_count": 0 if exc_type else result_count,
-                        "top_score":    None if exc_type else top_score,
-                        **({"error_hash": hash_content(str(exc_val))} if exc_type else {}),
-                    },
-                ))
+                t._client._emit(
+                    AgentEvent(
+                        event_type=EventType.RETRIEVAL_RESPONDED,
+                        run_id=state.run_id,
+                        agent_id=t._agent_id,
+                        agent_version=t._version,
+                        step_index=step,
+                        payload={
+                            "result_count": 0 if exc_type else result_count,
+                            "top_score": None if exc_type else top_score,
+                            **({"error_hash": hash_content(str(exc_val))} if exc_type else {}),
+                        },
+                    )
+                )
 
             elif kind == "tool":
-                output   = self._ctags.get("haystack.component.output") or {}
+                output = self._ctags.get("haystack.component.output") or {}
                 inp_data = self._ctags.get("haystack.component.input") or {}
-                calls    = _extract_tool_calls(inp_data, output, exc_type)
+                calls = _extract_tool_calls(inp_data, output, exc_type)
 
                 if not calls:
                     # Fallback when ToolInvoker has no messages (direct tool component)
                     calls = [(comp_name, "", exc_type is None)]
 
                 for tool_name, args_hash, success in calls:
-                    t._client._emit(AgentEvent(
-                        event_type=EventType.TOOL_CALLED,
-                        run_id=state.run_id,
-                        agent_id=t._agent_id,
-                        agent_version=t._version,
-                        step_index=step,
-                        payload={"tool_name": tool_name, "args_hash": args_hash},
-                    ))
-                    t._client._emit(AgentEvent(
-                        event_type=EventType.TOOL_RESPONDED,
-                        run_id=state.run_id,
-                        agent_id=t._agent_id,
-                        agent_version=t._version,
-                        step_index=step,
-                        payload={
-                            "tool_name":  tool_name,
-                            "success":    success,
-                            "latency_ms": latency_ms,
-                            **({"error_hash": hash_content(str(exc_val))} if exc_type else {}),
-                        },
-                    ))
+                    t._client._emit(
+                        AgentEvent(
+                            event_type=EventType.TOOL_CALLED,
+                            run_id=state.run_id,
+                            agent_id=t._agent_id,
+                            agent_version=t._version,
+                            step_index=step,
+                            payload={"tool_name": tool_name, "args_hash": args_hash},
+                        )
+                    )
+                    t._client._emit(
+                        AgentEvent(
+                            event_type=EventType.TOOL_RESPONDED,
+                            run_id=state.run_id,
+                            agent_id=t._agent_id,
+                            agent_version=t._version,
+                            step_index=step,
+                            payload={
+                                "tool_name": tool_name,
+                                "success": success,
+                                "latency_ms": latency_ms,
+                                **({"error_hash": hash_content(str(exc_val))} if exc_type else {}),
+                            },
+                        )
+                    )
 
             t._client.flush()
 
 
 # ── tracer ────────────────────────────────────────────────────────────────────
+
 
 class DunetraceHaystackTracer:
     """
@@ -576,25 +619,24 @@ class DunetraceHaystackTracer:
 
     def __init__(
         self,
-        client:        "Dunetrace",
-        agent_id:      str = "haystack-pipeline",
+        client: "Dunetrace",
+        agent_id: str = "haystack-pipeline",
         system_prompt: str = "",
-        model:         str = "unknown",
-        tools:         Optional[List[str]] = None,
+        model: str = "unknown",
+        tools: Optional[List[str]] = None,
     ) -> None:
         if not _HAYSTACK_AVAILABLE:
             raise ImportError(
-                "haystack-ai is not installed. "
-                "Run: pip install 'dunetrace[haystack]'"
+                "haystack-ai is not installed. Run: pip install 'dunetrace[haystack]'"
             )
-        self._client   = client
+        self._client = client
         self._agent_id = agent_id
-        self._model    = model
-        self._tools    = tools or []
-        self._version  = calc_version(system_prompt, model, self._tools)
+        self._model = model
+        self._tools = tools or []
+        self._version = calc_version(system_prompt, model, self._tools)
 
-        self._lock:        Lock                  = Lock()
-        self._active_runs: Dict[int, _RunState]  = {}   # span id(obj) → _RunState
+        self._lock: Lock = Lock()
+        self._active_runs: Dict[int, _RunState] = {}  # span id(obj) → _RunState
 
     # ── Tracer protocol ──────────────────────────────────────────────────────
 

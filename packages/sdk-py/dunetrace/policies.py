@@ -32,6 +32,7 @@ Supported actions:
   inject_prompt — appends to run.prompt_additions (list); agent code prepends to messages
   log           — emits policy.triggered event, no interruption
 """
+
 from __future__ import annotations
 
 import logging
@@ -46,16 +47,16 @@ logger = logging.getLogger("dunetrace.policies")
 # Matched by prefix — longest match wins. Falls back to _DEFAULT_PRICE.
 
 _MODEL_PRICES: Dict[str, Dict[str, float]] = {
-    "claude-opus-4":            {"input": 15.00e-6, "output": 75.00e-6},
-    "claude-sonnet-4":          {"input": 3.00e-6,  "output": 15.00e-6},
-    "claude-haiku-4":           {"input": 0.80e-6,  "output": 4.00e-6},
-    "claude-3-5-sonnet":        {"input": 3.00e-6,  "output": 15.00e-6},
-    "claude-3-5-haiku":         {"input": 0.80e-6,  "output": 4.00e-6},
-    "claude-3-opus":            {"input": 15.00e-6, "output": 75.00e-6},
-    "gpt-4o-mini":              {"input": 0.15e-6,  "output": 0.60e-6},
-    "gpt-4o":                   {"input": 5.00e-6,  "output": 15.00e-6},
-    "gpt-4-turbo":              {"input": 10.00e-6, "output": 30.00e-6},
-    "gpt-3.5-turbo":            {"input": 0.50e-6,  "output": 1.50e-6},
+    "claude-opus-4": {"input": 15.00e-6, "output": 75.00e-6},
+    "claude-sonnet-4": {"input": 3.00e-6, "output": 15.00e-6},
+    "claude-haiku-4": {"input": 0.80e-6, "output": 4.00e-6},
+    "claude-3-5-sonnet": {"input": 3.00e-6, "output": 15.00e-6},
+    "claude-3-5-haiku": {"input": 0.80e-6, "output": 4.00e-6},
+    "claude-3-opus": {"input": 15.00e-6, "output": 75.00e-6},
+    "gpt-4o-mini": {"input": 0.15e-6, "output": 0.60e-6},
+    "gpt-4o": {"input": 5.00e-6, "output": 15.00e-6},
+    "gpt-4-turbo": {"input": 10.00e-6, "output": 30.00e-6},
+    "gpt-3.5-turbo": {"input": 0.50e-6, "output": 1.50e-6},
 }
 _DEFAULT_PRICE: Dict[str, float] = {"input": 3.00e-6, "output": 12.00e-6}
 
@@ -71,8 +72,8 @@ def compute_run_cost(llm_calls: list) -> float:
     """Sum USD cost across all LLM calls tracked in a RunState."""
     total = 0.0
     for lc in llm_calls:
-        p  = int(getattr(lc, "prompt_tokens",     None) or 0)
-        c  = int(getattr(lc, "completion_tokens",  None) or 0)
+        p = int(getattr(lc, "prompt_tokens", None) or 0)
+        c = int(getattr(lc, "completion_tokens", None) or 0)
         price = _price_for(getattr(lc, "model", "") or "")
         total += p * price["input"] + c * price["output"]
     return total
@@ -85,21 +86,19 @@ def build_metrics(state: Any, step: int) -> Dict[str, Any]:
     Returns a dict keyed by trigger name. Values are None when the metric
     is not yet available (e.g. no LLM calls have happened yet).
     """
-    llm_calls  = getattr(state, "llm_calls",  []) or []
+    llm_calls = getattr(state, "llm_calls", []) or []
     tool_calls = getattr(state, "tool_calls", []) or []
 
     last_llm = llm_calls[-1] if llm_calls else None
-    error_count = sum(
-        1 for tc in tool_calls if getattr(tc, "success", None) is False
-    )
+    error_count = sum(1 for tc in tool_calls if getattr(tc, "success", None) is False)
 
     return {
         "tool_call_count": len(tool_calls),
-        "step_count":      step,
-        "cost_usd":        compute_run_cost(llm_calls),
-        "error_count":     error_count,
-        "finish_reason":   getattr(last_llm, "finish_reason", None),
-        "llm_latency_ms":  getattr(last_llm, "latency_ms",    None),
+        "step_count": step,
+        "cost_usd": compute_run_cost(llm_calls),
+        "error_count": error_count,
+        "finish_reason": getattr(last_llm, "finish_reason", None),
+        "llm_latency_ms": getattr(last_llm, "latency_ms", None),
         # "signal" is filled in by the engine when a detector-based policy exists
     }
 
@@ -107,36 +106,37 @@ def build_metrics(state: Any, step: int) -> Dict[str, Any]:
 # ── Condition evaluation ──────────────────────────────────────────────────────
 
 _OPERATORS: Dict[str, Any] = {
-    "gt":       lambda a, b: a > b,
-    "gte":      lambda a, b: a >= b,
-    "lt":       lambda a, b: a < b,
-    "lte":      lambda a, b: a <= b,
-    "eq":       lambda a, b: a == b,
-    "neq":      lambda a, b: a != b,
+    "gt": lambda a, b: a > b,
+    "gte": lambda a, b: a >= b,
+    "lt": lambda a, b: a < b,
+    "lte": lambda a, b: a <= b,
+    "eq": lambda a, b: a == b,
+    "neq": lambda a, b: a != b,
     "contains": lambda a, b: b in (a if isinstance(a, (list, tuple, set)) else [a]),
 }
 
 
 # ── Core data types ───────────────────────────────────────────────────────────
 
+
 class PolicyViolation(RuntimeError):
     """Raised when a 'stop' policy fires. Carries the policy name and action."""
 
     def __init__(self, policy_name: str, action: dict, message: str = "") -> None:
         self.policy_name = policy_name
-        self.action      = action
+        self.action = action
         super().__init__(message or f"Policy '{policy_name}' triggered — run stopped")
 
 
 @dataclass
 class Policy:
-    name:      str
-    condition: Dict[str, Any]   # {trigger, operator, value}
-    action:    Dict[str, Any]   # {type, params?}
-    agent_id:  str  = "*"       # "*" matches all agents
-    enabled:   bool = True
-    priority:  int  = 100
-    id:        Optional[int] = None
+    name: str
+    condition: Dict[str, Any]  # {trigger, operator, value}
+    action: Dict[str, Any]  # {type, params?}
+    agent_id: str = "*"  # "*" matches all agents
+    enabled: bool = True
+    priority: int = 100
+    id: Optional[int] = None
 
     @property
     def key(self) -> str:
@@ -144,10 +144,10 @@ class Policy:
         return str(self.id) if self.id is not None else self.name
 
     def matches(self, metrics: Dict[str, Any]) -> bool:
-        trigger  = self.condition.get("trigger", "")
+        trigger = self.condition.get("trigger", "")
         operator = self.condition.get("operator", "gt")
-        value    = self.condition.get("value")
-        current  = metrics.get(trigger)
+        value = self.condition.get("value")
+        current = metrics.get(trigger)
         if current is None:
             return False
         op_fn = _OPERATORS.get(operator)
@@ -173,6 +173,7 @@ class Policy:
 
 # ── Engine ────────────────────────────────────────────────────────────────────
 
+
 class PolicyEngine:
     """
     Thread-safe policy evaluator. One instance lives on the Dunetrace client
@@ -182,9 +183,9 @@ class PolicyEngine:
     _FETCH_TTL = 60.0  # seconds between remote refreshes per agent_id
 
     def __init__(self) -> None:
-        self._policies:    List[Policy]          = []
-        self._lock:        threading.Lock        = threading.Lock()
-        self._fetch_times: Dict[str, float]      = {}   # agent_id → last fetch monotonic
+        self._policies: List[Policy] = []
+        self._lock: threading.Lock = threading.Lock()
+        self._fetch_times: Dict[str, float] = {}  # agent_id → last fetch monotonic
 
     # ── Config API ────────────────────────────────────────────────────────────
 
@@ -217,9 +218,9 @@ class PolicyEngine:
 
     def evaluate(
         self,
-        agent_id:          str,
-        metrics:           Dict[str, Any],
-        triggered_already: set,             # policy keys already fired in this run
+        agent_id: str,
+        metrics: Dict[str, Any],
+        triggered_already: set,  # policy keys already fired in this run
     ) -> Optional[tuple]:
         """
         Return (policy, action_dict) for the highest-priority matching policy

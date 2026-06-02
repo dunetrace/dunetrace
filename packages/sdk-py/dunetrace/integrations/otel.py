@@ -37,6 +37,7 @@ parent_run_id is recorded as an attribute. Full W3C trace-context propagation
 for nested agent calls requires the caller to pass the parent span context
 explicitly via the standard OTel API, see CONTEXT PROPAGATION below.
 """
+
 from __future__ import annotations
 
 import logging
@@ -56,6 +57,7 @@ try:
         StatusCode,
         TraceFlags,
     )
+
     _OTEL_AVAILABLE = True
 except ImportError:
     _OTEL_AVAILABLE = False
@@ -64,6 +66,7 @@ from dunetrace.models import AgentEvent, EventType, RunState, Severity
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _ns(ts: float) -> int:
     """Float Unix seconds → OTel nanoseconds."""
@@ -82,14 +85,16 @@ def _root_span_id(run_id: str) -> int:
 
 # ── Per-run span state ─────────────────────────────────────────────────────────
 
+
 @dataclass
 class _RunSpans:
-    root_span:  Any               # opentelemetry Span
-    child_span: Any       = None  # currently open child span, or None
-    run_state:  Optional[RunState] = None  # set via notify_run_state before run end
+    root_span: Any  # opentelemetry Span
+    child_span: Any = None  # currently open child span, or None
+    run_state: Optional[RunState] = None  # set via notify_run_state before run end
 
 
 # ── Exporter ──────────────────────────────────────────────────────────────────
+
 
 class DunetraceOTelExporter:
     """
@@ -100,17 +105,16 @@ class DunetraceOTelExporter:
 
     def __init__(
         self,
-        tracer_provider: Any = None,   # opentelemetry TracerProvider
+        tracer_provider: Any = None,  # opentelemetry TracerProvider
         tracer_name: str = "dunetrace",
     ) -> None:
         if not _OTEL_AVAILABLE:
             raise ImportError(
-                "opentelemetry-sdk is not installed. "
-                "Run: pip install 'dunetrace[otel]'"
+                "opentelemetry-sdk is not installed. Run: pip install 'dunetrace[otel]'"
             )
         tp = tracer_provider or trace.get_tracer_provider()
         self._tracer = tp.get_tracer(tracer_name)
-        self._runs:  Dict[str, _RunSpans] = {}
+        self._runs: Dict[str, _RunSpans] = {}
         self._lock = Lock()
 
     # ── Called by Dunetrace client ─────────────────────────────────────────────
@@ -125,16 +129,16 @@ class DunetraceOTelExporter:
     def handle(self, event: AgentEvent) -> None:
         """Route one AgentEvent to the appropriate span operation. Never raises."""
         _DISPATCH = {
-            EventType.RUN_STARTED:         self._on_run_started,
-            EventType.RUN_COMPLETED:       self._on_run_ended,
-            EventType.RUN_ERRORED:         self._on_run_ended,
-            EventType.LLM_CALLED:          self._on_child_start,
-            EventType.LLM_RESPONDED:       self._on_llm_responded,
-            EventType.TOOL_CALLED:         self._on_child_start,
-            EventType.TOOL_RESPONDED:      self._on_tool_responded,
-            EventType.RETRIEVAL_CALLED:    self._on_child_start,
+            EventType.RUN_STARTED: self._on_run_started,
+            EventType.RUN_COMPLETED: self._on_run_ended,
+            EventType.RUN_ERRORED: self._on_run_ended,
+            EventType.LLM_CALLED: self._on_child_start,
+            EventType.LLM_RESPONDED: self._on_llm_responded,
+            EventType.TOOL_CALLED: self._on_child_start,
+            EventType.TOOL_RESPONDED: self._on_tool_responded,
+            EventType.RETRIEVAL_CALLED: self._on_child_start,
             EventType.RETRIEVAL_RESPONDED: self._on_retrieval_responded,
-            EventType.EXTERNAL_SIGNAL:     self._on_external_signal,
+            EventType.EXTERNAL_SIGNAL: self._on_external_signal,
         }
         fn = _DISPATCH.get(event.event_type)
         if fn:
@@ -143,7 +147,9 @@ class DunetraceOTelExporter:
             except Exception as exc:
                 logger.warning(
                     "Dunetrace OTel: failed to handle %s for run %s: %s",
-                    event.event_type, event.run_id, exc,
+                    event.event_type,
+                    event.run_id,
+                    exc,
                 )
 
     # ── Span handlers ─────────────────────────────────────────────────────────
@@ -163,12 +169,12 @@ class DunetraceOTelExporter:
             )
         )
         attrs: Dict[str, Any] = {
-            "dunetrace.agent_id":      event.agent_id,
-            "dunetrace.run_id":        event.run_id,
+            "dunetrace.agent_id": event.agent_id,
+            "dunetrace.run_id": event.run_id,
             "dunetrace.agent_version": event.agent_version,
-            "dunetrace.input_hash":    event.payload.get("input_hash", ""),
-            "dunetrace.model":         event.payload.get("model", ""),
-            "dunetrace.tools":         ",".join(event.payload.get("tools", [])),
+            "dunetrace.input_hash": event.payload.get("input_hash", ""),
+            "dunetrace.model": event.payload.get("model", ""),
+            "dunetrace.tools": ",".join(event.payload.get("tools", [])),
         }
         if event.parent_run_id:
             attrs["dunetrace.parent_run_id"] = event.parent_run_id
@@ -199,9 +205,9 @@ class DunetraceOTelExporter:
         if event.event_type is EventType.LLM_CALLED:
             name = "llm_call"
             attrs: Dict[str, Any] = {
-                "gen_ai.operation.name":  "chat",
-                "gen_ai.request.model":   event.payload.get("model", ""),
-                "dunetrace.step_index":   event.step_index,
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": event.payload.get("model", ""),
+                "dunetrace.step_index": event.step_index,
             }
             if event.payload.get("prompt_tokens"):
                 attrs["gen_ai.usage.input_tokens"] = event.payload["prompt_tokens"]
@@ -209,17 +215,17 @@ class DunetraceOTelExporter:
         elif event.event_type is EventType.TOOL_CALLED:
             name = "tool_call"
             attrs = {
-                "dunetrace.tool_name":  event.payload.get("tool_name", ""),
-                "dunetrace.args_hash":  event.payload.get("args_hash", ""),
+                "dunetrace.tool_name": event.payload.get("tool_name", ""),
+                "dunetrace.args_hash": event.payload.get("args_hash", ""),
                 "dunetrace.step_index": event.step_index,
             }
 
         else:  # RETRIEVAL_CALLED
             name = "retrieval"
             attrs = {
-                "dunetrace.index_name":  event.payload.get("index_name", ""),
-                "dunetrace.query_hash":  event.payload.get("query_hash", ""),
-                "dunetrace.step_index":  event.step_index,
+                "dunetrace.index_name": event.payload.get("index_name", ""),
+                "dunetrace.query_hash": event.payload.get("query_hash", ""),
+                "dunetrace.step_index": event.step_index,
             }
 
         rs.child_span = self._tracer.start_span(
@@ -331,13 +337,14 @@ class DunetraceOTelExporter:
         # OTel backend can display them without custom parsing.
         if rs.run_state is not None:
             from dunetrace.detectors import run_detectors
+
             signals = run_detectors(rs.run_state)
             for i, sig in enumerate(signals):
                 pfx = f"dunetrace.signal.{i}"
                 root.set_attribute(f"{pfx}.failure_type", sig.failure_type.value)
-                root.set_attribute(f"{pfx}.severity",     sig.severity.value)
-                root.set_attribute(f"{pfx}.confidence",   sig.confidence)
-                root.set_attribute(f"{pfx}.step_index",   sig.step_index)
+                root.set_attribute(f"{pfx}.severity", sig.severity.value)
+                root.set_attribute(f"{pfx}.confidence", sig.confidence)
+                root.set_attribute(f"{pfx}.step_index", sig.step_index)
                 for k, v in sig.evidence.items():
                     if isinstance(v, (str, int, float, bool)):
                         root.set_attribute(f"{pfx}.evidence.{k}", v)
@@ -351,8 +358,8 @@ class DunetraceOTelExporter:
                     f"{worst.failure_type.value} [{worst.severity.value}]",
                 )
 
-        root.set_attribute("dunetrace.total_steps",     event.payload.get("total_steps", 0))
-        root.set_attribute("dunetrace.exit_reason",     event.payload.get("exit_reason", ""))
+        root.set_attribute("dunetrace.total_steps", event.payload.get("total_steps", 0))
+        root.set_attribute("dunetrace.exit_reason", event.payload.get("exit_reason", ""))
         root.set_attribute("dunetrace.tool_call_count", event.payload.get("tool_call_count", 0))
 
         if event.event_type is EventType.RUN_ERRORED:

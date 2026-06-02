@@ -2,6 +2,7 @@
 Ring buffer for the outbound event queue.
 Drops the oldest event when full so the agent thread never blocks.
 """
+
 from __future__ import annotations
 
 from collections import deque
