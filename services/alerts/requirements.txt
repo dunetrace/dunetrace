@@ -1,4 +1,4 @@
 asyncpg==0.29.0
 httpx==0.28.1
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 PyYAML>=6.0
