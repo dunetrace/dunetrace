@@ -21,6 +21,7 @@ Span → event mapping:
 Each OTLP request is treated as a self-contained batch. Spans are sorted by
 startTimeUnixNano and assigned sequential step_index values.
 """
+
 from __future__ import annotations
 
 import time
@@ -30,12 +31,13 @@ from typing import Any
 
 # ── Attribute helpers ──────────────────────────────────────────────────────────
 
+
 def _val(v: dict) -> Any:
     """Extract a Python value from an OTLP AnyValue dict."""
     if "stringValue" in v:
         return v["stringValue"]
     if "intValue" in v:
-        return int(v["intValue"])      # intValue is often a string in JSON
+        return int(v["intValue"])  # intValue is often a string in JSON
     if "doubleValue" in v:
         return float(v["doubleValue"])
     if "boolValue" in v:
@@ -64,15 +66,50 @@ def _attrs(attrs: list[dict]) -> dict[str, Any]:
 
 # Signals that identify LLM provider spans in the span name
 _LLM_NAME_TOKENS = {
-    "openai", "anthropic", "gemini", "claude", "gpt", "cohere",
-    "mistral", "bedrock", "ollama", "llm", "chat", "completion",
-    "gen_ai", "langfuse", "together", "groq",
+    "openai",
+    "anthropic",
+    "gemini",
+    "claude",
+    "gpt",
+    "cohere",
+    "mistral",
+    "bedrock",
+    "ollama",
+    "llm",
+    "chat",
+    "completion",
+    "gen_ai",
+    "langfuse",
+    "together",
+    "groq",
 }
 _TOOL_NAME_TOKENS = {"tool", "function_call", "function"}
-_RETRIEVAL_TOKENS = {"retrieval", "retrieve", "vector", "search", "embed", "rag", "pinecone",
-                     "weaviate", "chroma", "qdrant", "milvus", "faiss"}
-_LIFECYCLE_TOKENS = {"agent", "chain", "executor", "graph", "workflow", "pipeline",
-                     "run", "invoke", "arun", "ainvoke"}
+_RETRIEVAL_TOKENS = {
+    "retrieval",
+    "retrieve",
+    "vector",
+    "search",
+    "embed",
+    "rag",
+    "pinecone",
+    "weaviate",
+    "chroma",
+    "qdrant",
+    "milvus",
+    "faiss",
+}
+_LIFECYCLE_TOKENS = {
+    "agent",
+    "chain",
+    "executor",
+    "graph",
+    "workflow",
+    "pipeline",
+    "run",
+    "invoke",
+    "arun",
+    "ainvoke",
+}
 
 
 def _classify(name: str, ad: dict[str, Any]) -> str:
@@ -82,15 +119,22 @@ def _classify(name: str, ad: dict[str, Any]) -> str:
     Falls back to span name token matching.
     """
     # ── Attribute-based (definitive) ──────────────────────────────────────────
-    if (ad.get("gen_ai.system") or ad.get("gen_ai.request.model")
-            or ad.get("llm.request.model") or ad.get("llm.vendor")):
+    if (
+        ad.get("gen_ai.system")
+        or ad.get("gen_ai.request.model")
+        or ad.get("llm.request.model")
+        or ad.get("llm.vendor")
+    ):
         return "llm"
 
     if ad.get("tool.name") or ad.get("gen_ai.tool.name"):
         return "tool"
 
-    if (ad.get("retrieval.index_name") or ad.get("vector_db.vendor")
-            or ad.get("vector_db.collection_name")):
+    if (
+        ad.get("retrieval.index_name")
+        or ad.get("vector_db.vendor")
+        or ad.get("vector_db.collection_name")
+    ):
         return "retrieval"
 
     # ── Name-based (fallback) ─────────────────────────────────────────────────
@@ -110,6 +154,7 @@ def _classify(name: str, ad: dict[str, Any]) -> str:
 
 
 # ── Time helpers ───────────────────────────────────────────────────────────────
+
 
 def _ns(ns: str | int | None) -> float:
     """Convert nanosecond timestamp (possibly a string) to Unix float seconds."""
@@ -136,11 +181,12 @@ def _trace_to_uuid(trace_id: str) -> str:
 
 # ── Core converter ─────────────────────────────────────────────────────────────
 
+
 def otlp_to_events(
     resource_spans: list[dict],
-    agent_id_override:      str | None = None,
+    agent_id_override: str | None = None,
     agent_version_override: str | None = None,
-    batch_id:               str | None = None,
+    batch_id: str | None = None,
 ) -> list[dict]:
     """
     Convert an OTLP resourceSpans payload into Dunetrace event dicts.
@@ -155,8 +201,8 @@ def otlp_to_events(
 
     for rs in resource_spans:
         res_attrs = _attrs(rs.get("resource", {}).get("attributes", []))
-        agent_id  = agent_id_override      or res_attrs.get("service.name",    "unknown-agent")
-        version   = agent_version_override or res_attrs.get("service.version", "unknown")
+        agent_id = agent_id_override or res_attrs.get("service.name", "unknown-agent")
+        version = agent_version_override or res_attrs.get("service.version", "unknown")
 
         for scope_span in rs.get("scopeSpans", []):
             for span in scope_span.get("spans", []):
@@ -168,9 +214,9 @@ def otlp_to_events(
     events: list[dict] = []
 
     for trace_id, trace in traces.items():
-        run_id    = _trace_to_uuid(trace_id)
-        agent_id  = trace["agent_id"]
-        version   = trace["agent_version"]
+        run_id = _trace_to_uuid(trace_id)
+        agent_id = trace["agent_id"]
+        version = trace["agent_version"]
 
         # Sort chronologically
         spans = sorted(trace["spans"], key=lambda s: int(s.get("startTimeUnixNano") or 0))
@@ -179,102 +225,168 @@ def otlp_to_events(
         if not root:
             continue
 
-        root_ad    = _attrs(root.get("attributes", []))
+        root_ad = _attrs(root.get("attributes", []))
         started_ts = _ns(root.get("startTimeUnixNano"))
-        ended_ts   = _ns(root.get("endTimeUnixNano")) or time.time()
-        errored    = root.get("status", {}).get("code") == 2  # STATUS_CODE_ERROR
+        ended_ts = _ns(root.get("endTimeUnixNano")) or time.time()
+        errored = root.get("status", {}).get("code") == 2  # STATUS_CODE_ERROR
 
         # Infer model from root span if present (some frameworks attach it there)
-        root_model = (
-            root_ad.get("gen_ai.request.model")
-            or root_ad.get("llm.request.model")
-            or ""
-        )
+        root_model = root_ad.get("gen_ai.request.model") or root_ad.get("llm.request.model") or ""
 
         def _ev(event_type: str, step: int, ts: float, payload: dict) -> dict:
             return {
-                "event_type":    event_type,
-                "run_id":        run_id,
-                "agent_id":      agent_id,
+                "event_type": event_type,
+                "run_id": run_id,
+                "agent_id": agent_id,
                 "agent_version": version,
-                "step_index":    step,
-                "timestamp":     ts,
-                "payload":       payload,
+                "step_index": step,
+                "timestamp": ts,
+                "payload": payload,
             }
 
-        events.append(_ev("run.started", 0, started_ts, {
-            "model":  root_model,
-            "tools":  [],
-            "source": "otlp",
-        }))
+        events.append(
+            _ev(
+                "run.started",
+                0,
+                started_ts,
+                {
+                    "model": root_model,
+                    "tools": [],
+                    "source": "otlp",
+                },
+            )
+        )
 
         step = 1
         for span in spans:
             if span is root:
                 continue
 
-            ad         = _attrs(span.get("attributes", []))
-            name       = span.get("name", "")
-            kind       = _classify(name, ad)
-            start_ts   = _ns(span.get("startTimeUnixNano"))
-            end_ts     = _ns(span.get("endTimeUnixNano")) or time.time()
-            lat_ms     = _latency_ms(span.get("startTimeUnixNano"), span.get("endTimeUnixNano"))
-            span_ok    = span.get("status", {}).get("code") != 2
+            ad = _attrs(span.get("attributes", []))
+            name = span.get("name", "")
+            kind = _classify(name, ad)
+            start_ts = _ns(span.get("startTimeUnixNano"))
+            end_ts = _ns(span.get("endTimeUnixNano")) or time.time()
+            lat_ms = _latency_ms(span.get("startTimeUnixNano"), span.get("endTimeUnixNano"))
+            span_ok = span.get("status", {}).get("code") != 2
 
             if kind == "llm":
-                model = (ad.get("gen_ai.request.model") or ad.get("llm.request.model")
-                         or ad.get("gen_ai.system") or root_model or "")
+                model = (
+                    ad.get("gen_ai.request.model")
+                    or ad.get("llm.request.model")
+                    or ad.get("gen_ai.system")
+                    or root_model
+                    or ""
+                )
                 # Accept both Gen AI semconv (input/output) and OpenLLMetry (prompt/completion)
-                prompt_tok     = int(ad.get("gen_ai.usage.input_tokens")
-                                     or ad.get("llm.usage.prompt_tokens") or 0)
-                completion_tok = int(ad.get("gen_ai.usage.output_tokens")
-                                     or ad.get("llm.usage.completion_tokens") or 0)
+                prompt_tok = int(
+                    ad.get("gen_ai.usage.input_tokens") or ad.get("llm.usage.prompt_tokens") or 0
+                )
+                completion_tok = int(
+                    ad.get("gen_ai.usage.output_tokens")
+                    or ad.get("llm.usage.completion_tokens")
+                    or 0
+                )
                 finish_reasons = ad.get("gen_ai.response.finish_reasons") or []
-                finish_reason  = (finish_reasons[0] if isinstance(finish_reasons, list)
-                                  and finish_reasons else
-                                  ad.get("llm.response.finish_reason") or "stop")
+                finish_reason = (
+                    finish_reasons[0]
+                    if isinstance(finish_reasons, list) and finish_reasons
+                    else ad.get("llm.response.finish_reason") or "stop"
+                )
 
-                events.append(_ev("llm.called", step, start_ts, {
-                    "model":         model,
-                    "prompt_tokens": prompt_tok,
-                }))
-                events.append(_ev("llm.responded", step, end_ts, {
-                    "model":             model,
-                    "prompt_tokens":     prompt_tok,
-                    "completion_tokens": completion_tok,
-                    "finish_reason":     finish_reason,
-                    "latency_ms":        lat_ms,
-                    "output_length":     completion_tok,
-                }))
+                events.append(
+                    _ev(
+                        "llm.called",
+                        step,
+                        start_ts,
+                        {
+                            "model": model,
+                            "prompt_tokens": prompt_tok,
+                        },
+                    )
+                )
+                events.append(
+                    _ev(
+                        "llm.responded",
+                        step,
+                        end_ts,
+                        {
+                            "model": model,
+                            "prompt_tokens": prompt_tok,
+                            "completion_tokens": completion_tok,
+                            "finish_reason": finish_reason,
+                            "latency_ms": lat_ms,
+                            "output_length": completion_tok,
+                        },
+                    )
+                )
 
             elif kind == "tool":
-                tool_name = (ad.get("tool.name") or ad.get("gen_ai.tool.name")
-                             or ad.get("traceloop.entity.name") or name)
-                events.append(_ev("tool.called", step, start_ts, {
-                    "tool_name": tool_name,
-                }))
-                events.append(_ev("tool.responded", step, end_ts, {
-                    "tool_name":  tool_name,
-                    "success":    span_ok,
-                    "latency_ms": lat_ms,
-                    "output_length": 0,
-                }))
+                tool_name = (
+                    ad.get("tool.name")
+                    or ad.get("gen_ai.tool.name")
+                    or ad.get("traceloop.entity.name")
+                    or name
+                )
+                events.append(
+                    _ev(
+                        "tool.called",
+                        step,
+                        start_ts,
+                        {
+                            "tool_name": tool_name,
+                        },
+                    )
+                )
+                events.append(
+                    _ev(
+                        "tool.responded",
+                        step,
+                        end_ts,
+                        {
+                            "tool_name": tool_name,
+                            "success": span_ok,
+                            "latency_ms": lat_ms,
+                            "output_length": 0,
+                        },
+                    )
+                )
 
             elif kind == "retrieval":
-                index = (ad.get("retrieval.index_name") or ad.get("vector_db.collection_name")
-                         or ad.get("db.name") or name)
-                result_count = int(ad.get("retrieval.result_count") or ad.get("db.result_count") or 0)
-                top_score    = ad.get("retrieval.top_score")
+                index = (
+                    ad.get("retrieval.index_name")
+                    or ad.get("vector_db.collection_name")
+                    or ad.get("db.name")
+                    or name
+                )
+                result_count = int(
+                    ad.get("retrieval.result_count") or ad.get("db.result_count") or 0
+                )
+                top_score = ad.get("retrieval.top_score")
 
-                events.append(_ev("retrieval.called", step, start_ts, {
-                    "index_name": index,
-                }))
-                events.append(_ev("retrieval.responded", step, end_ts, {
-                    "index_name":   index,
-                    "result_count": result_count,
-                    "top_score":    top_score,
-                    "latency_ms":   lat_ms,
-                }))
+                events.append(
+                    _ev(
+                        "retrieval.called",
+                        step,
+                        start_ts,
+                        {
+                            "index_name": index,
+                        },
+                    )
+                )
+                events.append(
+                    _ev(
+                        "retrieval.responded",
+                        step,
+                        end_ts,
+                        {
+                            "index_name": index,
+                            "result_count": result_count,
+                            "top_score": top_score,
+                            "latency_ms": lat_ms,
+                        },
+                    )
+                )
 
             else:
                 # lifecycle / skip — not a distinct Dunetrace event type
@@ -282,10 +394,13 @@ def otlp_to_events(
 
             step += 1
 
-        events.append(_ev(
-            "run.errored" if errored else "run.completed",
-            step, ended_ts,
-            {"exit_reason": "error" if errored else "completed"},
-        ))
+        events.append(
+            _ev(
+                "run.errored" if errored else "run.completed",
+                step,
+                ended_ts,
+                {"exit_reason": "error" if errored else "completed"},
+            )
+        )
 
     return events

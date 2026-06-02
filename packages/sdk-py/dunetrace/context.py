@@ -5,6 +5,7 @@ Used by auto-instrumentation patches and middleware to correlate
 LLM/tool calls with the correct run without passing the run object
 explicitly through every call frame.
 """
+
 from __future__ import annotations
 
 from contextvars import ContextVar
@@ -13,9 +14,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from dunetrace.run_context import RunContext
 
-_current_run: ContextVar[Optional["RunContext"]] = ContextVar(
-    "dunetrace_current_run", default=None
-)
+_current_run: ContextVar[Optional["RunContext"]] = ContextVar("dunetrace_current_run", default=None)
 
 
 def get_current_run() -> "Optional[RunContext]":

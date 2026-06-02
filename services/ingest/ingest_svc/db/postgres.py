@@ -1,6 +1,7 @@
 """
 Async Postgres connection pool via asyncpg. Created at startup and shared via FastAPI lifespan.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,6 +21,7 @@ _pool: Optional[asyncpg.Pool] = None  # type: ignore[attr-defined]
 
 
 # ── Pool lifecycle ─────────────────────────────────────────────────────────────
+
 
 async def init_pool() -> None:
     global _pool
@@ -150,6 +152,7 @@ async def ensure_schema() -> None:
 
 # ── Queries ────────────────────────────────────────────────────────────────────
 
+
 async def insert_events(events: list, batch_id: str) -> int:
     """Bulk insert IngestEvent objects. Called from a BackgroundTask after the response is already sent."""
     if not _pool:
@@ -193,6 +196,7 @@ async def insert_deploy_event(agent_id: str, version: str, meta: dict) -> int:
     if not _pool:
         return 0
     import json as _json
+
     try:
         async with _pool.acquire() as conn:
             row_id = await conn.fetchval(
@@ -201,7 +205,9 @@ async def insert_deploy_event(agent_id: str, version: str, meta: dict) -> int:
                 VALUES ($1, $2, $3::jsonb)
                 RETURNING id
                 """,
-                agent_id, version, _json.dumps(meta),
+                agent_id,
+                version,
+                _json.dumps(meta),
             )
         return int(row_id)
     except Exception as exc:
@@ -228,6 +234,7 @@ async def fetch_policies(agent_id: str) -> list:
                 """,
                 agent_id,
             )
+
         def _j(v):
             if not v:
                 return {}
@@ -237,13 +244,13 @@ async def fetch_policies(agent_id: str) -> list:
 
         return [
             {
-                "id":        r["id"],
-                "agent_id":  r["agent_id"],
-                "name":      r["name"],
+                "id": r["id"],
+                "agent_id": r["agent_id"],
+                "name": r["name"],
                 "condition": _j(r["condition"]),
-                "action":    _j(r["action"]),
-                "enabled":   r["enabled"],
-                "priority":  r["priority"],
+                "action": _j(r["action"]),
+                "enabled": r["enabled"],
+                "priority": r["priority"],
             }
             for r in rows
         ]

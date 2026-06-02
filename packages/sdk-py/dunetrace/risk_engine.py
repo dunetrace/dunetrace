@@ -36,6 +36,7 @@ The RiskScore does NOT replace FailureSignals — individual signals still carry
 detector-level evidence (which tool looped, which step failed, etc.). The score
 is a run-level envelope used by the alert and dashboard layers.
 """
+
 from __future__ import annotations
 
 from collections import Counter
@@ -56,22 +57,22 @@ class RiskEngine:
     """
 
     # ── Feature score constants ─────────────────────────────────────────────────
-    LOOP_WINDOW            = 5      # sliding window for loop score
-    STAGNATION_STEPS       = 4      # tail LLM-only steps that map to score 1.0
-    TOKEN_MAX_GROWTH       = 3.0    # token growth ratio that maps to score 1.0
-    RETRY_MAX_FAILS        = 5      # consecutive failures that map to score 1.0
-    LATENCY_OVERAGE_CAP    = 4.0    # (5× threshold - 1) maps to latency score 1.0
+    LOOP_WINDOW = 5  # sliding window for loop score
+    STAGNATION_STEPS = 4  # tail LLM-only steps that map to score 1.0
+    TOKEN_MAX_GROWTH = 3.0  # token growth ratio that maps to score 1.0
+    RETRY_MAX_FAILS = 5  # consecutive failures that map to score 1.0
+    LATENCY_OVERAGE_CAP = 4.0  # (5× threshold - 1) maps to latency score 1.0
 
     # ── Hard rule constants ─────────────────────────────────────────────────────
-    HARD_LOOP_CALLS         = 8     # same-tool call count across full run
-    HARD_SIMILARITY_THRESH  = 0.9   # fraction with identical args_hash
-    HARD_FAILURE_STREAK     = 5     # consecutive tool failures
+    HARD_LOOP_CALLS = 8  # same-tool call count across full run
+    HARD_SIMILARITY_THRESH = 0.9  # fraction with identical args_hash
+    HARD_FAILURE_STREAK = 5  # consecutive tool failures
 
     # ── Scoring constants ───────────────────────────────────────────────────────
     # Boost multipliers keyed by active feature count (capped at 3)
-    BOOST_MULTIPLIERS       = {0: 1.0, 1: 1.0, 2: 1.2, 3: 1.4}
+    BOOST_MULTIPLIERS = {0: 1.0, 1: 1.0, 2: 1.2, 3: 1.4}
     # Feature score threshold to count as "active"
-    ACTIVE_THRESHOLD        = 0.6
+    ACTIVE_THRESHOLD = 0.6
     # Latency escalation weight: confidence *= (1 + latency_score * weight)
     LATENCY_ESCALATION_WEIGHT = 0.5
 
@@ -80,8 +81,7 @@ class RiskEngine:
         unknown = set(overrides) - tunable
         if unknown:
             raise TypeError(
-                f"RiskEngine: unknown parameter(s) {sorted(unknown)}. "
-                f"Tunable: {sorted(tunable)}"
+                f"RiskEngine: unknown parameter(s) {sorted(unknown)}. Tunable: {sorted(tunable)}"
             )
         for k, v in overrides.items():
             setattr(self, k, v)
@@ -98,11 +98,11 @@ class RiskEngine:
                   normal runs go through feature scoring + boosting + escalation.
         """
         scores = {
-            "loop":       self._loop_score(run_state),
+            "loop": self._loop_score(run_state),
             "stagnation": self._stagnation_score(run_state),
-            "token":      self._token_score(run_state),
-            "retry":      self._retry_score(run_state),
-            "latency":    self._latency_score(run_state),
+            "token": self._token_score(run_state),
+            "retry": self._retry_score(run_state),
+            "latency": self._latency_score(run_state),
         }
 
         # Hard rules — deterministic, skip continuous scoring
@@ -140,22 +140,26 @@ class RiskEngine:
         # Extreme tool loop: same tool called many times with nearly identical args
         max_calls, similarity = self._loop_stats(state)
         if max_calls >= self.HARD_LOOP_CALLS and similarity >= self.HARD_SIMILARITY_THRESH:
-            overrides.append(RiskScore(
-                confidence=0.98,
-                active_signals=1,
-                scores={"loop": 1.0},
-                severity="CRITICAL",
-            ))
+            overrides.append(
+                RiskScore(
+                    confidence=0.98,
+                    active_signals=1,
+                    scores={"loop": 1.0},
+                    severity="CRITICAL",
+                )
+            )
 
         # Extreme failure streak: agent cannot recover from dependency failure
         consec = self._consecutive_failures(state)
         if consec >= self.HARD_FAILURE_STREAK:
-            overrides.append(RiskScore(
-                confidence=0.95,
-                active_signals=1,
-                scores={"retry": 1.0},
-                severity="HIGH",
-            ))
+            overrides.append(
+                RiskScore(
+                    confidence=0.95,
+                    active_signals=1,
+                    scores={"retry": 1.0},
+                    severity="HIGH",
+                )
+            )
 
         return overrides
 
@@ -168,7 +172,7 @@ class RiskEngine:
         """
         if len(state.tool_calls) < 2:
             return 0.0
-        recent = state.tool_calls[-self.LOOP_WINDOW:]
+        recent = state.tool_calls[-self.LOOP_WINDOW :]
         counts = Counter(tc.tool_name for tc in recent)
         max_count = max(counts.values())
         return min(1.0, max_count / len(recent))
@@ -181,7 +185,7 @@ class RiskEngine:
         """
         if not state.tool_calls or not state.events:
             return 0.0
-        tail = state.events[-self.STAGNATION_STEPS:]
+        tail = state.events[-self.STAGNATION_STEPS :]
         llm_only = sum(1 for e in tail if e.event_type.value.startswith("llm."))
         return min(1.0, llm_only / self.STAGNATION_STEPS)
 
@@ -194,7 +198,7 @@ class RiskEngine:
         if len(calls) < 2:
             return 0.0
         first = calls[0].prompt_tokens
-        last  = calls[-1].prompt_tokens
+        last = calls[-1].prompt_tokens
         if first < 10 or last < 100:
             return 0.0
         growth = last / first
@@ -216,13 +220,10 @@ class RiskEngine:
 
         _THRESHOLDS = [
             ("tool.called", 15_000),
-            ("llm.called",  30_000),
-            ("",            60_000),
+            ("llm.called", 30_000),
+            ("", 60_000),
         ]
-        agent_events = [
-            e for e in state.events
-            if e.event_type is not EventType.EXTERNAL_SIGNAL
-        ]
+        agent_events = [e for e in state.events if e.event_type is not EventType.EXTERNAL_SIGNAL]
         step_event_type = {e.step_index: e.event_type.value for e in agent_events}
 
         worst_ratio = 0.0
@@ -264,13 +265,13 @@ class RiskEngine:
         for tc in state.tool_calls:
             by_tool.setdefault(tc.tool_name, []).append(tc)
 
-        max_calls  = 0
+        max_calls = 0
         similarity = 0.0
         for calls in by_tool.values():
             if len(calls) > max_calls:
-                max_calls   = len(calls)
-                hashes      = Counter(tc.args_hash for tc in calls)
+                max_calls = len(calls)
+                hashes = Counter(tc.args_hash for tc in calls)
                 most_common = hashes.most_common(1)[0][1]
-                similarity  = most_common / len(calls)
+                similarity = most_common / len(calls)
 
         return max_calls, similarity

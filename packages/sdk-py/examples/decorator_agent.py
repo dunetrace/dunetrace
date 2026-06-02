@@ -11,6 +11,7 @@ OpenAI or Anthropic directly. Zero changes to your LLM call sites.
 Sends events to http://localhost:8001. Start the backend first:
     docker compose up
 """
+
 import asyncio
 import os
 
@@ -19,10 +20,11 @@ from dunetrace import Dunetrace, get_current_run
 ENDPOINT = os.getenv("DUNETRACE_ENDPOINT", "http://localhost:8001")
 
 dt = Dunetrace(endpoint=ENDPOINT)
-dt.auto_instrument()   # patches openai + anthropic if installed
+dt.auto_instrument()  # patches openai + anthropic if installed
 
 
 # ── Sync agent (normal) ───────────────────────────────────────────────────────
+
 
 @dt.agent("sync-agent", model="gpt-4o", tools=["web_search"])
 def run_sync_agent(query: str) -> str:
@@ -38,6 +40,7 @@ def run_sync_agent(query: str) -> str:
 
 # ── Async agent (normal) ──────────────────────────────────────────────────────
 
+
 @dt.agent("async-agent", model="claude-3-5-sonnet")
 async def run_async_agent(query: str) -> str:
     """Same pattern for async agents — decorator handles both."""
@@ -50,6 +53,7 @@ async def run_async_agent(query: str) -> str:
 
 # ── RAG agent (normal) ────────────────────────────────────────────────────────
 
+
 @dt.agent("rag-agent", model="gpt-4o", input_from="question")
 def run_rag_agent(context: str, question: str) -> str:
     """Use input_from when the user query is not the first argument."""
@@ -60,6 +64,7 @@ def run_rag_agent(context: str, question: str) -> str:
 
 
 # ── Failure scenarios (SCENARIO=failures) ─────────────────────────────────────
+
 
 @dt.agent("sync-agent", model="gpt-4o", tools=["web_search"])
 def run_tool_loop_agent(query: str) -> str:
@@ -93,6 +98,7 @@ def run_rag_empty_agent(context: str, question: str) -> str:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
 def run_normal() -> None:
     print("\n[sync]  (no signal expected)")
     print(f"  -> {run_sync_agent('What is the capital of France?')}")
@@ -101,7 +107,9 @@ def run_normal() -> None:
     print(f"  -> {asyncio.run(run_async_agent('Explain quantum entanglement'))}")
 
     print("\n[rag / input_from]  (no signal expected)")
-    print(f"  -> {run_rag_agent('Product docs context...', question='How do I configure feature X?')}")
+    print(
+        f"  -> {run_rag_agent('Product docs context...', question='How do I configure feature X?')}"
+    )
 
 
 def run_failures() -> None:
@@ -112,7 +120,7 @@ def run_failures() -> None:
     print(f"  -> {asyncio.run(run_retry_storm_agent('recent papers'))}")
 
     print("\n[rag_empty]  → expect RAG_EMPTY_RETRIEVAL signal")
-    print(f"  -> {run_rag_empty_agent('context', question='How do I configure feature X?')}"  )
+    print(f"  -> {run_rag_empty_agent('context', question='How do I configure feature X?')}")
 
 
 if __name__ == "__main__":

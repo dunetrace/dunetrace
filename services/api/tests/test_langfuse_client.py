@@ -5,6 +5,7 @@ Run:
     cd services/api
     python -m unittest tests.test_langfuse_client -v
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -14,66 +15,89 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
+
 def run(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
 def _make_generation(messages: list, output: str = "ok", name: str = "llm") -> dict:
-    return {"type": "GENERATION", "name": name, "input": {"messages": messages},
-            "output": output, "level": "DEFAULT", "metadata": {}}
+    return {
+        "type": "GENERATION",
+        "name": name,
+        "input": {"messages": messages},
+        "output": output,
+        "level": "DEFAULT",
+        "metadata": {},
+    }
 
 
 def _make_span(name: str, input_val: str = "x", output_val: str = "y") -> dict:
-    return {"type": "SPAN", "name": name, "input": input_val,
-            "output": output_val, "level": "DEFAULT", "metadata": {}}
+    return {
+        "type": "SPAN",
+        "name": name,
+        "input": input_val,
+        "output": output_val,
+        "level": "DEFAULT",
+        "metadata": {},
+    }
 
 
 def _make_signal(**kw) -> dict:
     return {
-        "failure_type":     kw.get("failure_type",     "TOOL_LOOP"),
-        "severity":         kw.get("severity",          "HIGH"),
-        "confidence":       kw.get("confidence",        0.92),
-        "run_id":           kw.get("run_id",            "run-abc"),
-        "what":             kw.get("what",              "Agent called search 7 times"),
-        "evidence_summary": kw.get("evidence_summary",  "Steps 2-6 repeated identical calls"),
-        "evidence":         kw.get("evidence",          {"first_step": 2, "last_step": 6}),
+        "failure_type": kw.get("failure_type", "TOOL_LOOP"),
+        "severity": kw.get("severity", "HIGH"),
+        "confidence": kw.get("confidence", 0.92),
+        "run_id": kw.get("run_id", "run-abc"),
+        "what": kw.get("what", "Agent called search 7 times"),
+        "evidence_summary": kw.get("evidence_summary", "Steps 2-6 repeated identical calls"),
+        "evidence": kw.get("evidence", {"first_step": 2, "last_step": 6}),
     }
 
 
 # ── _extract_system_prompt ─────────────────────────────────────────────────────
 
+
 class TestExtractSystemPrompt(unittest.TestCase):
     def setUp(self):
         from api_svc.langfuse_client import _extract_system_prompt
+
         self.fn = _extract_system_prompt
 
     def test_standard_role(self):
-        obs_input = {"messages": [
-            {"role": "system",  "content": "You are a research assistant."},
-            {"role": "human",   "content": "Tell me about climate"},
-        ]}
+        obs_input = {
+            "messages": [
+                {"role": "system", "content": "You are a research assistant."},
+                {"role": "human", "content": "Tell me about climate"},
+            ]
+        }
         self.assertEqual(self.fn(obs_input), "You are a research assistant.")
 
     def test_type_field_fallback(self):
         """LangChain sometimes uses 'type' instead of 'role'."""
-        obs_input = {"messages": [
-            {"type": "system", "content": "Use tools carefully."},
-            {"type": "human",  "content": "Go"},
-        ]}
+        obs_input = {
+            "messages": [
+                {"type": "system", "content": "Use tools carefully."},
+                {"type": "human", "content": "Go"},
+            ]
+        }
         self.assertEqual(self.fn(obs_input), "Use tools carefully.")
 
     def test_returns_first_system_message(self):
-        obs_input = {"messages": [
-            {"role": "system", "content": "First"},
-            {"role": "system", "content": "Second"},
-        ]}
+        obs_input = {
+            "messages": [
+                {"role": "system", "content": "First"},
+                {"role": "system", "content": "Second"},
+            ]
+        }
         self.assertEqual(self.fn(obs_input), "First")
 
     def test_no_system_message_returns_none(self):
-        obs_input = {"messages": [
-            {"role": "human", "content": "Hello"},
-            {"role": "ai",    "content": "Hi"},
-        ]}
+        obs_input = {
+            "messages": [
+                {"role": "human", "content": "Hello"},
+                {"role": "ai", "content": "Hi"},
+            ]
+        }
         self.assertIsNone(self.fn(obs_input))
 
     def test_non_dict_input_returns_none(self):
@@ -96,9 +120,11 @@ class TestExtractSystemPrompt(unittest.TestCase):
 
 # ── _format_observations ───────────────────────────────────────────────────────
 
+
 class TestFormatObservations(unittest.TestCase):
     def setUp(self):
         from api_svc.langfuse_client import _format_observations
+
         self.fn = _format_observations
 
     def test_empty_list(self):
@@ -107,10 +133,14 @@ class TestFormatObservations(unittest.TestCase):
         self.assertIsNone(sys_prompt)
 
     def test_extracts_system_prompt_from_generation(self):
-        obs = [_make_generation([
-            {"role": "system", "content": "You are a helpful agent."},
-            {"role": "human",  "content": "Do something"},
-        ])]
+        obs = [
+            _make_generation(
+                [
+                    {"role": "system", "content": "You are a helpful agent."},
+                    {"role": "human", "content": "Do something"},
+                ]
+            )
+        ]
         _, sys_prompt = self.fn(obs, 0, 0)
         self.assertEqual(sys_prompt, "You are a helpful agent.")
 
@@ -121,8 +151,14 @@ class TestFormatObservations(unittest.TestCase):
 
     def test_skips_event_type(self):
         obs = [
-            {"type": "EVENT", "name": "some_event", "input": "x", "output": "y",
-             "level": "DEFAULT", "metadata": {}},
+            {
+                "type": "EVENT",
+                "name": "some_event",
+                "input": "x",
+                "output": "y",
+                "level": "DEFAULT",
+                "metadata": {},
+            },
             _make_span("real_tool"),
         ]
         text, _ = self.fn(obs, 0, 0)
@@ -131,18 +167,36 @@ class TestFormatObservations(unittest.TestCase):
 
     def test_skips_score_type(self):
         obs = [
-            {"type": "SCORE", "name": "quality", "input": "x", "output": "y",
-             "level": "DEFAULT", "metadata": {}},
+            {
+                "type": "SCORE",
+                "name": "quality",
+                "input": "x",
+                "output": "y",
+                "level": "DEFAULT",
+                "metadata": {},
+            },
         ]
         text, _ = self.fn(obs, 0, 0)
         self.assertIn("no observations", text)
 
     def test_skips_langchain_chain_names(self):
         obs = [
-            {"type": "SPAN", "name": "langchain_on_chain_start", "input": "x",
-             "output": "y", "level": "DEFAULT", "metadata": {}},
-            {"type": "SPAN", "name": "langchain_on_chain_end", "input": "x",
-             "output": "y", "level": "DEFAULT", "metadata": {}},
+            {
+                "type": "SPAN",
+                "name": "langchain_on_chain_start",
+                "input": "x",
+                "output": "y",
+                "level": "DEFAULT",
+                "metadata": {},
+            },
+            {
+                "type": "SPAN",
+                "name": "langchain_on_chain_end",
+                "input": "x",
+                "output": "y",
+                "level": "DEFAULT",
+                "metadata": {},
+            },
             _make_span("real_tool"),
         ]
         text, _ = self.fn(obs, 0, 0)
@@ -166,18 +220,30 @@ class TestFormatObservations(unittest.TestCase):
         self.assertIn("b" * 150, text)
 
     def test_metadata_step_used_for_focus(self):
-        obs = [{
-            "type": "SPAN", "name": "important_tool",
-            "input": "c" * 400, "output": "result",
-            "level": "DEFAULT",
-            "metadata": {"step": 3},
-        }]
+        obs = [
+            {
+                "type": "SPAN",
+                "name": "important_tool",
+                "input": "c" * 400,
+                "output": "result",
+                "level": "DEFAULT",
+                "metadata": {"step": 3},
+            }
+        ]
         text, _ = self.fn(obs, 3, 3, signal_steps=[3])
         self.assertIn("c" * 400, text)
 
     def test_level_tag_shown_for_errors(self):
-        obs = [{"type": "SPAN", "name": "failing_tool", "input": "x",
-                "output": "err", "level": "ERROR", "metadata": {}}]
+        obs = [
+            {
+                "type": "SPAN",
+                "name": "failing_tool",
+                "input": "x",
+                "output": "err",
+                "level": "ERROR",
+                "metadata": {},
+            }
+        ]
         text, _ = self.fn(obs, 0, 0)
         self.assertIn("[ERROR]", text)
 
@@ -188,6 +254,7 @@ class TestFormatObservations(unittest.TestCase):
 
 
 # ── fetch_langfuse_trace ───────────────────────────────────────────────────────
+
 
 class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
     def _make_settings(self):
@@ -205,6 +272,7 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
         r.raise_for_status = MagicMock()
         if status >= 400:
             import httpx
+
             r.raise_for_status.side_effect = httpx.HTTPStatusError(
                 "err", request=MagicMock(), response=r
             )
@@ -222,9 +290,9 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
         trace_body = {"id": "abc", "observations": [{"type": "SPAN"}] * 5}
         mock_get = AsyncMock(return_value=self._make_response(200, trace_body))
 
-        with self._patch_client(mock_get), \
-             patch("api_svc.config.settings", self._make_settings()):
+        with self._patch_client(mock_get), patch("api_svc.config.settings", self._make_settings()):
             from api_svc.langfuse_client import fetch_langfuse_trace
+
             result = await fetch_langfuse_trace("abc")
 
         self.assertEqual(result["id"], "abc")
@@ -234,17 +302,19 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
     async def test_fetches_observations_separately_when_paginated(self):
         # 10 embedded observations triggers the fallback
         trace_body = {"id": "abc", "observations": [{"type": "SPAN"}] * 10}
-        full_obs   = [{"type": "SPAN", "name": f"step_{i}"} for i in range(20)]
-        obs_body   = {"data": full_obs}
+        full_obs = [{"type": "SPAN", "name": f"step_{i}"} for i in range(20)]
+        obs_body = {"data": full_obs}
 
-        mock_get = AsyncMock(side_effect=[
-            self._make_response(200, trace_body),
-            self._make_response(200, obs_body),
-        ])
+        mock_get = AsyncMock(
+            side_effect=[
+                self._make_response(200, trace_body),
+                self._make_response(200, obs_body),
+            ]
+        )
 
-        with self._patch_client(mock_get), \
-             patch("api_svc.config.settings", self._make_settings()):
+        with self._patch_client(mock_get), patch("api_svc.config.settings", self._make_settings()):
             from api_svc.langfuse_client import fetch_langfuse_trace
+
             result = await fetch_langfuse_trace("abc")
 
         self.assertEqual(len(result["observations"]), 20)
@@ -255,10 +325,13 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
     async def test_raises_lookup_error_on_404(self):
         mock_get = AsyncMock(return_value=self._make_response(404, {}))
 
-        with self._patch_client(mock_get), \
-             patch("api_svc.config.settings", self._make_settings()), \
-             patch("api_svc.langfuse_client.asyncio.sleep", new_callable=AsyncMock):
+        with (
+            self._patch_client(mock_get),
+            patch("api_svc.config.settings", self._make_settings()),
+            patch("api_svc.langfuse_client.asyncio.sleep", new_callable=AsyncMock),
+        ):
             from api_svc.langfuse_client import fetch_langfuse_trace
+
             with self.assertRaises(LookupError):
                 await fetch_langfuse_trace("missing")
 
@@ -268,6 +341,7 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
 
         with patch("api_svc.config.settings", s):
             from api_svc.langfuse_client import fetch_langfuse_trace
+
             with self.assertRaises(ValueError):
                 await fetch_langfuse_trace("any")
 
@@ -275,9 +349,9 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
         trace_body = {"id": "abc123", "observations": []}
         mock_get = AsyncMock(return_value=self._make_response(200, trace_body))
 
-        with self._patch_client(mock_get), \
-             patch("api_svc.config.settings", self._make_settings()):
+        with self._patch_client(mock_get), patch("api_svc.config.settings", self._make_settings()):
             from api_svc.langfuse_client import fetch_langfuse_trace
+
             await fetch_langfuse_trace("abc-123-def")
 
         called_url = mock_get.call_args_list[0][0][0]
@@ -285,6 +359,7 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
 
 
 # ── build_explain_prompt ───────────────────────────────────────────────────────
+
 
 class TestBuildExplainPrompt(unittest.IsolatedAsyncioTestCase):
     def _make_trace(self, observations=None, user_input="Research climate"):
@@ -295,21 +370,23 @@ class TestBuildExplainPrompt(unittest.IsolatedAsyncioTestCase):
 
     async def test_prompt_leads_with_signal_info(self):
         signal = _make_signal()
-        trace  = self._make_trace()
+        trace = self._make_trace()
 
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
 
-        self.assertIn("TOOL_LOOP",   prompt)
-        self.assertIn("92%",         prompt)
-        self.assertIn("HIGH",        prompt)
-        self.assertIn("Steps 2-6",   prompt)  # evidence_summary text
+        self.assertIn("TOOL_LOOP", prompt)
+        self.assertIn("92%", prompt)
+        self.assertIn("HIGH", prompt)
+        self.assertIn("Steps 2-6", prompt)  # evidence_summary text
 
     async def test_failing_steps_range_in_prompt(self):
         signal = _make_signal(evidence={"first_step": 3, "last_step": 7})
-        trace  = self._make_trace()
+        trace = self._make_trace()
 
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
 
         self.assertIn("3", prompt)
@@ -317,13 +394,18 @@ class TestBuildExplainPrompt(unittest.IsolatedAsyncioTestCase):
 
     async def test_system_prompt_surfaced_when_present(self):
         signal = _make_signal()
-        obs    = [_make_generation([
-            {"role": "system", "content": "Search the web for relevant sources."},
-            {"role": "human",  "content": "Find climate data"},
-        ])]
-        trace  = self._make_trace(observations=obs)
+        obs = [
+            _make_generation(
+                [
+                    {"role": "system", "content": "Search the web for relevant sources."},
+                    {"role": "human", "content": "Find climate data"},
+                ]
+            )
+        ]
+        trace = self._make_trace(observations=obs)
 
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
 
         self.assertIn("Search the web for relevant sources.", prompt)
@@ -331,55 +413,61 @@ class TestBuildExplainPrompt(unittest.IsolatedAsyncioTestCase):
 
     async def test_system_prompt_section_shows_not_found(self):
         signal = _make_signal()
-        trace  = self._make_trace(observations=[_make_span("tool")])
+        trace = self._make_trace(observations=[_make_span("tool")])
 
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
 
         self.assertIn("System prompt: (not found in trace)", prompt)
 
     async def test_trace_input_in_prompt(self):
         signal = _make_signal()
-        trace  = self._make_trace(user_input="Research climate policy trends")
+        trace = self._make_trace(user_input="Research climate policy trends")
 
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
 
         self.assertIn("Research climate policy trends", prompt)
 
     async def test_what_field_included(self):
         signal = _make_signal(what="Agent called search 7 times without progress")
-        trace  = self._make_trace()
+        trace = self._make_trace()
 
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
 
         self.assertIn("Agent called search 7 times without progress", prompt)
 
     async def test_dict_trace_input_converted(self):
         signal = _make_signal()
-        trace  = {"input": {"query": "test", "context": "ctx"}, "observations": []}
+        trace = {"input": {"query": "test", "context": "ctx"}, "observations": []}
 
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
 
         self.assertIn("query", prompt)
 
     async def test_handles_missing_evidence_gracefully(self):
         signal = _make_signal(evidence={})
-        trace  = self._make_trace()
+        trace = self._make_trace()
 
         from api_svc.langfuse_client import build_explain_prompt
+
         # Should not raise
         prompt = await build_explain_prompt(signal, trace)
         self.assertIsInstance(prompt, str)
 
     async def test_observations_present_in_prompt(self):
         signal = _make_signal()
-        obs    = [_make_span("web_search", input_val="climate data", output_val="found 5 results")]
-        trace  = self._make_trace(observations=obs)
+        obs = [_make_span("web_search", input_val="climate data", output_val="found 5 results")]
+        trace = self._make_trace(observations=obs)
 
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
 
         self.assertIn("web_search", prompt)
@@ -387,9 +475,11 @@ class TestBuildExplainPrompt(unittest.IsolatedAsyncioTestCase):
 
 # ── _get_step_range ────────────────────────────────────────────────────────────
 
+
 class TestGetStepRange(unittest.TestCase):
     def setUp(self):
         from api_svc.langfuse_client import _get_step_range
+
         self.fn = _get_step_range
 
     def test_tool_loop_uses_first_last_step(self):
@@ -430,8 +520,14 @@ class TestGetStepRange(unittest.TestCase):
 
     def test_no_step_range_detectors_fall_back_to_signal_step(self):
         # TOOL_THRASHING, TOOL_AVOIDANCE, REASONING_STALL, etc. have no step range
-        for ft in ("TOOL_THRASHING", "TOOL_AVOIDANCE", "REASONING_STALL",
-                   "STEP_COUNT_INFLATION", "RAG_EMPTY_RETRIEVAL", "PROMPT_INJECTION_SIGNAL"):
+        for ft in (
+            "TOOL_THRASHING",
+            "TOOL_AVOIDANCE",
+            "REASONING_STALL",
+            "STEP_COUNT_INFLATION",
+            "RAG_EMPTY_RETRIEVAL",
+            "PROMPT_INJECTION_SIGNAL",
+        ):
             with self.subTest(failure_type=ft):
                 self.assertEqual(self.fn({}, ft, 5), (5, 5))
 
@@ -445,24 +541,27 @@ class TestGetStepRange(unittest.TestCase):
 
 # ── build_explain_prompt uses correct step range per detector ──────────────────
 
+
 class TestBuildExplainPromptStepRange(unittest.IsolatedAsyncioTestCase):
     def _make_signal(self, failure_type, evidence, step_index=5):
         return {
-            "failure_type":     failure_type,
-            "severity":         "HIGH",
-            "confidence":       0.9,
-            "run_id":           "run-abc",
-            "step_index":       step_index,
-            "what":             "",
+            "failure_type": failure_type,
+            "severity": "HIGH",
+            "confidence": 0.9,
+            "run_id": "run-abc",
+            "step_index": step_index,
+            "what": "",
             "evidence_summary": "",
-            "evidence":         evidence,
+            "evidence": evidence,
         }
 
     async def test_llm_truncation_loop_step_range_correct(self):
-        signal = self._make_signal("LLM_TRUNCATION_LOOP",
-                                   {"first_truncation_step": 3, "last_truncation_step": 6})
+        signal = self._make_signal(
+            "LLM_TRUNCATION_LOOP", {"first_truncation_step": 3, "last_truncation_step": 6}
+        )
         trace = {"input": "test", "observations": []}
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
         self.assertIn("3", prompt)
         self.assertIn("6", prompt)
@@ -471,13 +570,17 @@ class TestBuildExplainPromptStepRange(unittest.IsolatedAsyncioTestCase):
         signal = self._make_signal("RETRY_STORM", {"first_fail_step": 4})
         trace = {"input": "test", "observations": []}
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
         self.assertIn("4", prompt)
 
     async def test_no_step_range_detector_uses_signal_step_index(self):
-        signal = self._make_signal("TOOL_THRASHING", {"tool_a": "search", "tool_b": "calc"}, step_index=8)
+        signal = self._make_signal(
+            "TOOL_THRASHING", {"tool_a": "search", "tool_b": "calc"}, step_index=8
+        )
         trace = {"input": "test", "observations": []}
         from api_svc.langfuse_client import build_explain_prompt
+
         prompt = await build_explain_prompt(signal, trace)
         self.assertIn("8", prompt)
 

@@ -1,6 +1,7 @@
 """
 services/api/api_svc/config.py
 """
+
 from __future__ import annotations
 
 import os
@@ -16,7 +17,7 @@ def _load_dotenv(path: str = ".env") -> None:
                 key, _, val = line.partition("=")
                 val = val.strip()
                 if " #" in val:
-                    val = val[:val.index(" #")].strip()
+                    val = val[: val.index(" #")].strip()
                 os.environ.setdefault(key.strip(), val)
     except FileNotFoundError:
         pass
@@ -45,8 +46,8 @@ class Settings:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
     # GitHub integration — for opening fix PRs from code-change signals
-    GITHUB_TOKEN: str       = os.getenv("GITHUB_TOKEN", "")
-    GITHUB_REPO: str        = os.getenv("GITHUB_REPO", "")        # e.g. "owner/repo"
+    GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
+    GITHUB_REPO: str = os.getenv("GITHUB_REPO", "")  # e.g. "owner/repo"
     GITHUB_BASE_BRANCH: str = os.getenv("GITHUB_BASE_BRANCH", "main")
 
     # Slack interactive callbacks — from Settings > Basic Information > Signing Secret

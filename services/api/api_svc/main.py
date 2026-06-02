@@ -8,6 +8,7 @@ Run:
 Docs:
     http://localhost:8002/docs
 """
+
 from __future__ import annotations
 
 import logging
@@ -19,7 +20,17 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api_svc.config import settings
 from api_svc.db.queries import init_pool, close_pool, check_db
-from api_svc.routers import agents, runs, signals, insights, issues, failure_patterns, policies, patterns, slack
+from api_svc.routers import (
+    agents,
+    runs,
+    signals,
+    insights,
+    issues,
+    failure_patterns,
+    policies,
+    patterns,
+    slack,
+)
 from api_svc.schemas import HealthResponse
 
 logging.basicConfig(
@@ -61,8 +72,7 @@ def create_app() -> FastAPI:
         t = time.monotonic()
         response = await call_next(request)
         ms = (time.monotonic() - t) * 1000
-        logger.info("%s %s %d %.1fms",
-                    request.method, request.url.path, response.status_code, ms)
+        logger.info("%s %s %d %.1fms", request.method, request.url.path, response.status_code, ms)
         return response
 
     app.include_router(agents.router)

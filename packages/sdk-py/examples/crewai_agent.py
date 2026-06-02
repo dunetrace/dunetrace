@@ -14,12 +14,14 @@ Run (happy path):
 Run (tool loop — triggers TOOL_LOOP signal):
     SCENARIO=tool_loop OPENAI_API_KEY=sk-... python examples/crewai_agent.py
 """
+
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 
 from crewai import Agent, Crew, Task, Process
@@ -30,12 +32,12 @@ from dunetrace.integrations.crewai import DunetraceCrewCallback
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-AGENT_ID   = "crewai-example-crew"
-MODEL      = "gpt-4o-mini"
+AGENT_ID = "crewai-example-crew"
+MODEL = "gpt-4o-mini"
 TOOLS_LIST = ["web_search"]
 
 SCENARIOS = {
-    "normal":    "Search for information about the Eiffel Tower and write a one-paragraph summary.",
+    "normal": "Search for information about the Eiffel Tower and write a one-paragraph summary.",
     "tool_loop": (
         "Search for 'latest AI news' exactly 6 times in a row, each time using "
         "the exact query 'latest AI news'. After all searches, compile the results."
@@ -44,10 +46,12 @@ SCENARIOS = {
 
 # ── Simulated tool ─────────────────────────────────────────────────────────────
 
+
 @tool("web_search")
 def web_search(query: str) -> str:
     """Search the web for information on a topic. Use this for any research task."""
     return f"Search results for '{query}': simulated result about {query}."
+
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
@@ -55,7 +59,7 @@ dt = Dunetrace(endpoint=os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8
 dt.mark_deploy(AGENT_ID, version=os.environ.get("APP_VERSION", "dev"))
 
 scenario = os.environ.get("SCENARIO", "normal")
-query    = SCENARIOS.get(scenario, SCENARIOS["normal"])
+query = SCENARIOS.get(scenario, SCENARIOS["normal"])
 
 print("=" * 60)
 print(f"Dunetrace + CrewAI example  [scenario={scenario}]")

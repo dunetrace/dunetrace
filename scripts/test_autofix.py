@@ -14,6 +14,7 @@ Usage:
     python scripts/test_autofix.py
     python scripts/test_autofix.py --apply   # also tests apply-fix (writes to Langfuse)
 """
+
 from __future__ import annotations
 
 import json
@@ -25,22 +26,25 @@ from pathlib import Path
 # ── Load .env ─────────────────────────────────────────────────────────────────
 try:
     from dotenv import load_dotenv
+
     load_dotenv(Path(__file__).parent.parent / ".env")
 except ImportError:
     pass
 
-API          = "http://localhost:8002"
-AUTH_HEADER  = {"Authorization": "Bearer dt_dev_test", "Content-Type": "application/json"}
-SIGNAL_ID    = 348   # TOOL_LOOP on langfuse-example-agent, steps 2-7
-APPLY        = "--apply" in sys.argv
+API = "http://localhost:8002"
+AUTH_HEADER = {"Authorization": "Bearer dt_dev_test", "Content-Type": "application/json"}
+SIGNAL_ID = 348  # TOOL_LOOP on langfuse-example-agent, steps 2-7
+APPLY = "--apply" in sys.argv
 
 _pass = 0
 _fail = 0
+
 
 def ok(label):
     global _pass
     _pass += 1
     print(f"  PASS  {label}")
+
 
 def fail(label, detail=""):
     global _fail
@@ -57,7 +61,10 @@ def get(path):
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
     req = urllib.request.Request(
-        f"{API}{path}", data=data, headers=AUTH_HEADER, method="POST",
+        f"{API}{path}",
+        data=data,
+        headers=AUTH_HEADER,
+        method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
@@ -73,9 +80,9 @@ def post(path, body=None):
 
 # ── Step 0: Verify signal exists ───────────────────────────────────────────────
 
-print(f"\n{'='*60}")
+print(f"\n{'=' * 60}")
 print(f"Autofix end-to-end test  (signal_id={SIGNAL_ID})")
-print(f"{'='*60}\n")
+print(f"{'=' * 60}\n")
 
 print("[0] Verify signal exists")
 data, status = get(f"/v1/agents/langfuse-example-agent/signals?limit=500")
@@ -113,7 +120,7 @@ if explain_status == 200:
         fail("fix_content key missing from response")
 
     pname = explain_data.get("langfuse_prompt_name")
-    pver  = explain_data.get("langfuse_prompt_version")
+    pver = explain_data.get("langfuse_prompt_version")
     if pname:
         ok(f"langfuse_prompt_name = {pname!r}  version = {pver}")
     else:
@@ -143,13 +150,18 @@ else:
 
 print("\n[2] POST /v1/signals/{id}/record-copy")
 if not fix_content:
-    fix_content = sig["suggested_fixes"][0]["code"] if sig.get("suggested_fixes") else "Add deduplication"
+    fix_content = (
+        sig["suggested_fixes"][0]["code"] if sig.get("suggested_fixes") else "Add deduplication"
+    )
 
-copy_data, copy_status = post(f"/v1/signals/{SIGNAL_ID}/record-copy", {
-    "fix_content":          fix_content,
-    "langfuse_prompt_name": prompt_name or "",
-    "applied_via":          "clipboard",
-})
+copy_data, copy_status = post(
+    f"/v1/signals/{SIGNAL_ID}/record-copy",
+    {
+        "fix_content": fix_content,
+        "langfuse_prompt_name": prompt_name or "",
+        "applied_via": "clipboard",
+    },
+)
 if copy_status == 200:
     ok(f"record-copy returned 200  (fix_id={copy_data.get('fix_id')})")
 else:
@@ -182,14 +194,19 @@ if APPLY:
     elif not fix_content:
         print("  SKIP  No fix_content from explain step")
     else:
-        apply_data, apply_status = post(f"/v1/signals/{SIGNAL_ID}/apply-fix", {
-            "fix_content":          fix_content,
-            "langfuse_prompt_name": prompt_name,
-            "applied_via":          "langfuse",
-        })
+        apply_data, apply_status = post(
+            f"/v1/signals/{SIGNAL_ID}/apply-fix",
+            {
+                "fix_content": fix_content,
+                "langfuse_prompt_name": prompt_name,
+                "applied_via": "langfuse",
+            },
+        )
         if apply_status == 200:
             ok(f"apply-fix returned 200")
-            ok(f"new_version = {apply_data.get('new_version')}  url = {apply_data.get('prompt_url')}")
+            ok(
+                f"new_version = {apply_data.get('new_version')}  url = {apply_data.get('prompt_url')}"
+            )
         else:
             fail(f"apply-fix returned {apply_status}", apply_data.get("detail", ""))
 else:
@@ -198,9 +215,9 @@ else:
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 
-print(f"\n{'='*60}")
+print(f"\n{'=' * 60}")
 print(f"Results:  {_pass} passed  {_fail} failed")
 if _fail:
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
     sys.exit(1)
-print(f"{'='*60}\n")
+print(f"{'=' * 60}\n")

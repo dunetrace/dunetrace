@@ -16,6 +16,7 @@ Usage:
     # Show how many signals each detector would fire if graduated
     python scripts/precision_report.py --summary
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,13 +40,13 @@ DATABASE_URL = os.environ.get(
 SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 SEVERITY_COLOR = {
     "CRITICAL": "\033[91m",  # red
-    "HIGH":     "\033[93m",  # yellow
-    "MEDIUM":   "\033[94m",  # blue
-    "LOW":      "\033[92m",  # green
+    "HIGH": "\033[93m",  # yellow
+    "MEDIUM": "\033[94m",  # blue
+    "LOW": "\033[92m",  # green
 }
 RESET = "\033[0m"
-BOLD  = "\033[1m"
-DIM   = "\033[2m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
 
 
 def connect():
@@ -77,11 +78,13 @@ def fmt_confidence(c: float) -> str:
 
 # ── Summary view ───────────────────────────────────────────────────────────────
 
+
 def print_summary(cur, agent_filter: str | None):
     agent_clause = "AND agent_id = %s" if agent_filter else ""
     params = [agent_filter] if agent_filter else []
 
-    cur.execute(f"""
+    cur.execute(
+        f"""
         SELECT
             failure_type,
             COUNT(*)                                          AS total,
@@ -97,7 +100,9 @@ def print_summary(cur, agent_filter: str | None):
         {agent_clause}
         GROUP BY failure_type
         ORDER BY total DESC
-    """, params)
+    """,
+        params,
+    )
 
     rows = cur.fetchall()
 
@@ -107,17 +112,21 @@ def print_summary(cur, agent_filter: str | None):
             print(f"(filtered to agent: {agent_filter})")
         return
 
-    print(f"\n{BOLD}Shadow Signal Summary{RESET}" +
-          (f"  {DIM}agent: {agent_filter}{RESET}" if agent_filter else ""))
+    print(
+        f"\n{BOLD}Shadow Signal Summary{RESET}"
+        + (f"  {DIM}agent: {agent_filter}{RESET}" if agent_filter else "")
+    )
     print(f"{DIM}{'─' * 90}{RESET}")
-    print(f"{'DETECTOR':<32} {'TOTAL':>6} {'CRIT':>5} {'HIGH':>5} {'MED':>5} {'LOW':>5}  {'AVG CONF':>9}  {'RUNS':>5}  LAST SEEN")
+    print(
+        f"{'DETECTOR':<32} {'TOTAL':>6} {'CRIT':>5} {'HIGH':>5} {'MED':>5} {'LOW':>5}  {'AVG CONF':>9}  {'RUNS':>5}  LAST SEEN"
+    )
     print(f"{DIM}{'─' * 90}{RESET}")
 
     for r in rows:
         last = fmt_ts(r["last_seen"])
         conf = fmt_confidence(float(r["avg_conf"]))
         crit_str = colored(str(r["critical"]), "\033[91m") if r["critical"] else DIM + "0" + RESET
-        high_str = colored(str(r["high"]),     "\033[93m") if r["high"]     else DIM + "0" + RESET
+        high_str = colored(str(r["high"]), "\033[93m") if r["high"] else DIM + "0" + RESET
         print(
             f"{r['failure_type']:<32} {r['total']:>6} {crit_str:>14} {high_str:>14} "
             f"{r['medium']:>5} {r['low']:>5}  {conf:>18}  {r['runs_affected']:>5}  {DIM}{last}{RESET}"
@@ -125,7 +134,7 @@ def print_summary(cur, agent_filter: str | None):
 
     print(f"{DIM}{'─' * 90}{RESET}")
     total_signals = sum(r["total"] for r in rows)
-    total_runs    = len(set())
+    total_runs = len(set())
     print(f"{BOLD}{total_signals} total shadow signals across {len(rows)} detector type(s){RESET}")
     print()
 
@@ -148,11 +157,13 @@ def print_summary(cur, agent_filter: str | None):
 
 # ── Recent signals view ────────────────────────────────────────────────────────
 
+
 def print_recent(cur, agent_filter: str | None, limit: int = 20):
     agent_clause = "AND s.agent_id = %s" if agent_filter else ""
     params = [agent_filter] if agent_filter else []
 
-    cur.execute(f"""
+    cur.execute(
+        f"""
         SELECT
             s.id, s.failure_type, s.severity, s.run_id,
             s.agent_id, s.step_index, s.confidence,
@@ -164,7 +175,9 @@ def print_recent(cur, agent_filter: str | None, limit: int = 20):
         {agent_clause}
         ORDER BY s.detected_at DESC
         LIMIT %s
-    """, params + [limit])
+    """,
+        params + [limit],
+    )
 
     rows = cur.fetchall()
 
@@ -213,13 +226,15 @@ def print_recent(cur, agent_filter: str | None, limit: int = 20):
 
 # ── Inspect a specific detector ────────────────────────────────────────────────
 
+
 def print_inspect(cur, failure_type: str, agent_filter: str | None, limit: int = 10):
     agent_clause = "AND agent_id = %s" if agent_filter else ""
     params = [failure_type.upper()]
     if agent_filter:
         params.append(agent_filter)
 
-    cur.execute(f"""
+    cur.execute(
+        f"""
         SELECT id, severity, run_id, agent_id, step_index,
                confidence, detected_at, evidence
         FROM failure_signals
@@ -228,7 +243,9 @@ def print_inspect(cur, failure_type: str, agent_filter: str | None, limit: int =
         {agent_clause}
         ORDER BY detected_at DESC
         LIMIT %s
-    """, params + [limit])
+    """,
+        params + [limit],
+    )
 
     rows = cur.fetchall()
 
@@ -237,7 +254,9 @@ def print_inspect(cur, failure_type: str, agent_filter: str | None, limit: int =
         return
 
     print(f"\n{BOLD}Inspecting: {failure_type}{RESET}  {DIM}(latest {len(rows)}){RESET}")
-    print(f"{DIM}Run through these manually and mark each as TP (true positive) or FP (false positive){RESET}")
+    print(
+        f"{DIM}Run through these manually and mark each as TP (true positive) or FP (false positive){RESET}"
+    )
     print(f"{DIM}If ≥80% are TP → ready to graduate.{RESET}\n")
 
     for i, r in enumerate(rows, 1):
@@ -267,20 +286,25 @@ def print_inspect(cur, failure_type: str, agent_filter: str | None, limit: int =
     print(f"{BOLD}To graduate this detector:{RESET}")
     print(f"  Edit services/detector/detector_svc/db.py:")
     print(f'  LIVE_DETECTORS = {{"{failure_type}"}}')
-    print(f"  Then restart: PYTHONPATH=.:../../packages/sdk-py SHADOW_MODE=false python -m detector_svc.worker")
+    print(
+        f"  Then restart: PYTHONPATH=.:../../packages/sdk-py SHADOW_MODE=false python -m detector_svc.worker"
+    )
     print()
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Dunetrace precision report — evaluate shadow signals before graduating detectors"
     )
-    parser.add_argument("--agent",   help="Filter to a specific agent_id")
-    parser.add_argument("--inspect", help="Show detailed evidence for a specific detector type (e.g. TOOL_LOOP)")
-    parser.add_argument("--recent",  action="store_true", help="Show recent individual signals")
-    parser.add_argument("--limit",   type=int, default=20, help="Max signals to show (default 20)")
+    parser.add_argument("--agent", help="Filter to a specific agent_id")
+    parser.add_argument(
+        "--inspect", help="Show detailed evidence for a specific detector type (e.g. TOOL_LOOP)"
+    )
+    parser.add_argument("--recent", action="store_true", help="Show recent individual signals")
+    parser.add_argument("--limit", type=int, default=20, help="Max signals to show (default 20)")
     args = parser.parse_args()
 
     try:

@@ -15,6 +15,7 @@ Run (tool loop — triggers TOOL_LOOP signal):
 
 DUNETRACE_ENDPOINT defaults to http://localhost:8001.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +23,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 
 from autogen_agentchat.agents import AssistantAgent
@@ -36,12 +38,12 @@ from dunetrace.integrations.autogen import DunetraceAutoGenObserver
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-AGENT_ID   = "autogen-example-agent"
-MODEL      = "gpt-4o-mini"
+AGENT_ID = "autogen-example-agent"
+MODEL = "gpt-4o-mini"
 TOOLS_LIST = ["web_search"]
 
 SCENARIOS = {
-    "normal":    "What is the capital of France? Answer in one sentence.",
+    "normal": "What is the capital of France? Answer in one sentence.",
     "tool_loop": (
         "Use web_search exactly 6 times with the exact query 'latest AI news'. "
         "After all 6 searches, compile the results into a brief report."
@@ -50,9 +52,11 @@ SCENARIOS = {
 
 # ── Simulated tool ─────────────────────────────────────────────────────────────
 
+
 def web_search(query: str) -> str:
     """Search the web for information on a topic."""
     return f"Search results for '{query}': simulated AI news content."
+
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
@@ -60,7 +64,7 @@ dt = Dunetrace(endpoint=os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8
 dt.mark_deploy(AGENT_ID, version=os.environ.get("APP_VERSION", "dev"))
 
 scenario = os.environ.get("SCENARIO", "normal")
-query    = SCENARIOS.get(scenario, SCENARIOS["normal"])
+query = SCENARIOS.get(scenario, SCENARIOS["normal"])
 
 print("=" * 60)
 print(f"Dunetrace + AutoGen example  [scenario={scenario}]")
@@ -76,9 +80,10 @@ observer = DunetraceAutoGenObserver(
 
 # ── Agent setup ────────────────────────────────────────────────────────────────
 
+
 async def main() -> None:
     base_client = OpenAIChatCompletionClient(model=MODEL)
-    dt_client   = observer.wrap_client(base_client)   # instruments LLM calls
+    dt_client = observer.wrap_client(base_client)  # instruments LLM calls
 
     search_tool = FunctionTool(web_search, description="Search the web for information.")
 
@@ -109,6 +114,7 @@ async def main() -> None:
     print(final_msg)
 
     await base_client.close()
+
 
 asyncio.run(main())
 

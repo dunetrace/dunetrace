@@ -8,6 +8,7 @@ signal of that type. If the failure recurs after resolution, the issue is reopen
 Query params:
   status: open | resolved | reopened  (default: all)
 """
+
 from __future__ import annotations
 
 from typing import Optional

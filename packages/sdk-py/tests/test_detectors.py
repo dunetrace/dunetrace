@@ -5,6 +5,7 @@ These should all pass with zero infrastructure running.
 Run: python -m unittest discover -s packages/sdk-py/tests
  or: pytest packages/sdk-py/tests/  (if pytest installed)
 """
+
 import unittest
 import time
 
@@ -34,6 +35,7 @@ def make_tool_call(name: str, step: int = 0) -> ToolCall:
 
 
 # ── ToolLoopDetector ──────────────────────────────────────────────────────────
+
 
 class TestToolLoopDetector(unittest.TestCase):
     detector = ToolLoopDetector()
@@ -82,6 +84,7 @@ class TestToolLoopDetector(unittest.TestCase):
 
 # ── ToolThrashingDetector ─────────────────────────────────────────────────────
 
+
 class TestToolThrashingDetector(unittest.TestCase):
     detector = ToolThrashingDetector()
 
@@ -123,6 +126,7 @@ class TestToolThrashingDetector(unittest.TestCase):
 
 # ── ToolAvoidanceDetector ─────────────────────────────────────────────────────
 
+
 class TestToolAvoidanceDetector(unittest.TestCase):
     detector = ToolAvoidanceDetector()
 
@@ -132,9 +136,16 @@ class TestToolAvoidanceDetector(unittest.TestCase):
         state.tool_calls = []
         # Detector requires MIN_LLM_CALLS=2 to suppress false positives on trivially short runs
         from dunetrace.models import LlmCall
+
         state.llm_calls = [
-            LlmCall(model="gpt-4o-mini", prompt_tokens=200, finish_reason="stop",
-                    latency_ms=100, step_index=i, timestamp=time.time())
+            LlmCall(
+                model="gpt-4o-mini",
+                prompt_tokens=200,
+                finish_reason="stop",
+                latency_ms=100,
+                step_index=i,
+                timestamp=time.time(),
+            )
             for i in range(1, 3)
         ]
         signal = self.detector.check(state)
@@ -161,6 +172,7 @@ class TestToolAvoidanceDetector(unittest.TestCase):
 
 
 # ── PromptInjectionDetector ───────────────────────────────────────────────────
+
 
 class TestPromptInjectionDetector(unittest.TestCase):
     detector = PromptInjectionDetector()
@@ -208,6 +220,7 @@ class TestPromptInjectionDetector(unittest.TestCase):
 
 
 # ── RagEmptyRetrievalDetector ─────────────────────────────────────────────────
+
 
 class TestRagEmptyRetrievalDetector(unittest.TestCase):
     detector = RagEmptyRetrievalDetector()
@@ -263,8 +276,9 @@ from dunetrace.models import LlmCall
 from dunetrace.detectors import LlmTruncationLoopDetector, ContextBloatDetector
 
 
-def make_llm_call(finish_reason: str = "stop", prompt_tokens: int = 500,
-                  step: int = 1, model: str = "gpt-4o-mini") -> LlmCall:
+def make_llm_call(
+    finish_reason: str = "stop", prompt_tokens: int = 500, step: int = 1, model: str = "gpt-4o-mini"
+) -> LlmCall:
     return LlmCall(
         model=model,
         prompt_tokens=prompt_tokens,
@@ -283,8 +297,8 @@ class TestLlmTruncationLoopDetector(unittest.TestCase):
         state = make_state()
         state.llm_calls = [
             make_llm_call("length", step=1),
-            make_llm_call("stop",   step=2),
-            make_llm_call("stop",   step=3),
+            make_llm_call("stop", step=2),
+            make_llm_call("stop", step=3),
         ]
         state.current_step = 3
         assert self.detector.check(state) is None
@@ -293,7 +307,7 @@ class TestLlmTruncationLoopDetector(unittest.TestCase):
         state = make_state()
         state.llm_calls = [
             make_llm_call("length", step=1),
-            make_llm_call("stop",   step=2),
+            make_llm_call("stop", step=2),
             make_llm_call("length", step=3),
         ]
         state.current_step = 3
@@ -345,9 +359,9 @@ class TestLlmTruncationLoopDetector(unittest.TestCase):
     def test_evidence_contains_step_indices(self):
         state = make_state()
         state.llm_calls = [
-            make_llm_call("stop",   step=1),
+            make_llm_call("stop", step=1),
             make_llm_call("length", step=2),
-            make_llm_call("stop",   step=3),
+            make_llm_call("stop", step=3),
             make_llm_call("length", step=4),
         ]
         state.current_step = 4
@@ -358,13 +372,14 @@ class TestLlmTruncationLoopDetector(unittest.TestCase):
 
 # ── ContextBloatDetector ──────────────────────────────────────────────────────
 
+
 class TestContextBloatDetector(unittest.TestCase):
     detector = ContextBloatDetector()
 
     def test_no_signal_below_min_calls(self):
         state = make_state()
         state.llm_calls = [
-            make_llm_call(prompt_tokens=500,  step=1),
+            make_llm_call(prompt_tokens=500, step=1),
             make_llm_call(prompt_tokens=2000, step=2),
         ]
         state.current_step = 2
@@ -373,8 +388,8 @@ class TestContextBloatDetector(unittest.TestCase):
     def test_no_signal_below_growth_factor(self):
         state = make_state()
         state.llm_calls = [
-            make_llm_call(prompt_tokens=500,  step=1),
-            make_llm_call(prompt_tokens=800,  step=2),
+            make_llm_call(prompt_tokens=500, step=1),
+            make_llm_call(prompt_tokens=800, step=2),
             make_llm_call(prompt_tokens=1200, step=3),
         ]
         state.current_step = 3
@@ -383,7 +398,7 @@ class TestContextBloatDetector(unittest.TestCase):
     def test_fires_at_3x_growth(self):
         state = make_state()
         state.llm_calls = [
-            make_llm_call(prompt_tokens=600,  step=1),
+            make_llm_call(prompt_tokens=600, step=1),
             make_llm_call(prompt_tokens=1200, step=2),
             make_llm_call(prompt_tokens=2100, step=3),
         ]
@@ -395,7 +410,7 @@ class TestContextBloatDetector(unittest.TestCase):
     def test_fires_on_clear_bloat(self):
         state = make_state()
         state.llm_calls = [
-            make_llm_call(prompt_tokens=400,  step=1),
+            make_llm_call(prompt_tokens=400, step=1),
             make_llm_call(prompt_tokens=2000, step=2),
             make_llm_call(prompt_tokens=3500, step=3),
             make_llm_call(prompt_tokens=5200, step=4),
@@ -410,7 +425,7 @@ class TestContextBloatDetector(unittest.TestCase):
     def test_evidence_contains_token_counts(self):
         state = make_state()
         state.llm_calls = [
-            make_llm_call(prompt_tokens=300,  step=1),
+            make_llm_call(prompt_tokens=300, step=1),
             make_llm_call(prompt_tokens=1500, step=2),
             make_llm_call(prompt_tokens=4500, step=3),
         ]
@@ -418,15 +433,21 @@ class TestContextBloatDetector(unittest.TestCase):
         signal = self.detector.check(state)
         assert signal is not None
         assert signal.evidence["first_tokens"] == 300
-        assert signal.evidence["last_tokens"]  == 4500
+        assert signal.evidence["last_tokens"] == 4500
         assert signal.evidence["growth_factor"] == 15.0
 
     def test_no_signal_when_tokens_not_reported(self):
         """If developer doesn't pass prompt_tokens, should not crash or fire."""
         state = make_state()
         state.llm_calls = [
-            LlmCall(model="gpt-4o-mini", prompt_tokens=None, finish_reason="stop",
-                    latency_ms=1000, step_index=i, timestamp=time.time())
+            LlmCall(
+                model="gpt-4o-mini",
+                prompt_tokens=None,
+                finish_reason="stop",
+                latency_ms=1000,
+                step_index=i,
+                timestamp=time.time(),
+            )
             for i in range(5)
         ]
         state.current_step = 5
@@ -448,7 +469,7 @@ class TestContextBloatDetector(unittest.TestCase):
         # 300→4500 tokens → growth=15×, threshold=3.0 → ratio=5.0 → confidence=1.0
         state = make_state()
         state.llm_calls = [
-            make_llm_call(prompt_tokens=300,  step=1),
+            make_llm_call(prompt_tokens=300, step=1),
             make_llm_call(prompt_tokens=1500, step=2),
             make_llm_call(prompt_tokens=4500, step=3),
         ]
@@ -472,7 +493,9 @@ from dunetrace.detectors import ReasoningSpinDetector
 from dunetrace.models import FailureType
 
 
-def _make_spin_state(llm_count: int, tool_count: int, exit_reason: str = "final_answer") -> RunState:
+def _make_spin_state(
+    llm_count: int, tool_count: int, exit_reason: str = "final_answer"
+) -> RunState:
     state = make_state()
     state.llm_calls = [make_llm_call(step=i) for i in range(llm_count)]
     state.tool_calls = [make_tool_call("web_search", step=i) for i in range(tool_count)]

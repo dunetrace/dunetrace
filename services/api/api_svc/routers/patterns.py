@@ -5,6 +5,7 @@ Cross-run signal frequency per agent × detector over the last 7 days.
 Powers the Patterns dashboard tab — answers "which detectors are firing
 systematically, not just on one run?"
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends

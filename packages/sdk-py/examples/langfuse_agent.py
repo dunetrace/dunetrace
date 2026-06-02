@@ -21,6 +21,7 @@ Run (happy path):
 Run (tool loop, triggers TOOL_LOOP signal + explain):
     SCENARIO=tool_loop python examples/langfuse_agent.py
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 
 import httpx
@@ -50,7 +52,7 @@ try:
     try:
         from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler  # v4+
     except ImportError:
-        from langfuse.callback import CallbackHandler as LangfuseCallbackHandler   # v2/v3
+        from langfuse.callback import CallbackHandler as LangfuseCallbackHandler  # v2/v3
     _LANGFUSE_AVAILABLE = True
 except ImportError:
     _LANGFUSE_AVAILABLE = False
@@ -60,19 +62,19 @@ except ImportError:
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 DUNETRACE_ENDPOINT = os.getenv("DUNETRACE_ENDPOINT", "http://localhost:8001")
-DUNETRACE_API      = os.getenv("DUNETRACE_API",      "http://localhost:8002")
-DUNETRACE_KEY      = os.getenv("DUNETRACE_KEY",      "dt_dev_test")
-AGENT_ID           = "langfuse-example-agent"
+DUNETRACE_API = os.getenv("DUNETRACE_API", "http://localhost:8002")
+DUNETRACE_KEY = os.getenv("DUNETRACE_KEY", "dt_dev_test")
+AGENT_ID = "langfuse-example-agent"
 
 SYSTEM_PROMPT = (
-    "You are a research assistant. "
-    "Use the search tool to find information before answering."
+    "You are a research assistant. Use the search tool to find information before answering."
 )
 
 dt = Dunetrace(endpoint=DUNETRACE_ENDPOINT)
 
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
+
 
 @tool
 def web_search(query: str) -> str:
@@ -98,6 +100,7 @@ agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
 # ── Run ────────────────────────────────────────────────────────────────────────
 
+
 def run_agent(query: str) -> str:
     # Pre-generate the run_id so both Dunetrace and Langfuse use the same value.
     # LangChain / Dunetrace use standard UUID format (with dashes).
@@ -122,8 +125,9 @@ def run_agent(query: str) -> str:
     lf_trace_id = None
     if _LANGFUSE_AVAILABLE:
         import langfuse as lf_module
+
         lf_module.get_client().flush()
-        lf_trace_id = getattr(lf_callback, 'last_trace_id', None)
+        lf_trace_id = getattr(lf_callback, "last_trace_id", None)
 
     # Use the run_id that DunetraceCallbackHandler actually assigned (not our
     # pre-generated shared_run_id, which LangGraph ignores for callbacks).
@@ -133,6 +137,7 @@ def run_agent(query: str) -> str:
 
 
 # ── Post-run: fetch signal + explain ──────────────────────────────────────────
+
 
 async def fetch_and_explain(dt_run_id: Optional[str], lf_trace_id: Optional[str]) -> None:
     """
@@ -159,16 +164,16 @@ async def fetch_and_explain(dt_run_id: Optional[str], lf_trace_id: Optional[str]
         if not top:
             print("\nNo signal for this run found — check the dashboard.")
             return
-        signal_id     = top["id"]
-        failure_type  = top["failure_type"]
-        run_id        = top["run_id"]
-        confidence    = int(top["confidence"] * 100)
+        signal_id = top["id"]
+        failure_type = top["failure_type"]
+        run_id = top["run_id"]
+        confidence = int(top["confidence"] * 100)
 
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print(f"Signal detected: {failure_type}  (confidence {confidence}%)")
         print(f"  run_id = {run_id}  ← same as Langfuse trace_id")
         print(f"  signal id = {signal_id}")
-        print(f"{'─'*60}")
+        print(f"{'─' * 60}")
 
         if not _LANGFUSE_AVAILABLE:
             print("\nSkipping explain — langfuse not installed.")
@@ -193,17 +198,17 @@ async def fetch_and_explain(dt_run_id: Optional[str], lf_trace_id: Optional[str]
             print(f"\nExplain failed ({explain_resp.status_code}): {detail}")
             return
 
-        data         = explain_resp.json()
-        root_cause   = data.get("root_cause", "")
-        fix_content  = data.get("fix_content", "")
-        fix_type     = data.get("fix_type", "")
-        apply_blocked= data.get("apply_blocked", True)
-        prompt_name  = data.get("langfuse_prompt_name")
-        source       = data.get("source", "langfuse")
+        data = explain_resp.json()
+        root_cause = data.get("root_cause", "")
+        fix_content = data.get("fix_content", "")
+        fix_type = data.get("fix_type", "")
+        apply_blocked = data.get("apply_blocked", True)
+        prompt_name = data.get("langfuse_prompt_name")
+        source = data.get("source", "langfuse")
 
         source_note = "" if source == "langfuse" else "  [signal-only — no Langfuse trace]"
         print(f"\nRoot cause:{source_note}")
-        print(f"{'─'*60}")
+        print(f"{'─' * 60}")
         print(root_cause)
         print(f"\nFix ({fix_type}):")
         print(f"  {fix_content}")
@@ -214,7 +219,7 @@ async def fetch_and_explain(dt_run_id: Optional[str], lf_trace_id: Optional[str]
             print("\n  → Security signal: review manually before applying.")
         elif apply_blocked:
             print("\n  → Code/infra fix: apply manually.")
-        print(f"{'─'*60}")
+        print(f"{'─' * 60}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -229,7 +234,7 @@ SCENARIOS = {
 
 if __name__ == "__main__":
     scenario = os.getenv("SCENARIO", "normal")
-    query    = SCENARIOS.get(scenario, SCENARIOS["normal"])
+    query = SCENARIOS.get(scenario, SCENARIOS["normal"])
 
     print("=" * 60)
     print(f"Dunetrace + Langfuse example  [scenario={scenario}]")

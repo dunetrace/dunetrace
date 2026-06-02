@@ -8,6 +8,7 @@ Run:
 Docs:
     http://localhost:8001/docs
 """
+
 from __future__ import annotations
 
 import logging
@@ -34,7 +35,7 @@ logger = logging.getLogger("dunetrace.ingest")
 # Rate limiter
 
 _RATE_LIMIT_REQUESTS = settings.RATE_LIMIT_REQUESTS
-_RATE_LIMIT_WINDOW   = 60  # seconds
+_RATE_LIMIT_WINDOW = 60  # seconds
 
 _rate_counters: dict[str, list[float]] = defaultdict(list)
 _rate_lock = Lock()
@@ -54,6 +55,7 @@ def _is_rate_limited(ip: str) -> bool:
 
 # Lifespan
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting — auth_mode=%s", settings.AUTH_MODE)
@@ -65,6 +67,7 @@ async def lifespan(app: FastAPI):
 
 
 # App
+
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -78,8 +81,13 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=["*"] if settings.is_dev else [],
         allow_methods=["POST", "GET"],
-        allow_headers=["Content-Type", "X-Dunetrace-Agent", "Authorization",
-                       "X-Dunetrace-Agent-Id", "X-Dunetrace-Agent-Version"],
+        allow_headers=[
+            "Content-Type",
+            "X-Dunetrace-Agent",
+            "Authorization",
+            "X-Dunetrace-Agent-Id",
+            "X-Dunetrace-Agent-Version",
+        ],
     )
 
     # Rate limiting + request timing
@@ -97,8 +105,7 @@ def create_app() -> FastAPI:
         t = time.monotonic()
         response = await call_next(request)
         ms = (time.monotonic() - t) * 1000
-        logger.info("%s %s %d %.1fms",
-                    request.method, request.url.path, response.status_code, ms)
+        logger.info("%s %s %d %.1fms", request.method, request.url.path, response.status_code, ms)
         return response
 
     app.include_router(ingest.router)

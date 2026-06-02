@@ -8,6 +8,7 @@ Each template follows the shape:
 
 All templates are registered in the TEMPLATES dict at the bottom of this file.
 """
+
 from __future__ import annotations
 
 from typing import Callable, Dict
@@ -17,6 +18,7 @@ from explainer_svc.models import CodeFix, Explanation
 
 
 # Helpers
+
 
 def _base(signal: FailureSignal, **kwargs) -> dict:
     """Base kwargs shared by every Explanation constructor call."""
@@ -36,16 +38,17 @@ def _base(signal: FailureSignal, **kwargs) -> dict:
 
 # TOOL_LOOP
 
+
 def explain_tool_loop(signal: FailureSignal) -> Explanation:
-    ev             = signal.evidence
-    tool           = ev.get("tool", "unknown_tool")
-    count          = ev.get("count", "?")
-    window         = ev.get("window", "?")
-    first_step     = ev.get("first_step")
-    last_step      = ev.get("last_step")
+    ev = signal.evidence
+    tool = ev.get("tool", "unknown_tool")
+    count = ev.get("count", "?")
+    window = ev.get("window", "?")
+    first_step = ev.get("first_step")
+    last_step = ev.get("last_step")
     args_identical = ev.get("args_identical")
-    args_similar   = ev.get("args_similar")
-    success_rate   = ev.get("success_rate")
+    args_similar = ev.get("args_similar")
+    success_rate = ev.get("success_rate")
 
     if first_step is not None and last_step is not None:
         step_range = f"steps {first_step}–{last_step}"
@@ -84,9 +87,9 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
             language="text",
             code=(
                 f"Add to system prompt:\n\n"
-                f"\"If {tool} returns a low-value or empty result, do not rephrase and retry. "
+                f'"If {tool} returns a low-value or empty result, do not rephrase and retry. '
                 f"Instead, proceed with the best result you have, use a different tool, "
-                f"or tell the user what you found and ask for clarification.\""
+                f'or tell the user what you found and ask for clarification."'
             ),
         )
     elif success_rate is not None and success_rate < 0.5:
@@ -105,7 +108,7 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
                 f"    {tool}_failures += 1\n"
                 f"    if {tool}_failures >= MAX_{tool.upper()}_FAILURES:\n"
                 f"        # stop retrying — escalate or use fallback\n"
-                f"        raise ToolUnavailableError(f\"{tool} failed {{MAX_{tool.upper()}_FAILURES}} times\")"
+                f'        raise ToolUnavailableError(f"{tool} failed {{MAX_{tool.upper()}_FAILURES}} times")'
             ),
         )
     else:
@@ -123,8 +126,8 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
                 f"    tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1\n"
                 f"    if tool_call_counts[tool_name] > MAX_CALLS_PER_TOOL:\n"
                 f"        raise RuntimeError(\n"
-                f"            f\"Tool {{tool_name}} called too many times. \"\n"
-                f"            f\"Results so far: {{previous_results}}\"\n"
+                f'            f"Tool {{tool_name}} called too many times. "\n'
+                f'            f"Results so far: {{previous_results}}"\n'
                 f"        )\n"
                 f"    return run_{tool}(args)"
             ),
@@ -133,9 +136,7 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
     wasted_tokens = ev.get("wasted_tokens")
     if wasted_tokens:
         cost_usd = wasted_tokens * 15.0 / 1_000_000
-        token_cost_str = (
-            f"{wasted_tokens:,} wasted tokens ≈ ${cost_usd:.2f} at gpt-4o pricing — "
-        )
+        token_cost_str = f"{wasted_tokens:,} wasted tokens ≈ ${cost_usd:.2f} at gpt-4o pricing — "
     else:
         token_cost_str = (
             f"A {window}-step loop at typical gpt-4o pricing costs roughly "
@@ -165,8 +166,8 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
                     "MAX_STEPS = 15\n\n"
                     "if current_step >= MAX_STEPS:\n"
                     "    return agent.respond(\n"
-                    "        \"I wasn't able to complete this in a reasonable number of steps. \"\n"
-                    "        \"Here's what I found so far: \" + partial_results\n"
+                    '        "I wasn\'t able to complete this in a reasonable number of steps. "\n'
+                    '        "Here\'s what I found so far: " + partial_results\n'
                     "    )"
                 ),
             ),
@@ -176,8 +177,9 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
 
 # TOOL_THRASHING
 
+
 def explain_tool_thrashing(signal: FailureSignal) -> Explanation:
-    ev    = signal.evidence
+    ev = signal.evidence
     toolA = ev.get("tool_a", "tool_A")
     toolB = ev.get("tool_b", "tool_B")
     count = ev.get("count", ev.get("oscillation_count", "?"))
@@ -209,10 +211,10 @@ def explain_tool_thrashing(signal: FailureSignal) -> Explanation:
                 language="text",
                 code=(
                     f"Add to system prompt:\n\n"
-                    f"\"If {toolA} and {toolB} give conflicting results, "
+                    f'"If {toolA} and {toolB} give conflicting results, '
                     f"prefer {toolA} for [X type of queries] and {toolB} for [Y type]. "
                     f"Do not call both more than once each. "
-                    f"If still unsure, present both results to the user and ask which to trust.\""
+                    f'If still unsure, present both results to the user and ask which to trust."'
                 ),
             ),
             CodeFix(
@@ -241,9 +243,10 @@ def explain_tool_thrashing(signal: FailureSignal) -> Explanation:
 
 # TOOL_AVOIDANCE
 
+
 def explain_tool_avoidance(signal: FailureSignal) -> Explanation:
-    ev     = signal.evidence
-    tools  = ev.get("available_tools", [])
+    ev = signal.evidence
+    tools = ev.get("available_tools", [])
     tools_str = ", ".join(f"`{t}`" for t in tools) if tools else "available tools"
 
     return Explanation(
@@ -272,10 +275,10 @@ def explain_tool_avoidance(signal: FailureSignal) -> Explanation:
                 language="text",
                 code=(
                     "Add to system prompt:\n\n"
-                    "\"You MUST use at least one tool before providing a final answer. "
+                    '"You MUST use at least one tool before providing a final answer. '
                     "Never answer questions about current events, prices, or real-time data "
                     "from memory. If no tool is relevant, call `web_search` with the user's "
-                    "question as the query.\""
+                    'question as the query."'
                 ),
             ),
             CodeFix(
@@ -308,12 +311,13 @@ def explain_tool_avoidance(signal: FailureSignal) -> Explanation:
 
 # GOAL_ABANDONMENT
 
+
 def explain_goal_abandonment(signal: FailureSignal) -> Explanation:
-    ev                  = signal.evidence
-    stall_steps         = ev.get("stall_steps", "?")
-    last_tool           = ev.get("last_tool_used", "unknown")
-    steps_since_tool    = ev.get("steps_since_last_tool")
-    stall_seq           = ev.get("stall_event_sequence", [])
+    ev = signal.evidence
+    stall_steps = ev.get("stall_steps", "?")
+    last_tool = ev.get("last_tool_used", "unknown")
+    steps_since_tool = ev.get("steps_since_last_tool")
+    stall_seq = ev.get("stall_event_sequence", [])
 
     return Explanation(
         **_base(signal),
@@ -335,7 +339,11 @@ def explain_goal_abandonment(signal: FailureSignal) -> Explanation:
             f"Last tool call was `{last_tool}` at step "
             f"{ev.get('last_tool_step', signal.step_index - (steps_since_tool or stall_steps))}. "
             f"No tool calls in the following {steps_since_tool or stall_steps} steps"
-            + (f" — event sequence: {' → '.join(e.replace('llm.', 'llm').replace('tool.', 'tool') for e in stall_seq)}." if stall_seq else ".")
+            + (
+                f" — event sequence: {' → '.join(e.replace('llm.', 'llm').replace('tool.', 'tool') for e in stall_seq)}."
+                if stall_seq
+                else "."
+            )
             + f" Confidence: {int(signal.confidence * 100)}%."
         ),
         suggested_fixes=[
@@ -362,7 +370,7 @@ def explain_goal_abandonment(signal: FailureSignal) -> Explanation:
                     "\"If you have called a tool and don't know how to proceed with the result, "
                     "do one of: (1) try a different tool, (2) ask the user for clarification, "
                     "or (3) tell the user what you found and why you can't complete the task. "
-                    "Never loop more than 3 times without making progress.\""
+                    'Never loop more than 3 times without making progress."'
                 ),
             ),
         ],
@@ -371,10 +379,11 @@ def explain_goal_abandonment(signal: FailureSignal) -> Explanation:
 
 # PROMPT_INJECTION_SIGNAL
 
+
 def explain_prompt_injection(signal: FailureSignal) -> Explanation:
-    ev       = signal.evidence
+    ev = signal.evidence
     patterns = ev.get("matched_patterns", [])
-    count    = ev.get("pattern_count", len(patterns))
+    count = ev.get("pattern_count", len(patterns))
     patterns_str = ", ".join(f"`{p}`" for p in patterns[:3])
 
     return Explanation(
@@ -456,16 +465,18 @@ def explain_prompt_injection(signal: FailureSignal) -> Explanation:
 
 # RAG_EMPTY_RETRIEVAL
 
+
 def explain_rag_empty_retrieval(signal: FailureSignal) -> Explanation:
-    ev      = signal.evidence
-    index   = ev.get("index_name", "unknown index")
-    count   = ev.get("result_count", 0)
-    score   = ev.get("top_score")
-    bad     = ev.get("bad_retrievals", 1)
+    ev = signal.evidence
+    index = ev.get("index_name", "unknown index")
+    count = ev.get("result_count", 0)
+    score = ev.get("top_score")
+    bad = ev.get("bad_retrievals", 1)
 
     score_str = (
         f"top similarity score was {score:.2f} (below threshold)"
-        if score is not None else "no results were returned"
+        if score is not None
+        else "no results were returned"
     )
 
     return Explanation(
@@ -521,7 +532,7 @@ def explain_rag_empty_retrieval(signal: FailureSignal) -> Explanation:
                 language="text",
                 code=(
                     "Add to system prompt:\n\n"
-                    "\"If your knowledge base search returns no results or only low-confidence "
+                    '"If your knowledge base search returns no results or only low-confidence '
                     "results (score < 0.5), do NOT answer from memory. Instead, tell the user: "
                     "'I searched our knowledge base but couldn't find relevant information "
                     "for your question. Please contact support or try rephrasing your query.'\""
@@ -548,16 +559,21 @@ def explain_rag_empty_retrieval(signal: FailureSignal) -> Explanation:
 
 # LLM_TRUNCATION_LOOP
 
+
 def explain_llm_truncation_loop(signal: FailureSignal) -> Explanation:
-    ev             = signal.evidence
-    count          = ev.get("truncation_count", "?")
-    total          = ev.get("total_llm_calls", "?")
-    first_step     = ev.get("first_truncation_step", "?")
-    last_step      = ev.get("last_truncation_step", "?")
-    token_counts   = ev.get("token_counts_at_truncation", [])
-    models         = ev.get("models", [])
-    token_note     = (f" Prompt tokens at truncation: {' → '.join(str(t) for t in token_counts)}." if token_counts else "")
-    model_note     = (f" Model{'s' if len(models) > 1 else ''}: {', '.join(models)}." if models else "")
+    ev = signal.evidence
+    count = ev.get("truncation_count", "?")
+    total = ev.get("total_llm_calls", "?")
+    first_step = ev.get("first_truncation_step", "?")
+    last_step = ev.get("last_truncation_step", "?")
+    token_counts = ev.get("token_counts_at_truncation", [])
+    models = ev.get("models", [])
+    token_note = (
+        f" Prompt tokens at truncation: {' → '.join(str(t) for t in token_counts)}."
+        if token_counts
+        else ""
+    )
+    model_note = f" Model{'s' if len(models) > 1 else ''}: {', '.join(models)}." if models else ""
 
     return Explanation(
         **_base(signal),
@@ -605,7 +621,7 @@ def explain_llm_truncation_loop(signal: FailureSignal) -> Explanation:
                 language="python",
                 code=(
                     "def add_tool_result_to_context(messages, tool_name, result):\n"
-                    "    \"\"\"Summarise large tool outputs to prevent context bloat.\"\"\"\n"
+                    '    """Summarise large tool outputs to prevent context bloat."""\n'
                     "    MAX_TOOL_OUTPUT_TOKENS = 500\n\n"
                     "    result_str = str(result)\n"
                     "    if count_tokens(result_str) > MAX_TOOL_OUTPUT_TOKENS:\n"
@@ -639,15 +655,16 @@ def explain_llm_truncation_loop(signal: FailureSignal) -> Explanation:
 
 # CONTEXT_BLOAT
 
+
 def explain_context_bloat(signal: FailureSignal) -> Explanation:
-    ev          = signal.evidence
-    first       = ev.get("first_tokens", "?")
-    last        = ev.get("last_tokens", "?")
-    growth      = ev.get("growth_factor", "?")
-    call_count  = ev.get("llm_call_count", "?")
-    first_step  = ev.get("first_call_step", "?")
-    last_step   = ev.get("last_call_step", "?")
-    seq         = ev.get("token_growth_sequence", [])
+    ev = signal.evidence
+    first = ev.get("first_tokens", "?")
+    last = ev.get("last_tokens", "?")
+    growth = ev.get("growth_factor", "?")
+    call_count = ev.get("llm_call_count", "?")
+    first_step = ev.get("first_call_step", "?")
+    last_step = ev.get("last_call_step", "?")
+    seq = ev.get("token_growth_sequence", [])
     # Build a compact growth curve string if sequence available: "500→1200→3100→8400"
     growth_curve = "→".join(str(p["tokens"]) for p in seq) if seq else f"{first}→{last}"
 
@@ -682,7 +699,7 @@ def explain_context_bloat(signal: FailureSignal) -> Explanation:
                 code=(
                     "MAX_HISTORY_TOKENS = 2000\n\n"
                     "def trim_messages(messages, max_tokens=MAX_HISTORY_TOKENS):\n"
-                    "    \"\"\"Keep system prompt + summarise old messages when context grows too large.\"\"\"\n"
+                    '    """Keep system prompt + summarise old messages when context grows too large."""\n'
                     "    system = [m for m in messages if m['role'] == 'system']\n"
                     "    history = [m for m in messages if m['role'] != 'system']\n\n"
                     "    if count_tokens(history) <= max_tokens:\n"
@@ -745,9 +762,10 @@ def explain_context_bloat(signal: FailureSignal) -> Explanation:
 
 # ── RETRY_STORM ───────────────────────────────────────────────────────────────
 
+
 def explain_retry_storm(signal: FailureSignal) -> Explanation:
-    ev    = signal.evidence
-    tool  = ev.get("tool", "unknown_tool")
+    ev = signal.evidence
+    tool = ev.get("tool", "unknown_tool")
     fails = ev.get("consecutive_fails", "?")
     first = ev.get("first_fail_step", "?")
 
@@ -798,9 +816,9 @@ def explain_retry_storm(signal: FailureSignal) -> Explanation:
                 language="text",
                 code=(
                     f"Add to system prompt:\n\n"
-                    f"\"If a tool returns an error or failure more than 2 times in a row, "
+                    f'"If a tool returns an error or failure more than 2 times in a row, '
                     f"stop retrying immediately. Tell the user the tool is unavailable "
-                    f"and what you would have done if it had worked.\""
+                    f'and what you would have done if it had worked."'
                 ),
             ),
             CodeFix(
@@ -814,11 +832,11 @@ def explain_retry_storm(signal: FailureSignal) -> Explanation:
                     "        if not result.get('success'):\n"
                     "            return (\n"
                     "                f\"ERROR: Tool failed with: {result.get('error', 'unknown')}.\\n\"\n"
-                    "                \"Do not retry. Proceed without this information.\"\n"
+                    '                "Do not retry. Proceed without this information."\n'
                     "            )\n"
                     "        return result['output']\n"
                     "    except Exception as e:\n"
-                    "        return f\"ERROR: {e}. Do not retry.\""
+                    '        return f"ERROR: {e}. Do not retry."'
                 ),
             ),
         ],
@@ -827,10 +845,11 @@ def explain_retry_storm(signal: FailureSignal) -> Explanation:
 
 # EMPTY_LLM_RESPONSE
 
+
 def explain_empty_llm_response(signal: FailureSignal) -> Explanation:
-    ev          = signal.evidence
+    ev = signal.evidence
     occurrences = ev.get("occurrences", 1)
-    first_step  = ev.get("first_step", "?")
+    first_step = ev.get("first_step", "?")
 
     return Explanation(
         **_base(signal),
@@ -890,12 +909,13 @@ def explain_empty_llm_response(signal: FailureSignal) -> Explanation:
 
 # STEP_COUNT_INFLATION
 
+
 def explain_step_count_inflation(signal: FailureSignal) -> Explanation:
-    ev      = signal.evidence
+    ev = signal.evidence
     current = ev.get("current_steps", "?")
-    p75     = ev.get("baseline_p75", "?")
-    ratio   = ev.get("inflation_ratio", "?")
-    factor  = ev.get("threshold_factor", 2.0)
+    p75 = ev.get("baseline_p75", "?")
+    ratio = ev.get("inflation_ratio", "?")
+    factor = ev.get("threshold_factor", 2.0)
 
     return Explanation(
         **_base(signal),
@@ -971,11 +991,12 @@ def explain_step_count_inflation(signal: FailureSignal) -> Explanation:
 
 # CASCADING_TOOL_FAILURE
 
+
 def explain_cascading_tool_failure(signal: FailureSignal) -> Explanation:
-    ev     = signal.evidence
-    count  = ev.get("consecutive_failures", "?")
-    tools  = ev.get("distinct_tools", [])
-    first  = ev.get("first_fail_step", "?")
+    ev = signal.evidence
+    count = ev.get("consecutive_failures", "?")
+    tools = ev.get("distinct_tools", [])
+    first = ev.get("first_fail_step", "?")
     tools_str = ", ".join(f"`{t}`" for t in tools) if tools else "multiple tools"
 
     return Explanation(
@@ -1007,7 +1028,7 @@ def explain_cascading_tool_failure(signal: FailureSignal) -> Explanation:
                 language="python",
                 code=(
                     "async def check_dependencies():\n"
-                    "    \"\"\"Fail fast before wasting tokens on a broken environment.\"\"\"\n"
+                    '    """Fail fast before wasting tokens on a broken environment."""\n'
                     "    checks = {\n"
                     "        'database':   ping_database,\n"
                     "        'search_api': ping_search_api,\n"
@@ -1051,10 +1072,10 @@ def explain_cascading_tool_failure(signal: FailureSignal) -> Explanation:
                 language="text",
                 code=(
                     "Add to system prompt:\n\n"
-                    "\"If 3 or more different tools fail in the same run, stop immediately. "
+                    '"If 3 or more different tools fail in the same run, stop immediately. '
                     "Tell the user: 'I'm experiencing technical difficulties — multiple services "
                     "I depend on are unavailable. Please try again in a few minutes.' "
-                    "Do not continue switching to other tools.\""
+                    'Do not continue switching to other tools."'
                 ),
             ),
         ],
@@ -1063,16 +1084,17 @@ def explain_cascading_tool_failure(signal: FailureSignal) -> Explanation:
 
 # FIRST_STEP_FAILURE
 
+
 def explain_first_step_failure(signal: FailureSignal) -> Explanation:
-    ev      = signal.evidence
+    ev = signal.evidence
     trigger = ev.get("trigger", "unknown")
-    step    = ev.get("failed_step", "?")
-    tool    = ev.get("tool")
+    step = ev.get("failed_step", "?")
+    tool = ev.get("tool")
 
     trigger_descriptions = {
-        "run_errored":       "the run raised an uncaught exception",
-        "empty_llm_response":"the model returned an empty response",
-        "tool_failure":      f"the first tool call (`{tool}`) failed",
+        "run_errored": "the run raised an uncaught exception",
+        "empty_llm_response": "the model returned an empty response",
+        "tool_failure": f"the first tool call (`{tool}`) failed",
     }
     trigger_str = trigger_descriptions.get(trigger, trigger)
 
@@ -1127,7 +1149,7 @@ def explain_first_step_failure(signal: FailureSignal) -> Explanation:
                 language="python",
                 code=(
                     "def validate_run_input(user_input, required_context_keys=None):\n"
-                    "    \"\"\"Catch bad inputs before they reach the LLM.\"\"\"\n"
+                    '    """Catch bad inputs before they reach the LLM."""\n'
                     "    if not user_input or not user_input.strip():\n"
                     "        raise ValueError('Empty user input — nothing to process')\n\n"
                     "    if len(user_input) > 10_000:\n"
@@ -1176,22 +1198,25 @@ def explain_first_step_failure(signal: FailureSignal) -> Explanation:
 
 # SLOW_STEP
 
+
 def explain_slow_step(signal: FailureSignal) -> Explanation:
-    ev           = signal.evidence
-    duration_ms  = ev.get("duration_ms", 0)
+    ev = signal.evidence
+    duration_ms = ev.get("duration_ms", 0)
     threshold_ms = ev.get("threshold_ms", 0)
-    event_type   = ev.get("event_type", "step")
-    step_label   = ev.get("step_label", event_type)
-    step_idx     = ev.get("step_index", signal.step_index)
-    ratio        = round(duration_ms / threshold_ms, 1) if threshold_ms else "?"
-    duration_s   = round(duration_ms / 1000, 1)
-    threshold_s  = round(threshold_ms / 1000, 1)
-    coincident   = ev.get("coincident_signals", [])
+    event_type = ev.get("event_type", "step")
+    step_label = ev.get("step_label", event_type)
+    step_idx = ev.get("step_index", signal.step_index)
+    ratio = round(duration_ms / threshold_ms, 1) if threshold_ms else "?"
+    duration_s = round(duration_ms / 1000, 1)
+    threshold_s = round(threshold_ms / 1000, 1)
+    coincident = ev.get("coincident_signals", [])
 
     coincident_note = ""
     if coincident:
         names = ", ".join(s.get("signal_name", "unknown") for s in coincident)
-        coincident_note = f" A coincident infrastructure signal was recorded during this step: {names}."
+        coincident_note = (
+            f" A coincident infrastructure signal was recorded during this step: {names}."
+        )
 
     return Explanation(
         **_base(signal),
@@ -1240,12 +1265,13 @@ def explain_slow_step(signal: FailureSignal) -> Explanation:
 
 # REASONING_STALL
 
+
 def explain_reasoning_stall(signal: FailureSignal) -> Explanation:
-    ev         = signal.evidence
-    llm_calls  = ev.get("llm_calls", "?")
+    ev = signal.evidence
+    llm_calls = ev.get("llm_calls", "?")
     tool_calls = ev.get("tool_calls", "?")
-    ratio      = ev.get("ratio", "?")
-    threshold  = ev.get("threshold", 4.0)
+    ratio = ev.get("ratio", "?")
+    threshold = ev.get("threshold", 4.0)
 
     return Explanation(
         **_base(signal),
@@ -1290,12 +1316,13 @@ def explain_reasoning_stall(signal: FailureSignal) -> Explanation:
 
 # COST_SPIKE
 
+
 def explain_cost_spike(signal: FailureSignal) -> Explanation:
-    ev           = signal.evidence
-    total        = ev.get("total_tokens", 0)
-    threshold    = ev.get("threshold", 0)
-    ratio        = ev.get("inflation_ratio", "?")
-    llm_calls    = ev.get("llm_calls", "?")
+    ev = signal.evidence
+    total = ev.get("total_tokens", 0)
+    threshold = ev.get("threshold", 0)
+    ratio = ev.get("inflation_ratio", "?")
+    llm_calls = ev.get("llm_calls", "?")
     baseline_p75 = ev.get("baseline_p75")
 
     baseline_note = (
@@ -1377,14 +1404,15 @@ def explain_cost_spike(signal: FailureSignal) -> Explanation:
 
 # SESSION_LATENCY
 
+
 def explain_session_latency(signal: FailureSignal) -> Explanation:
-    ev           = signal.evidence
-    duration_s   = ev.get("duration_s", 0)
-    threshold_s  = ev.get("threshold_s", 0)
-    ratio        = ev.get("inflation_ratio", "?")
+    ev = signal.evidence
+    duration_s = ev.get("duration_s", 0)
+    threshold_s = ev.get("threshold_s", 0)
+    ratio = ev.get("inflation_ratio", "?")
     baseline_p75 = ev.get("baseline_p75_s")
 
-    duration_str  = f"{duration_s:.0f}s"
+    duration_str = f"{duration_s:.0f}s"
     threshold_str = f"{threshold_s:.0f}s"
     baseline_note = (
         f" (P75 baseline: {baseline_p75:.0f}s)"
@@ -1471,21 +1499,21 @@ def explain_session_latency(signal: FailureSignal) -> Explanation:
 
 
 TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
-    FailureType.TOOL_LOOP:               explain_tool_loop,
-    FailureType.TOOL_THRASHING:          explain_tool_thrashing,
-    FailureType.TOOL_AVOIDANCE:          explain_tool_avoidance,
-    FailureType.GOAL_ABANDONMENT:        explain_goal_abandonment,
+    FailureType.TOOL_LOOP: explain_tool_loop,
+    FailureType.TOOL_THRASHING: explain_tool_thrashing,
+    FailureType.TOOL_AVOIDANCE: explain_tool_avoidance,
+    FailureType.GOAL_ABANDONMENT: explain_goal_abandonment,
     FailureType.PROMPT_INJECTION_SIGNAL: explain_prompt_injection,
-    FailureType.RAG_EMPTY_RETRIEVAL:     explain_rag_empty_retrieval,
-    FailureType.LLM_TRUNCATION_LOOP:     explain_llm_truncation_loop,
-    FailureType.CONTEXT_BLOAT:           explain_context_bloat,
-    FailureType.RETRY_STORM:             explain_retry_storm,
-    FailureType.EMPTY_LLM_RESPONSE:      explain_empty_llm_response,
-    FailureType.STEP_COUNT_INFLATION:    explain_step_count_inflation,
-    FailureType.CASCADING_TOOL_FAILURE:  explain_cascading_tool_failure,
-    FailureType.FIRST_STEP_FAILURE:      explain_first_step_failure,
-    FailureType.SLOW_STEP:               explain_slow_step,
-    FailureType.REASONING_STALL:         explain_reasoning_stall,
-    FailureType.COST_SPIKE:              explain_cost_spike,
-    FailureType.SESSION_LATENCY:         explain_session_latency,
+    FailureType.RAG_EMPTY_RETRIEVAL: explain_rag_empty_retrieval,
+    FailureType.LLM_TRUNCATION_LOOP: explain_llm_truncation_loop,
+    FailureType.CONTEXT_BLOAT: explain_context_bloat,
+    FailureType.RETRY_STORM: explain_retry_storm,
+    FailureType.EMPTY_LLM_RESPONSE: explain_empty_llm_response,
+    FailureType.STEP_COUNT_INFLATION: explain_step_count_inflation,
+    FailureType.CASCADING_TOOL_FAILURE: explain_cascading_tool_failure,
+    FailureType.FIRST_STEP_FAILURE: explain_first_step_failure,
+    FailureType.SLOW_STEP: explain_slow_step,
+    FailureType.REASONING_STALL: explain_reasoning_stall,
+    FailureType.COST_SPIKE: explain_cost_spike,
+    FailureType.SESSION_LATENCY: explain_session_latency,
 }

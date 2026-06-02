@@ -2,6 +2,7 @@
 Polling worker that picks up completed runs, rebuilds their state from events,
 runs all detectors, and stores any signals found.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -65,13 +66,16 @@ def _apply_hard_override(signals: list[FailureSignal], risk) -> None:
     if not risk.severity:
         return
     from dunetrace.models import Severity
+
     sev = Severity(risk.severity)
     for sig in signals:
-        sig.severity   = sev
+        sig.severity = sev
         sig.confidence = round(min(1.0, risk.confidence), 4)
 
 
-def _injection_signal_from_events(events: list[dict], run_id: str, agent_id: str, agent_version: str):
+def _injection_signal_from_events(
+    events: list[dict], run_id: str, agent_id: str, agent_version: str
+):
     """Extract prompt injection evidence from the run.started payload and build a FailureSignal. The SDK detects injection on raw input before hashing, so by the time we get here the evidence is already baked into the event."""
     for e in events:
         if e["event_type"] == "run.started":
@@ -130,8 +134,11 @@ async def process_run(
         risk = RiskEngine().evaluate(signals, state)
         logger.debug(
             "RiskEngine. run_id=%s confidence=%.2f active=%d severity=%s scores=%s",
-            run_id, risk.confidence, risk.active_signals,
-            risk.severity or "normal", risk.scores,
+            run_id,
+            risk.confidence,
+            risk.active_signals,
+            risk.severity or "normal",
+            risk.scores,
         )
         _apply_hard_override(signals, risk)
         _apply_cooccurrence_boost(signals)
@@ -173,7 +180,9 @@ async def poll_once() -> tuple[int, int]:
 
     async def process_run_bounded(r):
         async with semaphore:
-            return await process_run(r["run_id"], r["agent_id"], r["agent_version"], r.get("trigger", "unknown"))
+            return await process_run(
+                r["run_id"], r["agent_id"], r["agent_version"], r.get("trigger", "unknown")
+            )
 
     results = await asyncio.gather(*[process_run_bounded(r) for r in runs])
     return len(runs), sum(results)

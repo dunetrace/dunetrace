@@ -11,6 +11,7 @@ Usage:
     # Override endpoints if needed:
     INGEST_URL=http://localhost:8001 API_URL=http://localhost:8002 python scripts/smoke_test.py
 """
+
 from __future__ import annotations
 
 import json
@@ -23,6 +24,7 @@ from pathlib import Path
 # ── Load .env from repo root ────────────────────────────────────────────────────
 try:
     from dotenv import load_dotenv
+
     load_dotenv(Path(__file__).parent.parent / ".env")
 except ImportError:
     pass  # python-dotenv optional; rely on env vars being set
@@ -36,8 +38,8 @@ from dunetrace.integrations.langchain import DunetraceCallbackHandler
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 INGEST_URL = os.environ.get("INGEST_URL", "http://localhost:8001")
-API_URL    = os.environ.get("API_URL",    "http://localhost:8002")
-AGENT_ID   = f"real-agent-{int(time.time())}"
+API_URL = os.environ.get("API_URL", "http://localhost:8002")
+AGENT_ID = f"real-agent-{int(time.time())}"
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
@@ -54,6 +56,7 @@ SYSTEM_PROMPT = (
 # Returns partial results for the first 3 searches on any query, then "complete".
 # This reliably pushes the agent into a loop (TOOL_LOOP detector fires at call 5).
 _search_attempts: dict[str, int] = {}
+
 
 def do_search(query: str) -> str:
     # Normalise the query so quoted variants ("'foo'") count the same as unquoted ("foo")
@@ -75,6 +78,7 @@ def do_search(query: str) -> str:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def _get(url: str) -> dict:
     req = urllib.request.Request(url, headers={"Authorization": "Bearer dt_dev_test"})
@@ -102,6 +106,7 @@ def fetch_signals(agent_id: str) -> list[dict]:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     from langchain_openai import ChatOpenAI
     from langchain.agents import create_agent
@@ -118,7 +123,7 @@ def main() -> None:
     # 1. Health checks
     print("\n[1/4] Checking service health...")
     wait_healthy(INGEST_URL, "ingest")
-    wait_healthy(API_URL,    "api")
+    wait_healthy(API_URL, "api")
 
     # 2. Build the real agent
     print("\n[2/4] Running real GPT-4o-mini scenarios...")
@@ -142,20 +147,29 @@ def main() -> None:
         tools=["search"],
     )
 
-    llm   = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY)
     agent = create_agent(llm, [search], system_prompt=SYSTEM_PROMPT)
 
     # ── Scenario 1: TOOL_LOOP ──────────────────────────────────────────────────
     print("\n  ── Scenario 1: TOOL_LOOP ──")
-    print("  (Agent will search repeatedly; detector fires when search is called 3+ times in 5 steps)")
+    print(
+        "  (Agent will search repeatedly; detector fires when search is called 3+ times in 5 steps)"
+    )
     try:
         result = agent.invoke(
-            {"messages": [("human", (
-                "I need a thorough literature review on quantum computing advances in 2024. "
-                "The search tool may return incomplete results i.e. keep searching with the same "
-                "query until you have complete results. "
-                "Query to use: 'quantum computing advances 2024'."
-            ))]},
+            {
+                "messages": [
+                    (
+                        "human",
+                        (
+                            "I need a thorough literature review on quantum computing advances in 2024. "
+                            "The search tool may return incomplete results i.e. keep searching with the same "
+                            "query until you have complete results. "
+                            "Query to use: 'quantum computing advances 2024'."
+                        ),
+                    )
+                ]
+            },
             config={"callbacks": [callback]},
         )
         output = result["messages"][-1].content if result.get("messages") else ""

@@ -6,6 +6,7 @@ Run:
     cd services/alerts
     python -m unittest tests.test_alerts -v
 """
+
 from __future__ import annotations
 
 import json
@@ -30,53 +31,54 @@ from dunetrace.models import FailureSignal, FailureType, Severity
 from explainer_svc.models import Explanation, CodeFix
 from explainer_svc.explainer import explain
 
-from alerts_svc.formatters.slack   import format_slack, format_slack_simple
+from alerts_svc.formatters.slack import format_slack, format_slack_simple
 from alerts_svc.formatters.webhook import format_webhook, sign_payload, build_signed_request
-from alerts_svc.sender  import SendResult, send_with_retry
-from alerts_svc.config  import SEVERITY_ORDER
+from alerts_svc.sender import SendResult, send_with_retry
+from alerts_svc.config import SEVERITY_ORDER
 import alerts_svc.worker as worker_module
 
 # ── Factories ──────────────────────────────────────────────────────────────────
 
+
 def make_signal(
-    failure_type = FailureType.TOOL_LOOP,
-    severity     = Severity.HIGH,
-    confidence   = 0.95,
-    evidence     = None,
+    failure_type=FailureType.TOOL_LOOP,
+    severity=Severity.HIGH,
+    confidence=0.95,
+    evidence=None,
 ) -> FailureSignal:
     return FailureSignal(
-        failure_type  = failure_type,
-        severity      = severity,
-        run_id        = "run-abc123",
-        agent_id      = "agent-test",
-        agent_version = "abc12345",
-        step_index    = 5,
-        confidence    = confidence,
-        evidence      = evidence or {"tool": "web_search", "count": 5, "window": 5},
-        detected_at   = time.time(),
+        failure_type=failure_type,
+        severity=severity,
+        run_id="run-abc123",
+        agent_id="agent-test",
+        agent_version="abc12345",
+        step_index=5,
+        confidence=confidence,
+        evidence=evidence or {"tool": "web_search", "count": 5, "window": 5},
+        detected_at=time.time(),
     )
 
 
 def make_explanation(
-    failure_type = "TOOL_LOOP",
-    severity     = "HIGH",
-    confidence   = 0.95,
+    failure_type="TOOL_LOOP",
+    severity="HIGH",
+    confidence=0.95,
 ) -> Explanation:
     return Explanation(
-        failure_type    = failure_type,
-        severity        = severity,
-        run_id          = "run-abc123",
-        agent_id        = "agent-test",
-        agent_version   = "abc12345",
-        confidence      = confidence,
-        step_index      = 5,
-        detected_at     = time.time(),
-        evidence        = {"tool": "web_search", "count": 5, "window": 5},
-        title           = "Tool loop detected: `web_search` called 5× in 5 steps",
-        what            = "The agent called web_search 5 times without progress.",
-        why_it_matters  = "Loops burn tokens and delay the user.",
-        evidence_summary= "web_search called 5 times. Confidence: 95%.",
-        suggested_fixes = [
+        failure_type=failure_type,
+        severity=severity,
+        run_id="run-abc123",
+        agent_id="agent-test",
+        agent_version="abc12345",
+        confidence=confidence,
+        step_index=5,
+        detected_at=time.time(),
+        evidence={"tool": "web_search", "count": 5, "window": 5},
+        title="Tool loop detected: `web_search` called 5× in 5 steps",
+        what="The agent called web_search 5 times without progress.",
+        why_it_matters="Loops burn tokens and delay the user.",
+        evidence_summary="web_search called 5 times. Confidence: 95%.",
+        suggested_fixes=[
             CodeFix(
                 description="Add a per-tool call limit",
                 language="python",
@@ -93,8 +95,8 @@ def make_explanation(
 
 # Slack formatter
 
-class TestSlackFormatter(unittest.TestCase):
 
+class TestSlackFormatter(unittest.TestCase):
     def setUp(self):
         self.exp = make_explanation()
 
@@ -141,7 +143,7 @@ class TestSlackFormatter(unittest.TestCase):
         self.assertIn(self.exp.title, header["text"]["text"])
 
     def test_run_id_in_context(self):
-        blocks  = format_slack(self.exp)["attachments"][0]["blocks"]
+        blocks = format_slack(self.exp)["attachments"][0]["blocks"]
         context = blocks[1]
         self.assertEqual(context["type"], "context")
         text = context["elements"][0]["text"]
@@ -164,7 +166,7 @@ class TestSlackFormatter(unittest.TestCase):
         self.assertIn("Add a per-tool call limit", payload)
 
     def test_view_run_button_present(self):
-        blocks  = format_slack(self.exp)["attachments"][0]["blocks"]
+        blocks = format_slack(self.exp)["attachments"][0]["blocks"]
         actions = [b for b in blocks if b["type"] == "actions"]
         self.assertGreater(len(actions), 0)
         buttons = [e for e in actions[0]["elements"] if e["type"] == "button"]
@@ -187,8 +189,8 @@ class TestSlackFormatter(unittest.TestCase):
 
 # Webhook formatter
 
-class TestWebhookFormatter(unittest.TestCase):
 
+class TestWebhookFormatter(unittest.TestCase):
     def setUp(self):
         self.exp = make_explanation()
 
@@ -203,17 +205,17 @@ class TestWebhookFormatter(unittest.TestCase):
 
     def test_identity_fields_present(self):
         p = format_webhook(self.exp)
-        self.assertEqual(p["failure_type"],  "TOOL_LOOP")
-        self.assertEqual(p["severity"],      "HIGH")
-        self.assertEqual(p["run_id"],        "run-abc123")
-        self.assertEqual(p["agent_id"],      "agent-test")
+        self.assertEqual(p["failure_type"], "TOOL_LOOP")
+        self.assertEqual(p["severity"], "HIGH")
+        self.assertEqual(p["run_id"], "run-abc123")
+        self.assertEqual(p["agent_id"], "agent-test")
         self.assertEqual(p["agent_version"], "abc12345")
 
     def test_explanation_fields_present(self):
         p = format_webhook(self.exp)
-        self.assertIn("title",            p)
-        self.assertIn("what",             p)
-        self.assertIn("why_it_matters",   p)
+        self.assertIn("title", p)
+        self.assertIn("what", p)
+        self.assertIn("why_it_matters", p)
         self.assertIn("evidence_summary", p)
 
     def test_suggested_fixes_is_list(self):
@@ -224,8 +226,8 @@ class TestWebhookFormatter(unittest.TestCase):
     def test_each_fix_has_required_fields(self):
         for fix in format_webhook(self.exp)["suggested_fixes"]:
             self.assertIn("description", fix)
-            self.assertIn("language",    fix)
-            self.assertIn("code",        fix)
+            self.assertIn("language", fix)
+            self.assertIn("code", fix)
 
     def test_evidence_passthrough(self):
         evidence = {"tool": "web_search", "count": 5, "window": 5}
@@ -239,7 +241,7 @@ class TestWebhookFormatter(unittest.TestCase):
 
     def test_sign_payload_produces_hex_string(self):
         body = b'{"test": "data"}'
-        sig  = sign_payload(body, secret="mysecret")
+        sig = sign_payload(body, secret="mysecret")
         self.assertRegex(sig, r"^[0-9a-f]{64}$")
 
     def test_sign_payload_is_deterministic(self):
@@ -249,7 +251,7 @@ class TestWebhookFormatter(unittest.TestCase):
         self.assertEqual(sig1, sig2)
 
     def test_sign_payload_different_secret_different_sig(self):
-        body = b'test'
+        body = b"test"
         self.assertNotEqual(sign_payload(body, "secret1"), sign_payload(body, "secret2"))
 
     def test_sign_payload_empty_secret_returns_empty_string(self):
@@ -280,12 +282,13 @@ class TestWebhookFormatter(unittest.TestCase):
 
 # Sender retry logic
 
-class TestSenderRetry(unittest.TestCase):
 
+class TestSenderRetry(unittest.TestCase):
     def test_success_on_first_attempt(self):
         with patch("alerts_svc.sender._post", return_value=(200, "ok")):
-            result = send_with_retry("http://test", b"body", {}, "test",
-                                     max_retries=2, retry_backoff=0)
+            result = send_with_retry(
+                "http://test", b"body", {}, "test", max_retries=2, retry_backoff=0
+            )
         self.assertTrue(result.success)
         self.assertEqual(result.attempts, 1)
         self.assertEqual(result.status_code, 200)
@@ -293,65 +296,82 @@ class TestSenderRetry(unittest.TestCase):
     def test_retries_on_non_2xx(self):
         responses = [(500, "err"), (500, "err"), (200, "ok")]
         call_count = [0]
+
         def mock_post(url, body, headers):
             r = responses[call_count[0]]
             call_count[0] += 1
             return r
 
-        with patch("alerts_svc.sender._post", side_effect=mock_post), \
-             patch("alerts_svc.sender.time.sleep"):
-            result = send_with_retry("http://test", b"body", {}, "test",
-                                     max_retries=3, retry_backoff=0.01)
+        with (
+            patch("alerts_svc.sender._post", side_effect=mock_post),
+            patch("alerts_svc.sender.time.sleep"),
+        ):
+            result = send_with_retry(
+                "http://test", b"body", {}, "test", max_retries=3, retry_backoff=0.01
+            )
 
         self.assertTrue(result.success)
         self.assertEqual(result.attempts, 3)
 
     def test_fails_after_max_retries(self):
-        with patch("alerts_svc.sender._post", return_value=(500, "err")), \
-             patch("alerts_svc.sender.time.sleep"):
-            result = send_with_retry("http://test", b"body", {}, "test",
-                                     max_retries=2, retry_backoff=0.01)
+        with (
+            patch("alerts_svc.sender._post", return_value=(500, "err")),
+            patch("alerts_svc.sender.time.sleep"),
+        ):
+            result = send_with_retry(
+                "http://test", b"body", {}, "test", max_retries=2, retry_backoff=0.01
+            )
 
         self.assertFalse(result.success)
         self.assertEqual(result.attempts, 3)  # 1 initial + 2 retries
 
     def test_handles_url_error(self):
         import urllib.error
-        with patch("alerts_svc.sender._post",
-                   side_effect=urllib.error.URLError("connection refused")), \
-             patch("alerts_svc.sender.time.sleep"):
-            result = send_with_retry("http://test", b"body", {}, "test",
-                                     max_retries=1, retry_backoff=0.01)
+
+        with (
+            patch(
+                "alerts_svc.sender._post", side_effect=urllib.error.URLError("connection refused")
+            ),
+            patch("alerts_svc.sender.time.sleep"),
+        ):
+            result = send_with_retry(
+                "http://test", b"body", {}, "test", max_retries=1, retry_backoff=0.01
+            )
 
         self.assertFalse(result.success)
         self.assertIn("connection refused", result.error)
 
     def test_success_result_has_no_error(self):
         with patch("alerts_svc.sender._post", return_value=(200, "ok")):
-            result = send_with_retry("http://test", b"body", {}, "test",
-                                     max_retries=1, retry_backoff=0)
+            result = send_with_retry(
+                "http://test", b"body", {}, "test", max_retries=1, retry_backoff=0
+            )
         self.assertIsNone(result.error)
 
     def test_failure_result_has_error_string(self):
-        with patch("alerts_svc.sender._post", return_value=(503, "unavailable")), \
-             patch("alerts_svc.sender.time.sleep"):
-            result = send_with_retry("http://test", b"body", {}, "test",
-                                     max_retries=0, retry_backoff=0)
+        with (
+            patch("alerts_svc.sender._post", return_value=(503, "unavailable")),
+            patch("alerts_svc.sender.time.sleep"),
+        ):
+            result = send_with_retry(
+                "http://test", b"body", {}, "test", max_retries=0, retry_backoff=0
+            )
         self.assertIsNotNone(result.error)
         self.assertIn("503", result.error)
 
 
 # Severity threshold
 
-class TestSeverityThreshold(unittest.TestCase):
 
+class TestSeverityThreshold(unittest.TestCase):
     def test_severity_order_values(self):
-        self.assertLess(SEVERITY_ORDER["LOW"],      SEVERITY_ORDER["MEDIUM"])
-        self.assertLess(SEVERITY_ORDER["MEDIUM"],   SEVERITY_ORDER["HIGH"])
-        self.assertLess(SEVERITY_ORDER["HIGH"],     SEVERITY_ORDER["CRITICAL"])
+        self.assertLess(SEVERITY_ORDER["LOW"], SEVERITY_ORDER["MEDIUM"])
+        self.assertLess(SEVERITY_ORDER["MEDIUM"], SEVERITY_ORDER["HIGH"])
+        self.assertLess(SEVERITY_ORDER["HIGH"], SEVERITY_ORDER["CRITICAL"])
 
     def test_high_meets_high_threshold(self):
         from alerts_svc.config import settings as s, SEVERITY_ORDER
+
         original = s.SLACK_MIN_SEVERITY
         s.SLACK_MIN_SEVERITY = "HIGH"
         meets = SEVERITY_ORDER.get("HIGH", 0) >= SEVERITY_ORDER.get("HIGH", 2)
@@ -370,34 +390,41 @@ class TestSeverityThreshold(unittest.TestCase):
 
 # Worker pipeline
 
-class TestWorkerRowToSignal(unittest.TestCase):
 
+class TestWorkerRowToSignal(unittest.TestCase):
     def test_reconstructs_signal_from_row(self):
         row = {
-            "id":            1,
-            "failure_type":  "TOOL_LOOP",
-            "severity":      "HIGH",
-            "run_id":        "run-1",
-            "agent_id":      "agent-1",
+            "id": 1,
+            "failure_type": "TOOL_LOOP",
+            "severity": "HIGH",
+            "run_id": "run-1",
+            "agent_id": "agent-1",
             "agent_version": "v1",
-            "step_index":    5,
-            "confidence":    0.95,
-            "evidence":      {"tool": "web_search", "count": 5, "window": 5},
-            "detected_at":   time.time(),
+            "step_index": 5,
+            "confidence": 0.95,
+            "evidence": {"tool": "web_search", "count": 5, "window": 5},
+            "detected_at": time.time(),
         }
         signal = worker_module._row_to_signal(row)
         self.assertEqual(signal.failure_type, FailureType.TOOL_LOOP)
-        self.assertEqual(signal.severity,     Severity.HIGH)
-        self.assertEqual(signal.run_id,       "run-1")
+        self.assertEqual(signal.severity, Severity.HIGH)
+        self.assertEqual(signal.run_id, "run-1")
         self.assertAlmostEqual(signal.confidence, 0.95)
 
     def test_handles_datetime_detected_at(self):
         """asyncpg returns datetime objects for TIMESTAMPTZ columns."""
         from datetime import datetime, timezone
+
         row = {
-            "id": 1, "failure_type": "TOOL_LOOP", "severity": "HIGH",
-            "run_id": "r", "agent_id": "a", "agent_version": "v",
-            "step_index": 1, "confidence": 0.9, "evidence": {},
+            "id": 1,
+            "failure_type": "TOOL_LOOP",
+            "severity": "HIGH",
+            "run_id": "r",
+            "agent_id": "a",
+            "agent_version": "v",
+            "step_index": 1,
+            "confidence": 0.9,
+            "evidence": {},
             "detected_at": datetime(2024, 1, 1, tzinfo=timezone.utc),
         }
         signal = worker_module._row_to_signal(row)
@@ -405,9 +432,15 @@ class TestWorkerRowToSignal(unittest.TestCase):
 
     def test_handles_none_detected_at(self):
         row = {
-            "id": 1, "failure_type": "TOOL_LOOP", "severity": "HIGH",
-            "run_id": "r", "agent_id": "a", "agent_version": "v",
-            "step_index": 1, "confidence": 0.9, "evidence": {},
+            "id": 1,
+            "failure_type": "TOOL_LOOP",
+            "severity": "HIGH",
+            "run_id": "r",
+            "agent_id": "a",
+            "agent_version": "v",
+            "step_index": 1,
+            "confidence": 0.9,
+            "evidence": {},
             "detected_at": None,
         }
         signal = worker_module._row_to_signal(row)
@@ -415,26 +448,29 @@ class TestWorkerRowToSignal(unittest.TestCase):
 
 
 class TestWorkerDeliver(unittest.TestCase):
-
     def setUp(self):
         self.exp = make_explanation()
 
     def test_no_destinations_returns_empty_dict(self):
         with patch("alerts_svc.worker.settings") as mock_settings:
-            mock_settings.slack_enabled   = False
+            mock_settings.slack_enabled = False
             mock_settings.webhook_enabled = False
             mock_settings.SLACK_MIN_SEVERITY = "HIGH"
             results = worker_module.deliver(self.exp)
         self.assertEqual(results, {})
 
     def test_slack_called_when_enabled_and_severity_meets_threshold(self):
-        with patch("alerts_svc.worker.settings") as mock_s, \
-             patch("alerts_svc.worker.send_slack",
-                   return_value=SendResult(True, "slack", 1, 200)) as mock_slack, \
-             patch("alerts_svc.worker.send_webhook",
-                   return_value=SendResult(True, "webhook", 1, 200)):
-            mock_s.slack_enabled      = True
-            mock_s.webhook_enabled    = False
+        with (
+            patch("alerts_svc.worker.settings") as mock_s,
+            patch(
+                "alerts_svc.worker.send_slack", return_value=SendResult(True, "slack", 1, 200)
+            ) as mock_slack,
+            patch(
+                "alerts_svc.worker.send_webhook", return_value=SendResult(True, "webhook", 1, 200)
+            ),
+        ):
+            mock_s.slack_enabled = True
+            mock_s.webhook_enabled = False
             mock_s.SLACK_MIN_SEVERITY = "HIGH"
             results = worker_module.deliver(self.exp)
 
@@ -443,23 +479,28 @@ class TestWorkerDeliver(unittest.TestCase):
 
     def test_slack_skipped_when_severity_too_low(self):
         low_exp = make_explanation(severity="LOW")
-        with patch("alerts_svc.worker.settings") as mock_s, \
-             patch("alerts_svc.worker.send_slack") as mock_slack:
-            mock_s.slack_enabled      = True
-            mock_s.webhook_enabled    = False
+        with (
+            patch("alerts_svc.worker.settings") as mock_s,
+            patch("alerts_svc.worker.send_slack") as mock_slack,
+        ):
+            mock_s.slack_enabled = True
+            mock_s.webhook_enabled = False
             mock_s.SLACK_MIN_SEVERITY = "HIGH"
             worker_module.deliver(low_exp)
 
         mock_slack.assert_not_called()
 
     def test_webhook_called_when_enabled(self):
-        with patch("alerts_svc.worker.settings") as mock_s, \
-             patch("alerts_svc.worker.send_webhook",
-                   return_value=SendResult(True, "webhook", 1, 200)) as mock_wh, \
-             patch("alerts_svc.worker.build_signed_request", return_value=(b"{}", {})):
-            mock_s.slack_enabled   = False
+        with (
+            patch("alerts_svc.worker.settings") as mock_s,
+            patch(
+                "alerts_svc.worker.send_webhook", return_value=SendResult(True, "webhook", 1, 200)
+            ) as mock_wh,
+            patch("alerts_svc.worker.build_signed_request", return_value=(b"{}", {})),
+        ):
+            mock_s.slack_enabled = False
             mock_s.webhook_enabled = True
-            mock_s.WEBHOOK_SECRET  = ""
+            mock_s.WEBHOOK_SECRET = ""
             results = worker_module.deliver(self.exp)
 
         mock_wh.assert_called_once()
@@ -467,7 +508,6 @@ class TestWorkerDeliver(unittest.TestCase):
 
 
 class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
-
     async def test_poll_once_empty_returns_zeros(self):
         with patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[])):
             found, delivered = await worker_module.poll_once()
@@ -475,71 +515,87 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered, 0)
 
     async def test_poll_once_processes_signals(self):
-        rows = [{
-            "id":            42,
-            "failure_type":  "TOOL_LOOP",
-            "severity":      "HIGH",
-            "run_id":        "run-1",
-            "agent_id":      "agent-1",
-            "agent_version": "v1",
-            "step_index":    5,
-            "confidence":    0.95,
-            "evidence":      {"tool": "web_search", "count": 5, "window": 5},
-            "detected_at":   time.time(),
-        }]
+        rows = [
+            {
+                "id": 42,
+                "failure_type": "TOOL_LOOP",
+                "severity": "HIGH",
+                "run_id": "run-1",
+                "agent_id": "agent-1",
+                "agent_version": "v1",
+                "step_index": 5,
+                "confidence": 0.95,
+                "evidence": {"tool": "web_search", "count": 5, "window": 5},
+                "detected_at": time.time(),
+            }
+        ]
 
-        with patch("alerts_svc.worker.fetch_unalerted_signals",  AsyncMock(return_value=rows)), \
-             patch("alerts_svc.worker.mark_alerted_batch",       AsyncMock()) as mock_mark, \
-             patch("alerts_svc.worker.deliver",
-                   return_value={"slack": SendResult(True, "slack", 1, 200)}):
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
+            patch(
+                "alerts_svc.worker.deliver",
+                return_value={"slack": SendResult(True, "slack", 1, 200)},
+            ),
+        ):
             found, delivered = await worker_module.poll_once()
 
-        self.assertEqual(found,     1)
+        self.assertEqual(found, 1)
         self.assertEqual(delivered, 1)
         mock_mark.assert_called_once_with([42])
 
     async def test_failed_delivery_not_marked_alerted(self):
-        rows = [{
-            "id":            99,
-            "failure_type":  "TOOL_LOOP",
-            "severity":      "HIGH",
-            "run_id":        "r",
-            "agent_id":      "a",
-            "agent_version": "v",
-            "step_index":    1,
-            "confidence":    0.9,
-            "evidence":      {"tool": "x", "count": 3, "window": 3},
-            "detected_at":   time.time(),
-        }]
+        rows = [
+            {
+                "id": 99,
+                "failure_type": "TOOL_LOOP",
+                "severity": "HIGH",
+                "run_id": "r",
+                "agent_id": "a",
+                "agent_version": "v",
+                "step_index": 1,
+                "confidence": 0.9,
+                "evidence": {"tool": "x", "count": 3, "window": 3},
+                "detected_at": time.time(),
+            }
+        ]
 
-        with patch("alerts_svc.worker.fetch_unalerted_signals",  AsyncMock(return_value=rows)), \
-             patch("alerts_svc.worker.mark_alerted_batch",       AsyncMock()) as mock_mark, \
-             patch("alerts_svc.worker.deliver",
-                   return_value={"slack": SendResult(False, "slack", 3, 503, "err")}):
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
+            patch(
+                "alerts_svc.worker.deliver",
+                return_value={"slack": SendResult(False, "slack", 3, 503, "err")},
+            ),
+        ):
             found, delivered = await worker_module.poll_once()
 
-        self.assertEqual(found,     1)
+        self.assertEqual(found, 1)
         self.assertEqual(delivered, 0)
         mock_mark.assert_not_called()
 
     async def test_no_destinations_marks_signal_done(self):
         """If no destinations configured, signal is still marked alerted."""
-        rows = [{
-            "id":            7,
-            "failure_type":  "TOOL_LOOP",
-            "severity":      "HIGH",
-            "run_id":        "r",
-            "agent_id":      "a",
-            "agent_version": "v",
-            "step_index":    1,
-            "confidence":    0.9,
-            "evidence":      {"tool": "x", "count": 3, "window": 3},
-            "detected_at":   time.time(),
-        }]
+        rows = [
+            {
+                "id": 7,
+                "failure_type": "TOOL_LOOP",
+                "severity": "HIGH",
+                "run_id": "r",
+                "agent_id": "a",
+                "agent_version": "v",
+                "step_index": 1,
+                "confidence": 0.9,
+                "evidence": {"tool": "x", "count": 3, "window": 3},
+                "detected_at": time.time(),
+            }
+        ]
 
-        with patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)), \
-             patch("alerts_svc.worker.mark_alerted_batch",      AsyncMock()) as mock_mark, \
-             patch("alerts_svc.worker.deliver",                 return_value={}):
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
+            patch("alerts_svc.worker.deliver", return_value={}),
+        ):
             found, delivered = await worker_module.poll_once()
 
         self.assertEqual(delivered, 1)

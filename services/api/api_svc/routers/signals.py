@@ -1,4 +1,5 @@
 """Signals endpoints — list, filter, explain, and apply fixes for detected failure signals."""
+
 from __future__ import annotations
 import json as _json
 import logging
@@ -15,11 +16,18 @@ logger = logging.getLogger("dunetrace.api.signals")
 router = APIRouter(tags=["Signals"])
 
 # Detectors where the right fix is a code/infra change, not a system prompt addition.
-_CODE_CHANGE_TYPES = frozenset({
-    "CONTEXT_BLOAT", "RAG_EMPTY_RETRIEVAL", "SLOW_STEP",
-    "CASCADING_TOOL_FAILURE", "LLM_TRUNCATION_LOOP", "FIRST_STEP_FAILURE",
-    "COST_SPIKE", "SESSION_LATENCY",
-})
+_CODE_CHANGE_TYPES = frozenset(
+    {
+        "CONTEXT_BLOAT",
+        "RAG_EMPTY_RETRIEVAL",
+        "SLOW_STEP",
+        "CASCADING_TOOL_FAILURE",
+        "LLM_TRUNCATION_LOOP",
+        "FIRST_STEP_FAILURE",
+        "COST_SPIKE",
+        "SESSION_LATENCY",
+    }
+)
 
 # Detectors that must never have auto-apply enabled — the signal itself indicates
 # untrusted input in the trace, so LLM output cannot be safely acted on automatically.
@@ -27,12 +35,23 @@ _NO_AUTO_APPLY_TYPES = frozenset({"PROMPT_INJECTION_SIGNAL"})
 
 _VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 _VALID_FAILURE_TYPES = {
-    "TOOL_LOOP", "TOOL_THRASHING", "TOOL_AVOIDANCE", "RETRY_STORM",
-    "CASCADING_TOOL_FAILURE", "LLM_TRUNCATION_LOOP", "CONTEXT_BLOAT",
-    "EMPTY_LLM_RESPONSE", "GOAL_ABANDONMENT", "REASONING_STALL",
-    "RAG_EMPTY_RETRIEVAL", "SLOW_STEP", "FIRST_STEP_FAILURE",
-    "STEP_COUNT_INFLATION", "PROMPT_INJECTION_SIGNAL",
-    "COST_SPIKE", "SESSION_LATENCY",
+    "TOOL_LOOP",
+    "TOOL_THRASHING",
+    "TOOL_AVOIDANCE",
+    "RETRY_STORM",
+    "CASCADING_TOOL_FAILURE",
+    "LLM_TRUNCATION_LOOP",
+    "CONTEXT_BLOAT",
+    "EMPTY_LLM_RESPONSE",
+    "GOAL_ABANDONMENT",
+    "REASONING_STALL",
+    "RAG_EMPTY_RETRIEVAL",
+    "SLOW_STEP",
+    "FIRST_STEP_FAILURE",
+    "STEP_COUNT_INFLATION",
+    "PROMPT_INJECTION_SIGNAL",
+    "COST_SPIKE",
+    "SESSION_LATENCY",
 }
 
 
@@ -42,25 +61,31 @@ _VALID_FAILURE_TYPES = {
     summary="List failure signals for an agent",
 )
 async def get_signals(
-    agent_id:       str,
-    offset:         int           = Query(0, ge=0),
-    limit:          int           = Query(settings.PAGE_SIZE_DEFAULT, ge=1,
-                                          le=settings.PAGE_SIZE_MAX),
-    severity:       Optional[str] = Query(None,
-        description="Filter by severity: LOW | MEDIUM | HIGH | CRITICAL"),
-    failure_type:   Optional[str] = Query(None,
-        description="Filter by failure type e.g. TOOL_LOOP"),
-    include_shadow: bool          = Query(False,
-        description="Include shadow signals (stored but not alerted) in results"),
-    _customer:      str           = Depends(require_customer),
+    agent_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(settings.PAGE_SIZE_DEFAULT, ge=1, le=settings.PAGE_SIZE_MAX),
+    severity: Optional[str] = Query(
+        None, description="Filter by severity: LOW | MEDIUM | HIGH | CRITICAL"
+    ),
+    failure_type: Optional[str] = Query(None, description="Filter by failure type e.g. TOOL_LOOP"),
+    include_shadow: bool = Query(
+        False, description="Include shadow signals (stored but not alerted) in results"
+    ),
+    _customer: str = Depends(require_customer),
 ) -> SignalListResponse:
     if severity and severity.upper() not in _VALID_SEVERITIES:
-        raise HTTPException(status_code=422,
-            detail=f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}",
+        )
     if failure_type and failure_type.upper() not in _VALID_FAILURE_TYPES:
-        raise HTTPException(status_code=422,
-            detail=f"Invalid failure_type {failure_type!r}. Valid: {sorted(_VALID_FAILURE_TYPES)}")
-    rows, total = await list_signals(agent_id, offset, limit, severity, failure_type, include_shadow)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid failure_type {failure_type!r}. Valid: {sorted(_VALID_FAILURE_TYPES)}",
+        )
+    rows, total = await list_signals(
+        agent_id, offset, limit, severity, failure_type, include_shadow
+    )
 
     def _ts(v):
         if v is None:
@@ -70,8 +95,7 @@ async def get_signals(
     signals = [SignalDetail(**{**r, "detected_at": _ts(r["detected_at"])}) for r in rows]
     return SignalListResponse(
         signals=signals,
-        page=Page(total=total, offset=offset, limit=limit,
-                  has_more=(offset + limit) < total),
+        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
     )
 
 
@@ -101,8 +125,7 @@ async def explain_signal(
         raise HTTPException(
             status_code=503,
             detail=(
-                "No LLM API key configured. "
-                "Add ANTHROPIC_API_KEY or OPENAI_API_KEY to your .env."
+                "No LLM API key configured. Add ANTHROPIC_API_KEY or OPENAI_API_KEY to your .env."
             ),
         )
 
@@ -111,23 +134,28 @@ async def explain_signal(
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
 
     from api_svc.langfuse_client import (
-        fetch_langfuse_trace, build_explain_prompt, _detect_langfuse_prompt,
+        fetch_langfuse_trace,
+        build_explain_prompt,
+        _detect_langfuse_prompt,
     )
     import time as _time
+
     trace_lookup_id = body.langfuse_trace_id or signal["run_id"]
     # Only retry on 404 for fresh signals — Langfuse ingests asynchronously so a
     # trace flushed seconds ago may not be queryable yet. For anything older than
     # 5 minutes the trace is either there or not; retrying just adds 18s of latency.
     signal_age_s = _time.time() - (signal.get("detected_at") or 0)
-    max_retries  = 3 if signal_age_s < 300 else 0
+    max_retries = 3 if signal_age_s < 300 else 0
 
     trace = {}
     source = "signal_only"
     try:
-        trace  = await fetch_langfuse_trace(trace_lookup_id, max_retries=max_retries)
+        trace = await fetch_langfuse_trace(trace_lookup_id, max_retries=max_retries)
         source = "langfuse"
     except LookupError:
-        logger.info("Trace %s not in Langfuse; falling back to signal-only analysis", trace_lookup_id)
+        logger.info(
+            "Trace %s not in Langfuse; falling back to signal-only analysis", trace_lookup_id
+        )
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
@@ -135,7 +163,7 @@ async def explain_signal(
         # Non-fatal: degrade to signal-only rather than failing the whole request
 
     failure_type = signal["failure_type"]
-    user_prompt  = await build_explain_prompt(signal, trace)
+    user_prompt = await build_explain_prompt(signal, trace)
     prompt_name, prompt_version = _detect_langfuse_prompt(trace.get("observations", []))
 
     try:
@@ -154,22 +182,22 @@ async def explain_signal(
     apply_blocked = fix_type != "prompt_addition"
 
     return {
-        "signal_id":               signal_id,
-        "source":                  source,
-        "root_cause":              llm_result["root_cause"],
-        "fix_content":             llm_result["fix_content"],
-        "fix_patch":               llm_result["fix_patch"],
-        "fix_type":                fix_type,
-        "apply_blocked":           apply_blocked,
-        "langfuse_prompt_name":    prompt_name,
+        "signal_id": signal_id,
+        "source": source,
+        "root_cause": llm_result["root_cause"],
+        "fix_content": llm_result["fix_content"],
+        "fix_patch": llm_result["fix_patch"],
+        "fix_type": fix_type,
+        "apply_blocked": apply_blocked,
+        "langfuse_prompt_name": prompt_name,
         "langfuse_prompt_version": prompt_version,
     }
 
 
 class ApplyFixRequest(BaseModel):
-    fix_content:          str
+    fix_content: str
     langfuse_prompt_name: str
-    applied_via:          str = "langfuse"
+    applied_via: str = "langfuse"
 
 
 @router.post(
@@ -200,6 +228,7 @@ async def apply_fix(
         )
 
     from api_svc.langfuse_client import apply_langfuse_fix
+
     try:
         result = await apply_langfuse_fix(body.langfuse_prompt_name, body.fix_content)
     except LookupError as exc:
@@ -224,12 +253,12 @@ async def apply_fix(
         logger.warning("record_fix failed (non-fatal): %s", exc)
 
     return {
-        "fix_id":       fix_id,
-        "signal_id":    signal_id,
-        "new_version":  result["new_version"],
-        "prompt_url":   result["prompt_url"],
-        "old_text":     result["old_text"],
-        "new_text":     result["new_text"],
+        "fix_id": fix_id,
+        "signal_id": signal_id,
+        "new_version": result["new_version"],
+        "prompt_url": result["prompt_url"],
+        "old_text": result["old_text"],
+        "new_text": result["new_text"],
     }
 
 
@@ -264,9 +293,9 @@ async def record_copy(
 
 
 class OpenPRRequest(BaseModel):
-    root_cause:  str
+    root_cause: str
     fix_content: str
-    fix_patch:   str
+    fix_patch: str
 
 
 @router.post(
@@ -296,6 +325,7 @@ async def open_pr(
         )
 
     from api_svc.github_client import create_fix_pr
+
     try:
         result = await create_fix_pr(
             signal_id=signal_id,
@@ -309,7 +339,10 @@ async def open_pr(
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
         logger.warning("create_fix_pr failed: %s", exc)
-        raise HTTPException(status_code=502, detail="Could not create GitHub PR. Check GITHUB_TOKEN and GITHUB_REPO.")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not create GitHub PR. Check GITHUB_TOKEN and GITHUB_REPO.",
+        )
 
     try:
         await record_fix(
@@ -415,7 +448,7 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
             max_tokens=900,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user",   "content": user_prompt},
+                {"role": "user", "content": user_prompt},
             ],
         )
         raw = resp.choices[0].message.content
@@ -430,9 +463,9 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         parsed = _json.loads(raw_clean)
         if isinstance(parsed, dict) and "root_cause" in parsed:
             return {
-                "root_cause":  str(parsed.get("root_cause",  "")),
+                "root_cause": str(parsed.get("root_cause", "")),
                 "fix_content": str(parsed.get("fix_content", "")),
-                "fix_patch":   str(parsed.get("fix_patch",   "")),
+                "fix_patch": str(parsed.get("fix_patch", "")),
             }
     except (_json.JSONDecodeError, TypeError):
         pass

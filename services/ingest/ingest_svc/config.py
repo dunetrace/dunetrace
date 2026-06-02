@@ -13,7 +13,7 @@ def _load_dotenv(path: str = ".env") -> None:
                 key, _, val = line.partition("=")
                 val = val.strip()
                 if " #" in val:
-                    val = val[:val.index(" #")].strip()
+                    val = val[: val.index(" #")].strip()
                 os.environ.setdefault(key.strip(), val)
     except FileNotFoundError:
         pass

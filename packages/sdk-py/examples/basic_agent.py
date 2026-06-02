@@ -11,6 +11,7 @@ framework that doesn't have a dedicated middleware.
 Sends events to http://localhost:8001. Start the backend first:
     docker compose up
 """
+
 import os
 import time
 
@@ -32,7 +33,9 @@ AGENT_ID = "example-agent"
 def normal_run(user_input: str) -> None:
     """Healthy run: uses tools, gets results, answers."""
     print(f"\n[normal] {user_input!r}")
-    with dt.run(AGENT_ID, user_input=user_input, system_prompt=SYSTEM_PROMPT, model="gpt-4o", tools=TOOLS) as run:
+    with dt.run(
+        AGENT_ID, user_input=user_input, system_prompt=SYSTEM_PROMPT, model="gpt-4o", tools=TOOLS
+    ) as run:
         run.llm_called("gpt-4o", prompt_tokens=150)
         time.sleep(0.05)
         run.llm_responded(completion_tokens=30, latency_ms=100, finish_reason="tool_calls")
@@ -52,7 +55,9 @@ def normal_run(user_input: str) -> None:
 def tool_loop_run(user_input: str) -> None:
     """Demonstrates TOOL_LOOP: same tool called 4 times in a 5-step window."""
     print(f"\n[tool_loop] {user_input!r}")
-    with dt.run(AGENT_ID, user_input=user_input, system_prompt=SYSTEM_PROMPT, model="gpt-4o", tools=TOOLS) as run:
+    with dt.run(
+        AGENT_ID, user_input=user_input, system_prompt=SYSTEM_PROMPT, model="gpt-4o", tools=TOOLS
+    ) as run:
         for i in range(5):
             run.llm_called("gpt-4o", prompt_tokens=200 + i * 50)
             run.llm_responded(finish_reason="tool_calls", latency_ms=90)
@@ -61,8 +66,10 @@ def tool_loop_run(user_input: str) -> None:
 
             signals = run_detectors(run.state)
             for sig in signals:
-                print(f"  ! [{sig.failure_type.value}] step={sig.step_index} "
-                      f"confidence={sig.confidence:.0%}")
+                print(
+                    f"  ! [{sig.failure_type.value}] step={sig.step_index} "
+                    f"confidence={sig.confidence:.0%}"
+                )
 
         run.final_answer()
 
@@ -70,11 +77,15 @@ def tool_loop_run(user_input: str) -> None:
 def prompt_injection_run(user_input: str) -> None:
     """Demonstrates PROMPT_INJECTION_SIGNAL detection before any LLM call."""
     print(f"\n[injection] {user_input!r}")
-    with dt.run(AGENT_ID, user_input=user_input, system_prompt=SYSTEM_PROMPT, model="gpt-4o", tools=TOOLS) as run:
+    with dt.run(
+        AGENT_ID, user_input=user_input, system_prompt=SYSTEM_PROMPT, model="gpt-4o", tools=TOOLS
+    ) as run:
         signal = PROMPT_INJECTION_DETECTOR.check_input(user_input, run.state)
         if signal:
-            print(f"  CRITICAL [{signal.failure_type.value}] — "
-                  f"matched patterns: {signal.evidence['matched_patterns']}")
+            print(
+                f"  CRITICAL [{signal.failure_type.value}] — "
+                f"matched patterns: {signal.evidence['matched_patterns']}"
+            )
             print("  -> Run aborted. No LLM call was made.")
             return
         run.llm_called("gpt-4o", prompt_tokens=200)
@@ -84,7 +95,9 @@ def prompt_injection_run(user_input: str) -> None:
 def rag_empty_run(user_input: str) -> None:
     """Demonstrates RAG_EMPTY_RETRIEVAL: retrieval fails but agent answers anyway."""
     print(f"\n[rag_empty] {user_input!r}")
-    with dt.run(AGENT_ID, user_input=user_input, system_prompt=SYSTEM_PROMPT, model="gpt-4o", tools=TOOLS) as run:
+    with dt.run(
+        AGENT_ID, user_input=user_input, system_prompt=SYSTEM_PROMPT, model="gpt-4o", tools=TOOLS
+    ) as run:
         run.llm_called("gpt-4o", prompt_tokens=150)
         run.llm_responded(finish_reason="tool_calls")
 
