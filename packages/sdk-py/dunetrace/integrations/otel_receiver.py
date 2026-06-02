@@ -229,6 +229,7 @@ def _emit_llm(run, attrs: dict, latency_ms: int, is_error: bool) -> None:
     model = attrs.get("gen_ai.request.model", "unknown")
     prompt_toks = int(attrs.get("gen_ai.usage.prompt_tokens", 0) or 0)
     comp_toks = int(attrs.get("gen_ai.usage.completion_tokens", 0) or 0)
+    reason_toks = int(attrs.get("gen_ai.usage.reasoning_tokens", 0) or 0)
     finish_reason = "error" if is_error else _finish_reason(attrs)
 
     # Path 2 privacy boundary: hash raw content fields here, at the receiver,
@@ -241,6 +242,7 @@ def _emit_llm(run, attrs: dict, latency_ms: int, is_error: bool) -> None:
     run.llm_called(model, prompt_tokens=prompt_toks)
     run.llm_responded(
         completion_tokens=comp_toks,
+        reasoning_tokens=reason_toks,
         latency_ms=latency_ms,
         finish_reason=finish_reason,
         output_hash=output_hash,

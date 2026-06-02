@@ -326,17 +326,21 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
 
             # Token counts: try llm_output (LangChain ≤0.1), then usage_metadata (0.3+).
             # Both may be absent for streaming runs depending on provider.
-            prompt_tokens = completion_tokens = None
+            prompt_tokens = completion_tokens = reasoning_tokens = None
             if hasattr(response, "llm_output") and response.llm_output:
                 usage = response.llm_output.get("token_usage", {})
                 prompt_tokens = usage.get("prompt_tokens")
                 completion_tokens = usage.get("completion_tokens")
+                details = usage.get("completion_tokens_details") or {}
+                reasoning_tokens = details.get("reasoning_tokens")
             if prompt_tokens is None and gen:
                 msg = getattr(gen, "message", None)
                 meta = getattr(msg, "usage_metadata", None) if msg else None
                 if meta:
                     prompt_tokens = meta.get("input_tokens")
                     completion_tokens = meta.get("output_tokens")
+                    details = meta.get("output_token_details") or {}
+                    reasoning_tokens = details.get("reasoning")
 
             payload: Dict[str, Any] = {
                 "finish_reason": (
@@ -352,6 +356,8 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 payload["prompt_tokens"] = prompt_tokens
             if completion_tokens is not None:
                 payload["completion_tokens"] = completion_tokens
+            if reasoning_tokens is not None:
+                payload["reasoning_tokens"] = reasoning_tokens
 
             from dunetrace.models import EventType
 

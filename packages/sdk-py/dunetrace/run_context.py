@@ -86,6 +86,7 @@ class RunContext:
     def llm_responded(
         self,
         completion_tokens: int = 0,
+        reasoning_tokens: int = 0,
         latency_ms: int = 0,
         finish_reason: str = "stop",
         output_hash: str = "",
@@ -98,17 +99,17 @@ class RunContext:
             lc.latency_ms = latency_ms
             lc.output_length = output_length
             lc.completion_tokens = completion_tokens or None
-        self._emit(
-            EventType.LLM_RESPONDED,
-            {
-                "completion_tokens": completion_tokens,
-                "latency_ms": latency_ms,
-                "finish_reason": finish_reason,
-                "output_hash": output_hash,
-                "output_length": output_length,
-            },
-            advance=False,
-        )
+            lc.reasoning_tokens = reasoning_tokens or None
+        payload: dict = {
+            "completion_tokens": completion_tokens,
+            "latency_ms": latency_ms,
+            "finish_reason": finish_reason,
+            "output_hash": output_hash,
+            "output_length": output_length,
+        }
+        if reasoning_tokens:
+            payload["reasoning_tokens"] = reasoning_tokens
+        self._emit(EventType.LLM_RESPONDED, payload, advance=False)
 
     # ── Tool hooks ────────────────────────────────────────────────────────────
 
