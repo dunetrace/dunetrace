@@ -2,13 +2,12 @@
 Rebuilds a RunState from raw event rows. Bridges the flat DB records
 with the typed RunState that detectors expect.
 """
+
 from __future__ import annotations
 
 from typing import Any
 
-from dunetrace.models import (
-    AgentEvent, EventType, RunState, ToolCall, LlmCall, RetrievalResult
-)
+from dunetrace.models import AgentEvent, EventType, RunState, ToolCall, LlmCall, RetrievalResult
 
 
 def build_run_state(events: list[dict]) -> RunState:
@@ -18,8 +17,8 @@ def build_run_state(events: list[dict]) -> RunState:
 
     # Grab identity fields from first event (all events share run_id/agent_id)
     first = events[0]
-    run_id        = first["run_id"]
-    agent_id      = first["agent_id"]
+    run_id = first["run_id"]
+    agent_id = first["agent_id"]
     agent_version = first["agent_version"]
 
     state = RunState(
@@ -36,13 +35,13 @@ def build_run_state(events: list[dict]) -> RunState:
 
     for raw in events:
         event_type = raw["event_type"]
-        payload    = raw.get("payload") or {}
+        payload = raw.get("payload") or {}
         step_index = raw.get("step_index", 0)
 
         # run.started - extract available tools and input hash
         if event_type == "run.started":
-            state.available_tools  = payload.get("tools", [])
-            state.input_text_hash  = payload.get("input_hash")
+            state.available_tools = payload.get("tools", [])
+            state.input_text_hash = payload.get("input_hash")
 
         # run.completed - record exit reason
         elif event_type == "run.completed":
@@ -54,12 +53,14 @@ def build_run_state(events: list[dict]) -> RunState:
 
         # llm.called - push pending call onto the stack
         elif event_type == "llm.called":
-            _pending_llm.append({
-                "model":         payload.get("model", "unknown"),
-                "prompt_tokens": payload.get("prompt_tokens"),
-                "step_index":    step_index,
-                "timestamp":     raw.get("timestamp", 0.0),
-            })
+            _pending_llm.append(
+                {
+                    "model": payload.get("model", "unknown"),
+                    "prompt_tokens": payload.get("prompt_tokens"),
+                    "step_index": step_index,
+                    "timestamp": raw.get("timestamp", 0.0),
+                }
+            )
 
         # llm.responded - pop most recent pending call and merge into LlmCall
         elif event_type == "llm.responded":
@@ -96,12 +97,12 @@ def build_run_state(events: list[dict]) -> RunState:
         # matching by tool_name (not step_index) because tool.called and tool.responded
         # have consecutive step indices in the SDK, not the same step_index.
         elif event_type == "tool.responded":
-            success   = payload.get("success")
+            success = payload.get("success")
             tool_name = payload.get("tool_name", "")
             if success is not None:
                 for tc in reversed(state.tool_calls):
                     if tc.tool_name == tool_name and tc.success is None:
-                        tc.success    = bool(success)
+                        tc.success = bool(success)
                         tc.error_hash = payload.get("error_hash")
                         break
 

@@ -1,4 +1,5 @@
 """GitHub API client — creates fix branches and draft PRs for code-change signals."""
+
 from __future__ import annotations
 
 import base64
@@ -36,24 +37,37 @@ async def create_fix_pr(
     Returns {"pr_url": str, "pr_number": int, "branch": str}.
     Raises ValueError for config errors, httpx.HTTPStatusError for API failures.
     """
-    repo        = settings.GITHUB_REPO
+    repo = settings.GITHUB_REPO
     base_branch = settings.GITHUB_BASE_BRANCH
 
-    slug   = re.sub(r"[^a-z0-9]+", "-", failure_type.lower()).strip("-")
+    slug = re.sub(r"[^a-z0-9]+", "-", failure_type.lower()).strip("-")
     branch = f"dunetrace/signal-{signal_id}-{slug}"
 
-    async with httpx.AsyncClient(
-        base_url=_GITHUB_API, headers=_headers(), timeout=20
-    ) as client:
+    async with httpx.AsyncClient(base_url=_GITHUB_API, headers=_headers(), timeout=20) as client:
         base_sha = await _get_branch_sha(client, repo, base_branch)
         await _create_branch(client, repo, branch, base_sha)
         await _upsert_file(
-            client, repo, branch, signal_id,
-            agent_id, failure_type, root_cause, fix_content, fix_patch,
+            client,
+            repo,
+            branch,
+            signal_id,
+            agent_id,
+            failure_type,
+            root_cause,
+            fix_content,
+            fix_patch,
         )
         return await _open_pr(
-            client, repo, branch, base_branch,
-            signal_id, agent_id, failure_type, root_cause, fix_content, fix_patch,
+            client,
+            repo,
+            branch,
+            base_branch,
+            signal_id,
+            agent_id,
+            failure_type,
+            root_cause,
+            fix_content,
+            fix_patch,
         )
 
 
@@ -63,13 +77,14 @@ async def _get_branch_sha(client: httpx.AsyncClient, repo: str, branch: str) -> 
     return r.json()["object"]["sha"]
 
 
-async def _create_branch(
-    client: httpx.AsyncClient, repo: str, branch: str, sha: str
-) -> None:
-    r = await client.post(f"/repos/{repo}/git/refs", json={
-        "ref": f"refs/heads/{branch}",
-        "sha": sha,
-    })
+async def _create_branch(client: httpx.AsyncClient, repo: str, branch: str, sha: str) -> None:
+    r = await client.post(
+        f"/repos/{repo}/git/refs",
+        json={
+            "ref": f"refs/heads/{branch}",
+            "sha": sha,
+        },
+    )
     if r.status_code == 422:
         logger.debug("Branch %s already exists — reusing", branch)
     else:
@@ -87,10 +102,8 @@ async def _upsert_file(
     fix_content: str,
     fix_patch: str,
 ) -> None:
-    path    = f"dunetrace-fixes/signal-{signal_id}.md"
-    content = _build_fix_file(
-        signal_id, agent_id, failure_type, root_cause, fix_content, fix_patch
-    )
+    path = f"dunetrace-fixes/signal-{signal_id}.md"
+    content = _build_fix_file(signal_id, agent_id, failure_type, root_cause, fix_content, fix_patch)
     encoded = base64.b64encode(content.encode()).decode()
 
     existing_sha = None
@@ -101,7 +114,7 @@ async def _upsert_file(
     body: Dict[str, Any] = {
         "message": f"dunetrace: fix suggestion for {failure_type} (signal #{signal_id})",
         "content": encoded,
-        "branch":  branch,
+        "branch": branch,
     }
     if existing_sha:
         body["sha"] = existing_sha
@@ -126,19 +139,20 @@ async def _open_pr(
         f"[DuneTrace] Fix {failure_type.replace('_', ' ').title()} "
         f"in {agent_id} (signal #{signal_id})"
     )
-    pr_body = _build_pr_body(
-        signal_id, agent_id, failure_type, root_cause, fix_content, fix_patch
+    pr_body = _build_pr_body(signal_id, agent_id, failure_type, root_cause, fix_content, fix_patch)
+    r = await client.post(
+        f"/repos/{repo}/pulls",
+        json={
+            "title": title,
+            "body": pr_body,
+            "head": branch,
+            "base": base_branch,
+            "draft": True,
+        },
     )
-    r = await client.post(f"/repos/{repo}/pulls", json={
-        "title": title,
-        "body":  pr_body,
-        "head":  branch,
-        "base":  base_branch,
-        "draft": True,
-    })
     if r.status_code == 422:
         # PR already exists for this branch — find and return it
-        owner  = repo.split("/")[0]
+        owner = repo.split("/")[0]
         r2 = await client.get(
             f"/repos/{repo}/pulls",
             params={"head": f"{owner}:{branch}", "state": "open"},
@@ -146,9 +160,9 @@ async def _open_pr(
         prs = r2.json()
         if prs:
             return {
-                "pr_url":    prs[0]["html_url"],
+                "pr_url": prs[0]["html_url"],
                 "pr_number": prs[0]["number"],
-                "branch":    branch,
+                "branch": branch,
             }
     r.raise_for_status()
     pr = r.json()

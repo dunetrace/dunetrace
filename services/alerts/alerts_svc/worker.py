@@ -15,6 +15,7 @@ Run:
     cd services/alerts
     python -m alerts_svc.worker
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -26,21 +27,28 @@ from dunetrace.models import FailureSignal, FailureType, Severity
 
 from explainer_svc.explainer import explain
 from explainer_svc.models import Explanation
-from alerts_svc.formatters.slack   import format_slack
-from alerts_svc.formatters.webhook import build_signed_request      # type: ignore
-from alerts_svc.sender  import send_slack, send_webhook, SendResult
-from alerts_svc.db      import (
-    init_pool, close_pool,
-    fetch_unalerted_signals, mark_alerted_batch,
-    fetch_signal_rate_context, fetch_run_tokens,
-    ensure_digest_schema, ensure_dedup_schema,
-    fetch_dedup_states, record_alert_sent, increment_suppressed_count,
-    evaluate_alert_policy, fetch_agent_overrides,
+from alerts_svc.formatters.slack import format_slack
+from alerts_svc.formatters.webhook import build_signed_request  # type: ignore
+from alerts_svc.sender import send_slack, send_webhook, SendResult
+from alerts_svc.db import (
+    init_pool,
+    close_pool,
+    fetch_unalerted_signals,
+    mark_alerted_batch,
+    fetch_signal_rate_context,
+    fetch_run_tokens,
+    ensure_digest_schema,
+    ensure_dedup_schema,
+    fetch_dedup_states,
+    record_alert_sent,
+    increment_suppressed_count,
+    evaluate_alert_policy,
+    fetch_agent_overrides,
 )
-from alerts_svc.config  import load_alert_policies, get_alert_policy
+from alerts_svc.config import load_alert_policies, get_alert_policy
 from explainer_svc.cost import estimate_cost
-from alerts_svc.digest  import send_weekly_digest
-from alerts_svc.config  import settings, SEVERITY_ORDER
+from alerts_svc.digest import send_weekly_digest
+from alerts_svc.config import settings, SEVERITY_ORDER
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -51,6 +59,7 @@ logger = logging.getLogger("dunetrace.alerts")
 
 # Signal reconstruction
 
+
 def _row_to_signal(row: dict) -> FailureSignal:
     """Reconstruct a FailureSignal from a DB row dict."""
     detected_at = row.get("detected_at")
@@ -60,28 +69,29 @@ def _row_to_signal(row: dict) -> FailureSignal:
         detected_at = time.time()
 
     return FailureSignal(
-        failure_type  = FailureType(row["failure_type"]),
-        severity      = Severity(row["severity"]),
-        run_id        = row["run_id"],
-        agent_id      = row["agent_id"],
-        agent_version = row["agent_version"],
-        step_index    = row["step_index"],
-        confidence    = row["confidence"],
-        evidence      = json.loads(row["evidence"]) if isinstance(row.get("evidence"), str) else (row.get("evidence") or {}),
-        detected_at   = detected_at,
+        failure_type=FailureType(row["failure_type"]),
+        severity=Severity(row["severity"]),
+        run_id=row["run_id"],
+        agent_id=row["agent_id"],
+        agent_version=row["agent_version"],
+        step_index=row["step_index"],
+        confidence=row["confidence"],
+        evidence=json.loads(row["evidence"])
+        if isinstance(row.get("evidence"), str)
+        else (row.get("evidence") or {}),
+        detected_at=detected_at,
     )
 
 
 # Severity filter
 
+
 def _meets_slack_threshold(severity: str) -> bool:
-    return (
-        SEVERITY_ORDER.get(severity, 0)
-        >= SEVERITY_ORDER.get(settings.SLACK_MIN_SEVERITY, 2)
-    )
+    return SEVERITY_ORDER.get(severity, 0) >= SEVERITY_ORDER.get(settings.SLACK_MIN_SEVERITY, 2)
 
 
 # Per-signal delivery
+
 
 def deliver(
     explanation: Explanation,
@@ -104,7 +114,9 @@ def deliver(
         else:
             logger.debug(
                 "Severity %s below Slack threshold %s — skipping Slack. run_id=%s",
-                explanation.severity, settings.SLACK_MIN_SEVERITY, explanation.run_id,
+                explanation.severity,
+                settings.SLACK_MIN_SEVERITY,
+                explanation.run_id,
             )
 
     # Generic webhook
@@ -116,6 +128,7 @@ def deliver(
 
 
 # Poll cycle
+
 
 async def poll_once() -> tuple[int, int]:
     """One poll cycle. Returns (signals_found, signals_delivered)."""
@@ -154,7 +167,7 @@ async def poll_once() -> tuple[int, int]:
     # to_deliver: (row, suppressed_since_last_alert)
     to_deliver: list[tuple[dict, int]] = []
     # IDs to mark alerted without sending (policy pending or dedup suppressed)
-    silent_ids:    list[int] = []
+    silent_ids: list[int] = []
     duplicate_ids: list[int] = []
     suppressed_groups: list[tuple[str, str, int]] = []  # for dedup count increment
 
@@ -165,16 +178,20 @@ async def poll_once() -> tuple[int, int]:
         # ── Step 1: Alert policy ──────────────────────────────────────────────
         policy = get_alert_policy(alert_policies, failure_type)
         policy_met, policy_reason = await evaluate_alert_policy(
-            agent_id, failure_type,
-            mode        = policy["mode"],
-            threshold   = policy["threshold"],
-            window_runs = policy["window_runs"],
+            agent_id,
+            failure_type,
+            mode=policy["mode"],
+            threshold=policy["threshold"],
+            window_runs=policy["window_runs"],
         )
 
         if not policy_met:
             logger.info(
                 "Policy pending — %s on %s: %s (mode=%s)",
-                failure_type, agent_id, policy_reason, policy["mode"],
+                failure_type,
+                agent_id,
+                policy_reason,
+                policy["mode"],
             )
             silent_ids.extend(r["id"] for r in group_rows)
             continue
@@ -185,7 +202,9 @@ async def poll_once() -> tuple[int, int]:
             if override["silenced"]:
                 logger.info(
                     "Silenced by false positives — %s on %s (%d FPs, manually reset to re-enable)",
-                    failure_type, agent_id, override["fp_count"],
+                    failure_type,
+                    agent_id,
+                    override["fp_count"],
                 )
                 silent_ids.extend(r["id"] for r in group_rows)
                 continue
@@ -193,7 +212,11 @@ async def poll_once() -> tuple[int, int]:
             if best["confidence"] <= floor:
                 logger.info(
                     "Confidence %.2f below floor %.1f — %s on %s (%d FPs)",
-                    best["confidence"], floor, failure_type, agent_id, override["fp_count"],
+                    best["confidence"],
+                    floor,
+                    failure_type,
+                    agent_id,
+                    override["fp_count"],
                 )
                 silent_ids.extend(r["id"] for r in group_rows)
                 continue
@@ -211,7 +234,9 @@ async def poll_once() -> tuple[int, int]:
             silent_ids.extend(r["id"] for r in group_rows)
             logger.debug(
                 "Dedup suppressed %d signal(s): agent=%s type=%s (%.0fs remaining)",
-                len(group_rows), agent_id, failure_type,
+                len(group_rows),
+                agent_id,
+                failure_type,
                 dedup_window - (now - state["last_alerted_at"].timestamp()),
             )
             continue
@@ -233,10 +258,11 @@ async def poll_once() -> tuple[int, int]:
     if not to_deliver:
         if silent_ids:
             policy_cnt = len(silent_ids) - sum(c for _, _, c in suppressed_groups)
-            dedup_cnt  = sum(c for _, _, c in suppressed_groups)
+            dedup_cnt = sum(c for _, _, c in suppressed_groups)
             logger.info(
                 "No alerts to send: %d policy-pending, %d dedup-suppressed",
-                policy_cnt, dedup_cnt,
+                policy_cnt,
+                dedup_cnt,
             )
         return len(rows), 0
 
@@ -248,10 +274,12 @@ async def poll_once() -> tuple[int, int]:
         except Exception as exc:
             logger.error("Failed to reconstruct signal for signal_id=%d: %s", row["id"], exc)
 
-    rate_contexts = await asyncio.gather(*[
-        fetch_signal_rate_context(row["agent_id"], row["failure_type"])
-        for row, _ in signals_by_row
-    ])
+    rate_contexts = await asyncio.gather(
+        *[
+            fetch_signal_rate_context(row["agent_id"], row["failure_type"])
+            for row, _ in signals_by_row
+        ]
+    )
 
     run_token_map = await fetch_run_tokens([row["run_id"] for row, _ in signals_by_row])
 
@@ -282,15 +310,21 @@ async def poll_once() -> tuple[int, int]:
         if suppressed_count > 0:
             logger.info(
                 "[%s] %s — run_id=%s agent_id=%s confidence=%s (+%d suppressed)",
-                explanation.severity, explanation.title,
-                explanation.run_id, explanation.agent_id,
-                explanation.confidence_pct(), suppressed_count,
+                explanation.severity,
+                explanation.title,
+                explanation.run_id,
+                explanation.agent_id,
+                explanation.confidence_pct(),
+                suppressed_count,
             )
         else:
             logger.info(
                 "[%s] %s — run_id=%s agent_id=%s confidence=%s",
-                explanation.severity, explanation.title,
-                explanation.run_id, explanation.agent_id, explanation.confidence_pct(),
+                explanation.severity,
+                explanation.title,
+                explanation.run_id,
+                explanation.agent_id,
+                explanation.confidence_pct(),
             )
         try:
             results = await asyncio.to_thread(deliver, explanation, suppressed_count, signal_id)
@@ -298,23 +332,26 @@ async def poll_once() -> tuple[int, int]:
             logger.error("Delivery error for signal_id=%d: %s", signal_id, exc)
             return None
 
-        any_success     = any(r.success for r in results.values()) if results else False
+        any_success = any(r.success for r in results.values()) if results else False
         no_destinations = not results
 
         if any_success or no_destinations:
             for dest, result in results.items():
                 if not result.success:
-                    logger.warning("Partial delivery failure. dest=%s signal_id=%d error=%s",
-                                   dest, signal_id, result.error)
+                    logger.warning(
+                        "Partial delivery failure. dest=%s signal_id=%d error=%s",
+                        dest,
+                        signal_id,
+                        result.error,
+                    )
             return signal_id
         else:
-            logger.error("All destinations failed for signal_id=%d — will retry next cycle",
-                         signal_id)
+            logger.error(
+                "All destinations failed for signal_id=%d — will retry next cycle", signal_id
+            )
             return None
 
-    outcomes = await asyncio.gather(*[
-        _deliver_one(sid, exp, sup) for sid, exp, sup in work
-    ])
+    outcomes = await asyncio.gather(*[_deliver_one(sid, exp, sup) for sid, exp, sup in work])
     delivered_ids = [sid for sid in outcomes if sid is not None]
 
     if delivered_ids:
@@ -333,6 +370,7 @@ async def poll_once() -> tuple[int, int]:
 
 
 # Main loop
+
 
 async def run_worker() -> None:
     await init_pool()

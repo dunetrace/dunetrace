@@ -8,6 +8,7 @@ Run:
     cd services/detector
     python -m pytest tests/test_issues.py -v
 """
+
 from __future__ import annotations
 
 import sys
@@ -28,6 +29,7 @@ from detector_svc.db import CLEAN_RUNS_THRESHOLD
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def _make_pool():
     """Return a mock asyncpg pool whose acquire() returns a usable async context manager."""
@@ -56,8 +58,8 @@ class _AsyncCtx:
 
 # ── upsert_fired_issues ────────────────────────────────────────────────────────
 
-class TestUpsertFiredIssues(unittest.IsolatedAsyncioTestCase):
 
+class TestUpsertFiredIssues(unittest.IsolatedAsyncioTestCase):
     async def test_noop_when_no_fired_types(self):
         pool = _make_pool()
         with patch.object(db_module, "_pool", pool):
@@ -92,8 +94,8 @@ class TestUpsertFiredIssues(unittest.IsolatedAsyncioTestCase):
 
 # ── advance_clean_runs ─────────────────────────────────────────────────────────
 
-class TestAdvanceCleanRuns(unittest.IsolatedAsyncioTestCase):
 
+class TestAdvanceCleanRuns(unittest.IsolatedAsyncioTestCase):
     async def test_noop_when_pool_is_none(self):
         with patch.object(db_module, "_pool", None):
             await db_module.advance_clean_runs("agent-1", [])
@@ -122,6 +124,7 @@ class TestAdvanceCleanRuns(unittest.IsolatedAsyncioTestCase):
 
 # ── Issue lifecycle via worker ─────────────────────────────────────────────────
 
+
 class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
     """Tests that the detector worker calls issue functions after writing signals."""
 
@@ -145,18 +148,30 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_upsert_called_when_signals_fired(self):
         import detector_svc.worker as w
+
         signals = self._make_worker_mocks(["TOOL_LOOP", "RETRY_STORM"])
 
-        with patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=[{"event_type": "run.started", "payload": {}}])), \
-             patch("detector_svc.worker.build_run_state", return_value=MagicMock(baseline_p75_steps=None)), \
-             patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)), \
-             patch("detector_svc.worker.run_detectors", return_value=signals), \
-             patch("detector_svc.worker.RiskEngine", return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock(severity=None)))), \
-             patch("detector_svc.worker._injection_signal_from_events", return_value=None), \
-             patch("detector_svc.worker.write_signals", AsyncMock(return_value=1)), \
-             patch("detector_svc.worker.mark_run_processed", AsyncMock()), \
-             patch("detector_svc.worker.upsert_fired_issues", AsyncMock()) as mock_upsert, \
-             patch("detector_svc.worker.advance_clean_runs", AsyncMock()) as mock_advance:
+        with (
+            patch(
+                "detector_svc.worker.fetch_run_events",
+                AsyncMock(return_value=[{"event_type": "run.started", "payload": {}}]),
+            ),
+            patch(
+                "detector_svc.worker.build_run_state",
+                return_value=MagicMock(baseline_p75_steps=None),
+            ),
+            patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)),
+            patch("detector_svc.worker.run_detectors", return_value=signals),
+            patch(
+                "detector_svc.worker.RiskEngine",
+                return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock(severity=None))),
+            ),
+            patch("detector_svc.worker._injection_signal_from_events", return_value=None),
+            patch("detector_svc.worker.write_signals", AsyncMock(return_value=1)),
+            patch("detector_svc.worker.mark_run_processed", AsyncMock()),
+            patch("detector_svc.worker.upsert_fired_issues", AsyncMock()) as mock_upsert,
+            patch("detector_svc.worker.advance_clean_runs", AsyncMock()) as mock_advance,
+        ):
             await w.process_run("run-1", "agent-1", "v1", "completed")
 
         mock_upsert.assert_called_once()
@@ -169,16 +184,27 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_advance_called_even_when_no_signals(self):
         import detector_svc.worker as w
 
-        with patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=[{"event_type": "run.started", "payload": {}}])), \
-             patch("detector_svc.worker.build_run_state", return_value=MagicMock(baseline_p75_steps=None)), \
-             patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)), \
-             patch("detector_svc.worker.run_detectors", return_value=[]), \
-             patch("detector_svc.worker.RiskEngine", return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock(severity=None)))), \
-             patch("detector_svc.worker._injection_signal_from_events", return_value=None), \
-             patch("detector_svc.worker.write_signals", AsyncMock(return_value=0)), \
-             patch("detector_svc.worker.mark_run_processed", AsyncMock()), \
-             patch("detector_svc.worker.upsert_fired_issues", AsyncMock()) as mock_upsert, \
-             patch("detector_svc.worker.advance_clean_runs", AsyncMock()) as mock_advance:
+        with (
+            patch(
+                "detector_svc.worker.fetch_run_events",
+                AsyncMock(return_value=[{"event_type": "run.started", "payload": {}}]),
+            ),
+            patch(
+                "detector_svc.worker.build_run_state",
+                return_value=MagicMock(baseline_p75_steps=None),
+            ),
+            patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)),
+            patch("detector_svc.worker.run_detectors", return_value=[]),
+            patch(
+                "detector_svc.worker.RiskEngine",
+                return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock(severity=None))),
+            ),
+            patch("detector_svc.worker._injection_signal_from_events", return_value=None),
+            patch("detector_svc.worker.write_signals", AsyncMock(return_value=0)),
+            patch("detector_svc.worker.mark_run_processed", AsyncMock()),
+            patch("detector_svc.worker.upsert_fired_issues", AsyncMock()) as mock_upsert,
+            patch("detector_svc.worker.advance_clean_runs", AsyncMock()) as mock_advance,
+        ):
             await w.process_run("run-1", "agent-1", "v1", "completed")
 
         mock_upsert.assert_not_called()  # nothing to upsert
@@ -187,18 +213,33 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_issue_tracking_failure_does_not_break_run_processing(self):
         """If upsert_fired_issues raises, the run is still marked processed."""
         import detector_svc.worker as w
+
         signals = self._make_worker_mocks(["TOOL_LOOP"])
 
-        with patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=[{"event_type": "run.started", "payload": {}}])), \
-             patch("detector_svc.worker.build_run_state", return_value=MagicMock(baseline_p75_steps=None)), \
-             patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)), \
-             patch("detector_svc.worker.run_detectors", return_value=signals), \
-             patch("detector_svc.worker.RiskEngine", return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock(severity=None)))), \
-             patch("detector_svc.worker._injection_signal_from_events", return_value=None), \
-             patch("detector_svc.worker.write_signals", AsyncMock(return_value=1)), \
-             patch("detector_svc.worker.mark_run_processed", AsyncMock()) as mock_mark, \
-             patch("detector_svc.worker.upsert_fired_issues", AsyncMock(side_effect=Exception("DB down"))), \
-             patch("detector_svc.worker.advance_clean_runs", AsyncMock()):
+        with (
+            patch(
+                "detector_svc.worker.fetch_run_events",
+                AsyncMock(return_value=[{"event_type": "run.started", "payload": {}}]),
+            ),
+            patch(
+                "detector_svc.worker.build_run_state",
+                return_value=MagicMock(baseline_p75_steps=None),
+            ),
+            patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)),
+            patch("detector_svc.worker.run_detectors", return_value=signals),
+            patch(
+                "detector_svc.worker.RiskEngine",
+                return_value=MagicMock(evaluate=MagicMock(return_value=MagicMock(severity=None))),
+            ),
+            patch("detector_svc.worker._injection_signal_from_events", return_value=None),
+            patch("detector_svc.worker.write_signals", AsyncMock(return_value=1)),
+            patch("detector_svc.worker.mark_run_processed", AsyncMock()) as mock_mark,
+            patch(
+                "detector_svc.worker.upsert_fired_issues",
+                AsyncMock(side_effect=Exception("DB down")),
+            ),
+            patch("detector_svc.worker.advance_clean_runs", AsyncMock()),
+        ):
             result = await w.process_run("run-1", "agent-1", "v1", "completed")
 
         mock_mark.assert_called_once()
@@ -207,16 +248,19 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
 
 # ── list_issues query ──────────────────────────────────────────────────────────
 
-class TestListIssues(unittest.IsolatedAsyncioTestCase):
 
+class TestListIssues(unittest.IsolatedAsyncioTestCase):
     def _make_issue_row(self, status="open"):
         import datetime
+
         row = MagicMock()
         row.__getitem__ = lambda self, k: {
-            "id": 1, "agent_id": "agent-1", "failure_type": "TOOL_LOOP",
+            "id": 1,
+            "agent_id": "agent-1",
+            "failure_type": "TOOL_LOOP",
             "status": status,
             "first_seen": datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
-            "last_seen":  datetime.datetime(2026, 1, 7, tzinfo=datetime.timezone.utc),
+            "last_seen": datetime.datetime(2026, 1, 7, tzinfo=datetime.timezone.utc),
             "resolved_at": None,
             "affected_runs": 5,
             "clean_runs_since": 0,

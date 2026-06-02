@@ -10,6 +10,7 @@ Run:
     cd services/explainer
     python -m pytest tests/test_explainer_new.py -v
 """
+
 from __future__ import annotations
 
 import sys
@@ -18,9 +19,9 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py")
-))
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py"))
+)
 
 from dunetrace.models import FailureSignal, FailureType, Severity
 from explainer_svc.explainer import explain
@@ -48,6 +49,7 @@ def make_signal(
 
 
 # ── TOOL_THRASHING with new evidence key ──────────────────────────────────────
+
 
 class TestToolThrashingCountKey(unittest.TestCase):
     """Template reads ev.get('count', ev.get('oscillation_count', '?'))
@@ -85,7 +87,8 @@ class TestToolThrashingCountKey(unittest.TestCase):
         signal = make_signal(
             FailureType.TOOL_THRASHING,
             evidence={
-                "tool_a": "s", "tool_b": "b",
+                "tool_a": "s",
+                "tool_b": "b",
                 "count": 8,
                 "oscillation_count": 3,  # should be ignored
             },
@@ -100,8 +103,8 @@ class TestToolThrashingCountKey(unittest.TestCase):
 
 # ── GOAL_ABANDONMENT — new evidence fields ────────────────────────────────────
 
-class TestGoalAbandonmentNewEvidence(unittest.TestCase):
 
+class TestGoalAbandonmentNewEvidence(unittest.TestCase):
     def _make_exp(self, evidence: dict) -> Explanation:
         signal = make_signal(
             FailureType.GOAL_ABANDONMENT,
@@ -110,35 +113,41 @@ class TestGoalAbandonmentNewEvidence(unittest.TestCase):
         return explain(signal)
 
     def test_stall_event_sequence_in_evidence_summary(self):
-        exp = self._make_exp({
-            "stall_steps": 4,
-            "last_tool_used": "db_query",
-            "steps_since_last_tool": 5,
-            "stall_event_sequence": ["llm.called", "llm.called", "llm.called", "llm.called"],
-            "last_tool_step": 3,
-        })
+        exp = self._make_exp(
+            {
+                "stall_steps": 4,
+                "last_tool_used": "db_query",
+                "steps_since_last_tool": 5,
+                "stall_event_sequence": ["llm.called", "llm.called", "llm.called", "llm.called"],
+                "last_tool_step": 3,
+            }
+        )
         # The sequence should appear in the evidence_summary
         self.assertIn("llm", exp.evidence_summary)
 
     def test_steps_since_last_tool_in_evidence_summary(self):
-        exp = self._make_exp({
-            "stall_steps": 4,
-            "last_tool_used": "search",
-            "steps_since_last_tool": 7,
-            "stall_event_sequence": [],
-            "last_tool_step": 2,
-        })
+        exp = self._make_exp(
+            {
+                "stall_steps": 4,
+                "last_tool_used": "search",
+                "steps_since_last_tool": 7,
+                "stall_event_sequence": [],
+                "last_tool_step": 2,
+            }
+        )
         self.assertIn("7", exp.evidence_summary)
 
     def test_no_event_sequence_section_when_empty(self):
         """Empty stall_event_sequence → evidence_summary ends with a period, not an arrow."""
-        exp = self._make_exp({
-            "stall_steps": 4,
-            "last_tool_used": "search",
-            "steps_since_last_tool": 4,
-            "stall_event_sequence": [],
-            "last_tool_step": 2,
-        })
+        exp = self._make_exp(
+            {
+                "stall_steps": 4,
+                "last_tool_used": "search",
+                "steps_since_last_tool": 4,
+                "stall_event_sequence": [],
+                "last_tool_step": 2,
+            }
+        )
         self.assertNotIn("→", exp.evidence_summary)
 
     def test_missing_stall_event_sequence_no_crash(self):
@@ -147,12 +156,14 @@ class TestGoalAbandonmentNewEvidence(unittest.TestCase):
         self.assertIsInstance(exp, Explanation)
 
     def test_last_tool_in_title(self):
-        exp = self._make_exp({
-            "stall_steps": 3,
-            "last_tool_used": "vector_search",
-            "steps_since_last_tool": 3,
-            "stall_event_sequence": [],
-        })
+        exp = self._make_exp(
+            {
+                "stall_steps": 3,
+                "last_tool_used": "vector_search",
+                "steps_since_last_tool": 3,
+                "stall_event_sequence": [],
+            }
+        )
         self.assertIn("vector_search", exp.title)
 
     def test_confidence_in_evidence_summary(self):
@@ -167,25 +178,27 @@ class TestGoalAbandonmentNewEvidence(unittest.TestCase):
 
 # ── CONTEXT_BLOAT — token_growth_sequence → growth curve ─────────────────────
 
-class TestContextBloatGrowthCurve(unittest.TestCase):
 
+class TestContextBloatGrowthCurve(unittest.TestCase):
     def _make_exp(self, evidence: dict) -> Explanation:
         return explain(make_signal(FailureType.CONTEXT_BLOAT, evidence=evidence))
 
     def test_growth_curve_built_from_sequence(self):
-        exp = self._make_exp({
-            "first_tokens": 500,
-            "last_tokens": 6000,
-            "growth_factor": 12.0,
-            "llm_call_count": 3,
-            "first_call_step": 1,
-            "last_call_step": 3,
-            "token_growth_sequence": [
-                {"step": 1, "tokens": 500},
-                {"step": 2, "tokens": 2000},
-                {"step": 3, "tokens": 6000},
-            ],
-        })
+        exp = self._make_exp(
+            {
+                "first_tokens": 500,
+                "last_tokens": 6000,
+                "growth_factor": 12.0,
+                "llm_call_count": 3,
+                "first_call_step": 1,
+                "last_call_step": 3,
+                "token_growth_sequence": [
+                    {"step": 1, "tokens": 500},
+                    {"step": 2, "tokens": 2000},
+                    {"step": 3, "tokens": 6000},
+                ],
+            }
+        )
         # Evidence summary should show the step-by-step curve
         self.assertIn("500", exp.evidence_summary)
         self.assertIn("2000", exp.evidence_summary)
@@ -193,154 +206,177 @@ class TestContextBloatGrowthCurve(unittest.TestCase):
         self.assertIn("→", exp.evidence_summary)
 
     def test_fallback_to_first_last_when_no_sequence(self):
-        exp = self._make_exp({
-            "first_tokens": 300,
-            "last_tokens": 4500,
-            "growth_factor": 15.0,
-            "llm_call_count": 3,
-            "first_call_step": 1,
-            "last_call_step": 3,
-            # No token_growth_sequence key
-        })
+        exp = self._make_exp(
+            {
+                "first_tokens": 300,
+                "last_tokens": 4500,
+                "growth_factor": 15.0,
+                "llm_call_count": 3,
+                "first_call_step": 1,
+                "last_call_step": 3,
+                # No token_growth_sequence key
+            }
+        )
         # Falls back to "300→4500" style
         self.assertIn("300", exp.evidence_summary)
         self.assertIn("4500", exp.evidence_summary)
         self.assertIn("→", exp.evidence_summary)
 
     def test_growth_factor_in_title(self):
-        exp = self._make_exp({
-            "first_tokens": 200,
-            "last_tokens": 800,
-            "growth_factor": 4.0,
-            "llm_call_count": 3,
-            "first_call_step": 1,
-            "last_call_step": 3,
-        })
+        exp = self._make_exp(
+            {
+                "first_tokens": 200,
+                "last_tokens": 800,
+                "growth_factor": 4.0,
+                "llm_call_count": 3,
+                "first_call_step": 1,
+                "last_call_step": 3,
+            }
+        )
         self.assertIn("4.0", exp.title)
 
     def test_what_mentions_step_range(self):
-        exp = self._make_exp({
-            "first_tokens": 500,
-            "last_tokens": 5000,
-            "growth_factor": 10.0,
-            "llm_call_count": 4,
-            "first_call_step": 1,
-            "last_call_step": 4,
-        })
+        exp = self._make_exp(
+            {
+                "first_tokens": 500,
+                "last_tokens": 5000,
+                "growth_factor": 10.0,
+                "llm_call_count": 4,
+                "first_call_step": 1,
+                "last_call_step": 4,
+            }
+        )
         self.assertIn("step 1", exp.what)
         self.assertIn("step 4", exp.what)
 
 
 # ── LLM_TRUNCATION_LOOP — enriched evidence in summary ───────────────────────
 
-class TestLlmTruncationLoopEnriched(unittest.TestCase):
 
+class TestLlmTruncationLoopEnriched(unittest.TestCase):
     def _make_exp(self, evidence: dict) -> Explanation:
         return explain(make_signal(FailureType.LLM_TRUNCATION_LOOP, evidence=evidence))
 
     def test_token_counts_in_evidence_summary(self):
-        exp = self._make_exp({
-            "truncation_count": 2,
-            "total_llm_calls": 4,
-            "first_truncation_step": 2,
-            "last_truncation_step": 4,
-            "token_counts_at_truncation": [8000, 12000],
-            "models": ["gpt-4o"],
-        })
+        exp = self._make_exp(
+            {
+                "truncation_count": 2,
+                "total_llm_calls": 4,
+                "first_truncation_step": 2,
+                "last_truncation_step": 4,
+                "token_counts_at_truncation": [8000, 12000],
+                "models": ["gpt-4o"],
+            }
+        )
         self.assertIn("8000", exp.evidence_summary)
         self.assertIn("12000", exp.evidence_summary)
 
     def test_model_name_in_evidence_summary(self):
-        exp = self._make_exp({
-            "truncation_count": 2,
-            "total_llm_calls": 3,
-            "first_truncation_step": 1,
-            "last_truncation_step": 3,
-            "token_counts_at_truncation": [],
-            "models": ["claude-3-5-sonnet"],
-        })
+        exp = self._make_exp(
+            {
+                "truncation_count": 2,
+                "total_llm_calls": 3,
+                "first_truncation_step": 1,
+                "last_truncation_step": 3,
+                "token_counts_at_truncation": [],
+                "models": ["claude-3-5-sonnet"],
+            }
+        )
         self.assertIn("claude-3-5-sonnet", exp.evidence_summary)
 
     def test_multiple_models_in_evidence_summary(self):
-        exp = self._make_exp({
-            "truncation_count": 2,
-            "total_llm_calls": 3,
-            "first_truncation_step": 1,
-            "last_truncation_step": 3,
-            "token_counts_at_truncation": [],
-            "models": ["gpt-4o", "gpt-4o-mini"],
-        })
+        exp = self._make_exp(
+            {
+                "truncation_count": 2,
+                "total_llm_calls": 3,
+                "first_truncation_step": 1,
+                "last_truncation_step": 3,
+                "token_counts_at_truncation": [],
+                "models": ["gpt-4o", "gpt-4o-mini"],
+            }
+        )
         self.assertIn("gpt-4o", exp.evidence_summary)
         self.assertIn("gpt-4o-mini", exp.evidence_summary)
 
     def test_no_token_note_when_list_empty(self):
-        exp = self._make_exp({
-            "truncation_count": 2,
-            "total_llm_calls": 3,
-            "first_truncation_step": 1,
-            "last_truncation_step": 3,
-            "token_counts_at_truncation": [],
-            "models": [],
-        })
+        exp = self._make_exp(
+            {
+                "truncation_count": 2,
+                "total_llm_calls": 3,
+                "first_truncation_step": 1,
+                "last_truncation_step": 3,
+                "token_counts_at_truncation": [],
+                "models": [],
+            }
+        )
         self.assertNotIn("Prompt tokens", exp.evidence_summary)
 
     def test_no_model_note_when_empty(self):
-        exp = self._make_exp({
-            "truncation_count": 2,
-            "total_llm_calls": 3,
-            "first_truncation_step": 1,
-            "last_truncation_step": 3,
-            "token_counts_at_truncation": [],
-            "models": [],
-        })
+        exp = self._make_exp(
+            {
+                "truncation_count": 2,
+                "total_llm_calls": 3,
+                "first_truncation_step": 1,
+                "last_truncation_step": 3,
+                "token_counts_at_truncation": [],
+                "models": [],
+            }
+        )
         self.assertNotIn("Model", exp.evidence_summary)
 
     def test_singular_model_label(self):
         """One model → 'Model:', not 'Models:'."""
-        exp = self._make_exp({
-            "truncation_count": 2,
-            "total_llm_calls": 3,
-            "first_truncation_step": 1,
-            "last_truncation_step": 3,
-            "token_counts_at_truncation": [],
-            "models": ["gpt-4o"],
-        })
+        exp = self._make_exp(
+            {
+                "truncation_count": 2,
+                "total_llm_calls": 3,
+                "first_truncation_step": 1,
+                "last_truncation_step": 3,
+                "token_counts_at_truncation": [],
+                "models": ["gpt-4o"],
+            }
+        )
         self.assertIn("Model:", exp.evidence_summary)
         self.assertNotIn("Models:", exp.evidence_summary)
 
     def test_plural_model_label(self):
         """Two models → 'Models:'."""
-        exp = self._make_exp({
-            "truncation_count": 2,
-            "total_llm_calls": 3,
-            "first_truncation_step": 1,
-            "last_truncation_step": 3,
-            "token_counts_at_truncation": [],
-            "models": ["gpt-4o", "gpt-4o-mini"],
-        })
+        exp = self._make_exp(
+            {
+                "truncation_count": 2,
+                "total_llm_calls": 3,
+                "first_truncation_step": 1,
+                "last_truncation_step": 3,
+                "token_counts_at_truncation": [],
+                "models": ["gpt-4o", "gpt-4o-mini"],
+            }
+        )
         self.assertIn("Models:", exp.evidence_summary)
 
 
 # ── explain() rate_context parameter ─────────────────────────────────────────
 
-class TestExplainRateContext(unittest.TestCase):
 
+class TestExplainRateContext(unittest.TestCase):
     def test_rate_context_attached_to_explanation(self):
-        signal = make_signal(FailureType.TOOL_LOOP,
-                             evidence={"tool": "web_search", "count": 5, "window": 5})
+        signal = make_signal(
+            FailureType.TOOL_LOOP, evidence={"tool": "web_search", "count": 5, "window": 5}
+        )
         rc = {"total_runs": 10, "affected_runs": 3, "rate": 0.3, "is_systemic": False}
         exp = explain(signal, rate_context=rc)
         self.assertEqual(exp.rate_context, rc)
 
     def test_rate_context_defaults_to_empty_dict(self):
-        signal = make_signal(FailureType.TOOL_LOOP,
-                             evidence={"tool": "web_search", "count": 5, "window": 5})
+        signal = make_signal(
+            FailureType.TOOL_LOOP, evidence={"tool": "web_search", "count": 5, "window": 5}
+        )
         exp = explain(signal)
         self.assertEqual(exp.rate_context, {})
 
     def test_rate_context_none_becomes_empty_dict(self):
-        signal = make_signal(FailureType.TOOL_LOOP,
-                             evidence={"tool": "web_search", "count": 5, "window": 5})
+        signal = make_signal(
+            FailureType.TOOL_LOOP, evidence={"tool": "web_search", "count": 5, "window": 5}
+        )
         exp = explain(signal, rate_context=None)
         self.assertEqual(exp.rate_context, {})
 
@@ -352,8 +388,7 @@ class TestExplainRateContext(unittest.TestCase):
         self.assertEqual(exp.rate_context, rc)
 
     def test_rate_context_preserves_all_keys(self):
-        signal = make_signal(FailureType.TOOL_LOOP,
-                             evidence={"tool": "x", "count": 5, "window": 5})
+        signal = make_signal(FailureType.TOOL_LOOP, evidence={"tool": "x", "count": 5, "window": 5})
         rc = {
             "total_runs": 20,
             "affected_runs": 4,
@@ -367,8 +402,8 @@ class TestExplainRateContext(unittest.TestCase):
 
 # ── New template coverage: RETRY_STORM ───────────────────────────────────────
 
-class TestRetryStormExplanation(unittest.TestCase):
 
+class TestRetryStormExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.RETRY_STORM,
@@ -412,8 +447,8 @@ class TestRetryStormExplanation(unittest.TestCase):
 
 # ── New template coverage: REASONING_STALL ───────────────────────────────────
 
-class TestReasoningStallExplanation(unittest.TestCase):
 
+class TestReasoningStallExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.REASONING_STALL,
@@ -449,8 +484,8 @@ class TestReasoningStallExplanation(unittest.TestCase):
 
 # ── New template coverage: EMPTY_LLM_RESPONSE ────────────────────────────────
 
-class TestEmptyLlmResponseExplanation(unittest.TestCase):
 
+class TestEmptyLlmResponseExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.EMPTY_LLM_RESPONSE,
@@ -484,8 +519,8 @@ class TestEmptyLlmResponseExplanation(unittest.TestCase):
 
 # ── New template coverage: STEP_COUNT_INFLATION ───────────────────────────────
 
-class TestStepCountInflationExplanation(unittest.TestCase):
 
+class TestStepCountInflationExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.STEP_COUNT_INFLATION,
@@ -519,8 +554,8 @@ class TestStepCountInflationExplanation(unittest.TestCase):
 
 # ── New template coverage: CASCADING_TOOL_FAILURE ────────────────────────────
 
-class TestCascadingToolFailureExplanation(unittest.TestCase):
 
+class TestCascadingToolFailureExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.CASCADING_TOOL_FAILURE,
@@ -558,14 +593,15 @@ class TestCascadingToolFailureExplanation(unittest.TestCase):
 
 # ── New template coverage: FIRST_STEP_FAILURE ────────────────────────────────
 
-class TestFirstStepFailureExplanation(unittest.TestCase):
 
+class TestFirstStepFailureExplanation(unittest.TestCase):
     def _make_exp(self, trigger: str, tool: str | None = None) -> Explanation:
         evidence = {"trigger": trigger, "failed_step": 1, "max_step": 2}
         if tool:
             evidence["tool"] = tool
-        return explain(make_signal(FailureType.FIRST_STEP_FAILURE,
-                                   severity=Severity.MEDIUM, evidence=evidence))
+        return explain(
+            make_signal(FailureType.FIRST_STEP_FAILURE, severity=Severity.MEDIUM, evidence=evidence)
+        )
 
     def test_run_error_trigger(self):
         exp = self._make_exp("run_errored")
@@ -595,8 +631,8 @@ class TestFirstStepFailureExplanation(unittest.TestCase):
 
 # ── New template coverage: SLOW_STEP ─────────────────────────────────────────
 
-class TestSlowStepExplanation(unittest.TestCase):
 
+class TestSlowStepExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.SLOW_STEP,
@@ -653,19 +689,20 @@ class TestSlowStepExplanation(unittest.TestCase):
 
 # ── Edge cases across all templates ──────────────────────────────────────────
 
+
 class TestTemplateEdgeCases(unittest.TestCase):
     """Templates must handle missing/None evidence values without crashing."""
 
     PARTIALLY_EMPTY = [
-        (FailureType.RETRY_STORM,            {"tool": "api"}),
-        (FailureType.CONTEXT_BLOAT,          {"growth_factor": 5.0}),
-        (FailureType.LLM_TRUNCATION_LOOP,    {"truncation_count": 3}),
-        (FailureType.EMPTY_LLM_RESPONSE,     {}),
-        (FailureType.STEP_COUNT_INFLATION,   {"current_steps": 20}),
+        (FailureType.RETRY_STORM, {"tool": "api"}),
+        (FailureType.CONTEXT_BLOAT, {"growth_factor": 5.0}),
+        (FailureType.LLM_TRUNCATION_LOOP, {"truncation_count": 3}),
+        (FailureType.EMPTY_LLM_RESPONSE, {}),
+        (FailureType.STEP_COUNT_INFLATION, {"current_steps": 20}),
         (FailureType.CASCADING_TOOL_FAILURE, {"consecutive_failures": 4}),
-        (FailureType.FIRST_STEP_FAILURE,     {}),
-        (FailureType.SLOW_STEP,              {"duration_ms": 60_000, "threshold_ms": 15_000}),
-        (FailureType.REASONING_STALL,        {"llm_calls": 10, "tool_calls": 1}),
+        (FailureType.FIRST_STEP_FAILURE, {}),
+        (FailureType.SLOW_STEP, {"duration_ms": 60_000, "threshold_ms": 15_000}),
+        (FailureType.REASONING_STALL, {"llm_calls": 10, "tool_calls": 1}),
     ]
 
     def test_no_crash_with_partial_evidence(self):
@@ -681,6 +718,7 @@ class TestTemplateEdgeCases(unittest.TestCase):
 
     def test_all_templates_return_json_serialisable_explanation(self):
         import json
+
         for failure_type, evidence in self.PARTIALLY_EMPTY:
             with self.subTest(failure_type=failure_type):
                 signal = make_signal(failure_type, evidence=evidence)
@@ -695,13 +733,16 @@ class TestTemplateEdgeCases(unittest.TestCase):
         signal = make_signal(
             FailureType.TOOL_LOOP,
             evidence={
-                "tool": "x", "count": 5, "window": 5,
-                "first_step": 0, "last_step": 4,
+                "tool": "x",
+                "count": 5,
+                "window": 5,
+                "first_step": 0,
+                "last_step": 4,
                 "step_indices": [0, 1, 2, 3, 4],
                 "args_hashes": ["a"] * 5,
                 "args_identical": True,
                 "args_similar": True,
-                "success_rate": None,   # edge case
+                "success_rate": None,  # edge case
             },
         )
         exp = explain(signal)

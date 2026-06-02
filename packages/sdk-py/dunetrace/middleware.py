@@ -32,6 +32,7 @@ Accessing the run inside a handler::
         result = db.query(...)
         run.tool_responded("db_query", success=True, output_length=len(result))
 """
+
 from __future__ import annotations
 
 from typing import Callable, Iterable, List, Optional, TYPE_CHECKING
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
 
 # ── ASGI ──────────────────────────────────────────────────────────────────────
+
 
 class DunetraceASGIMiddleware:
     """
@@ -57,26 +59,26 @@ class DunetraceASGIMiddleware:
 
     def __init__(
         self,
-        app:      Callable,
-        dt:       "Dunetrace",
+        app: Callable,
+        dt: "Dunetrace",
         agent_id: str,
         *,
-        model:    str              = "unknown",
-        tools:    Optional[List[str]] = None,
+        model: str = "unknown",
+        tools: Optional[List[str]] = None,
     ) -> None:
-        self.app      = app
-        self.dt       = dt
+        self.app = app
+        self.dt = dt
         self.agent_id = agent_id
-        self.model    = model
-        self.tools    = tools or []
+        self.model = model
+        self.tools = tools or []
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
 
-        method     = scope.get("method", "")
-        path       = scope.get("path", "/")
+        method = scope.get("method", "")
+        path = scope.get("path", "/")
         user_input = f"{method} {path}".strip()
 
         with self.dt.run(
@@ -101,6 +103,7 @@ class DunetraceASGIMiddleware:
 
 # ── WSGI ──────────────────────────────────────────────────────────────────────
 
+
 class DunetraceWSGIMiddleware:
     """
     WSGI middleware that opens a Dunetrace run for every HTTP request.
@@ -113,22 +116,22 @@ class DunetraceWSGIMiddleware:
 
     def __init__(
         self,
-        app:      Callable,
-        dt:       "Dunetrace",
+        app: Callable,
+        dt: "Dunetrace",
         agent_id: str,
         *,
-        model:    str              = "unknown",
-        tools:    Optional[List[str]] = None,
+        model: str = "unknown",
+        tools: Optional[List[str]] = None,
     ) -> None:
-        self.app      = app
-        self.dt       = dt
+        self.app = app
+        self.dt = dt
         self.agent_id = agent_id
-        self.model    = model
-        self.tools    = tools or []
+        self.model = model
+        self.tools = tools or []
 
     def __call__(self, environ: dict, start_response: Callable) -> Iterable[bytes]:
-        method     = environ.get("REQUEST_METHOD", "")
-        path       = environ.get("PATH_INFO", "/")
+        method = environ.get("REQUEST_METHOD", "")
+        path = environ.get("PATH_INFO", "/")
         user_input = f"{method} {path}".strip()
 
         with self.dt.run(

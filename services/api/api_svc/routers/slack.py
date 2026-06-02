@@ -14,6 +14,7 @@ In local dev, expose the API with ngrok:
   ngrok http 8002
   then set the Request URL to https://<ngrok-id>.ngrok.io/v1/slack/callback
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -38,8 +39,8 @@ def _verify_signature(body: bytes, timestamp: str, signature: str) -> bool:
     try:
         if abs(time.time() - int(timestamp)) > 300:
             return False
-        base    = f"v0:{timestamp}:{body.decode()}"
-        digest  = hmac.new(
+        base = f"v0:{timestamp}:{body.decode()}"
+        digest = hmac.new(
             settings.SLACK_SIGNING_SECRET.encode(),
             base.encode(),
             hashlib.sha256,
@@ -56,7 +57,7 @@ async def slack_callback(request: Request) -> Response:
 
     # Signature verification — skip in dev mode when secret is not set
     if settings.SLACK_SIGNING_SECRET:
-        ts  = request.headers.get("X-Slack-Request-Timestamp", "")
+        ts = request.headers.get("X-Slack-Request-Timestamp", "")
         sig = request.headers.get("X-Slack-Signature", "")
         if not _verify_signature(body, ts, sig):
             logger.warning("Slack callback: invalid signature — rejecting")
@@ -68,7 +69,7 @@ async def slack_callback(request: Request) -> Response:
     try:
         form_body = body.decode()
         if form_body.startswith("payload="):
-            payload = json.loads(unquote_plus(form_body[len("payload="):]))
+            payload = json.loads(unquote_plus(form_body[len("payload=") :]))
         else:
             payload = json.loads(form_body)
     except Exception as exc:
@@ -79,9 +80,9 @@ async def slack_callback(request: Request) -> Response:
     if not actions:
         return Response(status_code=200)
 
-    action    = actions[0]
+    action = actions[0]
     action_id = action.get("action_id", "")
-    user      = payload.get("user", {})
+    user = payload.get("user", {})
     user_name = user.get("name", "unknown")
 
     try:
@@ -90,8 +91,8 @@ async def slack_callback(request: Request) -> Response:
         logger.error("Slack callback: bad action value: %s", action.get("value"))
         return Response(status_code=400)
 
-    signal_id    = int(value.get("signal_id", 0))
-    agent_id     = value.get("agent_id", "")
+    signal_id = int(value.get("signal_id", 0))
+    agent_id = value.get("agent_id", "")
     failure_type = value.get("failure_type", "")
 
     if not signal_id or not agent_id or not failure_type:
@@ -101,7 +102,11 @@ async def slack_callback(request: Request) -> Response:
         updated = await mark_signal_resolved(signal_id)
         logger.info(
             "Signal %d marked resolved by %s (agent=%s type=%s updated=%s)",
-            signal_id, user_name, agent_id, failure_type, updated,
+            signal_id,
+            user_name,
+            agent_id,
+            failure_type,
+            updated,
         )
         return Response(
             content='{"text": ":white_check_mark: Marked as resolved."}',
@@ -112,10 +117,15 @@ async def slack_callback(request: Request) -> Response:
         override = await record_false_positive(signal_id, agent_id, failure_type)
         fp_count = override.get("fp_count", 1)
         silenced = override.get("silenced", False)
-        floor    = override.get("confidence_floor", 0.1)
+        floor = override.get("confidence_floor", 0.1)
         logger.info(
             "False positive recorded by %s — agent=%s type=%s fp_count=%d floor=%.1f silenced=%s",
-            user_name, agent_id, failure_type, fp_count, floor, silenced,
+            user_name,
+            agent_id,
+            failure_type,
+            fp_count,
+            floor,
+            silenced,
         )
         if silenced:
             msg = (

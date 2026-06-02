@@ -6,6 +6,7 @@ Run:
     cd services/api
     python -m unittest tests.test_api -v
 """
+
 from __future__ import annotations
 
 import time
@@ -13,10 +14,17 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from api_svc.schemas import (
-    AgentSummary, AgentListResponse,
-    RunSummary, RunListResponse, RunDetail, RunEvent, RunSignal,
-    SignalDetail, SignalListResponse,
-    Page, HealthResponse,
+    AgentSummary,
+    AgentListResponse,
+    RunSummary,
+    RunListResponse,
+    RunDetail,
+    RunEvent,
+    RunSignal,
+    SignalDetail,
+    SignalListResponse,
+    Page,
+    HealthResponse,
 )
 from api_svc.config import settings
 
@@ -25,55 +33,57 @@ NOW = time.time()
 
 # ── Shared factories ───────────────────────────────────────────────────────────
 
+
 def make_agent_row(**kw) -> dict:
     return {
-        "agent_id":       kw.get("agent_id",       "agent-test"),
-        "last_seen":      kw.get("last_seen",       NOW),
-        "run_count":      kw.get("run_count",       10),
-        "signal_count":   kw.get("signal_count",    3),
-        "critical_count": kw.get("critical_count",  1),
-        "high_count":     kw.get("high_count",      2),
+        "agent_id": kw.get("agent_id", "agent-test"),
+        "last_seen": kw.get("last_seen", NOW),
+        "run_count": kw.get("run_count", 10),
+        "signal_count": kw.get("signal_count", 3),
+        "critical_count": kw.get("critical_count", 1),
+        "high_count": kw.get("high_count", 2),
     }
 
 
 def make_run_row(**kw) -> dict:
     return {
-        "run_id":        kw.get("run_id",        "run-abc"),
-        "agent_id":      kw.get("agent_id",      "agent-test"),
+        "run_id": kw.get("run_id", "run-abc"),
+        "agent_id": kw.get("agent_id", "agent-test"),
         "agent_version": kw.get("agent_version", "abc12345"),
-        "exit_reason":   kw.get("exit_reason",   "completed"),
-        "processed_at":  kw.get("processed_at",  NOW),
-        "started_at":    kw.get("started_at",    NOW - 30),
-        "step_count":    kw.get("step_count",    5),
-        "signal_count":  kw.get("signal_count",  1),
+        "exit_reason": kw.get("exit_reason", "completed"),
+        "processed_at": kw.get("processed_at", NOW),
+        "started_at": kw.get("started_at", NOW - 30),
+        "step_count": kw.get("step_count", 5),
+        "signal_count": kw.get("signal_count", 1),
     }
 
 
 def make_signal_row(**kw) -> dict:
     return {
-        "id":             kw.get("id",             1),
-        "failure_type":   kw.get("failure_type",   "TOOL_LOOP"),
-        "severity":       kw.get("severity",       "HIGH"),
-        "run_id":         kw.get("run_id",         "run-abc"),
-        "agent_id":       kw.get("agent_id",       "agent-test"),
-        "agent_version":  kw.get("agent_version",  "abc12345"),
-        "step_index":     kw.get("step_index",     5),
-        "confidence":     kw.get("confidence",     0.95),
-        "detected_at":    kw.get("detected_at",    NOW),
-        "evidence":       kw.get("evidence",       {"tool": "web_search", "count": 5, "window": 5}),
-        "alerted":        kw.get("alerted",        True),
-        "shadow":         kw.get("shadow",         False),
-        "title":          kw.get("title",          "Tool loop detected"),
-        "what":           kw.get("what",           "Agent looped."),
+        "id": kw.get("id", 1),
+        "failure_type": kw.get("failure_type", "TOOL_LOOP"),
+        "severity": kw.get("severity", "HIGH"),
+        "run_id": kw.get("run_id", "run-abc"),
+        "agent_id": kw.get("agent_id", "agent-test"),
+        "agent_version": kw.get("agent_version", "abc12345"),
+        "step_index": kw.get("step_index", 5),
+        "confidence": kw.get("confidence", 0.95),
+        "detected_at": kw.get("detected_at", NOW),
+        "evidence": kw.get("evidence", {"tool": "web_search", "count": 5, "window": 5}),
+        "alerted": kw.get("alerted", True),
+        "shadow": kw.get("shadow", False),
+        "title": kw.get("title", "Tool loop detected"),
+        "what": kw.get("what", "Agent looped."),
         "why_it_matters": kw.get("why_it_matters", "Burns tokens."),
         "evidence_summary": kw.get("evidence_summary", "x5. 95%."),
-        "suggested_fixes":  kw.get("suggested_fixes",  [
-            {"description": "Add limit", "language": "python", "code": "MAX=3"}
-        ]),
+        "suggested_fixes": kw.get(
+            "suggested_fixes", [{"description": "Add limit", "language": "python", "code": "MAX=3"}]
+        ),
     }
 
 
 # ── Schema contract tests ──────────────────────────────────────────────────────
+
 
 class TestSchemas(unittest.TestCase):
     """Validate that every schema accepts valid data and rejects invalid data."""
@@ -98,24 +108,46 @@ class TestSchemas(unittest.TestCase):
         self.assertFalse(p.has_more)
 
     def test_run_summary_has_signals_derived(self):
-        r = RunSummary(run_id="r", agent_id="a", agent_version="v", started_at=None, completed_at=None, exit_reason=None, step_count=5, signal_count=1, has_signals=True)
+        r = RunSummary(
+            run_id="r",
+            agent_id="a",
+            agent_version="v",
+            started_at=None,
+            completed_at=None,
+            exit_reason=None,
+            step_count=5,
+            signal_count=1,
+            has_signals=True,
+        )
         self.assertTrue(r.has_signals)
 
     def test_run_event_accepts_all_fields(self):
         e = RunEvent(
-            event_type="tool.called", step_index=1, timestamp=NOW,
-            payload={"tool_name": "web_search"}, parent_run_id=None,
+            event_type="tool.called",
+            step_index=1,
+            timestamp=NOW,
+            payload={"tool_name": "web_search"},
+            parent_run_id=None,
         )
         self.assertEqual(e.event_type, "tool.called")
 
     def test_run_signal_includes_explanation_fields(self):
-        s = RunSignal(**{
-            "id": 1, "failure_type": "TOOL_LOOP", "severity": "HIGH",
-            "step_index": 5, "confidence": 0.95, "detected_at": NOW,
-            "evidence": {}, "title": "Loop", "what": "Looped.",
-            "why_it_matters": "Expensive.", "evidence_summary": "×5",
-            "suggested_fixes": [],
-        })
+        s = RunSignal(
+            **{
+                "id": 1,
+                "failure_type": "TOOL_LOOP",
+                "severity": "HIGH",
+                "step_index": 5,
+                "confidence": 0.95,
+                "detected_at": NOW,
+                "evidence": {},
+                "title": "Loop",
+                "what": "Looped.",
+                "why_it_matters": "Expensive.",
+                "evidence_summary": "×5",
+                "suggested_fixes": [],
+            }
+        )
         self.assertEqual(s.title, "Loop")
         self.assertEqual(s.why_it_matters, "Expensive.")
 
@@ -137,7 +169,17 @@ class TestSchemas(unittest.TestCase):
         self.assertEqual(resp.page.total, 1)
 
     def test_run_list_response_shape(self):
-        run = RunSummary(run_id="run-abc", agent_id="a", agent_version="v", started_at=None, completed_at=None, exit_reason="completed", step_count=5, signal_count=1, has_signals=True)
+        run = RunSummary(
+            run_id="run-abc",
+            agent_id="a",
+            agent_version="v",
+            started_at=None,
+            completed_at=None,
+            exit_reason="completed",
+            step_count=5,
+            signal_count=1,
+            has_signals=True,
+        )
         resp = RunListResponse(
             runs=[run],
             page=Page(total=1, offset=0, limit=20, has_more=False),
@@ -153,11 +195,22 @@ class TestSchemas(unittest.TestCase):
 
     def test_run_detail_shape(self):
         d = RunDetail(
-            run_id="run-abc", agent_id="a", agent_version="v",
-            started_at=NOW - 30, completed_at=NOW,
-            exit_reason="completed", step_count=3,
-            events=[RunEvent(event_type="run.started", step_index=0,
-                             timestamp=NOW - 30, payload={}, parent_run_id=None)],
+            run_id="run-abc",
+            agent_id="a",
+            agent_version="v",
+            started_at=NOW - 30,
+            completed_at=NOW,
+            exit_reason="completed",
+            step_count=3,
+            events=[
+                RunEvent(
+                    event_type="run.started",
+                    step_index=0,
+                    timestamp=NOW - 30,
+                    payload={},
+                    parent_run_id=None,
+                )
+            ],
             signals=[],
         )
         self.assertEqual(d.run_id, "run-abc")
@@ -166,8 +219,8 @@ class TestSchemas(unittest.TestCase):
 
 # ── Pagination logic ───────────────────────────────────────────────────────────
 
-class TestPagination(unittest.TestCase):
 
+class TestPagination(unittest.TestCase):
     def test_has_more_true_when_offset_plus_limit_less_than_total(self):
         has_more = (0 + 20) < 50
         self.assertTrue(has_more)
@@ -190,8 +243,8 @@ class TestPagination(unittest.TestCase):
 
 # ── Config / auth ──────────────────────────────────────────────────────────────
 
-class TestConfig(unittest.TestCase):
 
+class TestConfig(unittest.TestCase):
     def test_dev_mode_default(self):
         self.assertEqual(settings.AUTH_MODE, "dev")
         self.assertTrue(settings.is_dev)
@@ -205,15 +258,17 @@ class TestConfig(unittest.TestCase):
 
 # ── Async DB layer unit tests ──────────────────────────────────────────────────
 
-class TestDbLayer(unittest.IsolatedAsyncioTestCase):
 
+class TestDbLayer(unittest.IsolatedAsyncioTestCase):
     async def test_verify_api_key_dev_mode_returns_dev_customer(self):
         from api_svc.db.queries import verify_api_key
+
         result = await verify_api_key("any_key_at_all")
         self.assertEqual(result, "dev_customer")
 
     async def test_check_db_no_pool_returns_no_pool(self):
         import api_svc.db.queries as q
+
         original_pool = q._pool
         q._pool = None
         result = await q.check_db()
@@ -222,6 +277,7 @@ class TestDbLayer(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_agents_no_pool_returns_empty(self):
         import api_svc.db.queries as q
+
         original_pool = q._pool
         q._pool = None
         rows, total = await q.list_agents("cust", 0, 20)
@@ -231,6 +287,7 @@ class TestDbLayer(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_runs_no_pool_returns_empty(self):
         import api_svc.db.queries as q
+
         original_pool = q._pool
         q._pool = None
         rows, total = await q.list_runs("agent-x", 0, 20)
@@ -240,6 +297,7 @@ class TestDbLayer(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_run_detail_no_pool_returns_none(self):
         import api_svc.db.queries as q
+
         original_pool = q._pool
         q._pool = None
         result = await q.get_run_detail("run-xyz")
@@ -248,6 +306,7 @@ class TestDbLayer(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_signals_no_pool_returns_empty(self):
         import api_svc.db.queries as q
+
         original_pool = q._pool
         q._pool = None
         rows, total = await q.list_signals("agent-x", 0, 20)
@@ -258,10 +317,11 @@ class TestDbLayer(unittest.IsolatedAsyncioTestCase):
 
 # ── Formatters / serialisation ─────────────────────────────────────────────────
 
-class TestSerialisation(unittest.TestCase):
 
+class TestSerialisation(unittest.TestCase):
     def test_signal_detail_json_serialisable(self):
         import json
+
         s = SignalDetail(**make_signal_row())
         data = s.model_dump()
         serialised = json.dumps(data)
@@ -269,10 +329,17 @@ class TestSerialisation(unittest.TestCase):
 
     def test_run_detail_json_serialisable(self):
         import json
+
         d = RunDetail(
-            run_id="r", agent_id="a", agent_version="v",
-            started_at=NOW, completed_at=NOW, exit_reason="completed", step_count=1,
-            events=[], signals=[],
+            run_id="r",
+            agent_id="a",
+            agent_version="v",
+            started_at=NOW,
+            completed_at=NOW,
+            exit_reason="completed",
+            step_count=1,
+            events=[],
+            signals=[],
         )
         data = d.model_dump()
         serialised = json.dumps(data)
@@ -286,7 +353,7 @@ class TestSerialisation(unittest.TestCase):
         row = make_signal_row()
         row["suggested_fixes"] = [
             {"description": "Fix 1", "language": "python", "code": "a = 1"},
-            {"description": "Fix 2", "language": "text",   "code": "Do this"},
+            {"description": "Fix 2", "language": "text", "code": "Do this"},
         ]
         s = SignalDetail(**row)
         self.assertEqual(len(s.suggested_fixes), 2)

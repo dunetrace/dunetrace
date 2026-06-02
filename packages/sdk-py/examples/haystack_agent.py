@@ -14,6 +14,7 @@ Deploy markers:
     dt.mark_deploy() overlays a blue dashed line on the 30-day detector timeline
     in the dashboard, making failure spikes easy to correlate with releases.
 """
+
 from __future__ import annotations
 
 import os
@@ -21,6 +22,7 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 
 import haystack.tracing
@@ -71,6 +73,7 @@ _FACTS: dict = {
     "population of paris": "Paris has approximately 2.1 million residents. Greater Paris (Île-de-France) has ~12 million.",
 }
 
+
 def web_search(query: str) -> str:
     """Search the web for information on a topic."""
     time.sleep(0.2)
@@ -106,7 +109,7 @@ SCENARIOS = {
 
 # ── Agent pipeline ─────────────────────────────────────────────────────────────
 
-llm   = OpenAIChatGenerator(model="gpt-4o-mini")
+llm = OpenAIChatGenerator(model="gpt-4o-mini")
 agent = Agent(
     chat_generator=llm,
     tools=[search_tool],
@@ -123,9 +126,7 @@ def run(scenario: str = "normal") -> None:
     print(f"\nScenario : {scenario}")
     print(f"Query    : {query}\n")
     try:
-        result = pipeline.run({
-            "agent": {"messages": [ChatMessage.from_user(query)]}
-        })
+        result = pipeline.run({"agent": {"messages": [ChatMessage.from_user(query)]}})
         last_msg = result["agent"]["messages"][-1]
         print(f"\nAnswer: {last_msg.text}")
     except Exception as e:

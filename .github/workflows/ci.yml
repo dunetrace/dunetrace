@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  sdk-py:
+    name: SDK (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e "packages/sdk-py[dev]"
+      - run: python -m pytest packages/sdk-py/tests/ -v
+
+  services:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: ingest
+            pythonpath: packages/sdk-py:services/ingest
+            requirements: services/ingest/requirements.txt
+            extra: httpx pytest-asyncio
+          - service: detector
+            pythonpath: packages/sdk-py:services/detector
+            requirements: services/detector/requirements.txt
+          - service: explainer
+            pythonpath: packages/sdk-py:services/explainer
+            requirements: services/explainer/requirements.txt
+          - service: alerts
+            pythonpath: packages/sdk-py:services/explainer:services/alerts
+            requirements: services/alerts/requirements.txt
+          - service: api
+            pythonpath: packages/sdk-py:services/explainer:services/api
+            requirements: services/api/requirements.txt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ${{ matrix.requirements }}
+      - run: pip install -r ${{ matrix.requirements }} pytest pytest-asyncio ${{ matrix.extra || '' }}
+      - run: pip install -e packages/sdk-py
+      - name: Run tests
+        env:
+          PYTHONPATH: ${{ matrix.pythonpath }}
+        run: python -m pytest services/${{ matrix.service }}/tests/ -v
+
+  mcp-server:
+    name: MCP Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e "packages/mcp-server" pytest
+      - run: python -m pytest packages/mcp-server/tests/ -v
+
+  sdk-ts:
+    name: SDK (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/sdk-ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: packages/sdk-ts/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck

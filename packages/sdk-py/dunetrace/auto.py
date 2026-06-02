@@ -17,6 +17,7 @@ Usage::
     dt.auto_instrument(["openai", "anthropic"])   # patch only LLM clients
     dt.auto_instrument(["httpx", "requests"])     # patch only HTTP clients
 """
+
 from __future__ import annotations
 
 import functools
@@ -35,6 +36,7 @@ _PATCHED: set[str] = set()
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 
+
 def _patch_openai() -> None:
     if "openai" in _PATCHED:
         return
@@ -50,7 +52,7 @@ def _patch_openai() -> None:
     @functools.wraps(_orig_create)
     def _patched_create(self, *, messages=None, model="unknown", **kwargs):
         run = _current_run.get()
-        t0  = time.monotonic()
+        t0 = time.monotonic()
         if run:
             run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
         try:
@@ -75,7 +77,7 @@ def _patch_openai() -> None:
         @functools.wraps(_orig_acreate)
         async def _patched_acreate(self, *, messages=None, model="unknown", **kwargs):
             run = _current_run.get()
-            t0  = time.monotonic()
+            t0 = time.monotonic()
             if run:
                 run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
             try:
@@ -100,11 +102,11 @@ def _patch_openai() -> None:
 
 
 def _emit_openai_response(run, resp, t0: float) -> None:
-    usage      = getattr(resp, "usage", None)
-    comp_toks  = getattr(usage, "completion_tokens", 0) or 0
+    usage = getattr(resp, "usage", None)
+    comp_toks = getattr(usage, "completion_tokens", 0) or 0
     latency_ms = int((time.monotonic() - t0) * 1000)
-    finish     = _openai_finish_reason(resp)
-    text       = _openai_content(resp)
+    finish = _openai_finish_reason(resp)
+    text = _openai_content(resp)
     run.llm_responded(
         completion_tokens=comp_toks,
         latency_ms=latency_ms,
@@ -130,6 +132,7 @@ def _openai_content(resp) -> str:
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 
+
 def _patch_anthropic() -> None:
     if "anthropic" in _PATCHED:
         return
@@ -145,11 +148,13 @@ def _patch_anthropic() -> None:
     @functools.wraps(_orig_create)
     def _patched_create(self, *, model="unknown", messages=None, max_tokens=1024, **kwargs):
         run = _current_run.get()
-        t0  = time.monotonic()
+        t0 = time.monotonic()
         if run:
             run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
         try:
-            resp = _orig_create(self, model=model, messages=messages, max_tokens=max_tokens, **kwargs)
+            resp = _orig_create(
+                self, model=model, messages=messages, max_tokens=max_tokens, **kwargs
+            )
         except Exception:
             if run:
                 run.llm_responded(
@@ -168,13 +173,17 @@ def _patch_anthropic() -> None:
         _orig_acreate = _mod.AsyncMessages.create
 
         @functools.wraps(_orig_acreate)
-        async def _patched_acreate(self, *, model="unknown", messages=None, max_tokens=1024, **kwargs):
+        async def _patched_acreate(
+            self, *, model="unknown", messages=None, max_tokens=1024, **kwargs
+        ):
             run = _current_run.get()
-            t0  = time.monotonic()
+            t0 = time.monotonic()
             if run:
                 run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
             try:
-                resp = await _orig_acreate(self, model=model, messages=messages, max_tokens=max_tokens, **kwargs)
+                resp = await _orig_acreate(
+                    self, model=model, messages=messages, max_tokens=max_tokens, **kwargs
+                )
             except Exception:
                 if run:
                     run.llm_responded(
@@ -195,11 +204,11 @@ def _patch_anthropic() -> None:
 
 
 def _emit_anthropic_response(run, resp, t0: float) -> None:
-    usage      = getattr(resp, "usage", None)
-    comp_toks  = getattr(usage, "output_tokens", 0) or 0
+    usage = getattr(resp, "usage", None)
+    comp_toks = getattr(usage, "output_tokens", 0) or 0
     latency_ms = int((time.monotonic() - t0) * 1000)
-    finish     = getattr(resp, "stop_reason", "end_turn") or "end_turn"
-    text       = _anthropic_content(resp)
+    finish = getattr(resp, "stop_reason", "end_turn") or "end_turn"
+    text = _anthropic_content(resp)
     run.llm_responded(
         completion_tokens=comp_toks,
         latency_ms=latency_ms,
@@ -219,6 +228,7 @@ def _anthropic_content(resp) -> str:
 
 # ── httpx ─────────────────────────────────────────────────────────────────────
 
+
 def _patch_httpx() -> None:
     if "httpx" in _PATCHED:
         return
@@ -233,9 +243,9 @@ def _patch_httpx() -> None:
 
     @functools.wraps(_orig_send)
     def _patched_send(self, request, **kwargs):
-        run       = _current_run.get()
+        run = _current_run.get()
         tool_name = _http_tool_name(request)
-        t0        = time.monotonic()
+        t0 = time.monotonic()
         if run:
             run.tool_called(tool_name, {"url_hash": hash_content(str(request.url))})
         try:
@@ -259,9 +269,9 @@ def _patch_httpx() -> None:
 
     @functools.wraps(_orig_asend)
     async def _patched_asend(self, request, **kwargs):
-        run       = _current_run.get()
+        run = _current_run.get()
         tool_name = _http_tool_name(request)
-        t0        = time.monotonic()
+        t0 = time.monotonic()
         if run:
             run.tool_called(tool_name, {"url_hash": hash_content(str(request.url))})
         try:
@@ -286,6 +296,7 @@ def _patch_httpx() -> None:
 
 # ── requests ──────────────────────────────────────────────────────────────────
 
+
 def _patch_requests() -> None:
     if "requests" in _PATCHED:
         return
@@ -300,7 +311,7 @@ def _patch_requests() -> None:
     @functools.wraps(_orig_send)
     def _patched_send(self, request, **kwargs):
         run = _current_run.get()
-        t0  = time.monotonic()
+        t0 = time.monotonic()
         if run:
             run.tool_called(
                 _requests_tool_name(request),
@@ -317,8 +328,8 @@ def _patch_requests() -> None:
                 )
             raise
         if run:
-            tool_name  = _requests_tool_name(request)
-            success    = resp.status_code < 400
+            tool_name = _requests_tool_name(request)
+            success = resp.status_code < 400
             output_len = int(resp.headers.get("content-length", 0) or 0)
             run.tool_responded(
                 tool_name,
@@ -337,6 +348,7 @@ def _patch_requests() -> None:
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
+
 def _http_tool_name(request) -> str:
     """Use hostname as the tool name — stable, no raw URL transmitted."""
     try:
@@ -344,6 +356,7 @@ def _http_tool_name(request) -> str:
     except AttributeError:
         try:
             from urllib.parse import urlparse
+
             return urlparse(str(request.url)).hostname or "http"
         except Exception:
             return "http"
@@ -352,6 +365,7 @@ def _http_tool_name(request) -> str:
 def _requests_tool_name(request) -> str:
     try:
         from urllib.parse import urlparse
+
         return urlparse(request.url).hostname or "http"
     except Exception:
         return "http"
@@ -360,8 +374,8 @@ def _requests_tool_name(request) -> str:
 def _emit_http_response(run, tool_name: str, resp, t0: float) -> None:
     """Emit tool_responded for a completed httpx request."""
     latency_ms = int((time.monotonic() - t0) * 1000)
-    status     = getattr(resp, "status_code", 0)
-    success    = 200 <= status < 400
+    status = getattr(resp, "status_code", 0)
+    success = 200 <= status < 400
     try:
         output_len = int(resp.headers.get("content-length", 0) or 0)
     except Exception:
@@ -377,15 +391,13 @@ def _emit_http_response(run, tool_name: str, resp, t0: float) -> None:
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
+
 def _estimate_tokens(messages) -> int:
     """Rough estimate: 4 chars ≈ 1 token. Never sends raw content."""
     if not messages:
         return 0
     chars = sum(
-        len(str(
-            m.get("content", "") if isinstance(m, dict)
-            else getattr(m, "content", "")
-        ))
+        len(str(m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")))
         for m in messages
     )
     return max(1, chars // 4)
@@ -394,10 +406,10 @@ def _estimate_tokens(messages) -> int:
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 _PATCHERS = {
-    "openai":    _patch_openai,
+    "openai": _patch_openai,
     "anthropic": _patch_anthropic,
-    "httpx":     _patch_httpx,
-    "requests":  _patch_requests,
+    "httpx": _patch_httpx,
+    "requests": _patch_requests,
 }
 
 
@@ -415,7 +427,8 @@ def auto_instrument(frameworks: Optional[List[str]] = None) -> None:
         if patcher is None:
             logger.warning(
                 "Unknown framework %r for auto_instrument — supported: %s",
-                name, list(_PATCHERS),
+                name,
+                list(_PATCHERS),
             )
             continue
         patcher()

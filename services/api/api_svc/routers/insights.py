@@ -3,6 +3,7 @@ Cross-run analytics for a single agent. One endpoint that returns input patterns
 signal trends, version comparisons, time-to-first-tool, hourly signal distribution,
 estimated API cost, deploy regressions, and user impact.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -46,13 +47,21 @@ router = APIRouter(tags=["Insights"])
     summary="Cross-run analytics for an agent",
 )
 async def get_insights(
-    agent_id:  str,
+    agent_id: str,
     _customer: str = Depends(require_customer),
 ) -> AgentInsights:
     (
-        patterns, trends, versions, ttt, hourly,
-        rates, systemic, deploys,
-        cost, regressions, user_impact,
+        patterns,
+        trends,
+        versions,
+        ttt,
+        hourly,
+        rates,
+        systemic,
+        deploys,
+        cost,
+        regressions,
+        user_impact,
     ) = await asyncio.gather(
         agent_input_hash_patterns(agent_id),
         agent_signal_recurrence(agent_id),

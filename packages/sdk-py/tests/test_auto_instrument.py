@@ -4,6 +4,7 @@ get_current_run(), and httpx/requests patches.
 
 No network required — all external calls are mocked.
 """
+
 import asyncio
 import io
 import json
@@ -24,6 +25,7 @@ from dunetrace.models import EventType
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+
 def _make_client() -> Dunetrace:
     return Dunetrace(endpoint=None)
 
@@ -38,14 +40,17 @@ def _capture(client: Dunetrace):
     """Attach a list collector to client._emit and return the list."""
     captured = []
     original = client._emit
+
     def _capturing_emit(event):
         captured.append(event)
         original(event)
+
     client._emit = _capturing_emit
     return captured
 
 
 # ── fake stdlib modules so tests don't need real packages ─────────────────────
+
 
 def _install_fake_openai():
     mod = types.ModuleType("openai")
@@ -119,7 +124,9 @@ def _install_fake_httpx():
 
     class FakeURL:
         host = "api.example.com"
-        def __str__(self): return "https://api.example.com/data"
+
+        def __str__(self):
+            return "https://api.example.com/data"
 
     class FakeRequest:
         url = FakeURL()
@@ -167,8 +174,8 @@ def _install_fake_requests():
 # 1. get_current_run()
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestGetCurrentRun(unittest.TestCase):
 
+class TestGetCurrentRun(unittest.TestCase):
     def test_none_outside_run(self):
         self.assertIsNone(get_current_run())
 
@@ -210,8 +217,8 @@ class TestGetCurrentRun(unittest.TestCase):
 # 2. @dt.agent() decorator
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestAgentDecorator(unittest.TestCase):
 
+class TestAgentDecorator(unittest.TestCase):
     def test_sync_function_wrapped(self):
         dt = _make_client()
         captured = _capture(dt)
@@ -254,7 +261,8 @@ class TestAgentDecorator(unittest.TestCase):
         captured = _capture(dt)
 
         @dt.agent("agent")
-        def fn(query: str): pass
+        def fn(query: str):
+            pass
 
         fn("my query")
         started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
@@ -265,7 +273,8 @@ class TestAgentDecorator(unittest.TestCase):
         dt = _make_client()
 
         @dt.agent("agent", input_from="question")
-        def fn(context: str, question: str): pass
+        def fn(context: str, question: str):
+            pass
 
         with dt.run("_check") as run:
             pass  # ensure no crash
@@ -304,7 +313,8 @@ class TestAgentDecorator(unittest.TestCase):
         dt = _make_client()
 
         @dt.agent("agent")
-        def my_special_function(q: str): pass
+        def my_special_function(q: str):
+            pass
 
         self.assertEqual(my_special_function.__name__, "my_special_function")
         dt.shutdown(timeout=1)
@@ -314,13 +324,14 @@ class TestAgentDecorator(unittest.TestCase):
 # 3. auto_instrument — OpenAI
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestAutoInstrumentOpenAI(unittest.TestCase):
 
+class TestAutoInstrumentOpenAI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._completions_mod = _install_fake_openai()
         _PATCHED.discard("openai")
         from dunetrace.auto import _patch_openai
+
         _patch_openai()
 
     def test_sync_llm_events_emitted(self):
@@ -401,13 +412,14 @@ class TestAutoInstrumentOpenAI(unittest.TestCase):
 # 4. auto_instrument — Anthropic
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestAutoInstrumentAnthropic(unittest.TestCase):
 
+class TestAutoInstrumentAnthropic(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._messages_mod = _install_fake_anthropic()
         _PATCHED.discard("anthropic")
         from dunetrace.auto import _patch_anthropic
+
         _patch_anthropic()
 
     def test_sync_llm_events_emitted(self):
@@ -462,13 +474,14 @@ class TestAutoInstrumentAnthropic(unittest.TestCase):
 # 5. auto_instrument — httpx
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestAutoInstrumentHTTPX(unittest.TestCase):
 
+class TestAutoInstrumentHTTPX(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._httpx = _install_fake_httpx()
         _PATCHED.discard("httpx")
         from dunetrace.auto import _patch_httpx
+
         _patch_httpx()
 
     def test_sync_tool_events_emitted(self):
@@ -545,13 +558,14 @@ class TestAutoInstrumentHTTPX(unittest.TestCase):
 # 6. auto_instrument — requests
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestAutoInstrumentRequests(unittest.TestCase):
 
+class TestAutoInstrumentRequests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._requests = _install_fake_requests()
         _PATCHED.discard("requests")
         from dunetrace.auto import _patch_requests
+
         _patch_requests()
 
     def test_tool_events_emitted(self):
@@ -590,8 +604,8 @@ class TestAutoInstrumentRequests(unittest.TestCase):
 # 7. ASGI middleware
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestASGIMiddleware(unittest.TestCase):
 
+class TestASGIMiddleware(unittest.TestCase):
     def _run_request(self, dt, agent_id, scope=None, side_effect=None):
         """Run a fake HTTP request through the middleware."""
         inner_run = {}
@@ -673,8 +687,8 @@ class TestASGIMiddleware(unittest.TestCase):
 # 8. WSGI middleware
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestWSGIMiddleware(unittest.TestCase):
 
+class TestWSGIMiddleware(unittest.TestCase):
     def _run_request(self, dt, agent_id, environ=None, side_effect=None):
         inner = {}
         environ = environ or {"REQUEST_METHOD": "POST", "PATH_INFO": "/run"}
@@ -742,8 +756,8 @@ class TestWSGIMiddleware(unittest.TestCase):
 # 9. auto_instrument idempotency
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestAutoInstrumentIdempotency(unittest.TestCase):
 
+class TestAutoInstrumentIdempotency(unittest.TestCase):
     def test_calling_twice_is_safe(self):
         dt = _make_client()
         dt.auto_instrument()
@@ -752,6 +766,7 @@ class TestAutoInstrumentIdempotency(unittest.TestCase):
 
     def test_unknown_framework_logs_warning(self):
         import logging
+
         dt = _make_client()
         with self.assertLogs("dunetrace.auto", level="WARNING") as cm:
             dt.auto_instrument(["nonexistent_framework"])

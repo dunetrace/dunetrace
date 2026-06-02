@@ -7,11 +7,15 @@
 [![PyPI version](https://img.shields.io/pypi/v/dunetrace.svg)](https://pypi.org/project/dunetrace/)
 [![Python versions](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/dunetrace/)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/dunetrace?period=total&units=INTERNATIONAL_SYSTEM&left_color=grey&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/dunetrace)
+[![CI](https://img.shields.io/github/actions/workflow/status/dunetrace/dunetrace/ci.yml?branch=main&label=CI&logo=github)](https://github.com/dunetrace/dunetrace/actions/workflows/ci.yml)
+[![CodeQL](https://img.shields.io/github/actions/workflow/status/dunetrace/dunetrace/codeql.yml?branch=main&label=CodeQL&logo=github)](https://github.com/dunetrace/dunetrace/actions/workflows/codeql.yml)
 [![GitHub Stars](https://img.shields.io/github/stars/dunetrace/dunetrace?style=flat&logo=github)](https://github.com/dunetrace/dunetrace)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/yxFjATwHW4)
 
 ---
+
+→ **If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
 
 ## The problem
 
@@ -48,14 +52,20 @@ Dunetrace answers a different question: **is something breaking right now?**  an
 
 Dunetrace is not a replacement for tracing tools, it's the layer that tells you *when to look*.
 
-**If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
-
 ---
 
 ## Quick Start
 
 ### 1. Start the backend
 
+**Option A — pre-built images (fastest)**
+```bash
+git clone https://github.com/dunetrace/dunetrace
+cd dunetrace && cp .env.example .env
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+**Option B — build from source**
 ```bash
 git clone https://github.com/dunetrace/dunetrace
 cd dunetrace && cp .env.example .env && docker compose build && docker compose up -d

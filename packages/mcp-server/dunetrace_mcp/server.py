@@ -15,6 +15,7 @@ Environment:
     DUNETRACE_API_URL   Customer API base URL  (default: http://localhost:8002)
     DUNETRACE_API_KEY   Bearer token           (default: dt_dev_test)
 """
+
 from __future__ import annotations
 
 import pathlib
@@ -50,6 +51,7 @@ mcp = FastMCP(
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+
 def _ts(epoch: float | None) -> str:
     if epoch is None:
         return "—"
@@ -63,10 +65,10 @@ def _ago(epoch: float | None) -> str:
     if secs < 60:
         return f"{int(secs)}s ago"
     if secs < 3600:
-        return f"{int(secs/60)}m ago"
+        return f"{int(secs / 60)}m ago"
     if secs < 86400:
-        return f"{int(secs/3600)}h ago"
-    return f"{int(secs/86400)}d ago"
+        return f"{int(secs / 3600)}h ago"
+    return f"{int(secs / 86400)}d ago"
 
 
 def _sev_icon(sev: str) -> str:
@@ -84,6 +86,7 @@ def _score_icon(score: int | None) -> str:
 
 
 # ── tools ────────────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def list_agents() -> str:
@@ -134,7 +137,11 @@ def get_agent_signals(
         signals = [s for s in signals if s["severity"] == severity.upper()]
 
     if not signals:
-        return f"No signals found for agent '{agent_id}'" + (f" with severity {severity}" if severity else "") + "."
+        return (
+            f"No signals found for agent '{agent_id}'"
+            + (f" with severity {severity}" if severity else "")
+            + "."
+        )
 
     lines = [f"Signals for agent: {agent_id}\n"]
     for s in signals:
@@ -170,7 +177,7 @@ def get_agent_health(agent_id: str) -> str:
     h = client.get(f"/v1/agents/{agent_id}/health-score")
 
     score = h.get("score")
-    icon  = _score_icon(score)
+    icon = _score_icon(score)
     score_str = str(score) if score is not None else "N/A (need ≥3 runs)"
 
     lines = [
@@ -200,9 +207,9 @@ def get_run_detail(run_id: str, agent_id: str = "") -> str:
     """
     run = client.get(f"/v1/runs/{run_id}")
 
-    r       = run.get("run", run)          # handle both flat and nested shapes
+    r = run.get("run", run)  # handle both flat and nested shapes
     signals = run.get("signals", [])
-    events  = run.get("events", [])
+    events = run.get("events", [])
 
     dur = "—"
     if r.get("completed_at") and r.get("started_at"):
@@ -239,7 +246,7 @@ def get_run_detail(run_id: str, agent_id: str = "") -> str:
     # Event timeline (compact)
     if events:
         lines.append(f"\nEvent timeline ({len(events)} events):")
-        for e in events[:40]:         # cap at 40 for readability
+        for e in events[:40]:  # cap at 40 for readability
             ts_rel = ""
             if e.get("timestamp") and r.get("started_at"):
                 ts_rel = f"+{e['timestamp'] - r['started_at']:.1f}s"
@@ -251,12 +258,12 @@ def get_run_detail(run_id: str, agent_id: str = "") -> str:
                     detail += f"  {p['latency_ms']}ms"
             elif e["event_type"] == "llm.called":
                 # prompt_tokens may be absent here for LangChain (they're in llm.responded)
-                pt = p.get('prompt_tokens', '?')
+                pt = p.get("prompt_tokens", "?")
                 detail = f"model={p.get('model', '?')}  p={pt}"
             elif e["event_type"] == "llm.responded":
                 # completion_tokens and latency always land here; prompt_tokens here for LangChain
-                pt = p.get('prompt_tokens')
-                ct = p.get('completion_tokens', '?')
+                pt = p.get("prompt_tokens")
+                ct = p.get("completion_tokens", "?")
                 detail = f"c={ct}"
                 if pt:
                     detail = f"p={pt}  {detail}"
@@ -266,7 +273,7 @@ def get_run_detail(run_id: str, agent_id: str = "") -> str:
                 detail = p.get("exit_reason", "")
             lines.append(f"  [{e['step_index']:>3}] {ts_rel:>8}  {e['event_type']:<20} {detail}")
         if len(events) > 40:
-            lines.append(f"  … {len(events)-40} more events")
+            lines.append(f"  … {len(events) - 40} more events")
 
     return "\n".join(lines)
 
@@ -321,7 +328,7 @@ def search_signals(
         all_signals = [s for s in all_signals if s.get("failure_type") == failure_type.upper()]
 
     all_signals.sort(key=lambda s: s.get("detected_at") or 0, reverse=True)
-    shown = all_signals[:min(limit, 200)]
+    shown = all_signals[: min(limit, 200)]
 
     if not shown:
         parts = []
@@ -371,15 +378,16 @@ def get_signal_detail(signal_id: int, agent_id: str = "") -> str:
     signal = None
     for a in agents:
         aid = a["agent_id"]
-        sigs = client.get(f"/v1/agents/{aid}/signals", limit=500, include_shadow="false").get("signals", [])
+        sigs = client.get(f"/v1/agents/{aid}/signals", limit=500, include_shadow="false").get(
+            "signals", []
+        )
         signal = next((s for s in sigs if s["id"] == signal_id), None)
         if signal:
             break
 
     if not signal:
-        return (
-            f"Signal {signal_id} not found."
-            + (" Try omitting agent_id to search all agents." if agent_id else "")
+        return f"Signal {signal_id} not found." + (
+            " Try omitting agent_id to search all agents." if agent_id else ""
         )
 
     icon = _sev_icon(signal["severity"])
@@ -411,7 +419,7 @@ def get_signal_detail(signal_id: int, agent_id: str = "") -> str:
         lines.append("Evidence (hashed/structural data):")
         for k, v in ev.items():
             if isinstance(v, list) and len(v) > 6:
-                v = v[:6] + [f"…+{len(v)-6} more"]
+                v = v[:6] + [f"…+{len(v) - 6} more"]
             lines.append(f"  {k}: {v}")
         lines.append("")
 
@@ -429,7 +437,7 @@ def get_signal_detail(signal_id: int, agent_id: str = "") -> str:
                 lines.append(f"     ```{lang}")
                 lines.extend(f"     {l}" for l in code_lines)
                 if len(code.splitlines()) > 20:
-                    lines.append(f"     … ({len(code.splitlines())-20} more lines)")
+                    lines.append(f"     … ({len(code.splitlines()) - 20} more lines)")
                 lines.append("     ```")
 
     return "\n".join(lines)
@@ -457,7 +465,7 @@ def get_agent_patterns(agent_id: str) -> str:
             badge = "🚨 SYSTEMIC" if p["is_systemic"] else "⚠ Occasional"
             lines.append(
                 f"  {badge}  {p['failure_type']}"
-                f"  {p['affected_runs']}/{p['total_runs']} runs ({p['rate']*100:.0f}%)"
+                f"  {p['affected_runs']}/{p['total_runs']} runs ({p['rate'] * 100:.0f}%)"
             )
             lines.append(
                 f"            first seen {_ago(p.get('first_seen'))}  "
@@ -470,9 +478,12 @@ def get_agent_patterns(agent_id: str) -> str:
     if trends:
         # Aggregate by failure_type
         from collections import defaultdict
+
         by_ft: dict = defaultdict(dict)
         for t in trends:
-            by_ft[t["failure_type"]][t["day"]] = (by_ft[t["failure_type"]].get(t["day"], 0) + t["count"])
+            by_ft[t["failure_type"]][t["day"]] = (
+                by_ft[t["failure_type"]].get(t["day"], 0) + t["count"]
+            )
         all_days = sorted({t["day"] for t in trends})
         recent_days = all_days[-7:]  # last 7 days for display
 
@@ -493,6 +504,7 @@ def get_agent_patterns(agent_id: str) -> str:
     if rates:
         # Show worst current rate per failure type
         from collections import defaultdict
+
         rate_map: dict = {}
         for r in rates:
             ft = r["failure_type"]
@@ -503,7 +515,7 @@ def get_agent_patterns(agent_id: str) -> str:
             for ft, r in sorted(rate_map.items(), key=lambda x: -x[1]["rate"]):
                 bar = "█" * int(r["rate"] * 20)
                 lines.append(
-                    f"  {ft:<30}  {bar:<20}  {r['rate']*100:.0f}%"
+                    f"  {ft:<30}  {bar:<20}  {r['rate'] * 100:.0f}%"
                     f"  ({r['affected_runs']}/{r['total_runs']} runs on {r['day']})"
                 )
             lines.append("")
@@ -515,7 +527,7 @@ def get_agent_patterns(agent_id: str) -> str:
         for p in sorted(input_pats, key=lambda x: -x["rate"])[:8]:
             lines.append(
                 f"  hash={p['input_hash']}  {p['failure_type']}"
-                f"  {p['triggered_count']}/{p['total_runs']} runs ({p['rate']*100:.0f}%)"
+                f"  {p['triggered_count']}/{p['total_runs']} runs ({p['rate'] * 100:.0f}%)"
             )
             lines.append("    → This input hash consistently causes this failure.")
         lines.append("")
@@ -539,14 +551,12 @@ def summarize_agent(agent_id: str) -> str:
     """
     # Fetch in parallel would be ideal; sequential is fine for an MCP tool
     agents_data = client.get("/v1/agents", limit=100)
-    agent_meta  = next(
-        (a for a in agents_data.get("agents", []) if a["agent_id"] == agent_id), None
-    )
+    agent_meta = next((a for a in agents_data.get("agents", []) if a["agent_id"] == agent_id), None)
     if not agent_meta:
         return f"Agent '{agent_id}' not found. Use list_agents to see available agents."
 
     signals_data = client.get(f"/v1/agents/{agent_id}/signals", limit=50, include_shadow="false")
-    signals      = signals_data.get("signals", [])
+    signals = signals_data.get("signals", [])
 
     try:
         health = client.get(f"/v1/agents/{agent_id}/health-score")
@@ -554,9 +564,9 @@ def summarize_agent(agent_id: str) -> str:
         health = None
 
     # Build summary
-    score     = health.get("score") if health else None
+    score = health.get("score") if health else None
     score_icon = _score_icon(score)
-    score_str  = f"{score}/100" if score is not None else "N/A"
+    score_str = f"{score}/100" if score is not None else "N/A"
 
     lines = [
         f"═══ Agent summary: {agent_id} ═══",
@@ -573,7 +583,11 @@ def summarize_agent(agent_id: str) -> str:
     if ft:
         lines.append("Failure breakdown:")
         for k, v in sorted(ft.items(), key=lambda x: -x[1]):
-            run_pct = f"{v/agent_meta['run_count']*100:.0f}% of runs" if agent_meta["run_count"] else ""
+            run_pct = (
+                f"{v / agent_meta['run_count'] * 100:.0f}% of runs"
+                if agent_meta["run_count"]
+                else ""
+            )
             lines.append(f"  {k:<35} {v:>4} signals  ({run_pct})")
         lines.append("")
 
@@ -600,9 +614,7 @@ def summarize_agent(agent_id: str) -> str:
         for name, comp in health["components"].items():
             bar_len = int(comp["score"] / comp["max"] * 20) if comp["max"] else 0
             bar = "█" * bar_len + "░" * (20 - bar_len)
-            lines.append(
-                f"  {name:<20} {bar}  {comp['score']}/{comp['max']}"
-            )
+            lines.append(f"  {name:<20} {bar}  {comp['score']}/{comp['max']}")
 
     return "\n".join(lines)
 
@@ -632,11 +644,11 @@ def get_agent_runs(agent_id: str, limit: int = 20) -> str:
         if r.get("completed_at") and r.get("started_at"):
             secs = r["completed_at"] - r["started_at"]
             dur = f"{secs:.1f}s"
-        sigs    = r.get("signal_count", 0)
+        sigs = r.get("signal_count", 0)
         sig_str = f"🔴 {sigs}" if sigs > 0 else "✅  0"
         lines.append(
             f"{r['run_id'][:12]:<12} {_ago(r.get('started_at')):<22} "
-            f"{dur:>6} {r.get('step_count',0):>5}  {sig_str}"
+            f"{dur:>6} {r.get('step_count', 0):>5}  {sig_str}"
         )
 
     page = data.get("page", {})
@@ -647,6 +659,7 @@ def get_agent_runs(agent_id: str, limit: int = 20) -> str:
 # ── documentation resources ───────────────────────────────────────────────────
 # Exposed as MCP resources so clients can browse them and LLMs can answer
 # instrumentation / how-to questions without calling any live-data tools.
+
 
 def _read_doc(name: str) -> str:
     p = _DOCS / name
@@ -759,7 +772,6 @@ _GUIDES: dict[str, str] = {
 
         Full guide: docs/integrate-langchain-agent.md
     """).strip(),
-
     "python": textwrap.dedent("""
         # Instrument a custom Python agent with Dunetrace
 
@@ -817,7 +829,6 @@ _GUIDES: dict[str, str] = {
 
         Full guide: docs/integrate-custom-python-agent.md
     """).strip(),
-
     "typescript": textwrap.dedent("""
         # Instrument a TypeScript / Node.js agent with Dunetrace
 
@@ -903,7 +914,6 @@ _GUIDES: dict[str, str] = {
 
         Full guide: docs/integrate-typescript-agent.md
     """).strip(),
-
     "tools": textwrap.dedent("""
         # How to track tool calls with Dunetrace
 
@@ -969,7 +979,6 @@ _GUIDES: dict[str, str] = {
         - **TOOL_AVOIDANCE** — agent gives a final answer without using any tools
         - **SLOW_STEP** — any tool call takes longer than 15 seconds
     """).strip(),
-
     "haystack": textwrap.dedent("""
         # Instrument a Haystack 2.x pipeline with Dunetrace
 
@@ -1042,7 +1051,6 @@ _GUIDES: dict[str, str] = {
 
         Full guide: docs/integrate-haystack-agent.md
     """).strip(),
-
     "otel": textwrap.dedent("""
         # Zero-code monitoring via OpenTelemetry (OTLP receiver)
 
@@ -1216,7 +1224,7 @@ def get_agent_token_stats(agent_id: str) -> str:
     except Exception as exc:
         return f"Could not fetch token stats for '{agent_id}': {exc}"
 
-    windows    = data.get("windows", {})
+    windows = data.get("windows", {})
     waste_by_ft = data.get("waste_by_failure_type", [])
 
     def _fmt_tok(n: int) -> str:
@@ -1241,8 +1249,8 @@ def get_agent_token_stats(agent_id: str) -> str:
         w = windows.get(win, {})
         if not w:
             continue
-        label    = {"1d": "Last 24 h", "7d": "Last 7 days", "30d": "Last 30 days"}[win]
-        wst_pct  = int(round((w.get("wasted_pct") or 0) * 100))
+        label = {"1d": "Last 24 h", "7d": "Last 7 days", "30d": "Last 30 days"}[win]
+        wst_pct = int(round((w.get("wasted_pct") or 0) * 100))
         lines += [
             f"── {label} ──",
             f"  Runs:            {w.get('run_count', 0):>6}  ({w.get('wasted_run_count', 0)} with failures)",
@@ -1267,6 +1275,7 @@ def get_agent_token_stats(agent_id: str) -> str:
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     import argparse, os

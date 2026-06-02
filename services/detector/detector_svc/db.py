@@ -2,6 +2,7 @@
 Database layer for the detector worker. Reads from events, writes to failure_signals,
 and tracks processed_runs to avoid running the same run twice.
 """
+
 from __future__ import annotations
 
 import json
@@ -10,6 +11,7 @@ from typing import Optional
 
 try:
     import asyncpg
+
     _ASYNCPG = True
 except ImportError:
     asyncpg = None  # type: ignore
@@ -23,6 +25,7 @@ _pool = None  # asyncpg.Pool when running for real
 
 
 # ── Pool lifecycle ─────────────────────────────────────────────────────────────
+
 
 async def init_pool() -> None:
     global _pool
@@ -103,7 +106,7 @@ CREATE TABLE IF NOT EXISTS issues (
 
 # Detectors that have graduated out of shadow mode.
 # Add a detector name here ONLY after verifying precision > 80% on real data.
-#LIVE_DETECTORS: set[str] = set()  # empty until we validate on real traffic
+# LIVE_DETECTORS: set[str] = set()  # empty until we validate on real traffic
 LIVE_DETECTORS: set[str] = {
     "PROMPT_INJECTION_SIGNAL",
     "TOOL_LOOP",
@@ -140,6 +143,7 @@ async def ensure_detector_schema() -> None:
 # to their static defaults.  P75 computed from fewer runs is too sensitive to
 # single-run outliers to be useful — 20 gives a stable enough percentile estimate.
 _MIN_BASELINE_RUNS = 20
+
 
 async def fetch_step_count_baseline(
     agent_id: str,
@@ -188,7 +192,10 @@ async def fetch_step_count_baseline(
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY step_count)     AS p75
             FROM step_counts
             """,
-            agent_id, agent_version, exclude_run_id, lookback,
+            agent_id,
+            agent_version,
+            exclude_run_id,
+            lookback,
         )
 
     if not row or (row["sample_size"] or 0) < min_runs:
@@ -251,7 +258,11 @@ async def fetch_latency_baseline(
             WHERE gap_ms >= 0
               AND gap_ms IS NOT NULL
             """,
-            agent_id, agent_version, exclude_run_id, lookback, event_type,
+            agent_id,
+            agent_version,
+            exclude_run_id,
+            lookback,
+            event_type,
         )
 
     if not row or (row["sample_size"] or 0) < min_runs:
@@ -323,7 +334,10 @@ async def fetch_token_growth_baseline(
                 )                                                                           AS p75
             FROM run_growth
             """,
-            agent_id, agent_version, exclude_run_id, lookback,
+            agent_id,
+            agent_version,
+            exclude_run_id,
+            lookback,
         )
 
     if not row or (row["sample_size"] or 0) < min_runs:
@@ -382,7 +396,10 @@ async def fetch_llm_tool_ratio_baseline(
                 )                                                                               AS p75
             FROM run_counts
             """,
-            agent_id, agent_version, exclude_run_id, lookback,
+            agent_id,
+            agent_version,
+            exclude_run_id,
+            lookback,
         )
 
     if not row or (row["sample_size"] or 0) < min_runs:
@@ -444,7 +461,10 @@ async def fetch_total_tokens_baseline(
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY total_tokens)       AS p75
             FROM run_tokens
             """,
-            agent_id, agent_version, exclude_run_id, lookback,
+            agent_id,
+            agent_version,
+            exclude_run_id,
+            lookback,
         )
 
     if not row or (row["sample_size"] or 0) < min_runs:
@@ -500,7 +520,10 @@ async def fetch_duration_baseline(
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY duration_s)         AS p75
             FROM run_durations
             """,
-            agent_id, agent_version, exclude_run_id, lookback,
+            agent_id,
+            agent_version,
+            exclude_run_id,
+            lookback,
         )
 
     if not row or (row["sample_size"] or 0) < min_runs:
@@ -558,7 +581,8 @@ async def fetch_stalled_runs(stall_timeout_secs: float, limit: int) -> list[dict
               )
             LIMIT $2
             """,
-            str(stall_timeout_secs), limit,
+            str(stall_timeout_secs),
+            limit,
         )
     return [dict(r) for r in rows]
 
@@ -580,13 +604,16 @@ async def fetch_run_events(run_id: str) -> list[dict]:
     return [
         {
             **dict(r),
-            "payload": json.loads(r["payload"]) if isinstance(r["payload"], str) else dict(r["payload"]),
+            "payload": json.loads(r["payload"])
+            if isinstance(r["payload"], str)
+            else dict(r["payload"]),
         }
         for r in rows
     ]
 
 
 # ── Writes ─────────────────────────────────────────────────────────────────────
+
 
 async def write_signals(signals: list, shadow: bool) -> int:
     """Write FailureSignal objects to failure_signals. shadow=True stores them without alerting. Returns row count written."""
@@ -622,8 +649,9 @@ async def write_signals(signals: list, shadow: bool) -> int:
     return len(rows)
 
 
-async def mark_run_processed(run_id: str, agent_id: str, agent_version: str,
-                              trigger: str, signal_count: int) -> None:
+async def mark_run_processed(
+    run_id: str, agent_id: str, agent_version: str, trigger: str, signal_count: int
+) -> None:
     """Record that this run has been processed. Prevents double-processing."""
     async with _pool.acquire() as conn:
         await conn.execute(
@@ -633,7 +661,11 @@ async def mark_run_processed(run_id: str, agent_id: str, agent_version: str,
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (run_id) DO NOTHING
             """,
-            run_id, agent_id, agent_version, trigger, signal_count,
+            run_id,
+            agent_id,
+            agent_version,
+            trigger,
+            signal_count,
         )
 
 
@@ -727,14 +759,14 @@ async def list_issues(agent_id: str, status: Optional[str] = None) -> list[dict]
         )
     return [
         {
-            "id":               r["id"],
-            "agent_id":         r["agent_id"],
-            "failure_type":     r["failure_type"],
-            "status":           r["status"],
-            "first_seen":       _ts(r["first_seen"]),
-            "last_seen":        _ts(r["last_seen"]),
-            "resolved_at":      _ts(r["resolved_at"]),
-            "affected_runs":    r["affected_runs"],
+            "id": r["id"],
+            "agent_id": r["agent_id"],
+            "failure_type": r["failure_type"],
+            "status": r["status"],
+            "first_seen": _ts(r["first_seen"]),
+            "last_seen": _ts(r["last_seen"]),
+            "resolved_at": _ts(r["resolved_at"]),
+            "affected_runs": r["affected_runs"],
             "clean_runs_since": r["clean_runs_since"],
         }
         for r in rows

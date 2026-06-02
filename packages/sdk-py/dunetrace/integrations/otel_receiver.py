@@ -60,6 +60,7 @@ gen_ai.* attributes read and their privacy handling:
     gen_ai.prompt.0.content        → SHA-256 hashed at receiver boundary
     gen_ai.completion.0.content    → SHA-256 hashed at receiver boundary
 """
+
 from __future__ import annotations
 
 import logging
@@ -95,7 +96,7 @@ class DunetraceOTelReceiver:
     """
 
     def __init__(self, dt: "Dunetrace", agent_id: str = "") -> None:
-        self._dt       = dt
+        self._dt = dt
         self._agent_id = agent_id
         # Accumulate spans per trace until the root span arrives.
         self._pending: dict[str, list] = defaultdict(list)
@@ -115,15 +116,13 @@ class DunetraceOTelReceiver:
                 self._pending[tid].extend(batch)
 
             # Process any trace that now has its root span
-            completed = [
-                tid for tid, spans in self._pending.items()
-                if _has_root(spans)
-            ]
+            completed = [tid for tid, spans in self._pending.items() if _has_root(spans)]
             for tid in completed:
                 self._process_trace(self._pending.pop(tid))
 
         try:
             from opentelemetry.sdk.trace.export import SpanExportResult
+
             return SpanExportResult.SUCCESS
         except ImportError:
             return 0
@@ -138,10 +137,10 @@ class DunetraceOTelReceiver:
 
     def _process_trace(self, spans: list) -> None:
         spans = sorted(spans, key=lambda s: s.start_time)
-        root  = _root_span(spans)
+        root = _root_span(spans)
 
         agent_id = self._agent_id or (root.name if root else "agent")
-        model    = _first_attr(spans, "gen_ai.request.model") or "unknown"
+        model = _first_attr(spans, "gen_ai.request.model") or "unknown"
 
         try:
             with self._dt.run(agent_id, model=model) as run:
@@ -178,13 +177,15 @@ class DunetraceOTelReceiver:
             BatchSpanProcessor,
             SimpleSpanProcessor,
         )
-        receiver  = cls(dt, agent_id=agent_id)
+
+        receiver = cls(dt, agent_id=agent_id)
         processor = BatchSpanProcessor(receiver) if batch else SimpleSpanProcessor(receiver)
         provider.add_span_processor(processor)
         return receiver
 
 
 # ── Span helpers ──────────────────────────────────────────────────────────────
+
 
 def _trace_id(span) -> str:
     return format(span.context.trace_id, "032x")
@@ -212,9 +213,9 @@ def _first_attr(spans: list, key: str):
 
 def _emit_span(run, span) -> None:
     """Emit llm_called/llm_responded or tool_called/tool_responded for one span."""
-    attrs      = dict(span.attributes or {})
+    attrs = dict(span.attributes or {})
     latency_ms = max(0, int((span.end_time - span.start_time) / 1_000_000))
-    is_error   = _span_is_error(span)
+    is_error = _span_is_error(span)
 
     if "gen_ai.request.model" in attrs:
         _emit_llm(run, attrs, latency_ms, is_error)
@@ -225,20 +226,16 @@ def _emit_span(run, span) -> None:
 
 
 def _emit_llm(run, attrs: dict, latency_ms: int, is_error: bool) -> None:
-    model         = attrs.get("gen_ai.request.model", "unknown")
-    prompt_toks   = int(attrs.get("gen_ai.usage.prompt_tokens", 0) or 0)
-    comp_toks     = int(attrs.get("gen_ai.usage.completion_tokens", 0) or 0)
+    model = attrs.get("gen_ai.request.model", "unknown")
+    prompt_toks = int(attrs.get("gen_ai.usage.prompt_tokens", 0) or 0)
+    comp_toks = int(attrs.get("gen_ai.usage.completion_tokens", 0) or 0)
     finish_reason = "error" if is_error else _finish_reason(attrs)
 
     # Path 2 privacy boundary: hash raw content fields here, at the receiver,
     # before any AgentEvent is constructed.  Non-sensitive metadata (model name,
     # token counts, latency, finish_reason) is passed as-is.
-    raw_output = (
-        attrs.get("gen_ai.completion")
-        or attrs.get("gen_ai.completion.0.content")
-        or ""
-    )
-    output_hash   = hash_content(str(raw_output)) if raw_output else ""
+    raw_output = attrs.get("gen_ai.completion") or attrs.get("gen_ai.completion.0.content") or ""
+    output_hash = hash_content(str(raw_output)) if raw_output else ""
     output_length = len(str(raw_output)) if raw_output else 0
 
     run.llm_called(model, prompt_tokens=prompt_toks)
@@ -268,6 +265,7 @@ def _finish_reason(attrs: dict) -> str:
 def _span_is_error(span) -> bool:
     try:
         from opentelemetry.trace import StatusCode
+
         return span.status.status_code == StatusCode.ERROR
     except Exception:
         return False
