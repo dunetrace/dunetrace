@@ -3463,7 +3463,9 @@ function updateConfigPreview() {
 
   // Read alert threshold
   const checkedRadio = document.querySelector('input[name="minsev"]:checked');
-  const minSev  = checkedRadio?.value || 'HIGH';
+  const minSevRaw = checkedRadio?.value || 'HIGH';
+  const ALLOWED_SEVERITIES = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
+  const minSev = ALLOWED_SEVERITIES.has(minSevRaw) ? minSevRaw : 'HIGH';
   const minOrd  = SEV_ORDER[minSev] ?? 2;
   const sevColor = SEV_COLOR[minSev] || 'var(--red)';
 
