@@ -4,6 +4,7 @@ Langfuse trace fetcher — standalone, no side effects.
 Fetches a single trace by ID from the Langfuse API and returns the raw dict.
 Never writes to Postgres. Raises on credential errors or missing traces.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,23 +17,23 @@ logger = logging.getLogger("dunetrace.api.langfuse")
 _SKIP_OBS_TYPES = {"EVENT", "SCORE"}
 _SKIP_OBS_NAMES = {"langchain_on_chain_start", "langchain_on_chain_end"}
 
-_INPUT_LIMIT_FOCUS  = 600
-_INPUT_LIMIT_OTHER  = 150
+_INPUT_LIMIT_FOCUS = 600
+_INPUT_LIMIT_OTHER = 150
 _SYSTEM_PROMPT_LIMIT = 800
-_TRACE_INPUT_LIMIT  = 400
+_TRACE_INPUT_LIMIT = 400
 
 # Maps each failure type to the (first_step_key, last_step_key) it stores in evidence.
 # Detectors not listed here have no step range — fall back to signal.step_index for both.
 _STEP_RANGE_FIELDS: Dict[str, tuple] = {
-    "TOOL_LOOP":              ("first_step",            "last_step"),
-    "EMPTY_LLM_RESPONSE":     ("first_step",            "first_step"),
-    "LLM_TRUNCATION_LOOP":    ("first_truncation_step", "last_truncation_step"),
-    "CONTEXT_BLOAT":          ("first_call_step",       "last_call_step"),
-    "RETRY_STORM":            ("first_fail_step",       "first_fail_step"),
-    "CASCADING_TOOL_FAILURE": ("first_fail_step",       "first_fail_step"),
-    "GOAL_ABANDONMENT":       ("last_tool_step",        "current_step"),
-    "FIRST_STEP_FAILURE":     ("failed_step",           "failed_step"),
-    "SLOW_STEP":              ("step_index",            "step_index"),
+    "TOOL_LOOP": ("first_step", "last_step"),
+    "EMPTY_LLM_RESPONSE": ("first_step", "first_step"),
+    "LLM_TRUNCATION_LOOP": ("first_truncation_step", "last_truncation_step"),
+    "CONTEXT_BLOAT": ("first_call_step", "last_call_step"),
+    "RETRY_STORM": ("first_fail_step", "first_fail_step"),
+    "CASCADING_TOOL_FAILURE": ("first_fail_step", "first_fail_step"),
+    "GOAL_ABANDONMENT": ("last_tool_step", "current_step"),
+    "FIRST_STEP_FAILURE": ("failed_step", "failed_step"),
+    "SLOW_STEP": ("step_index", "step_index"),
 }
 
 
@@ -46,7 +47,7 @@ def _get_step_range(
     if fields:
         first_key, last_key = fields
         raw_first = evidence.get(first_key, fallback)
-        raw_last  = evidence.get(last_key,  fallback)
+        raw_last = evidence.get(last_key, fallback)
     else:
         raw_first = raw_last = fallback
     try:
@@ -183,9 +184,9 @@ def _format_observations(
         if obs_type in _SKIP_OBS_TYPES or obs_name in _SKIP_OBS_NAMES:
             continue
 
-        obs_input  = obs.get("input")
+        obs_input = obs.get("input")
         obs_output = obs.get("output")
-        level      = obs.get("level", "DEFAULT")
+        level = obs.get("level", "DEFAULT")
 
         # Use Langfuse metadata step number if present; fall back to list order.
         meta = obs.get("metadata") or {}
@@ -194,11 +195,11 @@ def _format_observations(
             step_num = i
 
         is_focus = bool(focus_steps) and step_num in focus_steps
-        limit    = _INPUT_LIMIT_FOCUS if is_focus else _INPUT_LIMIT_OTHER
+        limit = _INPUT_LIMIT_FOCUS if is_focus else _INPUT_LIMIT_OTHER
 
         level_tag = f" [{level}]" if level not in ("DEFAULT", "") else ""
-        inp_str   = str(obs_input)[:limit]  if obs_input  else ""
-        out_str   = str(obs_output)[:limit] if obs_output else ""
+        inp_str = str(obs_input)[:limit] if obs_input else ""
+        out_str = str(obs_output)[:limit] if obs_output else ""
 
         lines.append(f"  [{i}] {obs_type} {obs_name!r}{level_tag}")
         if inp_str:
@@ -310,9 +311,9 @@ async def build_explain_prompt(signal_dict: dict, trace: Dict[str, Any]) -> str:
     """
     Compose the analysis prompt from a Dunetrace signal dict and a Langfuse trace.
     """
-    evidence     = signal_dict.get("evidence", {})
+    evidence = signal_dict.get("evidence", {})
     failure_type = signal_dict.get("failure_type", "UNKNOWN")
-    fallback     = signal_dict.get("step_index", 0) or 0
+    fallback = signal_dict.get("step_index", 0) or 0
 
     first_step, last_step = _get_step_range(evidence, failure_type, fallback)
 

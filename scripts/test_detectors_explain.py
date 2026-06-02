@@ -26,6 +26,7 @@ Env vars:
     LF_TRACE_ID  override the Langfuse trace used for explain calls
                  (default: the most recent TOOL_LOOP trace from langfuse-example-agent)
 """
+
 from __future__ import annotations
 
 import json
@@ -37,50 +38,51 @@ import urllib.request
 import urllib.error
 
 INGEST_URL = os.environ.get("INGEST_URL", "http://localhost:8001")
-API_URL    = os.environ.get("API_URL",    "http://localhost:8002")
-API_KEY    = "dt_dev_test"
+API_URL = os.environ.get("API_URL", "http://localhost:8002")
+API_KEY = "dt_dev_test"
 
-_TS           = int(time.time())
-AGENT_ID      = f"synth-explain-{_TS}"
+_TS = int(time.time())
+AGENT_ID = f"synth-explain-{_TS}"
 AGENT_VERSION = "v-test-1"
 INFL_AGENT_ID = f"synth-explain-infl-{_TS}"
-INFL_VERSION  = "v-infl-1"
+INFL_VERSION = "v-infl-1"
 
-GREEN  = "\033[92m"
+GREEN = "\033[92m"
 YELLOW = "\033[93m"
-RED    = "\033[91m"
-DIM    = "\033[2m"
-RESET  = "\033[0m"
+RED = "\033[91m"
+DIM = "\033[2m"
+RESET = "\033[0m"
 
 # Expected fix_type and apply_blocked per failure type.
 # apply_blocked is True for code_change and no_auto_apply.
 EXPECTED_FIX_TYPE: dict[str, tuple[str, bool]] = {
-    "TOOL_LOOP":              ("prompt_addition", False),
-    "TOOL_THRASHING":         ("prompt_addition", False),
-    "TOOL_AVOIDANCE":         ("prompt_addition", False),
-    "RETRY_STORM":            ("prompt_addition", False),
-    "EMPTY_LLM_RESPONSE":     ("prompt_addition", False),
-    "STEP_COUNT_INFLATION":   ("prompt_addition", False),
-    "REASONING_STALL":        ("prompt_addition", False),
-    "GOAL_ABANDONMENT":       ("prompt_addition", False),
-    "RAG_EMPTY_RETRIEVAL":    ("code_change",     True),
-    "LLM_TRUNCATION_LOOP":    ("code_change",     True),
-    "CONTEXT_BLOAT":          ("code_change",     True),
-    "SLOW_STEP":              ("code_change",     True),
-    "CASCADING_TOOL_FAILURE": ("code_change",     True),
-    "FIRST_STEP_FAILURE":     ("code_change",     True),
-    "PROMPT_INJECTION_SIGNAL":("no_auto_apply",   True),
+    "TOOL_LOOP": ("prompt_addition", False),
+    "TOOL_THRASHING": ("prompt_addition", False),
+    "TOOL_AVOIDANCE": ("prompt_addition", False),
+    "RETRY_STORM": ("prompt_addition", False),
+    "EMPTY_LLM_RESPONSE": ("prompt_addition", False),
+    "STEP_COUNT_INFLATION": ("prompt_addition", False),
+    "REASONING_STALL": ("prompt_addition", False),
+    "GOAL_ABANDONMENT": ("prompt_addition", False),
+    "RAG_EMPTY_RETRIEVAL": ("code_change", True),
+    "LLM_TRUNCATION_LOOP": ("code_change", True),
+    "CONTEXT_BLOAT": ("code_change", True),
+    "SLOW_STEP": ("code_change", True),
+    "CASCADING_TOOL_FAILURE": ("code_change", True),
+    "FIRST_STEP_FAILURE": ("code_change", True),
+    "PROMPT_INJECTION_SIGNAL": ("no_auto_apply", True),
 }
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
 
+
 def _post(url: str, body: dict) -> tuple[dict, int]:
     data = json.dumps(body).encode()
-    req  = urllib.request.Request(
-        url, data=data,
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {API_KEY}"},
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"},
         method="POST",
     )
     try:
@@ -102,8 +104,7 @@ def _get(url: str) -> dict:
 
 
 def ingest(agent_id: str, run_id: str, events: list[dict]) -> None:
-    _post(f"{INGEST_URL}/v1/ingest",
-          {"api_key": API_KEY, "agent_id": agent_id, "events": events})
+    _post(f"{INGEST_URL}/v1/ingest", {"api_key": API_KEY, "agent_id": agent_id, "events": events})
 
 
 def fetch_signals(agent_id: str, limit: int = 200) -> list[dict]:
@@ -114,17 +115,23 @@ def mk(tag: str) -> str:
     return f"synth-{tag}-{_TS}-{uuid.uuid4().hex[:6]}"
 
 
-def ev(event_type: str, run_id: str, agent_id: str, step: int,
-       payload: dict | None = None, ts: float | None = None,
-       version: str = AGENT_VERSION) -> dict:
+def ev(
+    event_type: str,
+    run_id: str,
+    agent_id: str,
+    step: int,
+    payload: dict | None = None,
+    ts: float | None = None,
+    version: str = AGENT_VERSION,
+) -> dict:
     return {
-        "event_type":    event_type,
-        "run_id":        run_id,
-        "agent_id":      agent_id,
+        "event_type": event_type,
+        "run_id": run_id,
+        "agent_id": agent_id,
         "agent_version": version,
-        "step_index":    step,
-        "timestamp":     ts or time.time(),
-        "payload":       payload or {},
+        "step_index": step,
+        "timestamp": ts or time.time(),
+        "payload": payload or {},
     }
 
 
@@ -144,181 +151,284 @@ def wait_healthy(url: str, label: str) -> None:
 
 # ── Scenario builders ──────────────────────────────────────────────────────────
 
+
 def s_tool_loop() -> str:
     rid = mk("tl")
-    ingest(AGENT_ID, rid, [
-        ev("run.started",   rid, AGENT_ID, 0, {"tools": ["search"]}),
-        *[ev("tool.called", rid, AGENT_ID, i, {"tool_name": "search", "args_hash": "h1"})
-          for i in range(1, 6)],
-        ev("run.completed", rid, AGENT_ID, 5, {"exit_reason": "completed"}),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0, {"tools": ["search"]}),
+            *[
+                ev("tool.called", rid, AGENT_ID, i, {"tool_name": "search", "args_hash": "h1"})
+                for i in range(1, 6)
+            ],
+            ev("run.completed", rid, AGENT_ID, 5, {"exit_reason": "completed"}),
+        ],
+    )
     return rid
+
 
 def s_tool_thrashing() -> str:
     rid = mk("th")
     pairs = []
     for i in range(1, 7):
         tool = "search" if i % 2 else "database"
-        pairs.append(ev("tool.called", rid, AGENT_ID, i,
-                        {"tool_name": tool, "args_hash": f"h{i}"}))
-    ingest(AGENT_ID, rid, [
-        ev("run.started",   rid, AGENT_ID, 0, {"tools": ["search", "database"]}),
-        *pairs,
-        ev("run.completed", rid, AGENT_ID, 6, {"exit_reason": "completed"}),
-    ])
+        pairs.append(ev("tool.called", rid, AGENT_ID, i, {"tool_name": tool, "args_hash": f"h{i}"}))
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0, {"tools": ["search", "database"]}),
+            *pairs,
+            ev("run.completed", rid, AGENT_ID, 6, {"exit_reason": "completed"}),
+        ],
+    )
     return rid
+
 
 def s_tool_avoidance() -> str:
     rid = mk("ta")
-    ingest(AGENT_ID, rid, [
-        ev("run.started",   rid, AGENT_ID, 0, {"tools": ["search"]}),
-        ev("llm.called",    rid, AGENT_ID, 1, {"model": "test"}),
-        ev("llm.responded", rid, AGENT_ID, 1,
-           {"finish_reason": "stop", "prompt_tokens": 100, "output_length": 80}),
-        ev("llm.called",    rid, AGENT_ID, 2, {"model": "test"}),
-        ev("llm.responded", rid, AGENT_ID, 2,
-           {"finish_reason": "stop", "prompt_tokens": 110, "output_length": 120}),
-        ev("run.completed", rid, AGENT_ID, 2, {"exit_reason": "final_answer"}),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0, {"tools": ["search"]}),
+            ev("llm.called", rid, AGENT_ID, 1, {"model": "test"}),
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                1,
+                {"finish_reason": "stop", "prompt_tokens": 100, "output_length": 80},
+            ),
+            ev("llm.called", rid, AGENT_ID, 2, {"model": "test"}),
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                2,
+                {"finish_reason": "stop", "prompt_tokens": 110, "output_length": 120},
+            ),
+            ev("run.completed", rid, AGENT_ID, 2, {"exit_reason": "final_answer"}),
+        ],
+    )
     return rid
+
 
 def s_rag_empty() -> str:
     rid = mk("rag")
-    ingest(AGENT_ID, rid, [
-        ev("run.started",         rid, AGENT_ID, 0),
-        ev("retrieval.called",    rid, AGENT_ID, 1, {"index_name": "kb"}),
-        ev("retrieval.responded", rid, AGENT_ID, 1,
-           {"index_name": "kb", "result_count": 0, "top_score": 0.0}),
-        ev("llm.called",    rid, AGENT_ID, 2, {"model": "test"}),
-        ev("llm.responded", rid, AGENT_ID, 2,
-           {"finish_reason": "stop", "prompt_tokens": 100, "output_length": 60}),
-        ev("run.completed", rid, AGENT_ID, 2, {"exit_reason": "final_answer"}),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0),
+            ev("retrieval.called", rid, AGENT_ID, 1, {"index_name": "kb"}),
+            ev(
+                "retrieval.responded",
+                rid,
+                AGENT_ID,
+                1,
+                {"index_name": "kb", "result_count": 0, "top_score": 0.0},
+            ),
+            ev("llm.called", rid, AGENT_ID, 2, {"model": "test"}),
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                2,
+                {"finish_reason": "stop", "prompt_tokens": 100, "output_length": 60},
+            ),
+            ev("run.completed", rid, AGENT_ID, 2, {"exit_reason": "final_answer"}),
+        ],
+    )
     return rid
+
 
 def s_llm_truncation() -> str:
     rid = mk("trunc")
-    ingest(AGENT_ID, rid, [
-        ev("run.started",   rid, AGENT_ID, 0),
-        ev("llm.called",    rid, AGENT_ID, 1, {"model": "test"}),
-        ev("llm.responded", rid, AGENT_ID, 1,
-           {"finish_reason": "length", "prompt_tokens": 800, "output_length": 512}),
-        ev("llm.called",    rid, AGENT_ID, 2, {"model": "test"}),
-        ev("llm.responded", rid, AGENT_ID, 2,
-           {"finish_reason": "length", "prompt_tokens": 900, "output_length": 512}),
-        ev("run.completed", rid, AGENT_ID, 2, {"exit_reason": "completed"}),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0),
+            ev("llm.called", rid, AGENT_ID, 1, {"model": "test"}),
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                1,
+                {"finish_reason": "length", "prompt_tokens": 800, "output_length": 512},
+            ),
+            ev("llm.called", rid, AGENT_ID, 2, {"model": "test"}),
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                2,
+                {"finish_reason": "length", "prompt_tokens": 900, "output_length": 512},
+            ),
+            ev("run.completed", rid, AGENT_ID, 2, {"exit_reason": "completed"}),
+        ],
+    )
     return rid
+
 
 def s_context_bloat() -> str:
     """CONTEXT_BLOAT: last_tokens (2200) > MIN_LAST_TOKENS (2000), growth 22× > 3.0."""
     rid = mk("bloat")
-    ingest(AGENT_ID, rid, [
-        ev("run.started",   rid, AGENT_ID, 0),
-        ev("llm.called",    rid, AGENT_ID, 1, {"model": "test"}),
-        ev("llm.responded", rid, AGENT_ID, 1,
-           {"finish_reason": "stop", "prompt_tokens": 100, "output_length": 50}),
-        ev("llm.called",    rid, AGENT_ID, 2, {"model": "test"}),
-        ev("llm.responded", rid, AGENT_ID, 2,
-           {"finish_reason": "stop", "prompt_tokens": 800, "output_length": 50}),
-        ev("llm.called",    rid, AGENT_ID, 3, {"model": "test"}),
-        ev("llm.responded", rid, AGENT_ID, 3,
-           {"finish_reason": "stop", "prompt_tokens": 2200, "output_length": 50}),
-        ev("run.completed", rid, AGENT_ID, 3, {"exit_reason": "completed"}),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0),
+            ev("llm.called", rid, AGENT_ID, 1, {"model": "test"}),
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                1,
+                {"finish_reason": "stop", "prompt_tokens": 100, "output_length": 50},
+            ),
+            ev("llm.called", rid, AGENT_ID, 2, {"model": "test"}),
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                2,
+                {"finish_reason": "stop", "prompt_tokens": 800, "output_length": 50},
+            ),
+            ev("llm.called", rid, AGENT_ID, 3, {"model": "test"}),
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                3,
+                {"finish_reason": "stop", "prompt_tokens": 2200, "output_length": 50},
+            ),
+            ev("run.completed", rid, AGENT_ID, 3, {"exit_reason": "completed"}),
+        ],
+    )
     return rid
+
 
 def s_slow_step() -> str:
     rid = mk("slow")
     T = time.time() - 25
-    ingest(AGENT_ID, rid, [
-        ev("run.started",   rid, AGENT_ID, 0, ts=T),
-        ev("tool.called",   rid, AGENT_ID, 1,
-           {"tool_name": "slow_api", "args_hash": "h1"}, ts=T),
-        ev("run.completed", rid, AGENT_ID, 2,
-           {"exit_reason": "completed"}, ts=T + 20),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0, ts=T),
+            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "slow_api", "args_hash": "h1"}, ts=T),
+            ev("run.completed", rid, AGENT_ID, 2, {"exit_reason": "completed"}, ts=T + 20),
+        ],
+    )
     return rid
+
 
 def s_retry_storm() -> str:
     rid = mk("retry")
-    ingest(AGENT_ID, rid, [
-        ev("run.started",    rid, AGENT_ID, 0),
-        ev("tool.called",    rid, AGENT_ID, 1,
-           {"tool_name": "payment_api", "args_hash": "h1"}),
-        ev("tool.responded", rid, AGENT_ID, 1,
-           {"tool_name": "payment_api", "success": False}),
-        ev("tool.called",    rid, AGENT_ID, 2,
-           {"tool_name": "payment_api", "args_hash": "h2"}),
-        ev("tool.responded", rid, AGENT_ID, 2,
-           {"tool_name": "payment_api", "success": False}),
-        ev("tool.called",    rid, AGENT_ID, 3,
-           {"tool_name": "payment_api", "args_hash": "h3"}),
-        ev("tool.responded", rid, AGENT_ID, 3,
-           {"tool_name": "payment_api", "success": False}),
-        ev("run.completed",  rid, AGENT_ID, 3, {"exit_reason": "error"}),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0),
+            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "payment_api", "args_hash": "h1"}),
+            ev("tool.responded", rid, AGENT_ID, 1, {"tool_name": "payment_api", "success": False}),
+            ev("tool.called", rid, AGENT_ID, 2, {"tool_name": "payment_api", "args_hash": "h2"}),
+            ev("tool.responded", rid, AGENT_ID, 2, {"tool_name": "payment_api", "success": False}),
+            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "payment_api", "args_hash": "h3"}),
+            ev("tool.responded", rid, AGENT_ID, 3, {"tool_name": "payment_api", "success": False}),
+            ev("run.completed", rid, AGENT_ID, 3, {"exit_reason": "error"}),
+        ],
+    )
     return rid
+
 
 def s_empty_llm() -> str:
     rid = mk("empty")
-    ingest(AGENT_ID, rid, [
-        ev("run.started",   rid, AGENT_ID, 0),
-        ev("llm.called",    rid, AGENT_ID, 1, {"model": "test"}),
-        ev("llm.responded", rid, AGENT_ID, 1,
-           {"finish_reason": "stop", "prompt_tokens": 150, "output_length": 0}),
-        ev("run.errored",   rid, AGENT_ID, 1),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0),
+            ev("llm.called", rid, AGENT_ID, 1, {"model": "test"}),
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                1,
+                {"finish_reason": "stop", "prompt_tokens": 150, "output_length": 0},
+            ),
+            ev("run.errored", rid, AGENT_ID, 1),
+        ],
+    )
     return rid
+
 
 def s_cascading_failure() -> str:
     rid = mk("cascade")
-    ingest(AGENT_ID, rid, [
-        ev("run.started",    rid, AGENT_ID, 0),
-        ev("tool.called",    rid, AGENT_ID, 1,
-           {"tool_name": "db",     "args_hash": "h1"}),
-        ev("tool.responded", rid, AGENT_ID, 1,
-           {"tool_name": "db",     "success": False}),
-        ev("tool.called",    rid, AGENT_ID, 2,
-           {"tool_name": "search", "args_hash": "h2"}),
-        ev("tool.responded", rid, AGENT_ID, 2,
-           {"tool_name": "search", "success": False}),
-        ev("tool.called",    rid, AGENT_ID, 3,
-           {"tool_name": "db",     "args_hash": "h3"}),
-        ev("tool.responded", rid, AGENT_ID, 3,
-           {"tool_name": "db",     "success": False}),
-        ev("run.errored",    rid, AGENT_ID, 3),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0),
+            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "db", "args_hash": "h1"}),
+            ev("tool.responded", rid, AGENT_ID, 1, {"tool_name": "db", "success": False}),
+            ev("tool.called", rid, AGENT_ID, 2, {"tool_name": "search", "args_hash": "h2"}),
+            ev("tool.responded", rid, AGENT_ID, 2, {"tool_name": "search", "success": False}),
+            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "db", "args_hash": "h3"}),
+            ev("tool.responded", rid, AGENT_ID, 3, {"tool_name": "db", "success": False}),
+            ev("run.errored", rid, AGENT_ID, 3),
+        ],
+    )
     return rid
+
 
 def s_first_step_failure() -> str:
     rid = mk("first-fail")
-    ingest(AGENT_ID, rid, [
-        ev("run.started", rid, AGENT_ID, 0),
-        ev("run.errored", rid, AGENT_ID, 1),
-    ])
+    ingest(
+        AGENT_ID,
+        rid,
+        [
+            ev("run.started", rid, AGENT_ID, 0),
+            ev("run.errored", rid, AGENT_ID, 1),
+        ],
+    )
     return rid
+
 
 def s_reasoning_stall() -> str:
     """5 LLM calls, 1 tool call → ratio 5.0 > threshold 4.0."""
     rid = mk("reason")
     events: list[dict] = [ev("run.started", rid, AGENT_ID, 0, {"tools": ["search"]})]
     for i in range(1, 6):
-        events.append(ev("llm.called",    rid, AGENT_ID, i, {"model": "test"}))
-        events.append(ev("llm.responded", rid, AGENT_ID, i,
-                         {"finish_reason": "stop", "prompt_tokens": 100 + i * 10,
-                          "output_length": 40}))
-    events.append(ev("tool.called",    rid, AGENT_ID, 3, {"tool_name": "search", "args_hash": "h1"}))
+        events.append(ev("llm.called", rid, AGENT_ID, i, {"model": "test"}))
+        events.append(
+            ev(
+                "llm.responded",
+                rid,
+                AGENT_ID,
+                i,
+                {"finish_reason": "stop", "prompt_tokens": 100 + i * 10, "output_length": 40},
+            )
+        )
+    events.append(ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args_hash": "h1"}))
     events.append(ev("tool.responded", rid, AGENT_ID, 3, {"success": True}))
-    events.append(ev("run.completed",  rid, AGENT_ID, 6, {"exit_reason": "final_answer"}))
+    events.append(ev("run.completed", rid, AGENT_ID, 6, {"exit_reason": "final_answer"}))
     ingest(AGENT_ID, rid, events)
     return rid
 
+
 # ── STEP_COUNT_INFLATION helpers (separate agent) ─────────────────────────────
 
-def _infl(event_type: str, run_id: str, step: int,
-          payload: dict | None = None, ts: float | None = None) -> dict:
+
+def _infl(
+    event_type: str, run_id: str, step: int, payload: dict | None = None, ts: float | None = None
+) -> dict:
     return ev(event_type, run_id, INFL_AGENT_ID, step, payload, ts, version=INFL_VERSION)
+
 
 def inject_inflation_baseline(n: int = 10) -> None:
     for _ in range(n):
@@ -326,23 +436,32 @@ def inject_inflation_baseline(n: int = 10) -> None:
         batch = [_infl("run.started", rid, 0)]
         for i in range(1, 6):
             batch += [
-                _infl("llm.called",    rid, i, {"model": "test"}),
-                _infl("llm.responded", rid, i,
-                      {"finish_reason": "stop", "prompt_tokens": 50 + i * 5, "output_length": 30}),
+                _infl("llm.called", rid, i, {"model": "test"}),
+                _infl(
+                    "llm.responded",
+                    rid,
+                    i,
+                    {"finish_reason": "stop", "prompt_tokens": 50 + i * 5, "output_length": 30},
+                ),
             ]
         batch.append(_infl("run.completed", rid, 5, {"exit_reason": "completed"}))
         ingest(INFL_AGENT_ID, rid, batch)
+
 
 def s_step_count_inflation() -> str:
     rid = mk("infl")
     events = [_infl("run.started", rid, 0)]
     for i in range(1, 11):
         events += [
-            _infl("llm.called",    rid, i,   {"model": "test"}),
-            _infl("llm.responded", rid, i,
-                  {"finish_reason": "stop", "prompt_tokens": 50 + i * 5, "output_length": 30}),
-            _infl("tool.called",   rid, i,   {"tool_name": "search", "args_hash": f"h{i}"}),
-            _infl("tool.responded",rid, i,   {"success": True}),
+            _infl("llm.called", rid, i, {"model": "test"}),
+            _infl(
+                "llm.responded",
+                rid,
+                i,
+                {"finish_reason": "stop", "prompt_tokens": 50 + i * 5, "output_length": 30},
+            ),
+            _infl("tool.called", rid, i, {"tool_name": "search", "args_hash": f"h{i}"}),
+            _infl("tool.responded", rid, i, {"success": True}),
         ]
     events.append(_infl("run.completed", rid, 20, {"exit_reason": "completed"}))
     ingest(INFL_AGENT_ID, rid, events)
@@ -350,6 +469,7 @@ def s_step_count_inflation() -> str:
 
 
 # ── Explain call ───────────────────────────────────────────────────────────────
+
 
 def explain(signal_id: int, lf_trace_id: str) -> tuple[dict, int]:
     return _post(
@@ -359,6 +479,7 @@ def explain(signal_id: int, lf_trace_id: str) -> tuple[dict, int]:
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     print("=" * 70)
@@ -370,7 +491,7 @@ def main() -> None:
     # ── Health ────────────────────────────────────────────────────────────────
     print("\n[0] Service health")
     wait_healthy(INGEST_URL, "  ingest")
-    wait_healthy(API_URL,    "  api   ")
+    wait_healthy(API_URL, "  api   ")
 
     # ── Find known-good Langfuse trace ────────────────────────────────────────
     print("\n[1] Finding known-good Langfuse trace...")
@@ -379,12 +500,14 @@ def main() -> None:
         try:
             sigs = fetch_signals("langfuse-example-agent", limit=5)
             if sigs:
-                raw_id   = sigs[0]["run_id"]
+                raw_id = sigs[0]["run_id"]
                 lf_trace_id = raw_id.replace("-", "")
                 print(f"  Using most recent TOOL_LOOP trace: {lf_trace_id}")
             else:
-                print("  WARNING: no langfuse-example-agent signals found."
-                      " Set LF_TRACE_ID= to override.")
+                print(
+                    "  WARNING: no langfuse-example-agent signals found."
+                    " Set LF_TRACE_ID= to override."
+                )
         except Exception as exc:
             print(f"  WARNING: could not fetch trace ID: {exc}")
     if not lf_trace_id:
@@ -401,18 +524,18 @@ def main() -> None:
     # ── Inject all scenarios ──────────────────────────────────────────────────
     print("\n[3] Injecting 12 synthetic scenarios...")
     SYNTH_SCENARIOS = [
-        ("TOOL_LOOP",              s_tool_loop),
-        ("TOOL_THRASHING",         s_tool_thrashing),
-        ("TOOL_AVOIDANCE",         s_tool_avoidance),
-        ("RAG_EMPTY_RETRIEVAL",    s_rag_empty),
-        ("LLM_TRUNCATION_LOOP",    s_llm_truncation),
-        ("CONTEXT_BLOAT",          s_context_bloat),
-        ("SLOW_STEP",              s_slow_step),
-        ("RETRY_STORM",            s_retry_storm),
-        ("EMPTY_LLM_RESPONSE",     s_empty_llm),
+        ("TOOL_LOOP", s_tool_loop),
+        ("TOOL_THRASHING", s_tool_thrashing),
+        ("TOOL_AVOIDANCE", s_tool_avoidance),
+        ("RAG_EMPTY_RETRIEVAL", s_rag_empty),
+        ("LLM_TRUNCATION_LOOP", s_llm_truncation),
+        ("CONTEXT_BLOAT", s_context_bloat),
+        ("SLOW_STEP", s_slow_step),
+        ("RETRY_STORM", s_retry_storm),
+        ("EMPTY_LLM_RESPONSE", s_empty_llm),
         ("CASCADING_TOOL_FAILURE", s_cascading_failure),
-        ("FIRST_STEP_FAILURE",     s_first_step_failure),
-        ("REASONING_STALL",        s_reasoning_stall),
+        ("FIRST_STEP_FAILURE", s_first_step_failure),
+        ("REASONING_STALL", s_reasoning_stall),
     ]
     for name, fn in SYNTH_SCENARIOS:
         try:
@@ -468,11 +591,11 @@ def main() -> None:
     # ── Run explain on every signal ───────────────────────────────────────────
     print(f"\n[6] Running explain on each signal (Langfuse trace: {lf_trace_id[:12]}...)\n")
 
-    results: list[tuple[str, str, str]] = []   # (failure_type, status, detail)
+    results: list[tuple[str, str, str]] = []  # (failure_type, status, detail)
 
     def run_explain_check(sig: dict) -> None:
-        ft         = sig["failure_type"]
-        sig_id     = sig["id"]
+        ft = sig["failure_type"]
+        sig_id = sig["id"]
         exp_type, exp_blocked = EXPECTED_FIX_TYPE.get(ft, ("?", None))
 
         resp, status = explain(sig_id, lf_trace_id)
@@ -482,10 +605,10 @@ def main() -> None:
             results.append((ft, "FAIL", f"explain returned {status}: {detail}"))
             return
 
-        rc  = resp.get("root_cause", "")
-        fc  = resp.get("fix_content", "")
+        rc = resp.get("root_cause", "")
+        fc = resp.get("fix_content", "")
         ft_ = resp.get("fix_type", "")
-        ab  = resp.get("apply_blocked")
+        ab = resp.get("apply_blocked")
 
         failures = []
         if not rc:
@@ -502,10 +625,9 @@ def main() -> None:
         else:
             snippet = rc[:80].replace("\n", " ")
             fix_snip = fc[:60].replace("\n", " ")
-            results.append((ft, "PASS",
-                             f"fix_type={ft_} ab={ab}  "
-                             f"root_cause: {snippet}…  "
-                             f"fix: {fix_snip}"))
+            results.append(
+                (ft, "PASS", f"fix_type={ft_} ab={ab}  root_cause: {snippet}…  fix: {fix_snip}")
+            )
 
     all_signals = list(found_synth.values())
     if found_injection:
@@ -522,20 +644,29 @@ def main() -> None:
             {"fix_content": "test", "langfuse_prompt_name": "test-prompt"},
         )
         if status == 403:
-            results.append(("PROMPT_INJECTION_SIGNAL (apply-fix guard)", "PASS",
-                             "apply-fix correctly returned 403"))
+            results.append(
+                (
+                    "PROMPT_INJECTION_SIGNAL (apply-fix guard)",
+                    "PASS",
+                    "apply-fix correctly returned 403",
+                )
+            )
         else:
-            results.append(("PROMPT_INJECTION_SIGNAL (apply-fix guard)", "FAIL",
-                             f"expected 403, got {status}: {body.get('detail','')}"))
+            results.append(
+                (
+                    "PROMPT_INJECTION_SIGNAL (apply-fix guard)",
+                    "FAIL",
+                    f"expected 403, got {status}: {body.get('detail', '')}",
+                )
+            )
     else:
-        results.append(("PROMPT_INJECTION_SIGNAL (apply-fix guard)", "SKIP",
-                        "no signal in DB"))
+        results.append(("PROMPT_INJECTION_SIGNAL (apply-fix guard)", "SKIP", "no signal in DB"))
 
     # ── Print results ─────────────────────────────────────────────────────────
     print()
-    print(f"{'─'*70}")
+    print(f"{'─' * 70}")
     print(f"{'FAILURE TYPE':<35}  {'STATUS':<6}  DETAIL")
-    print(f"{'─'*70}")
+    print(f"{'─' * 70}")
 
     passed = failed = skipped = 0
     for ft, status, detail in sorted(results):
@@ -558,9 +689,11 @@ def main() -> None:
             failed += 1
 
     print(f"\n  Skipped (needs stall timeout):  GOAL_ABANDONMENT")
-    print(f"\n  {GREEN}{passed} passed{RESET}  "
-          f"{(RED+str(failed)+RESET) if failed else str(failed)+' failed'}  "
-          f"{YELLOW}{skipped} skipped{RESET}\n")
+    print(
+        f"\n  {GREEN}{passed} passed{RESET}  "
+        f"{(RED + str(failed) + RESET) if failed else str(failed) + ' failed'}  "
+        f"{YELLOW}{skipped} skipped{RESET}\n"
+    )
 
     sys.exit(1 if failed else 0)
 

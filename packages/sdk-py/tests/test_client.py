@@ -1,4 +1,5 @@
 """Tests for DunetraceClient. No network required."""
+
 import json
 import threading
 import unittest
@@ -16,7 +17,6 @@ def _make_client(**kwargs) -> DunetraceClient:
 
 
 class TestDunetraceClientRun(unittest.TestCase):
-
     def test_run_emits_started_and_completed(self):
         emitted = []
         client = _make_client()
@@ -126,11 +126,11 @@ class TestDunetraceClientRun(unittest.TestCase):
 
 
 class TestDunetraceClientShip(unittest.TestCase):
-
     def test_ship_failure_does_not_raise(self):
         client = _make_client()
 
         from dunetrace.models import AgentEvent, EventType
+
         dummy_event = AgentEvent(
             event_type=EventType.RUN_STARTED,
             run_id="r1",
@@ -144,7 +144,6 @@ class TestDunetraceClientShip(unittest.TestCase):
 
 
 class TestTraceDecorator(unittest.TestCase):
-
     def _client(self):
         emitted = []
         c = _make_client()
@@ -189,6 +188,7 @@ class TestTraceDecorator(unittest.TestCase):
 
     def test_trace_async_function(self):
         import asyncio
+
         c, emitted = self._client()
 
         @c.trace
@@ -217,7 +217,6 @@ class TestTraceDecorator(unittest.TestCase):
 
 
 class TestToolDecorator(unittest.TestCase):
-
     def _client(self):
         emitted = []
         c = _make_client()
@@ -291,13 +290,14 @@ class TestToolDecorator(unittest.TestCase):
         def search(query: str) -> str:
             return "result"
 
-        result = search("hello")   # no active run
+        result = search("hello")  # no active run
         self.assertEqual(result, "result")
         c.shutdown(timeout=2)
         self.assertFalse(any(e.event_type == EventType.TOOL_CALLED for e in emitted))
 
     def test_tool_async(self):
         import asyncio
+
         c, emitted = self._client()
 
         @c.tool
@@ -316,6 +316,7 @@ class TestToolDecorator(unittest.TestCase):
     def test_tool_args_not_transmitted_raw(self):
         """Args must be hashed — raw argument values must not appear in the payload."""
         import json
+
         c, emitted = self._client()
         secret = "super-secret-query-value"
 
@@ -345,10 +346,10 @@ class TestToolDecorator(unittest.TestCase):
         my_agent("python")
         c.shutdown(timeout=2)
         types = [e.event_type for e in emitted]
-        self.assertIn(EventType.RUN_STARTED,    types)
-        self.assertIn(EventType.TOOL_CALLED,    types)
+        self.assertIn(EventType.RUN_STARTED, types)
+        self.assertIn(EventType.TOOL_CALLED, types)
         self.assertIn(EventType.TOOL_RESPONDED, types)
-        self.assertIn(EventType.RUN_COMPLETED,  types)
+        self.assertIn(EventType.RUN_COMPLETED, types)
 
 
 class TestConcurrentIsolation(unittest.TestCase):
@@ -393,10 +394,10 @@ class TestConcurrentIsolation(unittest.TestCase):
         c.shutdown(timeout=3)
 
         starts = [e for e in emitted if e.event_type == EventType.RUN_STARTED]
-        tools  = [e for e in emitted if e.event_type == EventType.TOOL_CALLED]
+        tools = [e for e in emitted if e.event_type == EventType.TOOL_CALLED]
 
         self.assertEqual(len(starts), 2, "expected two separate runs")
-        self.assertEqual(len(tools),  2, "expected one tool call per run")
+        self.assertEqual(len(tools), 2, "expected one tool call per run")
 
         run_ids = {e.run_id for e in starts}
         self.assertEqual(len(run_ids), 2, "run_ids must be distinct")
@@ -417,7 +418,7 @@ class TestConcurrentIsolation(unittest.TestCase):
 
         @c.tool
         async def async_tool(x: str) -> str:
-            await asyncio.sleep(0)   # yield, allowing the other task to run
+            await asyncio.sleep(0)  # yield, allowing the other task to run
             return x
 
         async def run_both():
@@ -437,10 +438,10 @@ class TestConcurrentIsolation(unittest.TestCase):
         c.shutdown(timeout=3)
 
         starts = [e for e in emitted if e.event_type == EventType.RUN_STARTED]
-        tools  = [e for e in emitted if e.event_type == EventType.TOOL_CALLED]
+        tools = [e for e in emitted if e.event_type == EventType.TOOL_CALLED]
 
         self.assertEqual(len(starts), 2, "expected two separate runs")
-        self.assertEqual(len(tools),  2, "expected one tool call per run")
+        self.assertEqual(len(tools), 2, "expected one tool call per run")
 
         run_ids = {e.run_id for e in starts}
         self.assertEqual(len(run_ids), 2, "run_ids must be distinct")

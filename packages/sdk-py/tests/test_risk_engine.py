@@ -3,6 +3,7 @@ Tests for RiskEngine.
 
 No network, no external deps. Builds minimal RunState fixtures by hand.
 """
+
 from __future__ import annotations
 
 import time
@@ -26,37 +27,67 @@ from dunetrace.risk_engine import RiskEngine
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _state(**kwargs) -> RunState:
     defaults = dict(run_id="r1", agent_id="a1", agent_version="v1")
     defaults.update(kwargs)
     return RunState(**defaults)
 
 
-def _tool(name: str, step: int, *, success: bool | None = True, args_hash: str = "abc", error_hash: str | None = None) -> ToolCall:
-    return ToolCall(tool_name=name, args_hash=args_hash, step_index=step, timestamp=time.time(), success=success, error_hash=error_hash)
+def _tool(
+    name: str,
+    step: int,
+    *,
+    success: bool | None = True,
+    args_hash: str = "abc",
+    error_hash: str | None = None,
+) -> ToolCall:
+    return ToolCall(
+        tool_name=name,
+        args_hash=args_hash,
+        step_index=step,
+        timestamp=time.time(),
+        success=success,
+        error_hash=error_hash,
+    )
 
 
-def _llm(step: int, prompt_tokens: int = 100, finish_reason: str = "stop", latency_ms: int = 200) -> LlmCall:
-    return LlmCall(model="gpt-4o", prompt_tokens=prompt_tokens, finish_reason=finish_reason, latency_ms=latency_ms, step_index=step, timestamp=time.time())
+def _llm(
+    step: int, prompt_tokens: int = 100, finish_reason: str = "stop", latency_ms: int = 200
+) -> LlmCall:
+    return LlmCall(
+        model="gpt-4o",
+        prompt_tokens=prompt_tokens,
+        finish_reason=finish_reason,
+        latency_ms=latency_ms,
+        step_index=step,
+        timestamp=time.time(),
+    )
 
 
 def _event(event_type: EventType, step: int) -> AgentEvent:
-    return AgentEvent(event_type=event_type, run_id="r1", agent_id="a1", agent_version="v1", step_index=step)
+    return AgentEvent(
+        event_type=event_type, run_id="r1", agent_id="a1", agent_version="v1", step_index=step
+    )
 
 
 def _signal(failure_type: FailureType = FailureType.TOOL_LOOP) -> FailureSignal:
     return FailureSignal(
         failure_type=failure_type,
         severity=Severity.HIGH,
-        run_id="r1", agent_id="a1", agent_version="v1",
-        step_index=1, confidence=0.9, evidence={},
+        run_id="r1",
+        agent_id="a1",
+        agent_version="v1",
+        step_index=1,
+        confidence=0.9,
+        evidence={},
     )
 
 
 # ── Constructor ───────────────────────────────────────────────────────────────
 
-class TestRiskEngineConstructor(unittest.TestCase):
 
+class TestRiskEngineConstructor(unittest.TestCase):
     def test_unknown_param_raises(self):
         with self.assertRaises(TypeError):
             RiskEngine(UNKNOWN_PARAM=5)
@@ -73,8 +104,8 @@ class TestRiskEngineConstructor(unittest.TestCase):
 
 # ── Empty / no-signal runs ────────────────────────────────────────────────────
 
-class TestEmptyRun(unittest.TestCase):
 
+class TestEmptyRun(unittest.TestCase):
     def test_no_signals_no_state_returns_zero_confidence(self):
         score = RiskEngine().evaluate([], _state())
         self.assertEqual(score.confidence, 0.0)
@@ -82,7 +113,9 @@ class TestEmptyRun(unittest.TestCase):
 
     def test_scores_dict_has_all_five_keys(self):
         score = RiskEngine().evaluate([], _state())
-        self.assertEqual(set(score.scores.keys()), {"loop", "stagnation", "token", "retry", "latency"})
+        self.assertEqual(
+            set(score.scores.keys()), {"loop", "stagnation", "token", "retry", "latency"}
+        )
 
     def test_severity_is_none_for_normal_run(self):
         score = RiskEngine().evaluate([], _state())
@@ -91,8 +124,8 @@ class TestEmptyRun(unittest.TestCase):
 
 # ── Feature: loop score ───────────────────────────────────────────────────────
 
-class TestLoopScore(unittest.TestCase):
 
+class TestLoopScore(unittest.TestCase):
     def test_zero_tool_calls(self):
         engine = RiskEngine()
         self.assertEqual(engine._loop_score(_state()), 0.0)
@@ -128,8 +161,8 @@ class TestLoopScore(unittest.TestCase):
 
 # ── Feature: stagnation score ─────────────────────────────────────────────────
 
-class TestStagnationScore(unittest.TestCase):
 
+class TestStagnationScore(unittest.TestCase):
     def test_no_tool_calls_returns_zero(self):
         # Agent never used tools — stagnation doesn't apply
         events = [_event(EventType.LLM_CALLED, i) for i in range(4)]
@@ -137,10 +170,9 @@ class TestStagnationScore(unittest.TestCase):
         self.assertEqual(RiskEngine()._stagnation_score(state), 0.0)
 
     def test_tail_all_llm_after_tool_use_is_1(self):
-        events = (
-            [_event(EventType.TOOL_CALLED, 1)]
-            + [_event(EventType.LLM_CALLED, i) for i in range(2, 6)]
-        )
+        events = [_event(EventType.TOOL_CALLED, 1)] + [
+            _event(EventType.LLM_CALLED, i) for i in range(2, 6)
+        ]
         calls = [_tool("search", 1)]
         state = _state(tool_calls=calls, events=events)
         self.assertAlmostEqual(RiskEngine()._stagnation_score(state), 1.0)
@@ -161,8 +193,8 @@ class TestStagnationScore(unittest.TestCase):
 
 # ── Feature: token score ─────────────────────────────────────────────────────
 
-class TestTokenScore(unittest.TestCase):
 
+class TestTokenScore(unittest.TestCase):
     def test_no_llm_calls_returns_zero(self):
         self.assertEqual(RiskEngine()._token_score(_state()), 0.0)
 
@@ -204,8 +236,8 @@ class TestTokenScore(unittest.TestCase):
 
 # ── Feature: retry score ─────────────────────────────────────────────────────
 
-class TestRetryScore(unittest.TestCase):
 
+class TestRetryScore(unittest.TestCase):
     def test_no_failures_is_zero(self):
         state = _state(tool_calls=[_tool("t", 1, success=True)])
         self.assertEqual(RiskEngine()._retry_score(state), 0.0)
@@ -218,7 +250,7 @@ class TestRetryScore(unittest.TestCase):
     def test_success_breaks_streak(self):
         calls = [
             _tool("t", 1, success=False),
-            _tool("t", 2, success=True),   # breaks streak
+            _tool("t", 2, success=True),  # breaks streak
             _tool("t", 3, success=False),
             _tool("t", 4, success=False),
         ]
@@ -234,8 +266,8 @@ class TestRetryScore(unittest.TestCase):
 
 # ── Feature: latency score ────────────────────────────────────────────────────
 
-class TestLatencyScore(unittest.TestCase):
 
+class TestLatencyScore(unittest.TestCase):
     def test_no_durations_is_zero(self):
         self.assertEqual(RiskEngine()._latency_score(_state()), 0.0)
 
@@ -266,8 +298,8 @@ class TestLatencyScore(unittest.TestCase):
 
 # ── Multi-signal boosting ─────────────────────────────────────────────────────
 
-class TestMultiSignalBoosting(unittest.TestCase):
 
+class TestMultiSignalBoosting(unittest.TestCase):
     def test_single_strong_signal_no_boost(self):
         # Only loop fires strongly; active=1 → multiplier=1.0
         calls = [_tool("search", i) for i in range(5)]
@@ -281,10 +313,9 @@ class TestMultiSignalBoosting(unittest.TestCase):
     def test_two_strong_signals_boost_1_2x(self):
         # 3 same-tool calls → loop score high, then 4 different failures → retry high.
         # Total "t" calls = 4 (< HARD_LOOP_CALLS=8), so no hard rule.
-        calls = (
-            [_tool("search", i) for i in range(3)]
-            + [_tool("t", i + 3, success=False) for i in range(4)]
-        )
+        calls = [_tool("search", i) for i in range(3)] + [
+            _tool("t", i + 3, success=False) for i in range(4)
+        ]
         state = _state(tool_calls=calls)
         engine = RiskEngine()
         score = engine.evaluate([], state)
@@ -294,7 +325,9 @@ class TestMultiSignalBoosting(unittest.TestCase):
         self.assertAlmostEqual(score.confidence, min(1.0, base * 1.2), places=3)
 
     def test_confidence_never_exceeds_1(self):
-        calls = [_tool("search", i) for i in range(10)] + [_tool("search", i + 10, success=False) for i in range(10)]
+        calls = [_tool("search", i) for i in range(10)] + [
+            _tool("search", i + 10, success=False) for i in range(10)
+        ]
         llm_calls = [_llm(1, prompt_tokens=100), _llm(2, prompt_tokens=500)]
         events = [_event(EventType.TOOL_CALLED, 1), _event(EventType.LLM_CALLED, 2)] * 5
         tool_calls_b = [_tool("t", i) for i in range(3)]
@@ -305,8 +338,8 @@ class TestMultiSignalBoosting(unittest.TestCase):
 
 # ── Time escalation ───────────────────────────────────────────────────────────
 
-class TestTimeEscalation(unittest.TestCase):
 
+class TestTimeEscalation(unittest.TestCase):
     def test_no_latency_no_escalation(self):
         # Use a state where loop score is well below 1.0 so latency can push higher.
         # 2 "search" out of 3 calls → loop = 2/3 ≈ 0.667, base ≈ 0.667
@@ -334,8 +367,8 @@ class TestTimeEscalation(unittest.TestCase):
 
 # ── Hard rules ────────────────────────────────────────────────────────────────
 
-class TestHardRules(unittest.TestCase):
 
+class TestHardRules(unittest.TestCase):
     def test_extreme_loop_returns_critical(self):
         # 8 calls to "search", all with same args_hash
         calls = [_tool("search", i, args_hash="same") for i in range(8)]
@@ -388,8 +421,8 @@ class TestHardRules(unittest.TestCase):
 
 # ── Custom thresholds ─────────────────────────────────────────────────────────
 
-class TestCustomThresholds(unittest.TestCase):
 
+class TestCustomThresholds(unittest.TestCase):
     def test_lower_hard_loop_threshold(self):
         engine = RiskEngine(HARD_LOOP_CALLS=4)
         calls = [_tool("search", i, args_hash="same") for i in range(4)]
@@ -409,8 +442,8 @@ class TestCustomThresholds(unittest.TestCase):
 
 # ── Integration ───────────────────────────────────────────────────────────────
 
-class TestIntegration(unittest.TestCase):
 
+class TestIntegration(unittest.TestCase):
     def test_evaluate_accepts_signals_list(self):
         signals = [_signal(FailureType.TOOL_LOOP), _signal(FailureType.RETRY_STORM)]
         score = RiskEngine().evaluate(signals, _state())

@@ -1,4 +1,5 @@
 """Agents endpoints — list agents and their signal summaries."""
+
 from __future__ import annotations
 from typing import Optional
 import asyncio
@@ -6,10 +7,22 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from api_svc.auth import require_customer
 from api_svc.config import settings
 from api_svc.db.queries import (
-    list_agents, agent_signal_sparklines, agent_failure_type_counts,
-    get_agent_health_score, list_agent_fixes, agent_token_stats,
+    list_agents,
+    agent_signal_sparklines,
+    agent_failure_type_counts,
+    get_agent_health_score,
+    list_agent_fixes,
+    agent_token_stats,
 )
-from api_svc.schemas import AgentListResponse, AgentSummary, AgentHealthScore, AgentTokenStats, Page, FixListResponse, FixRecord
+from api_svc.schemas import (
+    AgentListResponse,
+    AgentSummary,
+    AgentHealthScore,
+    AgentTokenStats,
+    Page,
+    FixListResponse,
+    FixRecord,
+)
 
 router = APIRouter(prefix="/v1/agents", tags=["Agents"])
 
@@ -17,7 +30,7 @@ router = APIRouter(prefix="/v1/agents", tags=["Agents"])
 @router.get("", response_model=AgentListResponse, summary="List agents")
 async def get_agents(
     offset: int = Query(0, ge=0),
-    limit:  int = Query(settings.PAGE_SIZE_DEFAULT, ge=1, le=settings.PAGE_SIZE_MAX),
+    limit: int = Query(settings.PAGE_SIZE_DEFAULT, ge=1, le=settings.PAGE_SIZE_MAX),
     customer_id: str = Depends(require_customer),
 ) -> AgentListResponse:
     rows, total = await list_agents(customer_id, offset, limit)
@@ -46,8 +59,7 @@ async def get_agents(
     ]
     return AgentListResponse(
         agents=agents,
-        page=Page(total=total, offset=offset, limit=limit,
-                  has_more=(offset + limit) < total),
+        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
     )
 
 
@@ -57,8 +69,8 @@ async def get_agents(
     summary="Fixes applied to signals for an agent, with recurrence verdicts",
 )
 async def get_agent_fixes(
-    agent_id:    str,
-    _customer:   str = Depends(require_customer),
+    agent_id: str,
+    _customer: str = Depends(require_customer),
 ) -> FixListResponse:
     """
     Returns all fixes applied via the dashboard for this agent — both Langfuse prompt
@@ -80,7 +92,7 @@ async def get_agent_fixes(
     summary="Per-window token usage and waste for an agent (1d / 7d / 30d)",
 )
 async def get_token_stats(
-    agent_id:  str,
+    agent_id: str,
     _customer: str = Depends(require_customer),
 ) -> AgentTokenStats:
     """
@@ -106,7 +118,7 @@ async def get_token_stats(
     summary="0–100 health score for an agent",
 )
 async def get_health_score(
-    agent_id:    str,
+    agent_id: str,
     customer_id: str = Depends(require_customer),
 ) -> AgentHealthScore:
     """

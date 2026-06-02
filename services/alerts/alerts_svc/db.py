@@ -114,9 +114,7 @@ async def log_digest_sent() -> None:
     if not _pool:
         return
     async with _pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO digest_log (digest_type) VALUES ('weekly')"
-        )
+        await conn.execute("INSERT INTO digest_log (digest_type) VALUES ('weekly')")
 
 
 async def fetch_weekly_digest_data() -> dict[str, Any]:
@@ -219,28 +217,34 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
         )
 
         # Issues opened and resolved this week
-        issues_opened = await conn.fetchval(
-            """
+        issues_opened = (
+            await conn.fetchval(
+                """
             SELECT COUNT(*) FROM issues
             WHERE first_seen >= NOW() - INTERVAL '7 days'
             """
-        ) or 0
+            )
+            or 0
+        )
 
-        issues_resolved = await conn.fetchval(
-            """
+        issues_resolved = (
+            await conn.fetchval(
+                """
             SELECT COUNT(*) FROM issues
             WHERE resolved_at >= NOW() - INTERVAL '7 days'
             """
-        ) or 0
+            )
+            or 0
+        )
 
     return {
-        "total_runs":      int(totals["total_runs"] or 0),
-        "total_agents":    int(totals["total_agents"] or 0),
-        "total_signals":   int(totals["total_signals"] or 0),
-        "top_failures":    [dict(r) for r in top_failures],
-        "top_agents":      [dict(r) for r in top_agents],
-        "systemic":        [dict(r) for r in systemic],
-        "issues_opened":   int(issues_opened),
+        "total_runs": int(totals["total_runs"] or 0),
+        "total_agents": int(totals["total_agents"] or 0),
+        "total_signals": int(totals["total_signals"] or 0),
+        "top_failures": [dict(r) for r in top_failures],
+        "top_agents": [dict(r) for r in top_agents],
+        "systemic": [dict(r) for r in systemic],
+        "issues_opened": int(issues_opened),
         "issues_resolved": int(issues_resolved),
     }
 
@@ -279,10 +283,10 @@ async def fetch_signal_rate_context(agent_id: str, failure_type: str) -> dict[st
             return {}
         rate = float(row["rate"] or 0)
         return {
-            "total_runs":    int(row["total_runs"]),
+            "total_runs": int(row["total_runs"]),
             "affected_runs": int(row["affected_runs"]),
-            "rate":          rate,
-            "is_systemic":   rate >= 0.10,
+            "rate": rate,
+            "is_systemic": rate >= 0.10,
         }
     except Exception as exc:
         logger.warning("fetch_signal_rate_context failed: %s", exc)
@@ -296,9 +300,9 @@ async def fetch_agent_overrides(
     Gracefully returns {} if the table doesn't exist yet."""
     if not _pool or not pairs:
         return {}
-    pair_set    = set(pairs)
-    agent_ids   = [p[0] for p in pairs]
-    ftypes      = [p[1] for p in pairs]
+    pair_set = set(pairs)
+    agent_ids = [p[0] for p in pairs]
+    ftypes = [p[1] for p in pairs]
     try:
         async with _pool.acquire() as conn:
             rows = await conn.fetch(
@@ -308,7 +312,8 @@ async def fetch_agent_overrides(
                 WHERE agent_id = ANY($1::text[])
                   AND failure_type = ANY($2::text[])
                 """,
-                agent_ids, ftypes,
+                agent_ids,
+                ftypes,
             )
         return {
             (r["agent_id"], r["failure_type"]): dict(r)
@@ -346,7 +351,8 @@ async def evaluate_alert_policy(
             ORDER BY processed_at DESC
             LIMIT $2
             """,
-            agent_id, window_runs,
+            agent_id,
+            window_runs,
         )
         if not run_rows:
             return False, f"no run history yet for {agent_id}"
@@ -362,7 +368,9 @@ async def evaluate_alert_policy(
               AND shadow = FALSE
               AND run_id = ANY($3::text[])
             """,
-            agent_id, failure_type, run_ids,
+            agent_id,
+            failure_type,
+            run_ids,
         )
     flagged = {r["run_id"] for r in flagged_rows}
 
@@ -410,9 +418,9 @@ async def fetch_dedup_states(
     """Return dedup records keyed by (agent_id, failure_type) for the given pairs."""
     if not _pool or not pairs:
         return {}
-    pair_set    = set(pairs)
-    agent_ids   = [p[0] for p in pairs]
-    ftypes      = [p[1] for p in pairs]
+    pair_set = set(pairs)
+    agent_ids = [p[0] for p in pairs]
+    ftypes = [p[1] for p in pairs]
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -421,7 +429,8 @@ async def fetch_dedup_states(
             WHERE agent_id = ANY($1::text[])
               AND failure_type = ANY($2::text[])
             """,
-            agent_ids, ftypes,
+            agent_ids,
+            ftypes,
         )
     return {
         (r["agent_id"], r["failure_type"]): dict(r)
@@ -442,7 +451,8 @@ async def record_alert_sent(agent_id: str, failure_type: str) -> None:
             ON CONFLICT (agent_id, failure_type)
             DO UPDATE SET last_alerted_at = NOW(), suppressed_count = 0
             """,
-            agent_id, failure_type,
+            agent_id,
+            failure_type,
         )
 
 
@@ -457,7 +467,9 @@ async def increment_suppressed_count(agent_id: str, failure_type: str, count: in
             SET suppressed_count = suppressed_count + $3
             WHERE agent_id = $1 AND failure_type = $2
             """,
-            agent_id, failure_type, count,
+            agent_id,
+            failure_type,
+            count,
         )
 
 

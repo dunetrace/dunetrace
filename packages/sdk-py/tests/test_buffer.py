@@ -1,4 +1,5 @@
 """Tests for the RingBuffer."""
+
 import threading
 import unittest
 
@@ -6,7 +7,6 @@ from dunetrace.buffer import RingBuffer
 
 
 class TestRingBuffer(unittest.TestCase):
-
     def test_push_and_drain(self):
         buf = RingBuffer(maxsize=10)
         buf.push("a")

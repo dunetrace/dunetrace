@@ -1,0 +1,17 @@
+line-length = 100
+target-version = "py311"
+
+[lint]
+# Ignore pre-existing violations in the codebase.
+# E402 — imports not at top (common in services that configure env before importing)
+# E701 / E702 — multiple statements on one line (schemas.py compact style)
+# F401 — unused imports (many are re-exported or used via PYTHONPATH)
+# F841 — unused local variables (often left as placeholders in async handlers)
+ignore = ["E401", "E402", "E701", "E702", "E741", "F401", "F541", "F811", "F841"]
+
+exclude = [
+    "packages/sdk-ts",
+    "dashboard",
+    "infra",
+    "scripts",
+]

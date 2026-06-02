@@ -17,6 +17,7 @@ Agent identity:
 Response:
     200 {}  — OTLP expects an empty JSON object on success.
 """
+
 from __future__ import annotations
 
 import logging
@@ -65,18 +66,18 @@ async def receive_otlp_traces(
         return {}
 
     # ── Optional agent_id / version overrides ─────────────────────────────────
-    agent_id_override      = request.headers.get("X-Dunetrace-Agent-Id") or None
+    agent_id_override = request.headers.get("X-Dunetrace-Agent-Id") or None
     agent_version_override = request.headers.get("X-Dunetrace-Agent-Version") or None
 
     batch_id = str(uuid.uuid4())
     span_count = sum(
-        len(ss.get("spans", []))
-        for rs in resource_spans
-        for ss in rs.get("scopeSpans", [])
+        len(ss.get("spans", [])) for rs in resource_spans for ss in rs.get("scopeSpans", [])
     )
     logger.info(
         "OTLP traces received. resources=%d spans=%d batch_id=%s",
-        len(resource_spans), span_count, batch_id,
+        len(resource_spans),
+        span_count,
+        batch_id,
     )
 
     background_tasks.add_task(
@@ -110,7 +111,9 @@ async def _persist_otlp(
         inserted = await insert_events(events, batch_id)
         logger.debug(
             "OTLP persisted. batch_id=%s events=%d inserted=%d",
-            batch_id, len(events), inserted,
+            batch_id,
+            len(events),
+            inserted,
         )
     except Exception as exc:
         logger.error("OTLP persist failed. batch_id=%s error=%s", batch_id, exc)

@@ -1,4 +1,5 @@
 """Make `dunetrace` importable when running pytest from packages/sdk-py/."""
+
 import sys
 from pathlib import Path
 

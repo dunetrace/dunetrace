@@ -15,6 +15,7 @@ Deploy markers:
     are visually separated from runs before it, making it easy to see whether a
     failure spike started before or after a release.
 """
+
 from __future__ import annotations
 
 import os
@@ -23,6 +24,7 @@ import warnings
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 
 from langchain.tools import tool

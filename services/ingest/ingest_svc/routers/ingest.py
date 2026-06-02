@@ -1,6 +1,7 @@
 """POST /v1/ingest — accepts event batches from the SDK.
-   GET  /v1/policies — returns runtime policies for the SDK to enforce.
+GET  /v1/policies — returns runtime policies for the SDK to enforce.
 """
+
 from __future__ import annotations
 
 import logging
@@ -37,8 +38,7 @@ async def ingest(
     batch_id = str(uuid.uuid4())
     n = len(body.events)
 
-    logger.info("Accepted. batch_id=%s agent_id=%s events=%d",
-                batch_id, body.agent_id, n)
+    logger.info("Accepted. batch_id=%s agent_id=%s events=%d", batch_id, body.agent_id, n)
 
     # Persist after response is sent
     background_tasks.add_task(_persist, body.events, batch_id, body.agent_id)
@@ -52,8 +52,8 @@ async def ingest(
     include_in_schema=False,
 )
 async def get_policies(
-    agent_id: str  = Query(...),
-    api_key:  str  = Query(...),
+    agent_id: str = Query(...),
+    api_key: str = Query(...),
 ) -> dict:
     """
     Called by the SDK at run start to retrieve active policies.
@@ -97,7 +97,9 @@ async def _persist(events: list, batch_id: str, agent_id: str) -> None:
         else:
             logger.error(
                 "Persist shortfall. batch_id=%s inserted=%d expected=%d — events lost",
-                batch_id, inserted, len(events),
+                batch_id,
+                inserted,
+                len(events),
             )
     except Exception as exc:
         logger.error("Persist failed. batch_id=%s error=%s", batch_id, exc)

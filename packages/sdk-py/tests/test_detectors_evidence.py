@@ -6,14 +6,22 @@ StepCountInflation, CascadingToolFailure, FirstStepFailure).
 All tests are deterministic, no DB, no network.
 Run: pytest packages/sdk-py/tests/test_detectors_evidence.py -v
 """
+
 from __future__ import annotations
 
 import time
 import unittest
 
 from dunetrace.models import (
-    AgentEvent, EventType, ExternalSignal, FailureType, LlmCall,
-    RetrievalResult, RunState, Severity, ToolCall,
+    AgentEvent,
+    EventType,
+    ExternalSignal,
+    FailureType,
+    LlmCall,
+    RetrievalResult,
+    RunState,
+    Severity,
+    ToolCall,
 )
 from dunetrace.detectors import (
     CascadingToolFailureDetector,
@@ -32,6 +40,7 @@ from dunetrace.detectors import (
 
 # ── Factories ──────────────────────────────────────────────────────────────────
 
+
 def make_state(**kwargs) -> RunState:
     defaults = dict(
         run_id="test-run",
@@ -43,17 +52,26 @@ def make_state(**kwargs) -> RunState:
     return RunState(**defaults)
 
 
-def make_tool_call(name: str, step: int = 0, success=None,
-                   args_hash: str = "aaa", error_hash: str | None = None) -> ToolCall:
+def make_tool_call(
+    name: str, step: int = 0, success=None, args_hash: str = "aaa", error_hash: str | None = None
+) -> ToolCall:
     return ToolCall(
-        tool_name=name, args_hash=args_hash, step_index=step,
-        timestamp=time.time(), success=success, error_hash=error_hash,
+        tool_name=name,
+        args_hash=args_hash,
+        step_index=step,
+        timestamp=time.time(),
+        success=success,
+        error_hash=error_hash,
     )
 
 
-def make_llm_call(finish_reason: str = "stop", prompt_tokens: int | None = 500,
-                  step: int = 1, model: str = "gpt-4o-mini",
-                  output_length: int = 100) -> LlmCall:
+def make_llm_call(
+    finish_reason: str = "stop",
+    prompt_tokens: int | None = 500,
+    step: int = 1,
+    model: str = "gpt-4o-mini",
+    output_length: int = 100,
+) -> LlmCall:
     return LlmCall(
         model=model,
         prompt_tokens=prompt_tokens,
@@ -67,12 +85,17 @@ def make_llm_call(finish_reason: str = "stop", prompt_tokens: int | None = 500,
 
 def make_event(event_type: EventType, step: int = 1, ts: float | None = None) -> AgentEvent:
     return AgentEvent(
-        event_type=event_type, step_index=step, timestamp=ts or time.time(),
-        run_id="test-run", agent_id="test-agent", agent_version="abc12345",
+        event_type=event_type,
+        step_index=step,
+        timestamp=ts or time.time(),
+        run_id="test-run",
+        agent_id="test-agent",
+        agent_version="abc12345",
     )
 
 
 # ── ToolLoopDetector — evidence fields ────────────────────────────────────────
+
 
 class TestToolLoopEvidence(unittest.TestCase):
     detector = ToolLoopDetector()
@@ -143,11 +166,13 @@ class TestToolLoopEvidence(unittest.TestCase):
 
 # ── GoalAbandonmentDetector ───────────────────────────────────────────────────
 
+
 class TestGoalAbandonmentDetector(unittest.TestCase):
     detector = GoalAbandonmentDetector()
 
-    def _make_stalling_state(self, stall_steps: int = 4, tool_step: int = 1,
-                              current_step: int = 10):
+    def _make_stalling_state(
+        self, stall_steps: int = 4, tool_step: int = 1, current_step: int = 10
+    ):
         state = make_state()
         state.exit_reason = None
         state.tool_calls = [make_tool_call("search_db", step=tool_step)]
@@ -231,6 +256,7 @@ class TestGoalAbandonmentDetector(unittest.TestCase):
 
 # ── LlmTruncationLoopDetector — enriched evidence ────────────────────────────
 
+
 class TestLlmTruncationLoopEvidence(unittest.TestCase):
     detector = LlmTruncationLoopDetector()
 
@@ -293,9 +319,9 @@ class TestLlmTruncationLoopEvidence(unittest.TestCase):
         """Only models from truncated calls appear in evidence."""
         state = make_state()
         state.llm_calls = [
-            make_llm_call("stop",   model="claude-3", step=1),
-            make_llm_call("length", model="gpt-4o",   step=2),
-            make_llm_call("length", model="gpt-4o",   step=3),
+            make_llm_call("stop", model="claude-3", step=1),
+            make_llm_call("length", model="gpt-4o", step=2),
+            make_llm_call("length", model="gpt-4o", step=3),
         ]
         state.current_step = 3
         signal = self.detector.check(state)
@@ -304,11 +330,11 @@ class TestLlmTruncationLoopEvidence(unittest.TestCase):
     def test_total_llm_calls_matches_all_calls(self):
         state = make_state()
         state.llm_calls = [
-            make_llm_call("stop",   step=1),
+            make_llm_call("stop", step=1),
             make_llm_call("length", step=2),
-            make_llm_call("stop",   step=3),
+            make_llm_call("stop", step=3),
             make_llm_call("length", step=4),
-            make_llm_call("stop",   step=5),
+            make_llm_call("stop", step=5),
         ]
         state.current_step = 5
         signal = self.detector.check(state)
@@ -318,13 +344,14 @@ class TestLlmTruncationLoopEvidence(unittest.TestCase):
 
 # ── ContextBloatDetector — token_growth_sequence ──────────────────────────────
 
+
 class TestContextBloatEvidence(unittest.TestCase):
     detector = ContextBloatDetector()
 
     def _bloating_state(self):
         state = make_state()
         state.llm_calls = [
-            make_llm_call(prompt_tokens=400,  step=1),
+            make_llm_call(prompt_tokens=400, step=1),
             make_llm_call(prompt_tokens=2000, step=2),
             make_llm_call(prompt_tokens=4000, step=3),
         ]
@@ -358,7 +385,7 @@ class TestContextBloatEvidence(unittest.TestCase):
         """Calls with None prompt_tokens are excluded from the sequence."""
         state = make_state()
         state.llm_calls = [
-            make_llm_call(prompt_tokens=500,  step=1),
+            make_llm_call(prompt_tokens=500, step=1),
             make_llm_call(prompt_tokens=None, step=2),  # excluded
             make_llm_call(prompt_tokens=2500, step=3),
             make_llm_call(prompt_tokens=6000, step=4),
@@ -374,18 +401,21 @@ class TestContextBloatEvidence(unittest.TestCase):
 
 # ── RetryStormDetector ────────────────────────────────────────────────────────
 
+
 class TestRetryStormDetector(unittest.TestCase):
     detector = RetryStormDetector()
 
-    def _failing_streak(self, tool: str, count: int,
-                        args_hashes=None, error_hashes=None) -> RunState:
+    def _failing_streak(
+        self, tool: str, count: int, args_hashes=None, error_hashes=None
+    ) -> RunState:
         state = make_state()
         calls = []
         for i in range(count):
             ah = args_hashes[i] if args_hashes else f"arg{i}"
             eh = error_hashes[i] if error_hashes else None
-            calls.append(make_tool_call(tool, step=i+1, success=False,
-                                        args_hash=ah, error_hash=eh))
+            calls.append(
+                make_tool_call(tool, step=i + 1, success=False, args_hash=ah, error_hash=eh)
+            )
         state.tool_calls = calls
         state.current_step = count
         return state
@@ -402,9 +432,7 @@ class TestRetryStormDetector(unittest.TestCase):
 
     def test_no_signal_when_all_succeed(self):
         state = make_state()
-        state.tool_calls = [
-            make_tool_call("tool", step=i, success=True) for i in range(5)
-        ]
+        state.tool_calls = [make_tool_call("tool", step=i, success=True) for i in range(5)]
         state.current_step = 5
         assert self.detector.check(state) is None
 
@@ -413,7 +441,7 @@ class TestRetryStormDetector(unittest.TestCase):
         state.tool_calls = [
             make_tool_call("tool", step=1, success=False),
             make_tool_call("tool", step=2, success=False),
-            make_tool_call("tool", step=3, success=True),   # breaks the streak
+            make_tool_call("tool", step=3, success=True),  # breaks the streak
             make_tool_call("tool", step=4, success=False),
         ]
         state.current_step = 4
@@ -495,6 +523,7 @@ class TestRetryStormDetector(unittest.TestCase):
 
 # ── ReasoningSpinDetector — event_sequence ────────────────────────────────────
 
+
 class TestReasoningSpinEvidence(unittest.TestCase):
     detector = ReasoningSpinDetector()
 
@@ -529,7 +558,7 @@ class TestReasoningSpinEvidence(unittest.TestCase):
         state = self._spin_state(llm_count=10, tool_count=1)
         signal = self.detector.check(state)
         seq = signal.evidence["event_sequence"]
-        llm_count  = seq.count("llm")
+        llm_count = seq.count("llm")
         tool_count = seq.count("tool")
         assert llm_count > tool_count
 
@@ -546,6 +575,7 @@ class TestReasoningSpinEvidence(unittest.TestCase):
 
 
 # ── SlowStepDetector ──────────────────────────────────────────────────────────
+
 
 class TestSlowStepDetector(unittest.TestCase):
     detector = SlowStepDetector()
@@ -659,6 +689,7 @@ class TestSlowStepDetector(unittest.TestCase):
 
 # ── EmptyLlmResponseDetector ──────────────────────────────────────────────────
 
+
 class TestEmptyLlmResponseDetector(unittest.TestCase):
     detector = EmptyLlmResponseDetector()
 
@@ -682,8 +713,14 @@ class TestEmptyLlmResponseDetector(unittest.TestCase):
     def test_no_signal_when_output_length_is_none(self):
         """output_length=None means not reported — should not fire."""
         state = make_state()
-        call = LlmCall(model="gpt-4o", prompt_tokens=500, finish_reason="stop",
-                       latency_ms=100, step_index=1, timestamp=time.time())
+        call = LlmCall(
+            model="gpt-4o",
+            prompt_tokens=500,
+            finish_reason="stop",
+            latency_ms=100,
+            step_index=1,
+            timestamp=time.time(),
+        )
         # output_length defaults to None — don't override
         state.llm_calls = [call]
         assert self.detector.check(state) is None
@@ -718,6 +755,7 @@ class TestEmptyLlmResponseDetector(unittest.TestCase):
 
 
 # ── StepCountInflationDetector ────────────────────────────────────────────────
+
 
 class TestStepCountInflationDetector(unittest.TestCase):
     detector = StepCountInflationDetector()
@@ -773,15 +811,16 @@ class TestStepCountInflationDetector(unittest.TestCase):
 
 # ── CascadingToolFailureDetector ──────────────────────────────────────────────
 
+
 class TestCascadingToolFailureDetector(unittest.TestCase):
     detector = CascadingToolFailureDetector()
 
     def test_fires_on_multi_tool_consecutive_failures(self):
         state = make_state()
         state.tool_calls = [
-            make_tool_call("search",   step=1, success=False),
+            make_tool_call("search", step=1, success=False),
             make_tool_call("database", step=2, success=False),
-            make_tool_call("cache",    step=3, success=False),
+            make_tool_call("cache", step=3, success=False),
         ]
         state.current_step = 3
         signal = self.detector.check(state)
@@ -791,16 +830,14 @@ class TestCascadingToolFailureDetector(unittest.TestCase):
     def test_no_signal_when_only_one_tool(self):
         """Same tool failing ≥ threshold = RetryStorm, not CascadingToolFailure."""
         state = make_state()
-        state.tool_calls = [
-            make_tool_call("api", step=i, success=False) for i in range(4)
-        ]
+        state.tool_calls = [make_tool_call("api", step=i, success=False) for i in range(4)]
         state.current_step = 4
         assert self.detector.check(state) is None
 
     def test_no_signal_below_threshold(self):
         state = make_state()
         state.tool_calls = [
-            make_tool_call("search",   step=1, success=False),
+            make_tool_call("search", step=1, success=False),
             make_tool_call("database", step=2, success=False),
         ]
         state.current_step = 2
@@ -809,10 +846,10 @@ class TestCascadingToolFailureDetector(unittest.TestCase):
     def test_success_breaks_cascade(self):
         state = make_state()
         state.tool_calls = [
-            make_tool_call("search",   step=1, success=False),
-            make_tool_call("database", step=2, success=True),   # breaks cascade
-            make_tool_call("cache",    step=3, success=False),
-            make_tool_call("search",   step=4, success=False),
+            make_tool_call("search", step=1, success=False),
+            make_tool_call("database", step=2, success=True),  # breaks cascade
+            make_tool_call("cache", step=3, success=False),
+            make_tool_call("search", step=4, success=False),
         ]
         state.current_step = 4
         # Only 2 failures after the success — below threshold
@@ -822,7 +859,7 @@ class TestCascadingToolFailureDetector(unittest.TestCase):
         state = make_state()
         state.tool_calls = [
             make_tool_call("alpha", step=1, success=False),
-            make_tool_call("beta",  step=2, success=False),
+            make_tool_call("beta", step=2, success=False),
             make_tool_call("gamma", step=3, success=False),
         ]
         state.current_step = 3
@@ -842,9 +879,7 @@ class TestCascadingToolFailureDetector(unittest.TestCase):
 
     def test_severity_is_high(self):
         state = make_state()
-        state.tool_calls = [
-            make_tool_call("x", step=i, success=False) for i in range(3)
-        ]
+        state.tool_calls = [make_tool_call("x", step=i, success=False) for i in range(3)]
         # Need 2 distinct tools
         state.tool_calls[1] = make_tool_call("y", step=1, success=False)
         state.current_step = 3
@@ -854,6 +889,7 @@ class TestCascadingToolFailureDetector(unittest.TestCase):
 
 
 # ── FirstStepFailureDetector ──────────────────────────────────────────────────
+
 
 class TestFirstStepFailureDetector(unittest.TestCase):
     detector = FirstStepFailureDetector()
@@ -878,9 +914,15 @@ class TestFirstStepFailureDetector(unittest.TestCase):
         state.exit_reason = None
         state.current_step = 1
         state.llm_calls = [
-            LlmCall(model="gpt-4o", prompt_tokens=100, finish_reason="stop",
-                    latency_ms=50, step_index=1, timestamp=time.time(),
-                    output_length=0),
+            LlmCall(
+                model="gpt-4o",
+                prompt_tokens=100,
+                finish_reason="stop",
+                latency_ms=50,
+                step_index=1,
+                timestamp=time.time(),
+                output_length=0,
+            ),
         ]
         signal = self.detector.check(state)
         assert signal is not None
@@ -891,9 +933,15 @@ class TestFirstStepFailureDetector(unittest.TestCase):
         state.exit_reason = None
         state.current_step = 5
         state.llm_calls = [
-            LlmCall(model="gpt-4o", prompt_tokens=100, finish_reason="stop",
-                    latency_ms=50, step_index=5, timestamp=time.time(),
-                    output_length=0),
+            LlmCall(
+                model="gpt-4o",
+                prompt_tokens=100,
+                finish_reason="stop",
+                latency_ms=50,
+                step_index=5,
+                timestamp=time.time(),
+                output_length=0,
+            ),
         ]
         assert self.detector.check(state) is None
 

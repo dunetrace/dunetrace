@@ -5,6 +5,7 @@ Cross-run deep-dive for a single failure type — answers "why is this
 happening across all my runs?" with evidence aggregates, step distributions,
 co-occurring failures, and a 14-day trend.
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -23,12 +24,25 @@ from api_svc.schemas import (
 router = APIRouter(tags=["Insights"])
 
 _VALID_FAILURE_TYPES = {
-    "TOOL_LOOP", "TOOL_THRASHING", "TOOL_AVOIDANCE", "GOAL_ABANDONMENT",
-    "PROMPT_INJECTION_SIGNAL", "RAG_EMPTY_RETRIEVAL", "LLM_TRUNCATION_LOOP",
-    "CONTEXT_BLOAT", "SLOW_STEP", "RETRY_STORM", "EMPTY_LLM_RESPONSE",
-    "STEP_COUNT_INFLATION", "CASCADING_TOOL_FAILURE", "FIRST_STEP_FAILURE",
-    "REASONING_STALL", "CONFIDENT_HALLUCINATION_PROXY", "POLICY_VIOLATION",
-    "USER_DISSATISFACTION", "INTENT_MISALIGNMENT",
+    "TOOL_LOOP",
+    "TOOL_THRASHING",
+    "TOOL_AVOIDANCE",
+    "GOAL_ABANDONMENT",
+    "PROMPT_INJECTION_SIGNAL",
+    "RAG_EMPTY_RETRIEVAL",
+    "LLM_TRUNCATION_LOOP",
+    "CONTEXT_BLOAT",
+    "SLOW_STEP",
+    "RETRY_STORM",
+    "EMPTY_LLM_RESPONSE",
+    "STEP_COUNT_INFLATION",
+    "CASCADING_TOOL_FAILURE",
+    "FIRST_STEP_FAILURE",
+    "REASONING_STALL",
+    "CONFIDENT_HALLUCINATION_PROXY",
+    "POLICY_VIOLATION",
+    "USER_DISSATISFACTION",
+    "INTENT_MISALIGNMENT",
 }
 
 
@@ -44,9 +58,9 @@ _VALID_FAILURE_TYPES = {
     ),
 )
 async def get_failure_pattern(
-    agent_id:     str,
+    agent_id: str,
     failure_type: str,
-    _customer:    str = Depends(require_customer),
+    _customer: str = Depends(require_customer),
 ) -> FailurePatternAnalysis:
     if failure_type not in _VALID_FAILURE_TYPES:
         raise HTTPException(
@@ -56,7 +70,9 @@ async def get_failure_pattern(
 
     data = await agent_failure_pattern(agent_id, failure_type)
     if not data:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DB unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DB unavailable"
+        )
 
     return FailurePatternAnalysis(
         failure_type=data["failure_type"],

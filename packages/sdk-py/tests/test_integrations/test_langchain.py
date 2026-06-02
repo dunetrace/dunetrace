@@ -4,6 +4,7 @@ Tests for DunetraceCallbackHandler.
 These tests mock LangChain's callback interface so they run without
 installing langchain.
 """
+
 import sys
 import time
 import types
@@ -23,7 +24,8 @@ def _stub_langchain() -> None:
     lc_cb_base = types.ModuleType("langchain.callbacks.base")
 
     class BaseCallbackHandler:
-        def __init__(self): pass
+        def __init__(self):
+            pass
 
     lc_cb_base.BaseCallbackHandler = BaseCallbackHandler
     lc.callbacks = lc_cb
@@ -35,6 +37,7 @@ def _stub_langchain() -> None:
 
     # Patch the availability flag so handler.__init__ doesn't raise
     import dunetrace.integrations.langchain as _lc_mod
+
     _lc_mod._LANGCHAIN_AVAILABLE = True
 
 
@@ -60,8 +63,8 @@ def _types(emitted):
 
 # ── Run lifecycle ──────────────────────────────────────────────────────────────
 
-class TestRunLifecycle(unittest.TestCase):
 
+class TestRunLifecycle(unittest.TestCase):
     def test_chain_start_emits_run_started(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "hello"}, run_id="lc-1")
@@ -91,6 +94,7 @@ class TestRunLifecycle(unittest.TestCase):
         secret = "my secret query"
         handler.on_chain_start({}, {"input": secret}, run_id="lc-1")
         import json
+
         self.assertNotIn(secret, json.dumps(emitted[0].payload))
         self.assertIn("input_hash", emitted[0].payload)
 
@@ -114,6 +118,7 @@ class TestRunLifecycle(unittest.TestCase):
         secret_msg = "secret internal error detail"
         handler.on_chain_error(RuntimeError(secret_msg), run_id="lc-1")
         import json
+
         self.assertNotIn(secret_msg, json.dumps([e.payload for e in emitted]))
 
     def test_sub_chain_start_is_ignored(self):
@@ -152,18 +157,17 @@ class TestRunLifecycle(unittest.TestCase):
     def test_input_extracted_from_messages_format(self):
         """LangGraph passes input as {'messages': [('human', text)]}"""
         handler, emitted = _make_handler()
-        handler.on_chain_start(
-            {}, {"messages": [("human", "secret message")]}, run_id="lc-1"
-        )
+        handler.on_chain_start({}, {"messages": [("human", "secret message")]}, run_id="lc-1")
         import json
+
         self.assertNotIn("secret message", json.dumps(emitted[0].payload))
         self.assertIn("input_hash", emitted[0].payload)
 
 
 # ── LLM callbacks ─────────────────────────────────────────────────────────────
 
-class TestLlmCallbacks(unittest.TestCase):
 
+class TestLlmCallbacks(unittest.TestCase):
     def _run_with_llm(self, finish_reason="stop", output_text="Answer"):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
@@ -216,6 +220,7 @@ class TestLlmCallbacks(unittest.TestCase):
     def test_llm_responded_does_not_include_raw_output(self):
         _, emitted = self._run_with_llm(output_text="secret output")
         import json
+
         self.assertNotIn("secret output", json.dumps([e.payload for e in emitted]))
 
     def test_llm_error_emits_responded_with_error_finish_reason(self):
@@ -232,32 +237,30 @@ class TestLlmCallbacks(unittest.TestCase):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         handler.on_llm_start(
-            {"kwargs": {"model_name": "text-davinci-003"}}, ["prompt"],
-            run_id="lc-llm", parent_run_id="lc-1"
+            {"kwargs": {"model_name": "text-davinci-003"}},
+            ["prompt"],
+            run_id="lc-llm",
+            parent_run_id="lc-1",
         )
         self.assertIn(EventType.LLM_CALLED, _types(emitted))
 
 
 # ── Tool callbacks ─────────────────────────────────────────────────────────────
 
-class TestToolCallbacks(unittest.TestCase):
 
+class TestToolCallbacks(unittest.TestCase):
     def test_tool_start_emits_tool_called(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         handler.on_tool_start(
-            {"name": "web_search"}, "query text",
-            run_id="lc-tool", parent_run_id="lc-1"
+            {"name": "web_search"}, "query text", run_id="lc-tool", parent_run_id="lc-1"
         )
         self.assertIn(EventType.TOOL_CALLED, _types(emitted))
 
     def test_tool_called_payload_has_tool_name(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_tool_start(
-            {"name": "calculator"}, "1+1",
-            run_id="lc-tool", parent_run_id="lc-1"
-        )
+        handler.on_tool_start({"name": "calculator"}, "1+1", run_id="lc-tool", parent_run_id="lc-1")
         called = next(e for e in emitted if e.event_type == EventType.TOOL_CALLED)
         self.assertEqual(called.payload["tool_name"], "calculator")
 
@@ -265,10 +268,10 @@ class TestToolCallbacks(unittest.TestCase):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         handler.on_tool_start(
-            {"name": "search"}, "secret args",
-            run_id="lc-tool", parent_run_id="lc-1"
+            {"name": "search"}, "secret args", run_id="lc-tool", parent_run_id="lc-1"
         )
         import json
+
         self.assertNotIn("secret args", json.dumps([e.payload for e in emitted]))
 
     def test_tool_end_emits_tool_responded_success(self):
@@ -294,8 +297,13 @@ class TestToolCallbacks(unittest.TestCase):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
-        handler.on_tool_end("Error: timeout", run_id="lc-tool", parent_run_id="lc-1",
-                            name="search", error=RuntimeError("timeout"))
+        handler.on_tool_end(
+            "Error: timeout",
+            run_id="lc-tool",
+            parent_run_id="lc-1",
+            name="search",
+            error=RuntimeError("timeout"),
+        )
         responded = next((e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None)
         self.assertIsNotNone(responded)
         self.assertFalse(responded.payload["success"])
@@ -315,8 +323,11 @@ class TestToolCallbacks(unittest.TestCase):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
-        handler.on_tool_error(RuntimeError("secret error details"), run_id="lc-tool", parent_run_id="lc-1")
+        handler.on_tool_error(
+            RuntimeError("secret error details"), run_id="lc-tool", parent_run_id="lc-1"
+        )
         import json
+
         self.assertNotIn("secret error details", json.dumps([e.payload for e in emitted]))
 
     def test_on_agent_action_emits_tool_called(self):
@@ -343,24 +354,26 @@ class TestToolCallbacks(unittest.TestCase):
 
 # ── Retrieval callbacks ────────────────────────────────────────────────────────
 
-class TestRetrievalCallbacks(unittest.TestCase):
 
+class TestRetrievalCallbacks(unittest.TestCase):
     def test_retriever_start_emits_retrieval_called(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_retriever_start({"name": "my-index"}, "search query",
-                                   run_id="lc-ret", parent_run_id="lc-1")
+        handler.on_retriever_start(
+            {"name": "my-index"}, "search query", run_id="lc-ret", parent_run_id="lc-1"
+        )
         self.assertIn(EventType.RETRIEVAL_CALLED, _types(emitted))
 
     def test_retriever_end_emits_retrieval_responded(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_retriever_start({"name": "idx"}, "q",
-                                   run_id="lc-ret", parent_run_id="lc-1")
+        handler.on_retriever_start({"name": "idx"}, "q", run_id="lc-ret", parent_run_id="lc-1")
         doc = MagicMock()
         doc.metadata = {"score": 0.9}
         handler.on_retriever_end([doc, doc], run_id="lc-ret", parent_run_id="lc-1")
-        responded = next((e for e in emitted if e.event_type == EventType.RETRIEVAL_RESPONDED), None)
+        responded = next(
+            (e for e in emitted if e.event_type == EventType.RETRIEVAL_RESPONDED), None
+        )
         self.assertIsNotNone(responded)
         self.assertEqual(responded.payload["result_count"], 2)
         self.assertAlmostEqual(responded.payload["top_score"], 0.9)
@@ -368,8 +381,7 @@ class TestRetrievalCallbacks(unittest.TestCase):
     def test_retriever_end_with_no_documents(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_retriever_start({"name": "idx"}, "q",
-                                   run_id="lc-ret", parent_run_id="lc-1")
+        handler.on_retriever_start({"name": "idx"}, "q", run_id="lc-ret", parent_run_id="lc-1")
         handler.on_retriever_end([], run_id="lc-ret", parent_run_id="lc-1")
         responded = next(e for e in emitted if e.event_type == EventType.RETRIEVAL_RESPONDED)
         self.assertEqual(responded.payload["result_count"], 0)
@@ -378,26 +390,28 @@ class TestRetrievalCallbacks(unittest.TestCase):
     def test_retriever_error_emits_retrieval_responded_with_zero_count(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_retriever_start({"name": "idx"}, "q",
-                                   run_id="lc-ret", parent_run_id="lc-1")
-        handler.on_retriever_error(RuntimeError("index down"),
-                                   run_id="lc-ret", parent_run_id="lc-1")
+        handler.on_retriever_start({"name": "idx"}, "q", run_id="lc-ret", parent_run_id="lc-1")
+        handler.on_retriever_error(
+            RuntimeError("index down"), run_id="lc-ret", parent_run_id="lc-1"
+        )
         responded = next(e for e in emitted if e.event_type == EventType.RETRIEVAL_RESPONDED)
         self.assertEqual(responded.payload["result_count"], 0)
 
     def test_retriever_hashes_query(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_retriever_start({"name": "idx"}, "secret query",
-                                   run_id="lc-ret", parent_run_id="lc-1")
+        handler.on_retriever_start(
+            {"name": "idx"}, "secret query", run_id="lc-ret", parent_run_id="lc-1"
+        )
         import json
+
         self.assertNotIn("secret query", json.dumps([e.payload for e in emitted]))
 
 
 # ── Step counter ───────────────────────────────────────────────────────────────
 
-class TestStepCounter(unittest.TestCase):
 
+class TestStepCounter(unittest.TestCase):
     def test_step_increments_on_llm_call(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
@@ -418,22 +432,27 @@ class TestStepCounter(unittest.TestCase):
         handler.on_chat_model_start({}, [[]], run_id="lc-llm", parent_run_id="lc-1")
         handler.on_tool_start({"name": "s"}, "q", run_id="lc-t", parent_run_id="lc-1")
         handler.on_chat_model_start({}, [[]], run_id="lc-llm2", parent_run_id="lc-1")
-        steps = [e.step_index for e in emitted if e.event_type in
-                 (EventType.LLM_CALLED, EventType.TOOL_CALLED)]
+        steps = [
+            e.step_index
+            for e in emitted
+            if e.event_type in (EventType.LLM_CALLED, EventType.TOOL_CALLED)
+        ]
         self.assertEqual(steps, [1, 2, 3])
 
 
 # ── Privacy ────────────────────────────────────────────────────────────────────
 
-class TestPrivacy(unittest.TestCase):
 
+class TestPrivacy(unittest.TestCase):
     def test_no_raw_content_in_any_event(self):
         import json
+
         handler, emitted = _make_handler()
         secret = "the secret user query"
         handler.on_chain_start({}, {"input": secret}, run_id="lc-1")
-        handler.on_tool_start({"name": "search"}, f"search: {secret}",
-                              run_id="lc-t", parent_run_id="lc-1")
+        handler.on_tool_start(
+            {"name": "search"}, f"search: {secret}", run_id="lc-t", parent_run_id="lc-1"
+        )
         for event in emitted:
             self.assertNotIn(secret, json.dumps(event.payload))
 
@@ -455,10 +474,11 @@ class TestPrivacy(unittest.TestCase):
 
 # ── Stale run pruning ──────────────────────────────────────────────────────────
 
-class TestStalePruning(unittest.TestCase):
 
+class TestStalePruning(unittest.TestCase):
     def test_stale_run_pruned_on_new_start(self):
         import dunetrace.integrations.langchain as lc_mod
+
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="old-run")
 

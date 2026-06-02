@@ -3,6 +3,7 @@ Integration tests for DunetraceOTelExporter.
 
 All tests use the in-memory InMemorySpanExporter — no real OTLP endpoint needed.
 """
+
 from __future__ import annotations
 
 import time
@@ -17,6 +18,7 @@ try:
     from opentelemetry.trace import StatusCode
     from dunetrace.integrations.otel import DunetraceOTelExporter, _trace_id, _root_span_id
     from dunetrace.models import AgentEvent, EventType, RunState, FailureType, Severity
+
     _OTEL_AVAILABLE = True
 except ImportError:
     _OTEL_AVAILABLE = False
@@ -27,6 +29,7 @@ if not _OTEL_AVAILABLE:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def _make_provider():
     """Return (provider, exporter) using in-memory span exporter."""
@@ -58,14 +61,27 @@ def _event(
 
 def _full_run(exporter_obj: DunetraceOTelExporter, run_id: str) -> List:
     """Emit a minimal complete run and return recorded spans."""
-    exporter_obj.handle(_event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": ["search"]}))
-    exporter_obj.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}))
-    exporter_obj.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"}))
-    exporter_obj.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+    exporter_obj.handle(
+        _event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": ["search"]})
+    )
+    exporter_obj.handle(
+        _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
+    )
+    exporter_obj.handle(
+        _event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"})
+    )
+    exporter_obj.handle(
+        _event(
+            EventType.RUN_COMPLETED,
+            run_id,
+            payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+        )
+    )
     return []
 
 
 # ── Utility function tests ─────────────────────────────────────────────────────
+
 
 class TestTraceIdDerivation:
     def test_trace_id_is_deterministic(self):
@@ -97,14 +113,23 @@ class TestTraceIdDerivation:
 
 # ── Span creation ─────────────────────────────────────────────────────────────
 
+
 class TestRunSpans:
     def test_run_started_creates_agent_run_span(self):
         provider, mem = _make_provider()
         dt_otel = DunetraceOTelExporter(provider)
         run_id = str(uuid.uuid4())
 
-        dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": ["search"]}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": ["search"]})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -115,8 +140,21 @@ class TestRunSpans:
         dt_otel = DunetraceOTelExporter(provider)
         run_id = str(uuid.uuid4())
 
-        dt_otel.handle(_event(EventType.RUN_STARTED, run_id, agent_id="my-agent", payload={"model": "gpt-4o", "tools": []}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_STARTED,
+                run_id,
+                agent_id="my-agent",
+                payload={"model": "gpt-4o", "tools": []},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -127,8 +165,16 @@ class TestRunSpans:
         dt_otel = DunetraceOTelExporter(provider)
         run_id = str(uuid.uuid4())
 
-        dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": []}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": []})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -139,8 +185,20 @@ class TestRunSpans:
         dt_otel = DunetraceOTelExporter(provider)
         run_id = str(uuid.uuid4())
 
-        dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": ["search", "calc"]}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_STARTED,
+                run_id,
+                payload={"model": "gpt-4o", "tools": ["search", "calc"]},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -153,7 +211,13 @@ class TestRunSpans:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -166,7 +230,13 @@ class TestRunSpans:
         parent_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}, parent_run_id=parent_id))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -178,7 +248,13 @@ class TestRunSpans:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -190,7 +266,13 @@ class TestRunSpans:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 7, "exit_reason": "final_answer", "tool_call_count": 3}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 7, "exit_reason": "final_answer", "tool_call_count": 3},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -201,6 +283,7 @@ class TestRunSpans:
 
 # ── LLM span ──────────────────────────────────────────────────────────────────
 
+
 class TestLlmSpan:
     def test_llm_called_creates_llm_call_span(self):
         provider, mem = _make_provider()
@@ -208,9 +291,29 @@ class TestLlmSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o", "prompt_tokens": 150}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop", "completion_tokens": 80}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.LLM_CALLED,
+                run_id,
+                step_index=1,
+                payload={"model": "gpt-4o", "prompt_tokens": 150},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"finish_reason": "stop", "completion_tokens": 80},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         llm_span = next(s for s in spans if s.name == "llm_call")
@@ -222,9 +325,19 @@ class TestLlmSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "claude-3-sonnet"}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "claude-3-sonnet"})
+        )
+        dt_otel.handle(
+            _event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         llm_span = next(s for s in spans if s.name == "llm_call")
@@ -236,9 +349,24 @@ class TestLlmSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o", "prompt_tokens": 300}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.LLM_CALLED,
+                run_id,
+                step_index=1,
+                payload={"model": "gpt-4o", "prompt_tokens": 300},
+            )
+        )
+        dt_otel.handle(
+            _event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         llm_span = next(s for s in spans if s.name == "llm_call")
@@ -250,9 +378,24 @@ class TestLlmSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop", "completion_tokens": 120}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"finish_reason": "stop", "completion_tokens": 120},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         llm_span = next(s for s in spans if s.name == "llm_call")
@@ -264,9 +407,24 @@ class TestLlmSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "tool_calls"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"finish_reason": "tool_calls"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         llm_span = next(s for s in spans if s.name == "llm_call")
@@ -279,9 +437,21 @@ class TestLlmSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "length"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "length"}
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         llm_span = next(s for s in spans if s.name == "llm_call")
@@ -293,9 +463,24 @@ class TestLlmSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop", "latency_ms": 450}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"finish_reason": "stop", "latency_ms": 450},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         llm_span = next(s for s in spans if s.name == "llm_call")
@@ -304,6 +489,7 @@ class TestLlmSpan:
 
 # ── Tool span ─────────────────────────────────────────────────────────────────
 
+
 class TestToolSpan:
     def test_tool_called_creates_tool_call_span(self):
         provider, mem = _make_provider()
@@ -311,9 +497,29 @@ class TestToolSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=2, payload={"tool_name": "web_search", "args_hash": "abc123"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True, "output_length": 512}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=2,
+                payload={"tool_name": "web_search", "args_hash": "abc123"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=2,
+                payload={"success": True, "output_length": 512},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
@@ -325,9 +531,24 @@ class TestToolSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=2, payload={"tool_name": "calculator", "args_hash": "abc123"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=2,
+                payload={"tool_name": "calculator", "args_hash": "abc123"},
+            )
+        )
+        dt_otel.handle(
+            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
@@ -339,9 +560,24 @@ class TestToolSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=2, payload={"tool_name": "search", "args_hash": "deadbeef"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=2,
+                payload={"tool_name": "search", "args_hash": "deadbeef"},
+            )
+        )
+        dt_otel.handle(
+            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
@@ -353,9 +589,24 @@ class TestToolSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=2, payload={"tool_name": "search", "args_hash": "x"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=2,
+                payload={"tool_name": "search", "args_hash": "x"},
+            )
+        )
+        dt_otel.handle(
+            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
@@ -367,9 +618,29 @@ class TestToolSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=2, payload={"tool_name": "search", "args_hash": "x"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": False, "error_hash": "err123"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=2,
+                payload={"tool_name": "search", "args_hash": "x"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=2,
+                payload={"success": False, "error_hash": "err123"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
@@ -381,9 +652,29 @@ class TestToolSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=2, payload={"tool_name": "search", "args_hash": "x"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": False, "error_hash": "abc999"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=2,
+                payload={"tool_name": "search", "args_hash": "x"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=2,
+                payload={"success": False, "error_hash": "abc999"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
@@ -395,9 +686,29 @@ class TestToolSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=2, payload={"tool_name": "search", "args_hash": "x"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True, "output_length": 200}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=2,
+                payload={"tool_name": "search", "args_hash": "x"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=2,
+                payload={"success": True, "output_length": 200},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
@@ -407,6 +718,7 @@ class TestToolSpan:
 
 # ── Retrieval span ─────────────────────────────────────────────────────────────
 
+
 class TestRetrievalSpan:
     def test_retrieval_called_creates_retrieval_span(self):
         provider, mem = _make_provider()
@@ -414,9 +726,29 @@ class TestRetrievalSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_CALLED, run_id, step_index=1, payload={"index_name": "docs", "query_hash": "qh1"}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_RESPONDED, run_id, step_index=1, payload={"result_count": 5, "top_score": 0.9}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RETRIEVAL_CALLED,
+                run_id,
+                step_index=1,
+                payload={"index_name": "docs", "query_hash": "qh1"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RETRIEVAL_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"result_count": 5, "top_score": 0.9},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         ret_span = next(s for s in spans if s.name == "retrieval")
@@ -428,9 +760,29 @@ class TestRetrievalSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_CALLED, run_id, step_index=1, payload={"index_name": "knowledge-base", "query_hash": "qh1"}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_RESPONDED, run_id, step_index=1, payload={"result_count": 3, "top_score": 0.8}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RETRIEVAL_CALLED,
+                run_id,
+                step_index=1,
+                payload={"index_name": "knowledge-base", "query_hash": "qh1"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RETRIEVAL_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"result_count": 3, "top_score": 0.8},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         ret_span = next(s for s in spans if s.name == "retrieval")
@@ -442,9 +794,29 @@ class TestRetrievalSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_CALLED, run_id, step_index=1, payload={"index_name": "docs", "query_hash": "qh1"}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_RESPONDED, run_id, step_index=1, payload={"result_count": 7, "top_score": 0.75}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RETRIEVAL_CALLED,
+                run_id,
+                step_index=1,
+                payload={"index_name": "docs", "query_hash": "qh1"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RETRIEVAL_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"result_count": 7, "top_score": 0.75},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         ret_span = next(s for s in spans if s.name == "retrieval")
@@ -456,9 +828,29 @@ class TestRetrievalSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_CALLED, run_id, step_index=1, payload={"index_name": "docs", "query_hash": "qh1"}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_RESPONDED, run_id, step_index=1, payload={"result_count": 4, "top_score": 0.92}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RETRIEVAL_CALLED,
+                run_id,
+                step_index=1,
+                payload={"index_name": "docs", "query_hash": "qh1"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RETRIEVAL_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"result_count": 4, "top_score": 0.92},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         ret_span = next(s for s in spans if s.name == "retrieval")
@@ -470,9 +862,24 @@ class TestRetrievalSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_CALLED, run_id, step_index=1, payload={"index_name": "docs", "query_hash": "qh1"}))
-        dt_otel.handle(_event(EventType.RETRIEVAL_RESPONDED, run_id, step_index=1, payload={"result_count": 0}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RETRIEVAL_CALLED,
+                run_id,
+                step_index=1,
+                payload={"index_name": "docs", "query_hash": "qh1"},
+            )
+        )
+        dt_otel.handle(
+            _event(EventType.RETRIEVAL_RESPONDED, run_id, step_index=1, payload={"result_count": 0})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         ret_span = next(s for s in spans if s.name == "retrieval")
@@ -480,6 +887,7 @@ class TestRetrievalSpan:
 
 
 # ── Orphaned child span handling ───────────────────────────────────────────────
+
 
 class TestOrphanedChildSpan:
     def test_orphaned_child_span_closed_on_next_call_start(self):
@@ -490,11 +898,28 @@ class TestOrphanedChildSpan:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         # First LLM call — no response emitted (orphan)
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
+        )
         # Second tool call starts without LLM being closed first
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=2, payload={"tool_name": "search", "args_hash": "x"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=2,
+                payload={"tool_name": "search", "args_hash": "x"},
+            )
+        )
+        dt_otel.handle(
+            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         # Both the orphaned llm_call and the tool_call should be finished
@@ -510,9 +935,22 @@ class TestOrphanedChildSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=1, payload={"tool_name": "search", "args_hash": "x"}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=1,
+                payload={"tool_name": "search", "args_hash": "x"},
+            )
+        )
         # Run ends without TOOL_RESPONDED
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
@@ -524,8 +962,21 @@ class TestOrphanedChildSpan:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.RUN_ERRORED, run_id, payload={"error_type": "TimeoutError", "total_steps": 1, "exit_reason": "error", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_ERRORED,
+                run_id,
+                payload={
+                    "error_type": "TimeoutError",
+                    "total_steps": 1,
+                    "exit_reason": "error",
+                    "tool_call_count": 0,
+                },
+            )
+        )
 
         spans = mem.get_finished_spans()
         llm_span = next(s for s in spans if s.name == "llm_call")
@@ -534,6 +985,7 @@ class TestOrphanedChildSpan:
 
 # ── Run errored ────────────────────────────────────────────────────────────────
 
+
 class TestRunErrored:
     def test_run_errored_sets_root_span_error(self):
         provider, mem = _make_provider()
@@ -541,7 +993,18 @@ class TestRunErrored:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RUN_ERRORED, run_id, payload={"error_type": "ValueError", "total_steps": 0, "exit_reason": "error", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_ERRORED,
+                run_id,
+                payload={
+                    "error_type": "ValueError",
+                    "total_steps": 0,
+                    "exit_reason": "error",
+                    "tool_call_count": 0,
+                },
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -553,7 +1016,18 @@ class TestRunErrored:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.RUN_ERRORED, run_id, payload={"error_type": "TimeoutError", "total_steps": 0, "exit_reason": "error", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_ERRORED,
+                run_id,
+                payload={
+                    "error_type": "TimeoutError",
+                    "total_steps": 0,
+                    "exit_reason": "error",
+                    "tool_call_count": 0,
+                },
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -562,17 +1036,26 @@ class TestRunErrored:
 
 # ── Failure signal annotation ──────────────────────────────────────────────────
 
+
 class TestSignalAnnotation:
     def _make_tool_loop_run_state(self) -> RunState:
         """Build a RunState that triggers TOOL_LOOP (same tool 3x in a 5-tool window)."""
         from dunetrace.models import ToolCall
-        state = RunState(run_id=str(uuid.uuid4()), agent_id="test", agent_version="1.0", available_tools=["search"])
+
+        state = RunState(
+            run_id=str(uuid.uuid4()),
+            agent_id="test",
+            agent_version="1.0",
+            available_tools=["search"],
+        )
         args_hash = "aaaa1111"
         # 5 calls total — 3 of "search" (triggers loop) + 2 fillers within the window
         tools = ["other", "search", "search", "other2", "search"]
         for i, tool in enumerate(tools):
             h = args_hash if tool == "search" else f"filler{i}"
-            state.tool_calls.append(ToolCall(tool_name=tool, step_index=i, args_hash=h, timestamp=time.time()))
+            state.tool_calls.append(
+                ToolCall(tool_name=tool, step_index=i, args_hash=h, timestamp=time.time())
+            )
         return state
 
     def test_high_signal_sets_root_span_error_status(self):
@@ -584,7 +1067,13 @@ class TestSignalAnnotation:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.notify_run_state(run_id, run_state)
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 3, "exit_reason": "stop", "tool_call_count": 3}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 3, "exit_reason": "stop", "tool_call_count": 3},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -599,12 +1088,21 @@ class TestSignalAnnotation:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.notify_run_state(run_id, run_state)
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 3, "exit_reason": "stop", "tool_call_count": 3}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 3, "exit_reason": "stop", "tool_call_count": 3},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
         # At least one signal should be indexed on the root span
-        assert any(k.startswith("dunetrace.signal.") and k.endswith(".failure_type") for k in root.attributes)
+        assert any(
+            k.startswith("dunetrace.signal.") and k.endswith(".failure_type")
+            for k in root.attributes
+        )
 
     def test_signal_severity_annotated_on_root_span(self):
         provider, mem = _make_provider()
@@ -615,11 +1113,19 @@ class TestSignalAnnotation:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.notify_run_state(run_id, run_state)
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 3, "exit_reason": "stop", "tool_call_count": 3}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 3, "exit_reason": "stop", "tool_call_count": 3},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
-        assert any(k.startswith("dunetrace.signal.") and k.endswith(".severity") for k in root.attributes)
+        assert any(
+            k.startswith("dunetrace.signal.") and k.endswith(".severity") for k in root.attributes
+        )
 
     def test_no_signal_annotation_when_run_state_not_provided(self):
         """Without notify_run_state, no signal attributes should appear on root span."""
@@ -629,7 +1135,13 @@ class TestSignalAnnotation:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         # No notify_run_state call
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -638,6 +1150,7 @@ class TestSignalAnnotation:
 
 # ── External signal events ─────────────────────────────────────────────────────
 
+
 class TestExternalSignal:
     def test_external_signal_adds_span_event_to_child(self):
         provider, mem = _make_provider()
@@ -645,10 +1158,31 @@ class TestExternalSignal:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=1, payload={"tool_name": "api", "args_hash": "x"}))
-        dt_otel.handle(_event(EventType.EXTERNAL_SIGNAL, run_id, payload={"signal_name": "rate_limit", "source": "openai"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=1, payload={"success": True}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=1,
+                payload={"tool_name": "api", "args_hash": "x"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.EXTERNAL_SIGNAL,
+                run_id,
+                payload={"signal_name": "rate_limit", "source": "openai"},
+            )
+        )
+        dt_otel.handle(
+            _event(EventType.TOOL_RESPONDED, run_id, step_index=1, payload={"success": True})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
@@ -661,8 +1195,20 @@ class TestExternalSignal:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.EXTERNAL_SIGNAL, run_id, payload={"signal_name": "circuit_breaker", "source": "internal"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.EXTERNAL_SIGNAL,
+                run_id,
+                payload={"signal_name": "circuit_breaker", "source": "internal"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -675,8 +1221,20 @@ class TestExternalSignal:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.EXTERNAL_SIGNAL, run_id, payload={"signal_name": "rate_limit", "source": "openai"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(
+                EventType.EXTERNAL_SIGNAL,
+                run_id,
+                payload={"signal_name": "rate_limit", "source": "openai"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -685,6 +1243,7 @@ class TestExternalSignal:
 
 
 # ── Concurrent runs ────────────────────────────────────────────────────────────
+
 
 class TestConcurrentRuns:
     def test_two_concurrent_runs_have_separate_trace_ids(self):
@@ -696,12 +1255,36 @@ class TestConcurrentRuns:
         # Interleave two runs
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id_a, agent_id="agent-a", payload={}))
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id_b, agent_id="agent-b", payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id_a, step_index=1, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id_b, step_index=1, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id_a, step_index=1, payload={"finish_reason": "stop"}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id_b, step_index=1, payload={"finish_reason": "stop"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id_a, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id_b, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id_a, step_index=1, payload={"model": "gpt-4o"})
+        )
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id_b, step_index=1, payload={"model": "gpt-4o"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED, run_id_a, step_index=1, payload={"finish_reason": "stop"}
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED, run_id_b, step_index=1, payload={"finish_reason": "stop"}
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id_a,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id_b,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         roots = [s for s in spans if s.name == "agent_run"]
@@ -717,8 +1300,16 @@ class TestConcurrentRuns:
 
         # Should not raise
         dt_otel.handle(_event(EventType.LLM_CALLED, ghost_id, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, ghost_id, payload={"tool_name": "x", "args_hash": "y"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, ghost_id, payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.TOOL_CALLED, ghost_id, payload={"tool_name": "x", "args_hash": "y"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                ghost_id,
+                payload={"total_steps": 0, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         # No spans should have been recorded
         spans = mem.get_finished_spans()
@@ -727,6 +1318,7 @@ class TestConcurrentRuns:
 
 # ── Span hierarchy ─────────────────────────────────────────────────────────────
 
+
 class TestSpanHierarchy:
     def test_child_spans_are_parented_to_root_span(self):
         provider, mem = _make_provider()
@@ -734,9 +1326,19 @@ class TestSpanHierarchy:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
+        )
+        dt_otel.handle(
+            _event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 1, "exit_reason": "stop", "tool_call_count": 0},
+            )
+        )
 
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
@@ -751,11 +1353,35 @@ class TestSpanHierarchy:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
-        dt_otel.handle(_event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}))
-        dt_otel.handle(_event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "tool_calls"}))
-        dt_otel.handle(_event(EventType.TOOL_CALLED, run_id, step_index=2, payload={"tool_name": "search", "args_hash": "x"}))
-        dt_otel.handle(_event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True}))
-        dt_otel.handle(_event(EventType.RUN_COMPLETED, run_id, payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1}))
+        dt_otel.handle(
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"finish_reason": "tool_calls"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.TOOL_CALLED,
+                run_id,
+                step_index=2,
+                payload={"tool_name": "search", "args_hash": "x"},
+            )
+        )
+        dt_otel.handle(
+            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+        )
+        dt_otel.handle(
+            _event(
+                EventType.RUN_COMPLETED,
+                run_id,
+                payload={"total_steps": 2, "exit_reason": "stop", "tool_call_count": 1},
+            )
+        )
 
         spans = mem.get_finished_spans()
         trace_ids = {s.context.trace_id for s in spans}

@@ -8,6 +8,7 @@ systemic patterns, and issue open/resolve counts.
 Delivery is guarded by digest_log — if a digest was sent in the last 6 days,
 it will not send again even if the worker restarts.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -62,14 +63,14 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
     week_start = (now - datetime.timedelta(days=7)).strftime("%-d %b")
     week_end = now.strftime("%-d %b %Y")
 
-    total_runs    = data.get("total_runs", 0)
-    total_agents  = data.get("total_agents", 0)
+    total_runs = data.get("total_runs", 0)
+    total_agents = data.get("total_agents", 0)
     total_signals = data.get("total_signals", 0)
-    top_failures  = data.get("top_failures", [])
-    top_agents    = data.get("top_agents", [])
-    systemic      = data.get("systemic", [])
-    opened        = data.get("issues_opened", 0)
-    resolved      = data.get("issues_resolved", 0)
+    top_failures = data.get("top_failures", [])
+    top_agents = data.get("top_agents", [])
+    systemic = data.get("systemic", [])
+    opened = data.get("issues_opened", 0)
+    resolved = data.get("issues_resolved", 0)
 
     blocks: list[dict] = [
         {
@@ -82,13 +83,15 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
         },
         {
             "type": "context",
-            "elements": [{
-                "type": "mrkdwn",
-                "text": (
-                    f"*{total_agents}* agent(s) · *{total_runs}* runs · "
-                    f"*{total_signals}* signal(s) in the last 7 days"
-                ),
-            }],
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*{total_agents}* agent(s) · *{total_runs}* runs · "
+                        f"*{total_signals}* signal(s) in the last 7 days"
+                    ),
+                }
+            ],
         },
         {"type": "divider"},
     ]
@@ -100,21 +103,27 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
             emoji = _SEVERITY_EMOJI.get(f["failure_type"], ":white_circle:")
             pct = _pct(f.get("rate", 0))
             lines.append(
-                f"{emoji} *{f['failure_type']}* — "
-                f"{f['affected_runs']} run(s) affected ({pct})"
+                f"{emoji} *{f['failure_type']}* — {f['affected_runs']} run(s) affected ({pct})"
             )
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*Top failure types*\n" + "\n".join(lines),
-            },
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Top failure types*\n" + "\n".join(lines),
+                },
+            }
+        )
     else:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": ":white_check_mark: No failures detected this week."},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": ":white_check_mark: No failures detected this week.",
+                },
+            }
+        )
 
     # Top agents by signal volume
     if top_agents:
@@ -126,13 +135,15 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
                 f"across {a['run_count']} runs  _(dominant: {dominant})_"
             )
         blocks.append({"type": "divider"})
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*Agents by signal volume*\n" + "\n".join(lines),
-            },
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Agents by signal volume*\n" + "\n".join(lines),
+                },
+            }
+        )
 
     # Systemic patterns
     if systemic:
@@ -143,37 +154,44 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
                 f"{s['affected_runs']}/{s['total_runs']} runs ({_pct(s['rate'])})"
             )
         blocks.append({"type": "divider"})
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*Systemic patterns* _(≥10% of runs affected)_\n" + "\n".join(lines),
-            },
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Systemic patterns* _(≥10% of runs affected)_\n" + "\n".join(lines),
+                },
+            }
+        )
 
     # Issue summary
     blocks.append({"type": "divider"})
-    blocks.append({
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": (
-                f":ticket: *Issues* — "
-                f"*{opened}* opened this week · *{resolved}* resolved"
-            ),
-        },
-    })
+    blocks.append(
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f":ticket: *Issues* — *{opened}* opened this week · *{resolved}* resolved"
+                ),
+            },
+        }
+    )
 
     # Dashboard link
-    blocks.append({
-        "type": "actions",
-        "elements": [{
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Open Dashboard", "emoji": True},
-            "url": settings.DASHBOARD_URL,
-            "style": "primary",
-        }],
-    })
+    blocks.append(
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Open Dashboard", "emoji": True},
+                    "url": settings.DASHBOARD_URL,
+                    "style": "primary",
+                }
+            ],
+        }
+    )
 
     return {"attachments": [{"color": "#4a9ede", "blocks": blocks}]}
 
@@ -216,7 +234,9 @@ async def send_weekly_digest() -> bool:
         await log_digest_sent()
         logger.info(
             "Weekly digest sent. runs=%d agents=%d signals=%d",
-            data["total_runs"], data["total_agents"], data["total_signals"],
+            data["total_runs"],
+            data["total_agents"],
+            data["total_signals"],
         )
         return True
     else:

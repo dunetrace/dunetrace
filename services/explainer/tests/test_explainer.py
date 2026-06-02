@@ -5,6 +5,7 @@ Run:
     cd services/explainer
     python -m unittest tests.test_explainer -v
 """
+
 from __future__ import annotations
 
 import sys
@@ -13,9 +14,9 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py")
-))
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py"))
+)
 
 from dunetrace.models import FailureSignal, FailureType, Severity
 from explainer_svc.explainer import explain
@@ -23,6 +24,7 @@ from explainer_svc.models import Explanation, CodeFix
 
 
 # ── Factories ──────────────────────────────────────────────────────────────────
+
 
 def make_signal(
     failure_type: FailureType,
@@ -46,6 +48,7 @@ def make_signal(
 
 # ── Contract tests — every explanation must satisfy these ──────────────────────
 
+
 class TestExplanationContract(unittest.TestCase):
     """
     Every Explanation produced by explain() must satisfy
@@ -53,12 +56,29 @@ class TestExplanationContract(unittest.TestCase):
     """
 
     ALL_TYPES = [
-        (FailureType.TOOL_LOOP,               {"tool": "web_search", "count": 5, "window": 5}),
-        (FailureType.TOOL_THRASHING,          {"tool_a": "search", "tool_b": "browse", "oscillation_count": 3}),
-        (FailureType.TOOL_AVOIDANCE,          {"available_tools": ["web_search", "calculator"], "tool_calls_made": 0}),
-        (FailureType.GOAL_ABANDONMENT,        {"stall_steps": 4, "last_tool_used": "database_lookup"}),
-        (FailureType.PROMPT_INJECTION_SIGNAL, {"matched_patterns": ["ignore_instructions", "you_are_now"], "pattern_count": 2}),
-        (FailureType.RAG_EMPTY_RETRIEVAL,     {"index_name": "product-docs", "result_count": 0, "top_score": None, "bad_retrievals": 1}),
+        (FailureType.TOOL_LOOP, {"tool": "web_search", "count": 5, "window": 5}),
+        (
+            FailureType.TOOL_THRASHING,
+            {"tool_a": "search", "tool_b": "browse", "oscillation_count": 3},
+        ),
+        (
+            FailureType.TOOL_AVOIDANCE,
+            {"available_tools": ["web_search", "calculator"], "tool_calls_made": 0},
+        ),
+        (FailureType.GOAL_ABANDONMENT, {"stall_steps": 4, "last_tool_used": "database_lookup"}),
+        (
+            FailureType.PROMPT_INJECTION_SIGNAL,
+            {"matched_patterns": ["ignore_instructions", "you_are_now"], "pattern_count": 2},
+        ),
+        (
+            FailureType.RAG_EMPTY_RETRIEVAL,
+            {
+                "index_name": "product-docs",
+                "result_count": 0,
+                "top_score": None,
+                "bad_retrievals": 1,
+            },
+        ),
     ]
 
     def _check_contract(self, exp: Explanation, failure_type: FailureType):
@@ -66,32 +86,31 @@ class TestExplanationContract(unittest.TestCase):
 
         # Identity fields are passed through unchanged
         self.assertEqual(exp.failure_type, failure_type.value)
-        self.assertEqual(exp.run_id,        "run-test-abc")
-        self.assertEqual(exp.agent_id,      "agent-test")
+        self.assertEqual(exp.run_id, "run-test-abc")
+        self.assertEqual(exp.agent_id, "agent-test")
         self.assertEqual(exp.agent_version, "abc12345")
         self.assertAlmostEqual(exp.confidence, 0.90)
 
         # Text fields must be non-empty strings
         self.assertIsInstance(exp.title, str)
-        self.assertGreater(len(exp.title), 10,
-                           f"{failure_type}: title too short: {exp.title!r}")
+        self.assertGreater(len(exp.title), 10, f"{failure_type}: title too short: {exp.title!r}")
 
         self.assertIsInstance(exp.what, str)
-        self.assertGreater(len(exp.what), 20,
-                           f"{failure_type}: 'what' too short")
+        self.assertGreater(len(exp.what), 20, f"{failure_type}: 'what' too short")
 
         self.assertIsInstance(exp.why_it_matters, str)
-        self.assertGreater(len(exp.why_it_matters), 20,
-                           f"{failure_type}: 'why_it_matters' too short")
+        self.assertGreater(
+            len(exp.why_it_matters), 20, f"{failure_type}: 'why_it_matters' too short"
+        )
 
         self.assertIsInstance(exp.evidence_summary, str)
-        self.assertGreater(len(exp.evidence_summary), 5,
-                           f"{failure_type}: evidence_summary too short")
+        self.assertGreater(
+            len(exp.evidence_summary), 5, f"{failure_type}: evidence_summary too short"
+        )
 
         # Must have at least one fix
         self.assertIsInstance(exp.suggested_fixes, list)
-        self.assertGreater(len(exp.suggested_fixes), 0,
-                           f"{failure_type}: no suggested fixes")
+        self.assertGreater(len(exp.suggested_fixes), 0, f"{failure_type}: no suggested fixes")
 
         for fix in exp.suggested_fixes:
             self.assertIsInstance(fix, CodeFix)
@@ -109,42 +128,58 @@ class TestExplanationContract(unittest.TestCase):
                 self._check_contract(exp, failure_type)
 
     def test_confidence_pct_format(self):
-        signal = make_signal(FailureType.TOOL_LOOP,
-                             evidence={"tool": "search", "count": 5, "window": 5})
+        signal = make_signal(
+            FailureType.TOOL_LOOP, evidence={"tool": "search", "count": 5, "window": 5}
+        )
         exp = explain(signal)
         self.assertEqual(exp.confidence_pct(), "90%")
 
     def test_as_dict_is_json_serialisable(self):
         import json
-        signal = make_signal(FailureType.TOOL_LOOP,
-                             evidence={"tool": "search", "count": 5, "window": 5})
+
+        signal = make_signal(
+            FailureType.TOOL_LOOP, evidence={"tool": "search", "count": 5, "window": 5}
+        )
         d = explain(signal).as_dict()
         # Should not raise
         serialised = json.dumps(d)
         self.assertIsInstance(serialised, str)
 
     def test_as_dict_shape(self):
-        signal = make_signal(FailureType.TOOL_LOOP,
-                             evidence={"tool": "search", "count": 5, "window": 5})
+        signal = make_signal(
+            FailureType.TOOL_LOOP, evidence={"tool": "search", "count": 5, "window": 5}
+        )
         d = explain(signal).as_dict()
         required_keys = {
-            "failure_type", "severity", "run_id", "agent_id",
-            "agent_version", "confidence", "title", "what",
-            "why_it_matters", "evidence_summary", "suggested_fixes",
-            "step_index", "detected_at", "evidence",
+            "failure_type",
+            "severity",
+            "run_id",
+            "agent_id",
+            "agent_version",
+            "confidence",
+            "title",
+            "what",
+            "why_it_matters",
+            "evidence_summary",
+            "suggested_fixes",
+            "step_index",
+            "detected_at",
+            "evidence",
         }
         self.assertTrue(required_keys.issubset(set(d.keys())))
 
     def test_slack_text_contains_title(self):
-        signal = make_signal(FailureType.TOOL_LOOP,
-                             evidence={"tool": "search", "count": 5, "window": 5})
+        signal = make_signal(
+            FailureType.TOOL_LOOP, evidence={"tool": "search", "count": 5, "window": 5}
+        )
         exp = explain(signal)
         slack = exp.as_slack_text()
         self.assertIn(exp.title, slack)
 
     def test_slack_text_contains_run_id(self):
-        signal = make_signal(FailureType.TOOL_LOOP,
-                             evidence={"tool": "search", "count": 5, "window": 5})
+        signal = make_signal(
+            FailureType.TOOL_LOOP, evidence={"tool": "search", "count": 5, "window": 5}
+        )
         exp = explain(signal)
         slack = exp.as_slack_text()
         self.assertIn("run-test-abc", slack)
@@ -152,8 +187,8 @@ class TestExplanationContract(unittest.TestCase):
 
 # ── TOOL_LOOP specific ─────────────────────────────────────────────────────────
 
-class TestToolLoopExplanation(unittest.TestCase):
 
+class TestToolLoopExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.TOOL_LOOP,
@@ -184,8 +219,8 @@ class TestToolLoopExplanation(unittest.TestCase):
 
 # ── TOOL_THRASHING specific ────────────────────────────────────────────────────
 
-class TestToolThrashingExplanation(unittest.TestCase):
 
+class TestToolThrashingExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.TOOL_THRASHING,
@@ -210,8 +245,8 @@ class TestToolThrashingExplanation(unittest.TestCase):
 
 # ── TOOL_AVOIDANCE specific ────────────────────────────────────────────────────
 
-class TestToolAvoidanceExplanation(unittest.TestCase):
 
+class TestToolAvoidanceExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.TOOL_AVOIDANCE,
@@ -238,8 +273,8 @@ class TestToolAvoidanceExplanation(unittest.TestCase):
 
 # ── GOAL_ABANDONMENT specific ──────────────────────────────────────────────────
 
-class TestGoalAbandonmentExplanation(unittest.TestCase):
 
+class TestGoalAbandonmentExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.GOAL_ABANDONMENT,
@@ -265,8 +300,8 @@ class TestGoalAbandonmentExplanation(unittest.TestCase):
 
 # ── PROMPT_INJECTION specific ──────────────────────────────────────────────────
 
-class TestPromptInjectionExplanation(unittest.TestCase):
 
+class TestPromptInjectionExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.PROMPT_INJECTION_SIGNAL,
@@ -292,8 +327,7 @@ class TestPromptInjectionExplanation(unittest.TestCase):
         self.assertIn("security", self.exp.why_it_matters.lower())
 
     def test_has_logging_fix(self):
-        all_text = " ".join(f.description + " " + f.code
-                            for f in self.exp.suggested_fixes)
+        all_text = " ".join(f.description + " " + f.code for f in self.exp.suggested_fixes)
         self.assertIn("log", all_text.lower())
 
     def test_single_pattern_grammar(self):
@@ -309,8 +343,8 @@ class TestPromptInjectionExplanation(unittest.TestCase):
 
 # ── RAG_EMPTY_RETRIEVAL specific ───────────────────────────────────────────────
 
-class TestRagEmptyRetrievalExplanation(unittest.TestCase):
 
+class TestRagEmptyRetrievalExplanation(unittest.TestCase):
     def setUp(self):
         self.signal = make_signal(
             FailureType.RAG_EMPTY_RETRIEVAL,
@@ -367,8 +401,8 @@ class TestRagEmptyRetrievalExplanation(unittest.TestCase):
 
 # ── Fallback ───────────────────────────────────────────────────────────────────
 
-class TestFallback(unittest.TestCase):
 
+class TestFallback(unittest.TestCase):
     def test_unknown_failure_type_returns_explanation(self):
         """explain() must never raise — even for future failure types."""
         signal = make_signal(FailureType.POLICY_VIOLATION, evidence={})

@@ -5,6 +5,7 @@ Edit that file to tune - no code changes or rebuild needed.
 Restart to pick up changes:
     docker compose restart detector
 """
+
 from __future__ import annotations
 
 from dunetrace.detectors import (
@@ -31,23 +32,23 @@ from detector_svc.config_loader import load_detector_kwargs
 
 # Maps YAML section key → detector class
 _DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
-    "tool_loop":               ToolLoopDetector,
-    "tool_thrashing":          ToolThrashingDetector,
-    "tool_avoidance":          ToolAvoidanceDetector,
-    "goal_abandonment":        GoalAbandonmentDetector,
+    "tool_loop": ToolLoopDetector,
+    "tool_thrashing": ToolThrashingDetector,
+    "tool_avoidance": ToolAvoidanceDetector,
+    "goal_abandonment": GoalAbandonmentDetector,
     "prompt_injection_signal": PromptInjectionDetector,
-    "rag_empty_retrieval":     RagEmptyRetrievalDetector,
-    "llm_truncation_loop":     LlmTruncationLoopDetector,
-    "context_bloat":           ContextBloatDetector,
-    "slow_step":               SlowStepDetector,
-    "retry_storm":             RetryStormDetector,
-    "empty_llm_response":      EmptyLlmResponseDetector,
-    "step_count_inflation":    StepCountInflationDetector,
-    "cascading_tool_failure":  CascadingToolFailureDetector,
-    "first_step_failure":      FirstStepFailureDetector,
-    "reasoning_stall":         ReasoningSpinDetector,
-    "cost_spike":              CostSpikeDetector,
-    "session_latency":         SessionLatencyDetector,
+    "rag_empty_retrieval": RagEmptyRetrievalDetector,
+    "llm_truncation_loop": LlmTruncationLoopDetector,
+    "context_bloat": ContextBloatDetector,
+    "slow_step": SlowStepDetector,
+    "retry_storm": RetryStormDetector,
+    "empty_llm_response": EmptyLlmResponseDetector,
+    "step_count_inflation": StepCountInflationDetector,
+    "cascading_tool_failure": CascadingToolFailureDetector,
+    "first_step_failure": FirstStepFailureDetector,
+    "reasoning_stall": ReasoningSpinDetector,
+    "cost_spike": CostSpikeDetector,
+    "session_latency": SessionLatencyDetector,
 }
 
 # Load config once at import time

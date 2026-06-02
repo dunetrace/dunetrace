@@ -2,6 +2,7 @@
 Reads detector thresholds from detectors.yml and returns kwargs for each detector class.
 Falls back to SDK defaults if the file is missing or a detector isn't listed.
 """
+
 from __future__ import annotations
 
 import logging
@@ -13,37 +14,37 @@ logger = logging.getLogger("dunetrace.config_loader")
 # Maps YAML section key -> detector constructor kwarg names (all uppercase).
 # Only detectors with tunable params need an entry here.
 _PARAM_MAP: dict[str, dict[str, str]] = {
-    "tool_loop":               {"threshold": "THRESHOLD", "window": "WINDOW"},
-    "tool_thrashing":          {"window": "WINDOW"},
-    "tool_avoidance":          {"min_llm_calls": "MIN_LLM_CALLS"},
-    "goal_abandonment":        {"stall_steps": "STALL_STEPS"},
-    "rag_empty_retrieval":     {"min_score": "MIN_SCORE", "min_results": "MIN_RESULTS"},
-    "llm_truncation_loop":     {"threshold": "THRESHOLD"},
-    "context_bloat":           {
-        "growth_factor":    "GROWTH_FACTOR",
-        "min_calls":        "MIN_CALLS",
-        "min_last_tokens":  "MIN_LAST_TOKENS",
+    "tool_loop": {"threshold": "THRESHOLD", "window": "WINDOW"},
+    "tool_thrashing": {"window": "WINDOW"},
+    "tool_avoidance": {"min_llm_calls": "MIN_LLM_CALLS"},
+    "goal_abandonment": {"stall_steps": "STALL_STEPS"},
+    "rag_empty_retrieval": {"min_score": "MIN_SCORE", "min_results": "MIN_RESULTS"},
+    "llm_truncation_loop": {"threshold": "THRESHOLD"},
+    "context_bloat": {
+        "growth_factor": "GROWTH_FACTOR",
+        "min_calls": "MIN_CALLS",
+        "min_last_tokens": "MIN_LAST_TOKENS",
         "inflation_factor": "INFLATION_FACTOR",
     },
-    "slow_step":               {"inflation_factor": "INFLATION_FACTOR"},
-    "retry_storm":             {"threshold": "THRESHOLD"},
-    "step_count_inflation":    {"inflation_factor": "INFLATION_FACTOR"},
-    "cascading_tool_failure":  {"threshold": "THRESHOLD"},
-    "first_step_failure":      {"max_step": "MAX_STEP"},
-    "reasoning_stall":         {
+    "slow_step": {"inflation_factor": "INFLATION_FACTOR"},
+    "retry_storm": {"threshold": "THRESHOLD"},
+    "step_count_inflation": {"inflation_factor": "INFLATION_FACTOR"},
+    "cascading_tool_failure": {"threshold": "THRESHOLD"},
+    "first_step_failure": {"max_step": "MAX_STEP"},
+    "reasoning_stall": {
         "ratio_threshold": "RATIO_THRESHOLD",
-        "min_llm_calls":   "MIN_LLM_CALLS",
+        "min_llm_calls": "MIN_LLM_CALLS",
         "inflation_factor": "INFLATION_FACTOR",
     },
-    "cost_spike":              {
-        "inflation_factor":         "INFLATION_FACTOR",
-        "static_threshold_tokens":  "STATIC_THRESHOLD_TOKENS",
-        "min_llm_calls":            "MIN_LLM_CALLS",
+    "cost_spike": {
+        "inflation_factor": "INFLATION_FACTOR",
+        "static_threshold_tokens": "STATIC_THRESHOLD_TOKENS",
+        "min_llm_calls": "MIN_LLM_CALLS",
     },
-    "session_latency":         {
-        "inflation_factor":        "INFLATION_FACTOR",
-        "static_threshold_secs":   "STATIC_THRESHOLD_SECS",
-        "min_events":              "MIN_EVENTS",
+    "session_latency": {
+        "inflation_factor": "INFLATION_FACTOR",
+        "static_threshold_secs": "STATIC_THRESHOLD_SECS",
+        "min_events": "MIN_EVENTS",
     },
 }
 
@@ -59,9 +60,7 @@ def load_detector_kwargs(config_path: str | None = None) -> dict[str, dict[str, 
 
     Returns an empty dict if the file is missing — SDK defaults apply.
     """
-    path = config_path or os.environ.get(
-        "DETECTOR_CONFIG", "/app/detectors.yml"
-    )
+    path = config_path or os.environ.get("DETECTOR_CONFIG", "/app/detectors.yml")
 
     try:
         import yaml  # type: ignore[import]
@@ -90,11 +89,7 @@ def load_detector_kwargs(config_path: str | None = None) -> dict[str, dict[str, 
             if not isinstance(params, dict):
                 continue
             param_map = _PARAM_MAP.get(det_key, {})
-            kwargs = {
-                param_map[k]: v
-                for k, v in params.items()
-                if k in param_map
-            }
+            kwargs = {param_map[k]: v for k, v in params.items() if k in param_map}
             if kwargs:
                 result[category][det_key] = kwargs
 

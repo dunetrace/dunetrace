@@ -7,6 +7,7 @@ Run:
     cd packages/mcp-server && python -m pytest tests/ -v
     python -m unittest discover -s packages/mcp-server/tests
 """
+
 from __future__ import annotations
 
 import time
@@ -96,7 +97,9 @@ SIGNAL_LIST = {
             "what": "Token usage was 5× above the P75 baseline.",
             "why_it_matters": "Runaway cost.",
             "evidence_summary": "80k tokens vs 15k baseline.",
-            "suggested_fixes": [{"description": "Add token budget guard", "language": "python", "code": ""}],
+            "suggested_fixes": [
+                {"description": "Add token budget guard", "language": "python", "code": ""}
+            ],
         },
     ],
     "page": {"total": 2, "offset": 0, "limit": 500, "has_more": False},
@@ -126,17 +129,58 @@ RUN_DETAIL = {
     "total_tokens": None,
     "signals": [SIGNAL_LIST["signals"][0]],
     "events": [
-        {"event_type": "run.started",   "step_index": 0, "timestamp": time.time() - 120, "payload": {}, "parent_run_id": None},
-        {"event_type": "llm.called",    "step_index": 1, "timestamp": time.time() - 119, "payload": {"model": "gpt-4o-mini", "prompt_tokens": 500, "completion_tokens": 100, "latency_ms": 800}, "parent_run_id": None},
-        {"event_type": "tool.called",   "step_index": 2, "timestamp": time.time() - 115, "payload": {"tool_name": "web_search", "success": True, "latency_ms": 200}, "parent_run_id": None},
-        {"event_type": "run.completed", "step_index": 8, "timestamp": time.time() - 90,  "payload": {"exit_reason": "final_answer"}, "parent_run_id": None},
+        {
+            "event_type": "run.started",
+            "step_index": 0,
+            "timestamp": time.time() - 120,
+            "payload": {},
+            "parent_run_id": None,
+        },
+        {
+            "event_type": "llm.called",
+            "step_index": 1,
+            "timestamp": time.time() - 119,
+            "payload": {
+                "model": "gpt-4o-mini",
+                "prompt_tokens": 500,
+                "completion_tokens": 100,
+                "latency_ms": 800,
+            },
+            "parent_run_id": None,
+        },
+        {
+            "event_type": "tool.called",
+            "step_index": 2,
+            "timestamp": time.time() - 115,
+            "payload": {"tool_name": "web_search", "success": True, "latency_ms": 200},
+            "parent_run_id": None,
+        },
+        {
+            "event_type": "run.completed",
+            "step_index": 8,
+            "timestamp": time.time() - 90,
+            "payload": {"exit_reason": "final_answer"},
+            "parent_run_id": None,
+        },
     ],
 }
 
 INSIGHTS = {
     "input_patterns": [
-        {"input_hash": "abc123", "failure_type": "TOOL_LOOP", "triggered_count": 8, "total_runs": 8, "rate": 1.0},
-        {"input_hash": "def456", "failure_type": "COST_SPIKE", "triggered_count": 2, "total_runs": 5, "rate": 0.4},
+        {
+            "input_hash": "abc123",
+            "failure_type": "TOOL_LOOP",
+            "triggered_count": 8,
+            "total_runs": 8,
+            "rate": 1.0,
+        },
+        {
+            "input_hash": "def456",
+            "failure_type": "COST_SPIKE",
+            "triggered_count": 2,
+            "total_runs": 5,
+            "rate": 0.4,
+        },
     ],
     "signal_trends": [
         {"failure_type": "TOOL_LOOP", "agent_version": "v1.2.3", "day": "2026-05-12", "count": 4},
@@ -144,15 +188,42 @@ INSIGHTS = {
         {"failure_type": "COST_SPIKE", "agent_version": "v1.2.3", "day": "2026-05-13", "count": 1},
     ],
     "failure_rates": [
-        {"failure_type": "TOOL_LOOP", "day": "2026-05-12", "total_runs": 8, "affected_runs": 8, "rate": 1.0},
-        {"failure_type": "COST_SPIKE", "day": "2026-05-13", "total_runs": 5, "affected_runs": 2, "rate": 0.4},
+        {
+            "failure_type": "TOOL_LOOP",
+            "day": "2026-05-12",
+            "total_runs": 8,
+            "affected_runs": 8,
+            "rate": 1.0,
+        },
+        {
+            "failure_type": "COST_SPIKE",
+            "day": "2026-05-13",
+            "total_runs": 5,
+            "affected_runs": 2,
+            "rate": 0.4,
+        },
     ],
     "systemic_patterns": [
-        {"failure_type": "TOOL_LOOP", "total_runs": 16, "affected_runs": 16, "rate": 1.0,
-         "first_seen": time.time() - 86400 * 5, "last_seen": time.time() - 600, "is_systemic": True},
+        {
+            "failure_type": "TOOL_LOOP",
+            "total_runs": 16,
+            "affected_runs": 16,
+            "rate": 1.0,
+            "first_seen": time.time() - 86400 * 5,
+            "last_seen": time.time() - 600,
+            "is_systemic": True,
+        },
     ],
     "versions": [],
-    "time_to_tool": {"p25": None, "p50": None, "p75": None, "avg_steps": None, "runs_with_tool": 0, "total_runs": 0, "daily_trend": []},
+    "time_to_tool": {
+        "p25": None,
+        "p50": None,
+        "p75": None,
+        "avg_steps": None,
+        "runs_with_tool": 0,
+        "total_runs": 0,
+        "daily_trend": [],
+    },
     "hourly_pattern": [],
     "deploy_events": [],
 }
@@ -171,12 +242,23 @@ def _mock_get(path, **params):
     if "/runs/" in path:
         return RUN_DETAIL
     if path.endswith("/runs"):
-        return {"runs": [
-            {"run_id": "run-abc-123", "agent_id": "my-agent", "agent_version": "v1.2.3",
-             "started_at": time.time() - 120, "completed_at": time.time() - 90,
-             "exit_reason": "run.completed", "step_count": 8, "total_tokens": None,
-             "signal_count": 1, "has_signals": True}
-        ], "page": {"total": 1, "offset": 0, "limit": 100, "has_more": False}}
+        return {
+            "runs": [
+                {
+                    "run_id": "run-abc-123",
+                    "agent_id": "my-agent",
+                    "agent_version": "v1.2.3",
+                    "started_at": time.time() - 120,
+                    "completed_at": time.time() - 90,
+                    "exit_reason": "run.completed",
+                    "step_count": 8,
+                    "total_tokens": None,
+                    "signal_count": 1,
+                    "has_signals": True,
+                }
+            ],
+            "page": {"total": 1, "offset": 0, "limit": 100, "has_more": False},
+        }
     raise ValueError(f"Unmocked path: {path}")
 
 
@@ -195,7 +277,7 @@ class TestListAgents(unittest.TestCase):
 
     def test_shows_signal_counts(self):
         out = srv.list_agents()
-        self.assertIn("12", out)   # signal count for my-agent
+        self.assertIn("12", out)  # signal count for my-agent
 
     def test_shows_failure_types(self):
         out = srv.list_agents()
@@ -291,7 +373,7 @@ class TestGetRunDetail(unittest.TestCase):
         self.assertIn("run-abc-123", out)
         self.assertIn("my-agent", out)
         self.assertIn("v1.2.3", out)
-        self.assertIn("30.0s", out)     # duration ~30s
+        self.assertIn("30.0s", out)  # duration ~30s
 
     def test_shows_signal(self):
         out = srv.get_run_detail("run-abc-123")
@@ -312,7 +394,7 @@ class TestGetRunDetail(unittest.TestCase):
         self.assertIn("clean run", out)
 
     def test_large_event_list_capped(self):
-        many_events = RUN_DETAIL["events"] * 15   # 60 events
+        many_events = RUN_DETAIL["events"] * 15  # 60 events
         big_run = {**RUN_DETAIL, "events": many_events}
         with patch("dunetrace_mcp.client.get", return_value=big_run):
             out = srv.get_run_detail("run-big")
@@ -345,7 +427,7 @@ class TestSearchSignals(unittest.TestCase):
         # The COST_SPIKE signal is 2 hours old; within 1h cutoff it should vanish
         out = srv.search_signals(since_hours=1)
         self.assertNotIn("COST_SPIKE", out)
-        self.assertIn("TOOL_LOOP", out)     # 10 min old, passes
+        self.assertIn("TOOL_LOOP", out)  # 10 min old, passes
 
     def test_since_hours_zero_results(self):
         # Very short window — nothing should match
@@ -428,7 +510,9 @@ class TestGetSignalDetail(unittest.TestCase):
     def test_evidence_list_truncated(self):
         big_evidence = {**SIGNAL_LIST["signals"][0]["evidence"], "args_hashes": ["x"] * 20}
         sig = {**SIGNAL_LIST["signals"][0], "evidence": big_evidence}
-        with patch("dunetrace_mcp.client.get", return_value={"signals": [sig], "page": {"total": 1}}):
+        with patch(
+            "dunetrace_mcp.client.get", return_value={"signals": [sig], "page": {"total": 1}}
+        ):
             out = srv.get_signal_detail(42, "my-agent")
         self.assertIn("+14 more", out)
 
@@ -641,7 +725,7 @@ class TestGetInstrumentationGuide(unittest.TestCase):
         out = srv.get_instrumentation_guide("rails")
         self.assertIn("Unknown framework", out)
         self.assertIn("rails", out)
-        self.assertIn("langchain", out)     # lists supported values
+        self.assertIn("langchain", out)  # lists supported values
 
     def test_case_insensitive(self):
         out = srv.get_instrumentation_guide("LANGCHAIN")
@@ -654,7 +738,10 @@ class TestGetInstrumentationGuide(unittest.TestCase):
     def test_includes_full_doc_when_available(self):
         # When docs directory exists (it does in repo), the full markdown is appended
         import pathlib
-        doc_path = pathlib.Path(__file__).resolve().parents[3] / "docs" / "integrate-langchain-agent.md"
+
+        doc_path = (
+            pathlib.Path(__file__).resolve().parents[3] / "docs" / "integrate-langchain-agent.md"
+        )
         if doc_path.exists():
             out = srv.get_instrumentation_guide("langchain")
             # The full doc contains sections not in the inline snippet
@@ -664,6 +751,7 @@ class TestGetInstrumentationGuide(unittest.TestCase):
         # Patch the docs path to a non-existent directory — should still return inline guide
         import pathlib
         from unittest.mock import patch
+
         fake_path = pathlib.Path("/nonexistent/docs")
         with patch.object(srv, "_DOCS", fake_path):
             out = srv.get_instrumentation_guide("python")
@@ -675,6 +763,7 @@ class TestMainCLI(unittest.TestCase):
 
     def test_no_args_runs_stdio(self):
         import sys
+
         with patch.object(sys, "argv", ["dunetrace-mcp"]):
             with patch.object(srv.mcp, "run") as mock_run:
                 srv.main()
@@ -682,6 +771,7 @@ class TestMainCLI(unittest.TestCase):
 
     def test_sse_flag_runs_sse(self):
         import sys
+
         with patch.object(sys, "argv", ["dunetrace-mcp", "--sse"]):
             with patch.object(srv.mcp, "run") as mock_run:
                 srv.main()
@@ -689,6 +779,7 @@ class TestMainCLI(unittest.TestCase):
 
     def test_sse_with_custom_port(self):
         import sys
+
         with patch.object(sys, "argv", ["dunetrace-mcp", "--sse", "--port", "9000"]):
             with patch.object(srv.mcp, "run") as mock_run:
                 srv.main()
@@ -696,6 +787,7 @@ class TestMainCLI(unittest.TestCase):
 
     def test_port_without_sse_still_runs_stdio(self):
         import sys
+
         with patch.object(sys, "argv", ["dunetrace-mcp", "--port", "9000"]):
             with patch.object(srv.mcp, "run") as mock_run:
                 srv.main()
@@ -703,6 +795,7 @@ class TestMainCLI(unittest.TestCase):
 
     def test_help_exits_zero(self):
         import sys
+
         with patch.object(sys, "argv", ["dunetrace-mcp", "--help"]):
             with self.assertRaises(SystemExit) as ctx:
                 srv.main()
@@ -710,6 +803,7 @@ class TestMainCLI(unittest.TestCase):
 
     def test_version_exits_zero(self):
         import sys
+
         with patch.object(sys, "argv", ["dunetrace-mcp", "--version"]):
             with self.assertRaises(SystemExit) as ctx:
                 srv.main()
@@ -744,6 +838,7 @@ class TestResources(unittest.TestCase):
     def test_missing_doc_returns_error_string(self):
         import pathlib
         from unittest.mock import patch
+
         with patch.object(srv, "_DOCS", pathlib.Path("/nonexistent")):
             content = srv.doc_integrate_python()
         self.assertIn("doc not found", content)
@@ -826,13 +921,21 @@ class TestSearchSignalsExtra(unittest.TestCase):
             "what": "Run took far longer than typical.",
             "why_it_matters": "Indicates hanging tools or infrastructure.",
             "evidence_summary": "350s vs 90s baseline.",
-            "suggested_fixes": [{"description": "Add timeout guards", "language": "python", "code": ""}],
+            "suggested_fixes": [
+                {"description": "Add timeout guards", "language": "python", "code": ""}
+            ],
         }
-        sig_list = {"signals": [session_sig], "page": {"total": 1, "offset": 0, "limit": 200, "has_more": False}}
-        with patch("dunetrace_mcp.client.get", side_effect=lambda path, **p: AGENT_LIST if path == "/v1/agents" else sig_list):
+        sig_list = {
+            "signals": [session_sig],
+            "page": {"total": 1, "offset": 0, "limit": 200, "has_more": False},
+        }
+        with patch(
+            "dunetrace_mcp.client.get",
+            side_effect=lambda path, **p: AGENT_LIST if path == "/v1/agents" else sig_list,
+        ):
             out = srv.search_signals(failure_type="SESSION_LATENCY")
         self.assertIn("SESSION_LATENCY", out)
-        self.assertIn("🟡", out)   # MEDIUM icon
+        self.assertIn("🟡", out)  # MEDIUM icon
 
 
 class TestGetAgentPatternsExtra(unittest.TestCase):
