@@ -15,7 +15,7 @@
 
 ---
 
-→ **If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
+**If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
 
 ## The problem
 
