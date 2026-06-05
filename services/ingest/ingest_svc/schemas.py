@@ -8,7 +8,6 @@ import time
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-
 VALID_EVENT_TYPES = {
     "run.started",
     "run.completed",

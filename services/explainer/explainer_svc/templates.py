@@ -16,7 +16,6 @@ from typing import Callable, Dict
 from dunetrace.models import FailureSignal, FailureType
 from explainer_svc.models import CodeFix, Explanation
 
-
 # Helpers
 
 
@@ -1167,9 +1166,11 @@ def explain_first_step_failure(signal: FailureSignal) -> Explanation:
                 description=(
                     f"Check for policy refusals: review the model's raw response at step {step}"
                     if trigger == "empty_llm_response"
-                    else f"Test `{tool}` independently to confirm it's reachable"
-                    if tool
-                    else "Review the exception traceback at step 0 for root cause"
+                    else (
+                        f"Test `{tool}` independently to confirm it's reachable"
+                        if tool
+                        else "Review the exception traceback at step 0 for root cause"
+                    )
                 ),
                 language="python" if trigger == "tool_failure" else "text",
                 code=(

@@ -11,6 +11,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+try:
+    from typing import Protocol, runtime_checkable
+except ImportError:  # Python 3.7
+    from typing_extensions import Protocol, runtime_checkable  # type: ignore[assignment]
+
 
 # ── Event Types ────────────────────────────────────────────────────────────────
 
@@ -114,6 +119,7 @@ class LlmCall:
     timestamp: float
     output_length: Optional[int] = None
     completion_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
 
 
 @dataclass
@@ -213,6 +219,47 @@ class FailureSignal:
     evidence: Dict[str, Any]
     detected_at: float = field(default_factory=time.time)
     co_signal_count: int = 0
+
+
+# ── Exporter interface ────────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class Exporter(Protocol):
+    """
+    Interface for custom event exporters.
+
+    Implement ``handle`` to forward every ``AgentEvent`` to an external sink
+    (Splunk, Datadog, a webhook, a custom file, etc.).
+
+    Exporters are called synchronously in ``_emit`` on the agent's thread.
+    Implementations should be fast and non-blocking; offload heavy I/O to a
+    background thread internally if needed.
+
+    Usage::
+
+        class MyExporter:
+            def handle(self, event: AgentEvent) -> None:
+                requests.post("https://my-sink.example.com", json=event.to_dict())
+
+        dt = Dunetrace(exporters=[MyExporter()])
+
+    A plain callable also works via ``CallableExporter``::
+
+        dt = Dunetrace(exporters=[CallableExporter(lambda e: print(e.to_dict()))])
+    """
+
+    def handle(self, event: "AgentEvent") -> None: ...
+
+
+class CallableExporter:
+    """Wraps a plain ``Callable[[AgentEvent], None]`` as an ``Exporter``."""
+
+    def __init__(self, fn: Any) -> None:
+        self._fn = fn
+
+    def handle(self, event: "AgentEvent") -> None:
+        self._fn(event)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

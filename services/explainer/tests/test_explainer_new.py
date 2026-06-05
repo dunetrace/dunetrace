@@ -20,7 +20,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py"))
+    0,
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py")),
 )
 
 from dunetrace.models import FailureSignal, FailureType, Severity
@@ -118,7 +119,12 @@ class TestGoalAbandonmentNewEvidence(unittest.TestCase):
                 "stall_steps": 4,
                 "last_tool_used": "db_query",
                 "steps_since_last_tool": 5,
-                "stall_event_sequence": ["llm.called", "llm.called", "llm.called", "llm.called"],
+                "stall_event_sequence": [
+                    "llm.called",
+                    "llm.called",
+                    "llm.called",
+                    "llm.called",
+                ],
                 "last_tool_step": 3,
             }
         )
@@ -360,7 +366,8 @@ class TestLlmTruncationLoopEnriched(unittest.TestCase):
 class TestExplainRateContext(unittest.TestCase):
     def test_rate_context_attached_to_explanation(self):
         signal = make_signal(
-            FailureType.TOOL_LOOP, evidence={"tool": "web_search", "count": 5, "window": 5}
+            FailureType.TOOL_LOOP,
+            evidence={"tool": "web_search", "count": 5, "window": 5},
         )
         rc = {"total_runs": 10, "affected_runs": 3, "rate": 0.3, "is_systemic": False}
         exp = explain(signal, rate_context=rc)
@@ -368,14 +375,16 @@ class TestExplainRateContext(unittest.TestCase):
 
     def test_rate_context_defaults_to_empty_dict(self):
         signal = make_signal(
-            FailureType.TOOL_LOOP, evidence={"tool": "web_search", "count": 5, "window": 5}
+            FailureType.TOOL_LOOP,
+            evidence={"tool": "web_search", "count": 5, "window": 5},
         )
         exp = explain(signal)
         self.assertEqual(exp.rate_context, {})
 
     def test_rate_context_none_becomes_empty_dict(self):
         signal = make_signal(
-            FailureType.TOOL_LOOP, evidence={"tool": "web_search", "count": 5, "window": 5}
+            FailureType.TOOL_LOOP,
+            evidence={"tool": "web_search", "count": 5, "window": 5},
         )
         exp = explain(signal, rate_context=None)
         self.assertEqual(exp.rate_context, {})
@@ -600,7 +609,11 @@ class TestFirstStepFailureExplanation(unittest.TestCase):
         if tool:
             evidence["tool"] = tool
         return explain(
-            make_signal(FailureType.FIRST_STEP_FAILURE, severity=Severity.MEDIUM, evidence=evidence)
+            make_signal(
+                FailureType.FIRST_STEP_FAILURE,
+                severity=Severity.MEDIUM,
+                evidence=evidence,
+            )
         )
 
     def test_run_error_trigger(self):

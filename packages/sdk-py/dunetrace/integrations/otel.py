@@ -64,7 +64,6 @@ except ImportError:
 
 from dunetrace.models import AgentEvent, EventType, RunState, Severity
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -245,7 +244,10 @@ class DunetraceOTelExporter:
         p, span = event.payload, rs.child_span
         span.set_attribute("gen_ai.response.finish_reason", p.get("finish_reason", ""))
         if p.get("completion_tokens"):
-            span.set_attribute("gen_ai.usage.output_tokens", p["completion_tokens"])
+            total_output = p["completion_tokens"] + (p.get("reasoning_tokens") or 0)
+            span.set_attribute("gen_ai.usage.output_tokens", total_output)
+        if p.get("reasoning_tokens"):
+            span.set_attribute("gen_ai.usage.reasoning.output_tokens", p["reasoning_tokens"])
         if p.get("latency_ms"):
             span.set_attribute("dunetrace.latency_ms", p["latency_ms"])
         if p.get("output_length"):

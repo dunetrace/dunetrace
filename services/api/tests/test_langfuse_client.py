@@ -12,7 +12,6 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -397,7 +396,10 @@ class TestBuildExplainPrompt(unittest.IsolatedAsyncioTestCase):
         obs = [
             _make_generation(
                 [
-                    {"role": "system", "content": "Search the web for relevant sources."},
+                    {
+                        "role": "system",
+                        "content": "Search the web for relevant sources.",
+                    },
                     {"role": "human", "content": "Find climate data"},
                 ]
             )
@@ -557,7 +559,8 @@ class TestBuildExplainPromptStepRange(unittest.IsolatedAsyncioTestCase):
 
     async def test_llm_truncation_loop_step_range_correct(self):
         signal = self._make_signal(
-            "LLM_TRUNCATION_LOOP", {"first_truncation_step": 3, "last_truncation_step": 6}
+            "LLM_TRUNCATION_LOOP",
+            {"first_truncation_step": 3, "last_truncation_step": 6},
         )
         trace = {"input": "test", "observations": []}
         from api_svc.langfuse_client import build_explain_prompt

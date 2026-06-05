@@ -37,7 +37,6 @@ from dunetrace.detectors import (
     ToolLoopDetector,
 )
 
-
 # ── Factories ──────────────────────────────────────────────────────────────────
 
 
@@ -53,7 +52,11 @@ def make_state(**kwargs) -> RunState:
 
 
 def make_tool_call(
-    name: str, step: int = 0, success=None, args_hash: str = "aaa", error_hash: str | None = None
+    name: str,
+    step: int = 0,
+    success=None,
+    args_hash: str = "aaa",
+    error_hash: str | None = None,
 ) -> ToolCall:
     return ToolCall(
         tool_name=name,

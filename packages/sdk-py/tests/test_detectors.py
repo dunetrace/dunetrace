@@ -277,7 +277,10 @@ from dunetrace.detectors import LlmTruncationLoopDetector, ContextBloatDetector
 
 
 def make_llm_call(
-    finish_reason: str = "stop", prompt_tokens: int = 500, step: int = 1, model: str = "gpt-4o-mini"
+    finish_reason: str = "stop",
+    prompt_tokens: int = 500,
+    step: int = 1,
+    model: str = "gpt-4o-mini",
 ) -> LlmCall:
     return LlmCall(
         model=model,

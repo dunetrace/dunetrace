@@ -185,7 +185,11 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Open Dashboard", "emoji": True},
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Open Dashboard",
+                        "emoji": True,
+                    },
                     "url": settings.DASHBOARD_URL,
                     "style": "primary",
                 }

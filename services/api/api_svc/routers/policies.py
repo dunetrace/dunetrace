@@ -15,6 +15,7 @@ from api_svc.db.queries import (
     create_policy,
     update_policy,
     delete_policy,
+    log_policy_audit,
 )
 
 logger = logging.getLogger("dunetrace.api.policies")
@@ -62,14 +63,23 @@ class PolicyUpdate(BaseModel):
     enabled: Optional[bool] = None
 
 
+def _check_prompt_injection(text: str) -> list:
+    """Return matched pattern labels if text contains injection signatures, else []."""
+    from dunetrace.detectors import _INJECTION_PATTERNS_COMPILED
+
+    return [label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(text)]
+
+
 def _validate(condition: ConditionModel, action: ActionModel) -> None:
     if condition.trigger not in _VALID_TRIGGERS:
         raise HTTPException(
-            422, f"Invalid trigger {condition.trigger!r}. Valid: {sorted(_VALID_TRIGGERS)}"
+            422,
+            f"Invalid trigger {condition.trigger!r}. Valid: {sorted(_VALID_TRIGGERS)}",
         )
     if condition.operator not in _VALID_OPERATORS:
         raise HTTPException(
-            422, f"Invalid operator {condition.operator!r}. Valid: {sorted(_VALID_OPERATORS)}"
+            422,
+            f"Invalid operator {condition.operator!r}. Valid: {sorted(_VALID_OPERATORS)}",
         )
     if action.type not in _VALID_ACTIONS:
         raise HTTPException(
@@ -77,8 +87,16 @@ def _validate(condition: ConditionModel, action: ActionModel) -> None:
         )
     if action.type == "switch_model" and not (action.params or {}).get("model"):
         raise HTTPException(422, "switch_model action requires params.model")
-    if action.type == "inject_prompt" and not (action.params or {}).get("prompt"):
-        raise HTTPException(422, "inject_prompt action requires params.prompt")
+    if action.type == "inject_prompt":
+        prompt = (action.params or {}).get("prompt", "")
+        if not prompt:
+            raise HTTPException(422, "inject_prompt action requires params.prompt")
+        matched = _check_prompt_injection(prompt)
+        if matched:
+            raise HTTPException(
+                422,
+                f"inject_prompt content rejected: matches injection pattern(s): {matched}",
+            )
 
 
 @router.get("", response_model=List[Dict[str, Any]], summary="List all policies")
@@ -92,7 +110,7 @@ async def list_all_policies(
 @router.post("", response_model=Dict[str, Any], summary="Create a policy")
 async def create(
     body: PolicyCreate,
-    _customer: str = Depends(require_customer),
+    customer_id: str = Depends(require_customer),
 ) -> Dict[str, Any]:
     _validate(body.condition, body.action)
     row = await create_policy(
@@ -103,6 +121,7 @@ async def create(
         priority=body.priority,
         enabled=body.enabled,
     )
+    await log_policy_audit(row["id"], "created", customer_id, before=None, after=row)
     return row
 
 
@@ -121,38 +140,44 @@ async def get_one(
 async def update(
     policy_id: int,
     body: PolicyUpdate,
-    _customer: str = Depends(require_customer),
+    customer_id: str = Depends(require_customer),
 ) -> Dict[str, Any]:
     existing = await get_policy_by_id(policy_id)
     if existing is None:
         raise HTTPException(404, f"Policy {policy_id} not found")
-    if body.condition:
-        _validate(body.condition, body.action or ActionModel(type=existing["action"]["type"]))
+    effective_condition = body.condition or ConditionModel(**existing["condition"])
+    effective_action = body.action or ActionModel(**existing["action"])
+    _validate(effective_condition, effective_action)
     row = await update_policy(policy_id, body.model_dump(exclude_none=True))
+    await log_policy_audit(policy_id, "updated", customer_id, before=existing, after=row)
     return row
 
 
 @router.delete("/{policy_id}", response_model=Dict[str, Any], summary="Delete a policy")
 async def delete(
     policy_id: int,
-    _customer: str = Depends(require_customer),
+    customer_id: str = Depends(require_customer),
 ) -> Dict[str, Any]:
     existing = await get_policy_by_id(policy_id)
     if existing is None:
         raise HTTPException(404, f"Policy {policy_id} not found")
     await delete_policy(policy_id)
+    await log_policy_audit(policy_id, "deleted", customer_id, before=existing, after=None)
     return {"deleted": True, "policy_id": policy_id}
 
 
 @router.patch(
-    "/{policy_id}/toggle", response_model=Dict[str, Any], summary="Toggle enabled/disabled"
+    "/{policy_id}/toggle",
+    response_model=Dict[str, Any],
+    summary="Toggle enabled/disabled",
 )
 async def toggle(
     policy_id: int,
-    _customer: str = Depends(require_customer),
+    customer_id: str = Depends(require_customer),
 ) -> Dict[str, Any]:
     existing = await get_policy_by_id(policy_id)
     if existing is None:
         raise HTTPException(404, f"Policy {policy_id} not found")
     row = await update_policy(policy_id, {"enabled": not existing["enabled"]})
+    await log_policy_audit(policy_id, "toggled", customer_id, before=existing, after=row)
     return row

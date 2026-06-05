@@ -52,7 +52,9 @@ try:
     try:
         from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler  # v4+
     except ImportError:
-        from langfuse.callback import CallbackHandler as LangfuseCallbackHandler  # v2/v3
+        from langfuse.callback import (
+            CallbackHandler as LangfuseCallbackHandler,
+        )  # v2/v3
     _LANGFUSE_AVAILABLE = True
 except ImportError:
     _LANGFUSE_AVAILABLE = False

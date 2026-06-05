@@ -14,9 +14,15 @@ from typing import List
 try:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
     from opentelemetry.trace import StatusCode
-    from dunetrace.integrations.otel import DunetraceOTelExporter, _trace_id, _root_span_id
+    from dunetrace.integrations.otel import (
+        DunetraceOTelExporter,
+        _trace_id,
+        _root_span_id,
+    )
     from dunetrace.models import AgentEvent, EventType, RunState, FailureType, Severity
 
     _OTEL_AVAILABLE = True
@@ -62,13 +68,22 @@ def _event(
 def _full_run(exporter_obj: DunetraceOTelExporter, run_id: str) -> List:
     """Emit a minimal complete run and return recorded spans."""
     exporter_obj.handle(
-        _event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": ["search"]})
+        _event(
+            EventType.RUN_STARTED,
+            run_id,
+            payload={"model": "gpt-4o", "tools": ["search"]},
+        )
     )
     exporter_obj.handle(
         _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
     )
     exporter_obj.handle(
-        _event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"})
+        _event(
+            EventType.LLM_RESPONDED,
+            run_id,
+            step_index=1,
+            payload={"finish_reason": "stop"},
+        )
     )
     exporter_obj.handle(
         _event(
@@ -121,7 +136,11 @@ class TestRunSpans:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(
-            _event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": ["search"]})
+            _event(
+                EventType.RUN_STARTED,
+                run_id,
+                payload={"model": "gpt-4o", "tools": ["search"]},
+            )
         )
         dt_otel.handle(
             _event(
@@ -270,7 +289,11 @@ class TestRunSpans:
             _event(
                 EventType.RUN_COMPLETED,
                 run_id,
-                payload={"total_steps": 7, "exit_reason": "final_answer", "tool_call_count": 3},
+                payload={
+                    "total_steps": 7,
+                    "exit_reason": "final_answer",
+                    "tool_call_count": 3,
+                },
             )
         )
 
@@ -326,10 +349,20 @@ class TestLlmSpan:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.handle(
-            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "claude-3-sonnet"})
+            _event(
+                EventType.LLM_CALLED,
+                run_id,
+                step_index=1,
+                payload={"model": "claude-3-sonnet"},
+            )
         )
         dt_otel.handle(
-            _event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"})
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"finish_reason": "stop"},
+            )
         )
         dt_otel.handle(
             _event(
@@ -358,7 +391,12 @@ class TestLlmSpan:
             )
         )
         dt_otel.handle(
-            _event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"})
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"finish_reason": "stop"},
+            )
         )
         dt_otel.handle(
             _event(
@@ -442,7 +480,10 @@ class TestLlmSpan:
         )
         dt_otel.handle(
             _event(
-                EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "length"}
+                EventType.LLM_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"finish_reason": "length"},
             )
         )
         dt_otel.handle(
@@ -540,7 +581,12 @@ class TestToolSpan:
             )
         )
         dt_otel.handle(
-            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=2,
+                payload={"success": True},
+            )
         )
         dt_otel.handle(
             _event(
@@ -569,7 +615,12 @@ class TestToolSpan:
             )
         )
         dt_otel.handle(
-            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=2,
+                payload={"success": True},
+            )
         )
         dt_otel.handle(
             _event(
@@ -598,7 +649,12 @@ class TestToolSpan:
             )
         )
         dt_otel.handle(
-            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=2,
+                payload={"success": True},
+            )
         )
         dt_otel.handle(
             _event(
@@ -871,7 +927,12 @@ class TestRetrievalSpan:
             )
         )
         dt_otel.handle(
-            _event(EventType.RETRIEVAL_RESPONDED, run_id, step_index=1, payload={"result_count": 0})
+            _event(
+                EventType.RETRIEVAL_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"result_count": 0},
+            )
         )
         dt_otel.handle(
             _event(
@@ -911,7 +972,12 @@ class TestOrphanedChildSpan:
             )
         )
         dt_otel.handle(
-            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=2,
+                payload={"success": True},
+            )
         )
         dt_otel.handle(
             _event(
@@ -1174,7 +1240,12 @@ class TestExternalSignal:
             )
         )
         dt_otel.handle(
-            _event(EventType.TOOL_RESPONDED, run_id, step_index=1, payload={"success": True})
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"success": True},
+            )
         )
         dt_otel.handle(
             _event(
@@ -1256,19 +1327,35 @@ class TestConcurrentRuns:
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id_a, agent_id="agent-a", payload={}))
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id_b, agent_id="agent-b", payload={}))
         dt_otel.handle(
-            _event(EventType.LLM_CALLED, run_id_a, step_index=1, payload={"model": "gpt-4o"})
-        )
-        dt_otel.handle(
-            _event(EventType.LLM_CALLED, run_id_b, step_index=1, payload={"model": "gpt-4o"})
-        )
-        dt_otel.handle(
             _event(
-                EventType.LLM_RESPONDED, run_id_a, step_index=1, payload={"finish_reason": "stop"}
+                EventType.LLM_CALLED,
+                run_id_a,
+                step_index=1,
+                payload={"model": "gpt-4o"},
             )
         )
         dt_otel.handle(
             _event(
-                EventType.LLM_RESPONDED, run_id_b, step_index=1, payload={"finish_reason": "stop"}
+                EventType.LLM_CALLED,
+                run_id_b,
+                step_index=1,
+                payload={"model": "gpt-4o"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id_a,
+                step_index=1,
+                payload={"finish_reason": "stop"},
+            )
+        )
+        dt_otel.handle(
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id_b,
+                step_index=1,
+                payload={"finish_reason": "stop"},
             )
         )
         dt_otel.handle(
@@ -1301,7 +1388,11 @@ class TestConcurrentRuns:
         # Should not raise
         dt_otel.handle(_event(EventType.LLM_CALLED, ghost_id, payload={"model": "gpt-4o"}))
         dt_otel.handle(
-            _event(EventType.TOOL_CALLED, ghost_id, payload={"tool_name": "x", "args_hash": "y"})
+            _event(
+                EventType.TOOL_CALLED,
+                ghost_id,
+                payload={"tool_name": "x", "args_hash": "y"},
+            )
         )
         dt_otel.handle(
             _event(
@@ -1330,7 +1421,12 @@ class TestSpanHierarchy:
             _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
         )
         dt_otel.handle(
-            _event(EventType.LLM_RESPONDED, run_id, step_index=1, payload={"finish_reason": "stop"})
+            _event(
+                EventType.LLM_RESPONDED,
+                run_id,
+                step_index=1,
+                payload={"finish_reason": "stop"},
+            )
         )
         dt_otel.handle(
             _event(
@@ -1373,7 +1469,12 @@ class TestSpanHierarchy:
             )
         )
         dt_otel.handle(
-            _event(EventType.TOOL_RESPONDED, run_id, step_index=2, payload={"success": True})
+            _event(
+                EventType.TOOL_RESPONDED,
+                run_id,
+                step_index=2,
+                payload={"success": True},
+            )
         )
         dt_otel.handle(
             _event(

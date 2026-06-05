@@ -1238,7 +1238,7 @@ def get_agent_token_stats(agent_id: str) -> str:
         if usd == 0:
             return "$0.00"
         if usd < 0.001:
-            return f"${usd * 100:.4f}¢"
+            return f"{usd * 100:.4f}¢"
         if usd < 1:
             return f"${usd:.4f}"
         return f"${usd:.2f}"
@@ -1250,14 +1250,16 @@ def get_agent_token_stats(agent_id: str) -> str:
         if not w:
             continue
         label = {"1d": "Last 24 h", "7d": "Last 7 days", "30d": "Last 30 days"}[win]
-        wst_pct = int(round((w.get("wasted_pct") or 0) * 100))
+        cost_wst_pct = int(round((w.get("wasted_pct") or 0) * 100))
+        total_tok = w.get("total_tokens") or 0
+        tok_wst_pct = int(round(w.get("wasted_tokens", 0) / total_tok * 100)) if total_tok else 0
         lines += [
             f"── {label} ──",
             f"  Runs:            {w.get('run_count', 0):>6}  ({w.get('wasted_run_count', 0)} with failures)",
             f"  Total tokens:    {_fmt_tok(w.get('total_tokens', 0)):>8}",
-            f"  Wasted tokens:   {_fmt_tok(w.get('wasted_tokens', 0)):>8}  ({wst_pct}% of total)",
+            f"  Wasted tokens:   {_fmt_tok(w.get('wasted_tokens', 0)):>8}  ({tok_wst_pct}% of total)",
             f"  Total cost:      {_fmt_cost(w.get('total_cost_usd', 0)):>10}",
-            f"  Wasted cost:     {_fmt_cost(w.get('wasted_cost_usd', 0)):>10}  ({wst_pct}% of total)",
+            f"  Wasted cost:     {_fmt_cost(w.get('wasted_cost_usd', 0)):>10}  ({cost_wst_pct}% of total)",
             "",
         ]
 
@@ -1303,7 +1305,7 @@ def main() -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version="dunetrace-mcp 0.1.0",
+        version="dunetrace-mcp 0.1.4",
     )
 
     api_url = os.environ.get("DUNETRACE_API_URL", "http://localhost:8002")

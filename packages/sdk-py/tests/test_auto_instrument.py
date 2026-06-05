@@ -22,7 +22,6 @@ from dunetrace import (
 from dunetrace.auto import _PATCHED
 from dunetrace.models import EventType
 
-
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -61,6 +60,7 @@ def _install_fake_openai():
     class FakeUsage:
         completion_tokens = 42
         prompt_tokens = 10
+        completion_tokens_details = type("D", (), {"reasoning_tokens": 7})()
 
     class FakeChoice:
         finish_reason = "stop"
@@ -405,6 +405,19 @@ class TestAutoInstrumentOpenAI(unittest.TestCase):
 
         responded = next(e for e in captured if e.event_type == EventType.LLM_RESPONDED)
         self.assertEqual(responded.payload["completion_tokens"], 42)
+        dt.shutdown(timeout=1)
+
+    def test_reasoning_tokens_recorded(self):
+        dt = _make_client()
+        captured = _capture(dt)
+
+        with dt.run("agent"):
+            self._completions_mod.Completions().create(
+                messages=[{"role": "user", "content": "hi"}], model="o3"
+            )
+
+        responded = next(e for e in captured if e.event_type == EventType.LLM_RESPONDED)
+        self.assertEqual(responded.payload["reasoning_tokens"], 7)
         dt.shutdown(timeout=1)
 
 

@@ -117,7 +117,9 @@ def load_alert_policies(yml_path: str | None = None) -> dict[str, dict]:
         import logging
 
         logging.getLogger("dunetrace.alerts.config").warning(
-            "Failed to load alert policies from %s: %s — using immediate for all", path, exc
+            "Failed to load alert policies from %s: %s — using immediate for all",
+            path,
+            exc,
         )
         return {}
 

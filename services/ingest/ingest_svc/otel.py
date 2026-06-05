@@ -28,7 +28,6 @@ import time
 import uuid
 from typing import Any
 
-
 # ── Attribute helpers ──────────────────────────────────────────────────────────
 
 
@@ -208,7 +207,11 @@ def otlp_to_events(
             for span in scope_span.get("spans", []):
                 tid = span.get("traceId", "") or str(uuid.uuid4()).replace("-", "")
                 if tid not in traces:
-                    traces[tid] = {"agent_id": agent_id, "agent_version": version, "spans": []}
+                    traces[tid] = {
+                        "agent_id": agent_id,
+                        "agent_version": version,
+                        "spans": [],
+                    }
                 traces[tid]["spans"].append(span)
 
     events: list[dict] = []

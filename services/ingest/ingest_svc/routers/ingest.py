@@ -9,8 +9,18 @@ import uuid
 from fastapi import APIRouter, HTTPException, Query, status, BackgroundTasks
 
 import time
-from ingest_svc.db import insert_events, insert_deploy_event, verify_api_key, fetch_policies
-from ingest_svc.schemas import IngestRequest, IngestResponse, DeployRequest, DeployResponse
+from ingest_svc.db import (
+    insert_events,
+    insert_deploy_event,
+    verify_api_key,
+    fetch_policies,
+)
+from ingest_svc.schemas import (
+    IngestRequest,
+    IngestResponse,
+    DeployRequest,
+    DeployResponse,
+)
 
 logger = logging.getLogger("dunetrace.ingest")
 router = APIRouter()

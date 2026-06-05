@@ -104,11 +104,13 @@ def _patch_openai() -> None:
 def _emit_openai_response(run, resp, t0: float) -> None:
     usage = getattr(resp, "usage", None)
     comp_toks = getattr(usage, "completion_tokens", 0) or 0
+    reason_toks = _completion_detail_tokens(usage, "reasoning_tokens")
     latency_ms = int((time.monotonic() - t0) * 1000)
     finish = _openai_finish_reason(resp)
     text = _openai_content(resp)
     run.llm_responded(
         completion_tokens=comp_toks,
+        reasoning_tokens=reason_toks,
         latency_ms=latency_ms,
         finish_reason=finish,
         output_hash=hash_content(text) if text else "",
@@ -128,6 +130,17 @@ def _openai_content(resp) -> str:
         return resp.choices[0].message.content or ""
     except (AttributeError, IndexError):
         return ""
+
+
+def _completion_detail_tokens(usage, name: str) -> int:
+    details = getattr(usage, "completion_tokens_details", None)
+    if details is None and isinstance(usage, dict):
+        details = usage.get("completion_tokens_details")
+    if details is None:
+        return 0
+    if isinstance(details, dict):
+        return int(details.get(name, 0) or 0)
+    return int(getattr(details, name, 0) or 0)
 
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
@@ -182,7 +195,11 @@ def _patch_anthropic() -> None:
                 run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
             try:
                 resp = await _orig_acreate(
-                    self, model=model, messages=messages, max_tokens=max_tokens, **kwargs
+                    self,
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    **kwargs,
                 )
             except Exception:
                 if run:

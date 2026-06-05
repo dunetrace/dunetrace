@@ -18,7 +18,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ingest_svc.otel import otlp_to_events, _classify, _val, _trace_to_uuid
 
-
 # ── _val ──────────────────────────────────────────────────────────────────────
 
 

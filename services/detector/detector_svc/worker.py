@@ -167,10 +167,16 @@ async def process_run(
 
 
 async def poll_once() -> tuple[int, int]:
-    completed = await fetch_completed_runs(limit=settings.BATCH_SIZE)
+    completed = await fetch_completed_runs(
+        limit=settings.BATCH_SIZE,
+        shard_count=settings.SHARD_COUNT,
+        shard_index=settings.SHARD_INDEX,
+    )
     stalled = await fetch_stalled_runs(
         stall_timeout_secs=settings.STALL_TIMEOUT_SECS,
         limit=settings.BATCH_SIZE,
+        shard_count=settings.SHARD_COUNT,
+        shard_index=settings.SHARD_INDEX,
     )
     runs = completed + stalled
     if not runs:
@@ -181,7 +187,10 @@ async def poll_once() -> tuple[int, int]:
     async def process_run_bounded(r):
         async with semaphore:
             return await process_run(
-                r["run_id"], r["agent_id"], r["agent_version"], r.get("trigger", "unknown")
+                r["run_id"],
+                r["agent_id"],
+                r["agent_version"],
+                r.get("trigger", "unknown"),
             )
 
     results = await asyncio.gather(*[process_run_bounded(r) for r in runs])

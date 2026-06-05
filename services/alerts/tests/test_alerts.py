@@ -32,7 +32,11 @@ from explainer_svc.models import Explanation, CodeFix
 from explainer_svc.explainer import explain
 
 from alerts_svc.formatters.slack import format_slack, format_slack_simple
-from alerts_svc.formatters.webhook import format_webhook, sign_payload, build_signed_request
+from alerts_svc.formatters.webhook import (
+    format_webhook,
+    sign_payload,
+    build_signed_request,
+)
 from alerts_svc.sender import SendResult, send_with_retry
 from alerts_svc.config import SEVERITY_ORDER
 import alerts_svc.worker as worker_module
@@ -330,7 +334,8 @@ class TestSenderRetry(unittest.TestCase):
 
         with (
             patch(
-                "alerts_svc.sender._post", side_effect=urllib.error.URLError("connection refused")
+                "alerts_svc.sender._post",
+                side_effect=urllib.error.URLError("connection refused"),
             ),
             patch("alerts_svc.sender.time.sleep"),
         ):
@@ -463,10 +468,12 @@ class TestWorkerDeliver(unittest.TestCase):
         with (
             patch("alerts_svc.worker.settings") as mock_s,
             patch(
-                "alerts_svc.worker.send_slack", return_value=SendResult(True, "slack", 1, 200)
+                "alerts_svc.worker.send_slack",
+                return_value=SendResult(True, "slack", 1, 200),
             ) as mock_slack,
             patch(
-                "alerts_svc.worker.send_webhook", return_value=SendResult(True, "webhook", 1, 200)
+                "alerts_svc.worker.send_webhook",
+                return_value=SendResult(True, "webhook", 1, 200),
             ),
         ):
             mock_s.slack_enabled = True
@@ -494,7 +501,8 @@ class TestWorkerDeliver(unittest.TestCase):
         with (
             patch("alerts_svc.worker.settings") as mock_s,
             patch(
-                "alerts_svc.worker.send_webhook", return_value=SendResult(True, "webhook", 1, 200)
+                "alerts_svc.worker.send_webhook",
+                return_value=SendResult(True, "webhook", 1, 200),
             ) as mock_wh,
             patch("alerts_svc.worker.build_signed_request", return_value=(b"{}", {})),
         ):
@@ -531,7 +539,10 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch(
                 "alerts_svc.worker.deliver",
@@ -561,7 +572,10 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch(
                 "alerts_svc.worker.deliver",
@@ -592,7 +606,10 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch("alerts_svc.worker.deliver", return_value={}),
         ):

@@ -25,9 +25,12 @@ for _p in [
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from alerts_svc.digest import should_send_digest, format_digest_slack, send_weekly_digest
+from alerts_svc.digest import (
+    should_send_digest,
+    format_digest_slack,
+    send_weekly_digest,
+)
 from alerts_svc.sender import SendResult
-
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -46,39 +49,55 @@ def _sample_data(
         "total_runs": total_runs,
         "total_agents": total_agents,
         "total_signals": total_signals,
-        "top_failures": top_failures
-        if top_failures is not None
-        else [
-            {"failure_type": "TOOL_LOOP", "affected_runs": 10, "total_runs": 100, "rate": 0.10},
-            {"failure_type": "RETRY_STORM", "affected_runs": 5, "total_runs": 100, "rate": 0.05},
-        ],
-        "top_agents": top_agents
-        if top_agents is not None
-        else [
-            {
-                "agent_id": "research-agent",
-                "signal_count": 12,
-                "run_count": 50,
-                "dominant_failure": "TOOL_LOOP",
-            },
-            {
-                "agent_id": "code-agent",
-                "signal_count": 8,
-                "run_count": 50,
-                "dominant_failure": "RETRY_STORM",
-            },
-        ],
-        "systemic": systemic
-        if systemic is not None
-        else [
-            {
-                "agent_id": "research-agent",
-                "failure_type": "TOOL_LOOP",
-                "total_runs": 50,
-                "affected_runs": 10,
-                "rate": 0.20,
-            },
-        ],
+        "top_failures": (
+            top_failures
+            if top_failures is not None
+            else [
+                {
+                    "failure_type": "TOOL_LOOP",
+                    "affected_runs": 10,
+                    "total_runs": 100,
+                    "rate": 0.10,
+                },
+                {
+                    "failure_type": "RETRY_STORM",
+                    "affected_runs": 5,
+                    "total_runs": 100,
+                    "rate": 0.05,
+                },
+            ]
+        ),
+        "top_agents": (
+            top_agents
+            if top_agents is not None
+            else [
+                {
+                    "agent_id": "research-agent",
+                    "signal_count": 12,
+                    "run_count": 50,
+                    "dominant_failure": "TOOL_LOOP",
+                },
+                {
+                    "agent_id": "code-agent",
+                    "signal_count": 8,
+                    "run_count": 50,
+                    "dominant_failure": "RETRY_STORM",
+                },
+            ]
+        ),
+        "systemic": (
+            systemic
+            if systemic is not None
+            else [
+                {
+                    "agent_id": "research-agent",
+                    "failure_type": "TOOL_LOOP",
+                    "total_runs": 50,
+                    "affected_runs": 10,
+                    "rate": 0.20,
+                },
+            ]
+        ),
         "issues_opened": issues_opened,
         "issues_resolved": issues_resolved,
     }
@@ -200,7 +219,12 @@ class TestFormatDigestSlack(unittest.TestCase):
     def test_pct_computed_correctly(self):
         data = _sample_data(
             top_failures=[
-                {"failure_type": "TOOL_LOOP", "affected_runs": 1, "total_runs": 3, "rate": 1 / 3}
+                {
+                    "failure_type": "TOOL_LOOP",
+                    "affected_runs": 1,
+                    "total_runs": 3,
+                    "rate": 1 / 3,
+                }
             ]
         )
         blocks = self._blocks(data)
@@ -237,7 +261,10 @@ class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
         with (
             patch("alerts_svc.digest.settings") as mock_settings,
             patch("alerts_svc.digest.should_send_digest", return_value=True),
-            patch("alerts_svc.digest.was_digest_sent_recently", AsyncMock(return_value=True)),
+            patch(
+                "alerts_svc.digest.was_digest_sent_recently",
+                AsyncMock(return_value=True),
+            ),
         ):
             mock_settings.digest_enabled = True
             result = await send_weekly_digest()
@@ -247,7 +274,10 @@ class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
         with (
             patch("alerts_svc.digest.settings") as mock_settings,
             patch("alerts_svc.digest.should_send_digest", return_value=True),
-            patch("alerts_svc.digest.was_digest_sent_recently", AsyncMock(return_value=False)),
+            patch(
+                "alerts_svc.digest.was_digest_sent_recently",
+                AsyncMock(return_value=False),
+            ),
             patch(
                 "alerts_svc.digest.fetch_weekly_digest_data",
                 AsyncMock(return_value={"total_runs": 0}),
@@ -263,11 +293,18 @@ class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
         with (
             patch("alerts_svc.digest.settings") as mock_settings,
             patch("alerts_svc.digest.should_send_digest", return_value=True),
-            patch("alerts_svc.digest.was_digest_sent_recently", AsyncMock(return_value=False)),
             patch(
-                "alerts_svc.digest.fetch_weekly_digest_data", AsyncMock(return_value=_sample_data())
+                "alerts_svc.digest.was_digest_sent_recently",
+                AsyncMock(return_value=False),
             ),
-            patch("alerts_svc.digest.send_slack", return_value=SendResult(True, "slack", 1, 200)),
+            patch(
+                "alerts_svc.digest.fetch_weekly_digest_data",
+                AsyncMock(return_value=_sample_data()),
+            ),
+            patch(
+                "alerts_svc.digest.send_slack",
+                return_value=SendResult(True, "slack", 1, 200),
+            ),
             patch("alerts_svc.digest.log_digest_sent", AsyncMock()) as mock_log,
         ):
             mock_settings.digest_enabled = True
@@ -280,9 +317,13 @@ class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
         with (
             patch("alerts_svc.digest.settings") as mock_settings,
             patch("alerts_svc.digest.should_send_digest", return_value=True),
-            patch("alerts_svc.digest.was_digest_sent_recently", AsyncMock(return_value=False)),
             patch(
-                "alerts_svc.digest.fetch_weekly_digest_data", AsyncMock(return_value=_sample_data())
+                "alerts_svc.digest.was_digest_sent_recently",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "alerts_svc.digest.fetch_weekly_digest_data",
+                AsyncMock(return_value=_sample_data()),
             ),
             patch(
                 "alerts_svc.digest.send_slack",
@@ -300,7 +341,10 @@ class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
         with (
             patch("alerts_svc.digest.settings") as mock_settings,
             patch("alerts_svc.digest.should_send_digest", return_value=True),
-            patch("alerts_svc.digest.was_digest_sent_recently", AsyncMock(return_value=False)),
+            patch(
+                "alerts_svc.digest.was_digest_sent_recently",
+                AsyncMock(return_value=False),
+            ),
             patch(
                 "alerts_svc.digest.fetch_weekly_digest_data",
                 AsyncMock(side_effect=Exception("DB down")),

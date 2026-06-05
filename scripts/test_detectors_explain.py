@@ -82,7 +82,10 @@ def _post(url: str, body: dict) -> tuple[dict, int]:
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {API_KEY}",
+        },
         method="POST",
     )
     try:
@@ -104,7 +107,10 @@ def _get(url: str) -> dict:
 
 
 def ingest(agent_id: str, run_id: str, events: list[dict]) -> None:
-    _post(f"{INGEST_URL}/v1/ingest", {"api_key": API_KEY, "agent_id": agent_id, "events": events})
+    _post(
+        f"{INGEST_URL}/v1/ingest",
+        {"api_key": API_KEY, "agent_id": agent_id, "events": events},
+    )
 
 
 def fetch_signals(agent_id: str, limit: int = 200) -> list[dict]:
@@ -160,7 +166,13 @@ def s_tool_loop() -> str:
         [
             ev("run.started", rid, AGENT_ID, 0, {"tools": ["search"]}),
             *[
-                ev("tool.called", rid, AGENT_ID, i, {"tool_name": "search", "args_hash": "h1"})
+                ev(
+                    "tool.called",
+                    rid,
+                    AGENT_ID,
+                    i,
+                    {"tool_name": "search", "args_hash": "h1"},
+                )
                 for i in range(1, 6)
             ],
             ev("run.completed", rid, AGENT_ID, 5, {"exit_reason": "completed"}),
@@ -174,7 +186,15 @@ def s_tool_thrashing() -> str:
     pairs = []
     for i in range(1, 7):
         tool = "search" if i % 2 else "database"
-        pairs.append(ev("tool.called", rid, AGENT_ID, i, {"tool_name": tool, "args_hash": f"h{i}"}))
+        pairs.append(
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                i,
+                {"tool_name": tool, "args_hash": f"h{i}"},
+            )
+        )
     ingest(
         AGENT_ID,
         rid,
@@ -320,8 +340,22 @@ def s_slow_step() -> str:
         rid,
         [
             ev("run.started", rid, AGENT_ID, 0, ts=T),
-            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "slow_api", "args_hash": "h1"}, ts=T),
-            ev("run.completed", rid, AGENT_ID, 2, {"exit_reason": "completed"}, ts=T + 20),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                1,
+                {"tool_name": "slow_api", "args_hash": "h1"},
+                ts=T,
+            ),
+            ev(
+                "run.completed",
+                rid,
+                AGENT_ID,
+                2,
+                {"exit_reason": "completed"},
+                ts=T + 20,
+            ),
         ],
     )
     return rid
@@ -334,12 +368,48 @@ def s_retry_storm() -> str:
         rid,
         [
             ev("run.started", rid, AGENT_ID, 0),
-            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "payment_api", "args_hash": "h1"}),
-            ev("tool.responded", rid, AGENT_ID, 1, {"tool_name": "payment_api", "success": False}),
-            ev("tool.called", rid, AGENT_ID, 2, {"tool_name": "payment_api", "args_hash": "h2"}),
-            ev("tool.responded", rid, AGENT_ID, 2, {"tool_name": "payment_api", "success": False}),
-            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "payment_api", "args_hash": "h3"}),
-            ev("tool.responded", rid, AGENT_ID, 3, {"tool_name": "payment_api", "success": False}),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                1,
+                {"tool_name": "payment_api", "args_hash": "h1"},
+            ),
+            ev(
+                "tool.responded",
+                rid,
+                AGENT_ID,
+                1,
+                {"tool_name": "payment_api", "success": False},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                2,
+                {"tool_name": "payment_api", "args_hash": "h2"},
+            ),
+            ev(
+                "tool.responded",
+                rid,
+                AGENT_ID,
+                2,
+                {"tool_name": "payment_api", "success": False},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                3,
+                {"tool_name": "payment_api", "args_hash": "h3"},
+            ),
+            ev(
+                "tool.responded",
+                rid,
+                AGENT_ID,
+                3,
+                {"tool_name": "payment_api", "success": False},
+            ),
             ev("run.completed", rid, AGENT_ID, 3, {"exit_reason": "error"}),
         ],
     )
@@ -375,11 +445,35 @@ def s_cascading_failure() -> str:
         [
             ev("run.started", rid, AGENT_ID, 0),
             ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "db", "args_hash": "h1"}),
-            ev("tool.responded", rid, AGENT_ID, 1, {"tool_name": "db", "success": False}),
-            ev("tool.called", rid, AGENT_ID, 2, {"tool_name": "search", "args_hash": "h2"}),
-            ev("tool.responded", rid, AGENT_ID, 2, {"tool_name": "search", "success": False}),
+            ev(
+                "tool.responded",
+                rid,
+                AGENT_ID,
+                1,
+                {"tool_name": "db", "success": False},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                2,
+                {"tool_name": "search", "args_hash": "h2"},
+            ),
+            ev(
+                "tool.responded",
+                rid,
+                AGENT_ID,
+                2,
+                {"tool_name": "search", "success": False},
+            ),
             ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "db", "args_hash": "h3"}),
-            ev("tool.responded", rid, AGENT_ID, 3, {"tool_name": "db", "success": False}),
+            ev(
+                "tool.responded",
+                rid,
+                AGENT_ID,
+                3,
+                {"tool_name": "db", "success": False},
+            ),
             ev("run.errored", rid, AGENT_ID, 3),
         ],
     )
@@ -411,7 +505,11 @@ def s_reasoning_stall() -> str:
                 rid,
                 AGENT_ID,
                 i,
-                {"finish_reason": "stop", "prompt_tokens": 100 + i * 10, "output_length": 40},
+                {
+                    "finish_reason": "stop",
+                    "prompt_tokens": 100 + i * 10,
+                    "output_length": 40,
+                },
             )
         )
     events.append(ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args_hash": "h1"}))
@@ -425,7 +523,11 @@ def s_reasoning_stall() -> str:
 
 
 def _infl(
-    event_type: str, run_id: str, step: int, payload: dict | None = None, ts: float | None = None
+    event_type: str,
+    run_id: str,
+    step: int,
+    payload: dict | None = None,
+    ts: float | None = None,
 ) -> dict:
     return ev(event_type, run_id, INFL_AGENT_ID, step, payload, ts, version=INFL_VERSION)
 
@@ -441,7 +543,11 @@ def inject_inflation_baseline(n: int = 10) -> None:
                     "llm.responded",
                     rid,
                     i,
-                    {"finish_reason": "stop", "prompt_tokens": 50 + i * 5, "output_length": 30},
+                    {
+                        "finish_reason": "stop",
+                        "prompt_tokens": 50 + i * 5,
+                        "output_length": 30,
+                    },
                 ),
             ]
         batch.append(_infl("run.completed", rid, 5, {"exit_reason": "completed"}))
@@ -458,7 +564,11 @@ def s_step_count_inflation() -> str:
                 "llm.responded",
                 rid,
                 i,
-                {"finish_reason": "stop", "prompt_tokens": 50 + i * 5, "output_length": 30},
+                {
+                    "finish_reason": "stop",
+                    "prompt_tokens": 50 + i * 5,
+                    "output_length": 30,
+                },
             ),
             _infl("tool.called", rid, i, {"tool_name": "search", "args_hash": f"h{i}"}),
             _infl("tool.responded", rid, i, {"success": True}),
@@ -578,7 +688,8 @@ def main() -> None:
         try:
             sigs = fetch_signals(agent_id)
             found_injection = next(
-                (s for s in sigs if s["failure_type"] == "PROMPT_INJECTION_SIGNAL"), None
+                (s for s in sigs if s["failure_type"] == "PROMPT_INJECTION_SIGNAL"),
+                None,
             )
             if found_injection:
                 print(f"  Found signal {found_injection['id']} on {agent_id}")
@@ -626,7 +737,11 @@ def main() -> None:
             snippet = rc[:80].replace("\n", " ")
             fix_snip = fc[:60].replace("\n", " ")
             results.append(
-                (ft, "PASS", f"fix_type={ft_} ab={ab}  root_cause: {snippet}…  fix: {fix_snip}")
+                (
+                    ft,
+                    "PASS",
+                    f"fix_type={ft_} ab={ab}  root_cause: {snippet}…  fix: {fix_snip}",
+                )
             )
 
     all_signals = list(found_synth.values())
