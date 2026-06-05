@@ -108,7 +108,8 @@ def build_metrics(
         "step_count": step,
         "cost_usd": cost_usd if cost_usd is not None else compute_run_cost(llm_calls),
         "error_count": (
-            error_count if error_count is not None
+            error_count
+            if error_count is not None
             else sum(1 for tc in tool_calls if getattr(tc, "success", None) is False)
         ),
         "finish_reason": getattr(last_llm, "finish_reason", None),
@@ -202,19 +203,22 @@ def _verify_policy_signature(policy: dict, secret: str) -> bool:
         logger.warning(
             "Policy '%s' (id=%s) has no signature — loaded without verification. "
             "Re-save this policy to sign it.",
-            policy.get("name"), policy.get("id"),
+            policy.get("name"),
+            policy.get("id"),
         )
         return True
     # Use null-byte as separator — safe against colons in agent_id or name.
-    canonical = "\x00".join([
-        str(policy.get("id", "")),
-        policy.get("agent_id", ""),
-        policy.get("name", ""),
-        _json.dumps(policy.get("condition", {}), sort_keys=True),
-        _json.dumps(policy.get("action", {}), sort_keys=True),
-        str(policy.get("enabled", True)),
-        str(policy.get("priority", 100)),
-    ])
+    canonical = "\x00".join(
+        [
+            str(policy.get("id", "")),
+            policy.get("agent_id", ""),
+            policy.get("name", ""),
+            _json.dumps(policy.get("condition", {}), sort_keys=True),
+            _json.dumps(policy.get("action", {}), sort_keys=True),
+            str(policy.get("enabled", True)),
+            str(policy.get("priority", 100)),
+        ]
+    )
     expected_sig = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected_sig, actual_sig)
 
@@ -234,7 +238,9 @@ class PolicyEngine:
         self._policies: List[Policy] = []
         self._lock: threading.Lock = threading.Lock()
         self._fetch_times: Dict[str, float] = {}  # agent_id → last fetch monotonic
-        self._generation: int = 0  # incremented on every load/add so RunContext can detect staleness
+        self._generation: int = (
+            0  # incremented on every load/add so RunContext can detect staleness
+        )
 
     # ── Config API ────────────────────────────────────────────────────────────
 
@@ -257,7 +263,8 @@ class PolicyEngine:
                 if not _verify_policy_signature(p, secret):
                     logger.warning(
                         "Policy '%s' (id=%s) failed signature verification — skipped",
-                        p.get("name"), p.get("id"),
+                        p.get("name"),
+                        p.get("id"),
                     )
                     continue
             verified.append(Policy.from_dict(p))

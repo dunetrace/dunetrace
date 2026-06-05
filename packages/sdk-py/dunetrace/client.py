@@ -21,7 +21,14 @@ from typing import Callable, List, Optional, Union
 from dunetrace.buffer import RingBuffer
 from dunetrace.context import _current_run
 from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
-from dunetrace.models import AgentEvent, EventType, hash_content, agent_version, Exporter, CallableExporter
+from dunetrace.models import (
+    AgentEvent,
+    EventType,
+    hash_content,
+    agent_version,
+    Exporter,
+    CallableExporter,
+)
 from dunetrace.policies import Policy, PolicyEngine, PolicyViolation
 from dunetrace.run_context import RunContext
 
@@ -683,7 +690,9 @@ class Dunetrace:
                 try:
                     exporter.handle(event)
                 except Exception as exc:
-                    logger.warning("Dunetrace: exporter %s failed on %s: %s", exporter, event.event_type, exc)
+                    logger.warning(
+                        "Dunetrace: exporter %s failed on %s: %s", exporter, event.event_type, exc
+                    )
             self._buffer.push(event)
         except Exception as exc:
             logger.warning("Dunetrace: failed to emit %s: %s", event.event_type, exc)

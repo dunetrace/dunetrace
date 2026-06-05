@@ -66,6 +66,7 @@ class PolicyUpdate(BaseModel):
 def _check_prompt_injection(text: str) -> list:
     """Return matched pattern labels if text contains injection signatures, else []."""
     from dunetrace.detectors import _INJECTION_PATTERNS_COMPILED
+
     return [label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(text)]
 
 

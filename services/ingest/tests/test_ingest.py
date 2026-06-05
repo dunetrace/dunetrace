@@ -297,6 +297,7 @@ class TestPruneOldEvents:
     async def test_returns_zero_when_no_pool(self, monkeypatch):
         monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
         from ingest_svc.db.postgres import prune_old_events
+
         result = await prune_old_events(retention_days=90)
         assert result == 0
 
@@ -304,6 +305,7 @@ class TestPruneOldEvents:
         pool, conn = _make_pool(fetchval_return=0)  # relkind != 'p'
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
+
         result = await prune_old_events(retention_days=90)
         assert result == 0
         conn.execute.assert_not_called()
@@ -316,6 +318,7 @@ class TestPruneOldEvents:
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
+
         dropped = await prune_old_events(retention_days=30)
         assert dropped == 1
         conn.execute.assert_called_once()
@@ -330,6 +333,7 @@ class TestPruneOldEvents:
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
+
         dropped = await prune_old_events(retention_days=30)
         assert dropped == 0
         conn.execute.assert_not_called()
@@ -344,6 +348,7 @@ class TestPruneOldEvents:
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
+
         dropped = await prune_old_events(retention_days=30)
         assert dropped == 1
 
@@ -355,6 +360,7 @@ class TestPruneOldEvents:
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
+
         dropped = await prune_old_events(retention_days=30)
         assert dropped == 1
 
@@ -365,6 +371,7 @@ class TestPruneOldEvents:
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
+
         dropped = await prune_old_events(retention_days=30)
         assert dropped == 0
         conn.execute.assert_not_called()

@@ -11,7 +11,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from api_svc.auth import require_customer
 from api_svc.config import settings
-from api_svc.db.queries import get_signal_by_id, list_signals, export_signals, record_fix, get_signal_fix_status
+from api_svc.db.queries import (
+    get_signal_by_id,
+    list_signals,
+    export_signals,
+    record_fix,
+    get_signal_fix_status,
+)
 from api_svc.schemas import SignalDetail, SignalListResponse, Page
 
 logger = logging.getLogger("dunetrace.api.signals")
@@ -103,8 +109,16 @@ async def get_signals(
 
 
 _EXPORT_COLUMNS = [
-    "id", "failure_type", "severity", "run_id", "agent_id",
-    "agent_version", "step_index", "confidence", "detected_at", "evidence",
+    "id",
+    "failure_type",
+    "severity",
+    "run_id",
+    "agent_id",
+    "agent_version",
+    "step_index",
+    "confidence",
+    "detected_at",
+    "evidence",
 ]
 
 
@@ -124,18 +138,26 @@ async def export_signals_endpoint(
     customer_id: str = Depends(require_customer),
 ) -> StreamingResponse:
     if severity and severity.upper() not in _VALID_SEVERITIES:
-        raise HTTPException(422, f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}")
+        raise HTTPException(
+            422, f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}"
+        )
     if failure_type and failure_type.upper() not in _VALID_FAILURE_TYPES:
-        raise HTTPException(422, f"Invalid failure_type {failure_type!r}. Valid: {sorted(_VALID_FAILURE_TYPES)}")
+        raise HTTPException(
+            422, f"Invalid failure_type {failure_type!r}. Valid: {sorted(_VALID_FAILURE_TYPES)}"
+        )
 
     from_ts: Optional[float] = None
     to_ts: Optional[float] = None
     try:
         if from_:
             from datetime import datetime, timezone
-            from_ts = datetime.fromisoformat(from_.rstrip("Z")).replace(tzinfo=timezone.utc).timestamp()
+
+            from_ts = (
+                datetime.fromisoformat(from_.rstrip("Z")).replace(tzinfo=timezone.utc).timestamp()
+            )
         if to_:
             from datetime import datetime, timezone
+
             to_ts = datetime.fromisoformat(to_.rstrip("Z")).replace(tzinfo=timezone.utc).timestamp()
     except ValueError as exc:
         raise HTTPException(422, f"Invalid datetime: {exc}")
@@ -152,6 +174,7 @@ async def export_signals_endpoint(
     filename = f"signals-{agent_id}.{format}"
 
     if format == "ndjson":
+
         async def _ndjson_stream(batches: AsyncGenerator) -> AsyncGenerator[str, None]:
             async for batch in batches:
                 for row in batch:

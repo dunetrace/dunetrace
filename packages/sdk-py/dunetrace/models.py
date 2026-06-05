@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
 try:
     from typing import Protocol, runtime_checkable
 except ImportError:  # Python 3.7

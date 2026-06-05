@@ -279,7 +279,9 @@ class RunContext:
         if not len(engine):
             return
 
-        metrics = build_metrics(self.state, self.step, error_count=self._error_count, cost_usd=self._cost_usd)
+        metrics = build_metrics(
+            self.state, self.step, error_count=self._error_count, cost_usd=self._cost_usd
+        )
 
         # Augment metrics with signal detection if any policy uses trigger="signal".
         # We do this lazily to avoid running detectors when no signal policies exist.

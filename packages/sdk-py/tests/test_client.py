@@ -489,10 +489,12 @@ class TestCustomExporters(unittest.TestCase):
         received_a, received_b = [], []
 
         class ExporterA:
-            def handle(self, event): received_a.append(event)
+            def handle(self, event):
+                received_a.append(event)
 
         class ExporterB:
-            def handle(self, event): received_b.append(event)
+            def handle(self, event):
+                received_b.append(event)
 
         c = self._client(exporters=[ExporterA(), ExporterB()])
         with c.run("agent"):
@@ -505,10 +507,12 @@ class TestCustomExporters(unittest.TestCase):
         received = []
 
         class BrokenExporter:
-            def handle(self, event): raise RuntimeError("boom")
+            def handle(self, event):
+                raise RuntimeError("boom")
 
         class GoodExporter:
-            def handle(self, event): received.append(event)
+            def handle(self, event):
+                received.append(event)
 
         c = self._client(exporters=[BrokenExporter(), GoodExporter()])
         with c.run("agent"):
@@ -520,7 +524,8 @@ class TestCustomExporters(unittest.TestCase):
         from dunetrace.models import Exporter
 
         class MyExporter:
-            def handle(self, event): pass
+            def handle(self, event):
+                pass
 
         self.assertIsInstance(MyExporter(), Exporter)
 
@@ -529,13 +534,17 @@ class TestCustomExporters(unittest.TestCase):
         otel_calls = []
 
         class FakeOtelExporter:
-            def handle(self, event): otel_calls.append(event)
-            def notify_run_state(self, run_id, state): pass
+            def handle(self, event):
+                otel_calls.append(event)
+
+            def notify_run_state(self, run_id, state):
+                pass
 
         custom_calls = []
 
         class MyExporter:
-            def handle(self, event): custom_calls.append(event)
+            def handle(self, event):
+                custom_calls.append(event)
 
         c = self._client(otel_exporter=FakeOtelExporter(), exporters=[MyExporter()])
         with c.run("agent"):
@@ -584,10 +593,10 @@ class TestSignalTriggerDebounce(unittest.TestCase):
         c = self._client_with_signal_policy()
         with patch("dunetrace.detectors.run_detectors", return_value=[]) as mock_rd:
             with c.run("agent") as run:
-                run.llm_called("gpt-4o", prompt_tokens=100)   # step 1 — detectors run
+                run.llm_called("gpt-4o", prompt_tokens=100)  # step 1 — detectors run
                 run.llm_responded(finish_reason="tool_calls")  # step 1 — reuses cache
-                run.tool_called("search", {"q": "x"})          # step 2 — detectors run
-                run.tool_responded("search", success=True)     # step 2 — reuses cache
+                run.tool_called("search", {"q": "x"})  # step 2 — detectors run
+                run.tool_responded("search", success=True)  # step 2 — reuses cache
             c.shutdown(timeout=2)
         self.assertEqual(mock_rd.call_count, 2)
 
@@ -636,7 +645,9 @@ class TestSignalTriggerDebounce(unittest.TestCase):
             run.llm_called("gpt-4o-mini", prompt_tokens=2000)
             run.llm_responded(completion_tokens=800)
             self.assertGreater(run._cost_usd, 0)
-            self.assertAlmostEqual(run._cost_usd, build_metrics(run.state, run.step)["cost_usd"], places=10)
+            self.assertAlmostEqual(
+                run._cost_usd, build_metrics(run.state, run.step)["cost_usd"], places=10
+            )
         c.shutdown(timeout=2)
 
     def test_needs_signal_cached_after_first_check(self):

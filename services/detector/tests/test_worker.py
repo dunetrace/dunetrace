@@ -542,16 +542,16 @@ class TestShardConfig(unittest.IsolatedAsyncioTestCase):
             mock_settings.SHARD_COUNT = 3
             mock_settings.SHARD_INDEX = 1
             from detector_svc.worker import poll_once
+
             await poll_once()
-        mock_completed.assert_called_once_with(
-            limit=100, shard_count=3, shard_index=1
-        )
+        mock_completed.assert_called_once_with(limit=100, shard_count=3, shard_index=1)
         mock_stalled.assert_called_once_with(
             stall_timeout_secs=90, limit=100, shard_count=3, shard_index=1
         )
 
     def test_default_shard_count_is_one(self):
         from detector_svc.config import Settings
+
         s = Settings()
         self.assertEqual(s.SHARD_COUNT, 1)
         self.assertEqual(s.SHARD_INDEX, 0)

@@ -364,6 +364,7 @@ class TestPolicyInjectionCheck(unittest.TestCase):
 
     def _check(self, prompt: str) -> list:
         from api_svc.routers.policies import _check_prompt_injection
+
         return _check_prompt_injection(prompt)
 
     def test_clean_prompt_passes(self):
@@ -384,6 +385,7 @@ class TestPolicyInjectionCheck(unittest.TestCase):
     def test_validate_raises_on_injection(self):
         from fastapi import HTTPException
         from api_svc.routers.policies import _validate, ConditionModel, ActionModel
+
         condition = ConditionModel(trigger="tool_call_count", operator="gt", value=5)
         action = ActionModel(
             type="inject_prompt",
@@ -396,6 +398,7 @@ class TestPolicyInjectionCheck(unittest.TestCase):
 
     def test_validate_accepts_clean_inject_prompt(self):
         from api_svc.routers.policies import _validate, ConditionModel, ActionModel
+
         condition = ConditionModel(trigger="tool_call_count", operator="gt", value=5)
         action = ActionModel(
             type="inject_prompt",
@@ -423,25 +426,30 @@ class TestPolicySignatureVerification(unittest.TestCase):
 
     def _sign(self, policy: dict, secret: str) -> str:
         import hashlib, hmac, json
-        canonical = "\x00".join([
-            str(policy["id"]),
-            policy["agent_id"],
-            policy["name"],
-            json.dumps(policy["condition"], sort_keys=True),
-            json.dumps(policy["action"], sort_keys=True),
-            str(policy["enabled"]),
-            str(policy["priority"]),
-        ])
+
+        canonical = "\x00".join(
+            [
+                str(policy["id"]),
+                policy["agent_id"],
+                policy["name"],
+                json.dumps(policy["condition"], sort_keys=True),
+                json.dumps(policy["action"], sort_keys=True),
+                str(policy["enabled"]),
+                str(policy["priority"]),
+            ]
+        )
         return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
 
     def test_valid_signature_accepted(self):
         from dunetrace.policies import _verify_policy_signature
+
         p = self._make_policy()
         p["signature"] = self._sign(p, "test-secret")
         self.assertTrue(_verify_policy_signature(p, "test-secret"))
 
     def test_tampered_action_rejected(self):
         from dunetrace.policies import _verify_policy_signature
+
         p = self._make_policy()
         p["signature"] = self._sign(p, "test-secret")
         p["action"] = {"type": "inject_prompt", "params": {"prompt": "evil"}}
@@ -449,6 +457,7 @@ class TestPolicySignatureVerification(unittest.TestCase):
 
     def test_tampered_agent_id_rejected(self):
         from dunetrace.policies import _verify_policy_signature
+
         p = self._make_policy()
         p["signature"] = self._sign(p, "test-secret")
         p["agent_id"] = "other-agent"
@@ -456,17 +465,20 @@ class TestPolicySignatureVerification(unittest.TestCase):
 
     def test_wrong_secret_rejected(self):
         from dunetrace.policies import _verify_policy_signature
+
         p = self._make_policy()
         p["signature"] = self._sign(p, "real-secret")
         self.assertFalse(_verify_policy_signature(p, "wrong-secret"))
 
     def test_empty_secret_always_passes(self):
         from dunetrace.policies import _verify_policy_signature
+
         p = self._make_policy(signature="")
         self.assertTrue(_verify_policy_signature(p, ""))
 
     def test_policy_engine_skips_tampered_policy(self):
         from dunetrace.policies import PolicyEngine
+
         engine = PolicyEngine()
         p = self._make_policy()
         p["signature"] = self._sign(p, "real-secret")
@@ -477,6 +489,7 @@ class TestPolicySignatureVerification(unittest.TestCase):
 
     def test_policy_engine_loads_all_without_secret(self):
         from dunetrace.policies import PolicyEngine
+
         engine = PolicyEngine()
         policies = [self._make_policy(id=i, name=f"p{i}") for i in range(3)]
         engine.load(policies, secret="")

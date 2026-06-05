@@ -772,18 +772,20 @@ async def export_signals(
                 detected_at_str = detected_at.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
             else:
                 detected_at_str = str(detected_at)
-            batch.append({
-                "id": s["id"],
-                "failure_type": s["failure_type"],
-                "severity": s["severity"],
-                "run_id": s["run_id"],
-                "agent_id": s["agent_id"],
-                "agent_version": s["agent_version"],
-                "step_index": s["step_index"],
-                "confidence": round(float(s["confidence"]), 4),
-                "detected_at": detected_at_str,
-                "evidence": dict(evidence) if evidence else {},
-            })
+            batch.append(
+                {
+                    "id": s["id"],
+                    "failure_type": s["failure_type"],
+                    "severity": s["severity"],
+                    "run_id": s["run_id"],
+                    "agent_id": s["agent_id"],
+                    "agent_version": s["agent_version"],
+                    "step_index": s["step_index"],
+                    "confidence": round(float(s["confidence"]), 4),
+                    "detected_at": detected_at_str,
+                    "evidence": dict(evidence) if evidence else {},
+                }
+            )
 
         yield batch
 
@@ -1638,15 +1640,17 @@ def _sign_policy(
     """
     if not secret:
         return ""
-    canonical = "\x00".join([
-        str(policy_id),
-        agent_id,
-        name,
-        _json_mod.dumps(condition, sort_keys=True),
-        _json_mod.dumps(action, sort_keys=True),
-        str(enabled),
-        str(priority),
-    ])
+    canonical = "\x00".join(
+        [
+            str(policy_id),
+            agent_id,
+            name,
+            _json_mod.dumps(condition, sort_keys=True),
+            _json_mod.dumps(action, sort_keys=True),
+            str(enabled),
+            str(priority),
+        ]
+    )
     return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
 
 
@@ -1722,7 +1726,13 @@ async def create_policy(
                 enabled,
             )
             sig = _sign_policy(
-                row["id"], agent_id, name, condition, action, enabled, priority,
+                row["id"],
+                agent_id,
+                name,
+                condition,
+                action,
+                enabled,
+                priority,
                 settings.POLICY_SIGNING_SECRET,
             )
             row = await conn.fetchrow(
@@ -1765,13 +1775,19 @@ async def update_policy(policy_id: int, fields: dict) -> dict:
             if isinstance(act, str):
                 act = _json_mod.loads(act)
             sig = _sign_policy(
-                row["id"], row["agent_id"], row["name"],
-                dict(cond), dict(act), row["enabled"], row["priority"],
+                row["id"],
+                row["agent_id"],
+                row["name"],
+                dict(cond),
+                dict(act),
+                row["enabled"],
+                row["priority"],
                 settings.POLICY_SIGNING_SECRET,
             )
             row = await conn.fetchrow(
                 "UPDATE policies SET signature = $1 WHERE id = $2 RETURNING *",
-                sig, policy_id,
+                sig,
+                policy_id,
             )
     return _policy_row(row)
 

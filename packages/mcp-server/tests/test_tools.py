@@ -699,19 +699,19 @@ class TestGetAgentTokenStats(unittest.TestCase):
 
     def test_shows_run_counts(self):
         out = srv.get_agent_token_stats("my-agent")
-        self.assertIn("10", out)   # 1d run_count
+        self.assertIn("10", out)  # 1d run_count
         self.assertIn("3 with failures", out)
 
     def test_shows_token_amounts(self):
         out = srv.get_agent_token_stats("my-agent")
-        self.assertIn("50.0k", out)   # total_tokens 1d
-        self.assertIn("15.0k", out)   # wasted_tokens 1d
+        self.assertIn("50.0k", out)  # total_tokens 1d
+        self.assertIn("15.0k", out)  # wasted_tokens 1d
 
     def test_token_waste_pct_uses_token_ratio(self):
         # 1d: wasted_tokens=15000 / total_tokens=50000 = 30%
         # 30d: wasted_tokens=225000 / total_tokens=1000000 = 22% (not 22.5% from cost ratio)
         out = srv.get_agent_token_stats("my-agent")
-        self.assertIn("30% of total", out)   # token-based pct for 1d
+        self.assertIn("30% of total", out)  # token-based pct for 1d
 
     def test_cost_waste_pct_uses_cost_ratio(self):
         # 1d: wasted_pct=0.3 → 30% for cost line; same value here but computed from different field
@@ -722,23 +722,31 @@ class TestGetAgentTokenStats(unittest.TestCase):
 
     def test_shows_cost_figures(self):
         out = srv.get_agent_token_stats("my-agent")
-        self.assertIn("$0.0500", out)   # total_cost_usd 1d
-        self.assertIn("$0.0150", out)   # wasted_cost_usd 1d
+        self.assertIn("$0.0500", out)  # total_cost_usd 1d
+        self.assertIn("$0.0150", out)  # wasted_cost_usd 1d
 
     def test_fmt_cost_sub_cent_no_dollar_prefix(self):
         # $0.0005 should render as "0.0500¢", not "$0.0500¢"
-        with patch("dunetrace_mcp.client.get", return_value={
-            "windows": {"1d": {
-                "run_count": 1, "wasted_run_count": 1,
-                "total_tokens": 100, "wasted_tokens": 100,
-                "total_cost_usd": 0.0005, "wasted_cost_usd": 0.0005,
-                "wasted_pct": 1.0,
-            }},
-            "waste_by_failure_type": [],
-        }):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={
+                "windows": {
+                    "1d": {
+                        "run_count": 1,
+                        "wasted_run_count": 1,
+                        "total_tokens": 100,
+                        "wasted_tokens": 100,
+                        "total_cost_usd": 0.0005,
+                        "wasted_cost_usd": 0.0005,
+                        "wasted_pct": 1.0,
+                    }
+                },
+                "waste_by_failure_type": [],
+            },
+        ):
             out = srv.get_agent_token_stats("my-agent")
         self.assertIn("¢", out)
-        self.assertNotIn("$0.0500¢", out)   # the old bug
+        self.assertNotIn("$0.0500¢", out)  # the old bug
 
     def test_shows_waste_by_failure_type(self):
         out = srv.get_agent_token_stats("my-agent")
@@ -752,16 +760,21 @@ class TestGetAgentTokenStats(unittest.TestCase):
         self.assertIn("15 runs", out)
 
     def test_waste_by_ft_singular_run(self):
-        single_run = [{
-            "failure_type": "RETRY_STORM",
-            "wasted_tokens": 5000,
-            "wasted_cost_usd": 0.005,
-            "affected_runs": 1,
-        }]
-        with patch("dunetrace_mcp.client.get", return_value={
-            "windows": TOKEN_STATS["windows"],
-            "waste_by_failure_type": single_run,
-        }):
+        single_run = [
+            {
+                "failure_type": "RETRY_STORM",
+                "wasted_tokens": 5000,
+                "wasted_cost_usd": 0.005,
+                "affected_runs": 1,
+            }
+        ]
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={
+                "windows": TOKEN_STATS["windows"],
+                "waste_by_failure_type": single_run,
+            },
+        ):
             out = srv.get_agent_token_stats("my-agent")
         self.assertIn("1 run", out)
         self.assertNotIn("1 runs", out)
@@ -773,21 +786,31 @@ class TestGetAgentTokenStats(unittest.TestCase):
         self.assertIn("my-agent", out)
 
     def test_missing_windows_shows_header_only(self):
-        with patch("dunetrace_mcp.client.get", return_value={"windows": {}, "waste_by_failure_type": []}):
+        with patch(
+            "dunetrace_mcp.client.get", return_value={"windows": {}, "waste_by_failure_type": []}
+        ):
             out = srv.get_agent_token_stats("my-agent")
         self.assertIn("Token stats: my-agent", out)
         self.assertNotIn("Last 24 h", out)
 
     def test_million_token_formatting(self):
-        with patch("dunetrace_mcp.client.get", return_value={
-            "windows": {"30d": {
-                "run_count": 500, "wasted_run_count": 100,
-                "total_tokens": 2_000_000, "wasted_tokens": 500_000,
-                "total_cost_usd": 2.0, "wasted_cost_usd": 0.5,
-                "wasted_pct": 0.25,
-            }},
-            "waste_by_failure_type": [],
-        }):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={
+                "windows": {
+                    "30d": {
+                        "run_count": 500,
+                        "wasted_run_count": 100,
+                        "total_tokens": 2_000_000,
+                        "wasted_tokens": 500_000,
+                        "total_cost_usd": 2.0,
+                        "wasted_cost_usd": 0.5,
+                        "wasted_pct": 0.25,
+                    }
+                },
+                "waste_by_failure_type": [],
+            },
+        ):
             out = srv.get_agent_token_stats("my-agent")
         self.assertIn("2.0M", out)
         self.assertIn("500.0k", out)
