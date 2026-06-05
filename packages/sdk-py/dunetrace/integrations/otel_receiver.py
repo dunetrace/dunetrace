@@ -116,7 +116,9 @@ class DunetraceOTelReceiver:
                 self._pending[tid].extend(batch)
 
             # Process any trace that now has its root span
-            completed = [tid for tid, spans in self._pending.items() if _has_root(spans)]
+            completed = [
+                tid for tid, spans in self._pending.items() if _has_root(spans)
+            ]
             for tid in completed:
                 self._process_trace(self._pending.pop(tid))
 
@@ -179,7 +181,9 @@ class DunetraceOTelReceiver:
         )
 
         receiver = cls(dt, agent_id=agent_id)
-        processor = BatchSpanProcessor(receiver) if batch else SimpleSpanProcessor(receiver)
+        processor = (
+            BatchSpanProcessor(receiver) if batch else SimpleSpanProcessor(receiver)
+        )
         provider.add_span_processor(processor)
         return receiver
 
@@ -234,7 +238,9 @@ def _emit_llm(run, attrs: dict, latency_ms: int, is_error: bool) -> None:
     # Path 2 privacy boundary: hash raw content fields here, at the receiver,
     # before any AgentEvent is constructed.  Non-sensitive metadata (model name,
     # token counts, latency, finish_reason) is passed as-is.
-    raw_output = attrs.get("gen_ai.completion") or attrs.get("gen_ai.completion.0.content") or ""
+    raw_output = (
+        attrs.get("gen_ai.completion") or attrs.get("gen_ai.completion.0.content") or ""
+    )
     output_hash = hash_content(str(raw_output)) if raw_output else ""
     output_length = len(str(raw_output)) if raw_output else 0
 
@@ -248,7 +254,9 @@ def _emit_llm(run, attrs: dict, latency_ms: int, is_error: bool) -> None:
     )
 
 
-def _emit_tool(run, attrs: dict, latency_ms: int, is_error: bool, span_name: str) -> None:
+def _emit_tool(
+    run, attrs: dict, latency_ms: int, is_error: bool, span_name: str
+) -> None:
     tool_name = attrs.get("gen_ai.tool.name") or span_name or "tool"
     run.tool_called(tool_name)
     run.tool_responded(tool_name, success=not is_error, latency_ms=latency_ms)

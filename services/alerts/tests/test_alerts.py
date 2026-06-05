@@ -32,7 +32,11 @@ from explainer_svc.models import Explanation, CodeFix
 from explainer_svc.explainer import explain
 
 from alerts_svc.formatters.slack import format_slack, format_slack_simple
-from alerts_svc.formatters.webhook import format_webhook, sign_payload, build_signed_request
+from alerts_svc.formatters.webhook import (
+    format_webhook,
+    sign_payload,
+    build_signed_request,
+)
 from alerts_svc.sender import SendResult, send_with_retry
 from alerts_svc.config import SEVERITY_ORDER
 import alerts_svc.worker as worker_module
@@ -120,15 +124,21 @@ class TestSlackFormatter(unittest.TestCase):
         self.assertEqual(color, "#FF0000")
 
     def test_high_is_orange(self):
-        color = format_slack(make_explanation(severity="HIGH"))["attachments"][0]["color"]
+        color = format_slack(make_explanation(severity="HIGH"))["attachments"][0][
+            "color"
+        ]
         self.assertEqual(color, "#FF6B00")
 
     def test_medium_is_amber(self):
-        color = format_slack(make_explanation(severity="MEDIUM"))["attachments"][0]["color"]
+        color = format_slack(make_explanation(severity="MEDIUM"))["attachments"][0][
+            "color"
+        ]
         self.assertEqual(color, "#FFB800")
 
     def test_low_is_green(self):
-        color = format_slack(make_explanation(severity="LOW"))["attachments"][0]["color"]
+        color = format_slack(make_explanation(severity="LOW"))["attachments"][0][
+            "color"
+        ]
         self.assertEqual(color, "#36A64F")
 
     def test_blocks_present(self):
@@ -252,7 +262,9 @@ class TestWebhookFormatter(unittest.TestCase):
 
     def test_sign_payload_different_secret_different_sig(self):
         body = b"test"
-        self.assertNotEqual(sign_payload(body, "secret1"), sign_payload(body, "secret2"))
+        self.assertNotEqual(
+            sign_payload(body, "secret1"), sign_payload(body, "secret2")
+        )
 
     def test_sign_payload_empty_secret_returns_empty_string(self):
         self.assertEqual(sign_payload(b"body", ""), "")
@@ -330,7 +342,8 @@ class TestSenderRetry(unittest.TestCase):
 
         with (
             patch(
-                "alerts_svc.sender._post", side_effect=urllib.error.URLError("connection refused")
+                "alerts_svc.sender._post",
+                side_effect=urllib.error.URLError("connection refused"),
             ),
             patch("alerts_svc.sender.time.sleep"),
         ):
@@ -384,7 +397,9 @@ class TestSeverityThreshold(unittest.TestCase):
 
     def test_critical_meets_all_thresholds(self):
         for threshold in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]:
-            meets = SEVERITY_ORDER.get("CRITICAL", 0) >= SEVERITY_ORDER.get(threshold, 0)
+            meets = SEVERITY_ORDER.get("CRITICAL", 0) >= SEVERITY_ORDER.get(
+                threshold, 0
+            )
             self.assertTrue(meets, f"CRITICAL should meet {threshold} threshold")
 
 
@@ -463,10 +478,12 @@ class TestWorkerDeliver(unittest.TestCase):
         with (
             patch("alerts_svc.worker.settings") as mock_s,
             patch(
-                "alerts_svc.worker.send_slack", return_value=SendResult(True, "slack", 1, 200)
+                "alerts_svc.worker.send_slack",
+                return_value=SendResult(True, "slack", 1, 200),
             ) as mock_slack,
             patch(
-                "alerts_svc.worker.send_webhook", return_value=SendResult(True, "webhook", 1, 200)
+                "alerts_svc.worker.send_webhook",
+                return_value=SendResult(True, "webhook", 1, 200),
             ),
         ):
             mock_s.slack_enabled = True
@@ -494,7 +511,8 @@ class TestWorkerDeliver(unittest.TestCase):
         with (
             patch("alerts_svc.worker.settings") as mock_s,
             patch(
-                "alerts_svc.worker.send_webhook", return_value=SendResult(True, "webhook", 1, 200)
+                "alerts_svc.worker.send_webhook",
+                return_value=SendResult(True, "webhook", 1, 200),
             ) as mock_wh,
             patch("alerts_svc.worker.build_signed_request", return_value=(b"{}", {})),
         ):
@@ -509,7 +527,9 @@ class TestWorkerDeliver(unittest.TestCase):
 
 class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
     async def test_poll_once_empty_returns_zeros(self):
-        with patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[])):
+        with patch(
+            "alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[])
+        ):
             found, delivered = await worker_module.poll_once()
         self.assertEqual(found, 0)
         self.assertEqual(delivered, 0)
@@ -531,7 +551,10 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch(
                 "alerts_svc.worker.deliver",
@@ -561,7 +584,10 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch(
                 "alerts_svc.worker.deliver",
@@ -592,7 +618,10 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch("alerts_svc.worker.deliver", return_value={}),
         ):

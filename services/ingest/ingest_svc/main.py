@@ -100,12 +100,20 @@ def create_app() -> FastAPI:
                 logger.warning("Rate limit exceeded. ip=%s", ip)
                 return JSONResponse(
                     status_code=429,
-                    content={"detail": "Rate limit exceeded. Max 60 requests per minute."},
+                    content={
+                        "detail": "Rate limit exceeded. Max 60 requests per minute."
+                    },
                 )
         t = time.monotonic()
         response = await call_next(request)
         ms = (time.monotonic() - t) * 1000
-        logger.info("%s %s %d %.1fms", request.method, request.url.path, response.status_code, ms)
+        logger.info(
+            "%s %s %d %.1fms",
+            request.method,
+            request.url.path,
+            response.status_code,
+            ms,
+        )
         return response
 
     app.include_router(ingest.router)

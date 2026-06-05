@@ -219,7 +219,9 @@ def _verify_policy_signature(policy: dict, secret: str) -> bool:
             str(policy.get("priority", 100)),
         ]
     )
-    expected_sig = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    expected_sig = hmac.new(
+        secret.encode(), canonical.encode(), hashlib.sha256
+    ).hexdigest()
     return hmac.compare_digest(expected_sig, actual_sig)
 
 
@@ -273,7 +275,9 @@ class PolicyEngine:
             local = [p for p in self._policies if p.id is None]
             self._policies = sorted(local + verified, key=lambda p: p.priority)
             self._generation += 1
-        logger.debug("Policies loaded: %d total (%d remote)", len(self._policies), len(verified))
+        logger.debug(
+            "Policies loaded: %d total (%d remote)", len(self._policies), len(verified)
+        )
 
     def mark_fetched(self, agent_id: str) -> None:
         self._fetch_times[agent_id] = time.monotonic()

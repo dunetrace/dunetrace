@@ -72,7 +72,13 @@ def create_app() -> FastAPI:
         t = time.monotonic()
         response = await call_next(request)
         ms = (time.monotonic() - t) * 1000
-        logger.info("%s %s %d %.1fms", request.method, request.url.path, response.status_code, ms)
+        logger.info(
+            "%s %s %d %.1fms",
+            request.method,
+            request.url.path,
+            response.status_code,
+            ms,
+        )
         return response
 
     app.include_router(agents.router)

@@ -55,7 +55,9 @@ class Settings:
 
     # Retry behaviour for failed HTTP calls
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
-    RETRY_BACKOFF: float = float(os.getenv("RETRY_BACKOFF", "2.0"))  # seconds, doubled each retry
+    RETRY_BACKOFF: float = float(
+        os.getenv("RETRY_BACKOFF", "2.0")
+    )  # seconds, doubled each retry
 
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
@@ -117,7 +119,9 @@ def load_alert_policies(yml_path: str | None = None) -> dict[str, dict]:
         import logging
 
         logging.getLogger("dunetrace.alerts.config").warning(
-            "Failed to load alert policies from %s: %s — using immediate for all", path, exc
+            "Failed to load alert policies from %s: %s — using immediate for all",
+            path,
+            exc,
         )
         return {}
 

@@ -6,7 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from api_svc.auth import require_customer
 from api_svc.config import settings
 from api_svc.db.queries import list_runs, get_run_detail
-from api_svc.schemas import RunDetail, RunEvent, RunListResponse, RunSignal, RunSummary, Page
+from api_svc.schemas import (
+    RunDetail,
+    RunEvent,
+    RunListResponse,
+    RunSignal,
+    RunSummary,
+    Page,
+)
 
 router = APIRouter(tags=["Runs"])
 
@@ -51,7 +58,9 @@ async def get_runs(
     ]
     return RunListResponse(
         runs=runs,
-        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
+        page=Page(
+            total=total, offset=offset, limit=limit, has_more=(offset + limit) < total
+        ),
     )
 
 

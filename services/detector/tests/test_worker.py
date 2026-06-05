@@ -17,7 +17,6 @@ from detector_svc.run_builder import build_run_state
 from dunetrace.models import FailureType
 import detector_svc.worker  # must be imported before patch() can resolve "detector_svc.worker.*"
 
-
 # ── Event factories ────────────────────────────────────────────────────────────
 
 
@@ -63,7 +62,9 @@ def run_started(tools: list = None, step: int = 0) -> dict:
 
 
 def run_completed(step: int = 10) -> dict:
-    return evt("run.completed", step, {"exit_reason": "final_answer", "total_steps": step})
+    return evt(
+        "run.completed", step, {"exit_reason": "final_answer", "total_steps": step}
+    )
 
 
 def llm_evt(step: int) -> dict:
@@ -71,7 +72,9 @@ def llm_evt(step: int) -> dict:
 
 
 def llm_responded_evt(step: int, prompt_tokens: int = 500) -> dict:
-    return evt("llm.responded", step, {"prompt_tokens": prompt_tokens, "finish_reason": "stop"})
+    return evt(
+        "llm.responded", step, {"prompt_tokens": prompt_tokens, "finish_reason": "stop"}
+    )
 
 
 # ── RunBuilder tests ───────────────────────────────────────────────────────────
@@ -164,7 +167,12 @@ class TestRunBuilder(unittest.TestCase):
         self.assertEqual(state.current_step, 4)
 
     def test_events_list_populated(self):
-        events = [run_started(), llm_evt(1), tool_evt("web_search", 2), run_completed(3)]
+        events = [
+            run_started(),
+            llm_evt(1),
+            tool_evt("web_search", 2),
+            run_completed(3),
+        ]
         state = build_run_state(events)
         self.assertEqual(len(state.events), 4)
 
@@ -319,7 +327,9 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
             return len(signals)
 
         with (
-            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)),
+            patch(
+                "detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)
+            ),
             patch("detector_svc.worker.write_signals", mock_write),
             patch("detector_svc.worker.mark_run_processed", AsyncMock()),
         ):
@@ -345,7 +355,9 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
             return len(signals)
 
         with (
-            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)),
+            patch(
+                "detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)
+            ),
             patch("detector_svc.worker.write_signals", mock_write),
             patch("detector_svc.worker.mark_run_processed", AsyncMock()),
             patch("detector_svc.worker.LIVE_DETECTORS", set()),
@@ -360,11 +372,17 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_process_run_marks_processed_even_with_no_signals(self):
-        events = [run_started(tools=["web_search"]), tool_evt("web_search", 1), run_completed(2)]
+        events = [
+            run_started(tools=["web_search"]),
+            tool_evt("web_search", 1),
+            run_completed(2),
+        ]
         mark_mock = AsyncMock()
 
         with (
-            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)),
+            patch(
+                "detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)
+            ),
             patch("detector_svc.worker.write_signals", AsyncMock(return_value=0)),
             patch("detector_svc.worker.mark_run_processed", mark_mock),
         ):
@@ -390,9 +408,21 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
 
     async def test_poll_once_processes_completed_and_stalled(self):
         completed = [
-            {"run_id": "r1", "agent_id": "a1", "agent_version": "v1", "trigger": "completed"}
+            {
+                "run_id": "r1",
+                "agent_id": "a1",
+                "agent_version": "v1",
+                "trigger": "completed",
+            }
         ]
-        stalled = [{"run_id": "r2", "agent_id": "a1", "agent_version": "v1", "trigger": "stalled"}]
+        stalled = [
+            {
+                "run_id": "r2",
+                "agent_id": "a1",
+                "agent_version": "v1",
+                "trigger": "stalled",
+            }
+        ]
 
         healthy_events = [
             run_started(tools=["web_search"]),
@@ -401,9 +431,18 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch("detector_svc.worker.fetch_completed_runs", AsyncMock(return_value=completed)),
-            patch("detector_svc.worker.fetch_stalled_runs", AsyncMock(return_value=stalled)),
-            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=healthy_events)),
+            patch(
+                "detector_svc.worker.fetch_completed_runs",
+                AsyncMock(return_value=completed),
+            ),
+            patch(
+                "detector_svc.worker.fetch_stalled_runs",
+                AsyncMock(return_value=stalled),
+            ),
+            patch(
+                "detector_svc.worker.fetch_run_events",
+                AsyncMock(return_value=healthy_events),
+            ),
             patch("detector_svc.worker.write_signals", AsyncMock(return_value=0)),
             patch("detector_svc.worker.mark_run_processed", AsyncMock()),
         ):
@@ -415,7 +454,9 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
 
     async def test_poll_once_returns_zero_when_no_work(self):
         with (
-            patch("detector_svc.worker.fetch_completed_runs", AsyncMock(return_value=[])),
+            patch(
+                "detector_svc.worker.fetch_completed_runs", AsyncMock(return_value=[])
+            ),
             patch("detector_svc.worker.fetch_stalled_runs", AsyncMock(return_value=[])),
         ):
             from detector_svc.worker import poll_once
@@ -518,7 +559,9 @@ class TestCooccurrenceBoost(unittest.TestCase):
 
         s1 = self._make_signal(0.80)
         original_severity = s1.severity
-        risk = RiskScore(confidence=0.75, active_signals=2, scores={"loop": 0.6, "retry": 0.7})
+        risk = RiskScore(
+            confidence=0.75, active_signals=2, scores={"loop": 0.6, "retry": 0.7}
+        )
         _apply_hard_override([s1], risk)
 
         self.assertEqual(s1.severity, original_severity)

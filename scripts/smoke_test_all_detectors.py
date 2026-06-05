@@ -50,7 +50,10 @@ def _post(url: str, body: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {API_KEY}",
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as r:
@@ -123,11 +126,41 @@ def scenario_tool_loop() -> str:
         rid,
         [
             ev("run.started", rid, AGENT_ID, 0, {"tools": ["search"]}),
-            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "search", "args_hash": "h1"}),
-            ev("tool.called", rid, AGENT_ID, 2, {"tool_name": "search", "args_hash": "h1"}),
-            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args_hash": "h1"}),
-            ev("tool.called", rid, AGENT_ID, 4, {"tool_name": "search", "args_hash": "h1"}),
-            ev("tool.called", rid, AGENT_ID, 5, {"tool_name": "search", "args_hash": "h1"}),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                1,
+                {"tool_name": "search", "args_hash": "h1"},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                2,
+                {"tool_name": "search", "args_hash": "h1"},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                3,
+                {"tool_name": "search", "args_hash": "h1"},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                4,
+                {"tool_name": "search", "args_hash": "h1"},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                5,
+                {"tool_name": "search", "args_hash": "h1"},
+            ),
             ev("run.completed", rid, AGENT_ID, 5, {"exit_reason": "completed"}),
         ],
     )
@@ -142,12 +175,48 @@ def scenario_tool_thrashing() -> str:
         rid,
         [
             ev("run.started", rid, AGENT_ID, 0, {"tools": ["search", "database"]}),
-            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "search", "args_hash": "h1"}),
-            ev("tool.called", rid, AGENT_ID, 2, {"tool_name": "database", "args_hash": "h2"}),
-            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args_hash": "h3"}),
-            ev("tool.called", rid, AGENT_ID, 4, {"tool_name": "database", "args_hash": "h4"}),
-            ev("tool.called", rid, AGENT_ID, 5, {"tool_name": "search", "args_hash": "h5"}),
-            ev("tool.called", rid, AGENT_ID, 6, {"tool_name": "database", "args_hash": "h6"}),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                1,
+                {"tool_name": "search", "args_hash": "h1"},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                2,
+                {"tool_name": "database", "args_hash": "h2"},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                3,
+                {"tool_name": "search", "args_hash": "h3"},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                4,
+                {"tool_name": "database", "args_hash": "h4"},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                5,
+                {"tool_name": "search", "args_hash": "h5"},
+            ),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                6,
+                {"tool_name": "database", "args_hash": "h6"},
+            ),
             ev("run.completed", rid, AGENT_ID, 6, {"exit_reason": "completed"}),
         ],
     )
@@ -293,9 +362,23 @@ def scenario_slow_step() -> str:
         [
             ev("run.started", rid, AGENT_ID, 0, ts=T),
             # tool.called at T — the gap to the next event drives the duration
-            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "slow_api", "args_hash": "h1"}, ts=T),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                1,
+                {"tool_name": "slow_api", "args_hash": "h1"},
+                ts=T,
+            ),
             # run.completed at T+20: step_durations_ms[1] = 20 000 ms > 15 000 ms threshold
-            ev("run.completed", rid, AGENT_ID, 2, {"exit_reason": "completed"}, ts=T + 20),
+            ev(
+                "run.completed",
+                rid,
+                AGENT_ID,
+                2,
+                {"exit_reason": "completed"},
+                ts=T + 20,
+            ),
         ],
     )
     return rid
@@ -309,11 +392,29 @@ def scenario_retry_storm() -> str:
         rid,
         [
             ev("run.started", rid, AGENT_ID, 0),
-            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "payment_api", "args_hash": "h1"}),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                1,
+                {"tool_name": "payment_api", "args_hash": "h1"},
+            ),
             ev("tool.responded", rid, AGENT_ID, 1, {"success": False}),
-            ev("tool.called", rid, AGENT_ID, 2, {"tool_name": "payment_api", "args_hash": "h2"}),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                2,
+                {"tool_name": "payment_api", "args_hash": "h2"},
+            ),
             ev("tool.responded", rid, AGENT_ID, 2, {"success": False}),
-            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "payment_api", "args_hash": "h3"}),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                3,
+                {"tool_name": "payment_api", "args_hash": "h3"},
+            ),
             ev("tool.responded", rid, AGENT_ID, 3, {"success": False}),
             ev("run.completed", rid, AGENT_ID, 3, {"exit_reason": "error"}),
         ],
@@ -351,11 +452,29 @@ def scenario_cascading_tool_failure() -> str:
         rid,
         [
             ev("run.started", rid, AGENT_ID, 0),
-            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "db_lookup", "args_hash": "h1"}),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                1,
+                {"tool_name": "db_lookup", "args_hash": "h1"},
+            ),
             ev("tool.responded", rid, AGENT_ID, 1, {"success": False}),
-            ev("tool.called", rid, AGENT_ID, 2, {"tool_name": "search_api", "args_hash": "h2"}),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                2,
+                {"tool_name": "search_api", "args_hash": "h2"},
+            ),
             ev("tool.responded", rid, AGENT_ID, 2, {"success": False}),
-            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "db_lookup", "args_hash": "h3"}),
+            ev(
+                "tool.called",
+                rid,
+                AGENT_ID,
+                3,
+                {"tool_name": "db_lookup", "args_hash": "h3"},
+            ),
             ev("tool.responded", rid, AGENT_ID, 3, {"success": False}),
             ev("run.errored", rid, AGENT_ID, 3),
         ],
@@ -381,7 +500,11 @@ def scenario_first_step_failure() -> str:
 
 
 def _infl_ev(
-    event_type: str, run_id: str, step: int, payload: dict | None = None, ts: float | None = None
+    event_type: str,
+    run_id: str,
+    step: int,
+    payload: dict | None = None,
+    ts: float | None = None,
 ) -> dict:
     return {
         "event_type": event_type,
@@ -453,11 +576,17 @@ def scenario_step_count_inflation() -> str:
                 "llm.responded",
                 rid,
                 i,
-                {"finish_reason": "stop", "prompt_tokens": 50 + i * 5, "output_length": 30},
+                {
+                    "finish_reason": "stop",
+                    "prompt_tokens": 50 + i * 5,
+                    "output_length": 30,
+                },
             )
         )
         events.append(
-            _infl_ev("tool.called", rid, i, {"tool_name": "search", "args_hash": f"h{i}"})
+            _infl_ev(
+                "tool.called", rid, i, {"tool_name": "search", "args_hash": f"h{i}"}
+            )
         )
         events.append(_infl_ev("tool.responded", rid, i, {"success": True}))
     events.append(_infl_ev("run.completed", rid, 20, {"exit_reason": "completed"}))

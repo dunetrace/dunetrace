@@ -59,7 +59,9 @@ def run_rag_agent(context: str, question: str) -> str:
     """Use input_from when the user query is not the first argument."""
     run = get_current_run()
     run.retrieval_called("product-docs", query_hash="abc123")
-    run.retrieval_responded("product-docs", result_count=3, top_score=0.91, latency_ms=22)
+    run.retrieval_responded(
+        "product-docs", result_count=3, top_score=0.91, latency_ms=22
+    )
     return f"RAG answer to: {question}"
 
 
@@ -92,7 +94,9 @@ def run_rag_empty_agent(context: str, question: str) -> str:
     """Returns 0 retrieval results with a low score → triggers RAG_EMPTY_RETRIEVAL."""
     run = get_current_run()
     run.retrieval_called("product-docs", query_hash="abc123")
-    run.retrieval_responded("product-docs", result_count=0, top_score=0.05, latency_ms=18)
+    run.retrieval_responded(
+        "product-docs", result_count=0, top_score=0.05, latency_ms=18
+    )
     return f"RAG (empty) answer to: {question}"
 
 
@@ -120,7 +124,9 @@ def run_failures() -> None:
     print(f"  -> {asyncio.run(run_retry_storm_agent('recent papers'))}")
 
     print("\n[rag_empty]  → expect RAG_EMPTY_RETRIEVAL signal")
-    print(f"  -> {run_rag_empty_agent('context', question='How do I configure feature X?')}")
+    print(
+        f"  -> {run_rag_empty_agent('context', question='How do I configure feature X?')}"
+    )
 
 
 if __name__ == "__main__":

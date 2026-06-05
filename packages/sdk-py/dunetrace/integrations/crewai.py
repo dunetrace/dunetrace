@@ -107,7 +107,9 @@ class DunetraceCrewCallback:
                 unreg(fn)
             except Exception:
                 pass
-        logger.debug("Dunetrace CrewAI hooks uninstalled for agent_id=%s", self._agent_id)
+        logger.debug(
+            "Dunetrace CrewAI hooks uninstalled for agent_id=%s", self._agent_id
+        )
 
     # ── LLM hooks ──────────────────────────────────────────────────────────────
 
@@ -186,7 +188,13 @@ def _estimate_tokens(messages: Any) -> int:
         return 0
     try:
         total = sum(
-            len(str(m.get("content", "") if isinstance(m, dict) else getattr(m, "content", m)))
+            len(
+                str(
+                    m.get("content", "")
+                    if isinstance(m, dict)
+                    else getattr(m, "content", m)
+                )
+            )
             for m in messages
         )
         return total // 4

@@ -59,7 +59,9 @@ def send_with_retry(
 ) -> SendResult:
     """POST with exponential backoff. max_retries=3, backoff=2.0 → delays of 2s, 4s, 8s (~14s total before giving up)."""
     max_retries = max_retries if max_retries is not None else settings.MAX_RETRIES
-    retry_backoff = retry_backoff if retry_backoff is not None else settings.RETRY_BACKOFF
+    retry_backoff = (
+        retry_backoff if retry_backoff is not None else settings.RETRY_BACKOFF
+    )
 
     last_error = None
     last_status = None
@@ -72,7 +74,10 @@ def send_with_retry(
             # Slack returns 200 with body "ok" on success
             if 200 <= status < 300:
                 logger.info(
-                    "Alert sent. dest=%s attempt=%d status=%d", destination, attempt, status
+                    "Alert sent. dest=%s attempt=%d status=%d",
+                    destination,
+                    attempt,
+                    status,
                 )
                 return SendResult(
                     success=True,
@@ -95,13 +100,19 @@ def send_with_retry(
             last_error = f"HTTPError {exc.code}: {exc.reason}"
             last_status = exc.code
             logger.warning(
-                "Alert HTTPError. dest=%s attempt=%d error=%s", destination, attempt, last_error
+                "Alert HTTPError. dest=%s attempt=%d error=%s",
+                destination,
+                attempt,
+                last_error,
             )
 
         except urllib.error.URLError as exc:
             last_error = f"URLError: {exc.reason}"
             logger.warning(
-                "Alert URLError. dest=%s attempt=%d error=%s", destination, attempt, last_error
+                "Alert URLError. dest=%s attempt=%d error=%s",
+                destination,
+                attempt,
+                last_error,
             )
 
         except Exception as exc:
@@ -120,7 +131,10 @@ def send_with_retry(
             delay *= 2
 
     logger.error(
-        "Alert failed after %d attempts. dest=%s error=%s", max_retries + 1, destination, last_error
+        "Alert failed after %d attempts. dest=%s error=%s",
+        max_retries + 1,
+        destination,
+        last_error,
     )
     return SendResult(
         success=False,
@@ -138,7 +152,9 @@ def send_slack(payload: dict) -> SendResult:
     """POST a Block Kit payload to the Slack webhook URL."""
     if not settings.slack_enabled:
         logger.debug("Slack not configured — skipping")
-        return SendResult(success=False, destination="slack", attempts=0, error="not_configured")
+        return SendResult(
+            success=False, destination="slack", attempts=0, error="not_configured"
+        )
 
     body = json.dumps(payload, separators=(",", ":")).encode()
     headers = {"Content-Type": "application/json"}
@@ -154,7 +170,9 @@ def send_webhook(body: bytes, headers: dict) -> SendResult:
     """POST a signed JSON payload to the generic webhook URL."""
     if not settings.webhook_enabled:
         logger.debug("Webhook not configured — skipping")
-        return SendResult(success=False, destination="webhook", attempts=0, error="not_configured")
+        return SendResult(
+            success=False, destination="webhook", attempts=0, error="not_configured"
+        )
 
     return send_with_retry(
         url=settings.WEBHOOK_URL,

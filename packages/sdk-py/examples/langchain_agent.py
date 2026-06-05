@@ -33,7 +33,9 @@ from langgraph.prebuilt import create_react_agent
 
 # The suggested migration target (langchain.agents.create_react_agent) doesn't
 # exist in the installed langchain version, so the warning is premature.
-warnings.filterwarnings("ignore", message=".*create_react_agent.*", category=DeprecationWarning)
+warnings.filterwarnings(
+    "ignore", message=".*create_react_agent.*", category=DeprecationWarning
+)
 
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler

@@ -165,7 +165,9 @@ async def _ensure_event_partitions(conn, months_ahead: int = 3) -> None:
 
     # Default partition must exist before any named partitions so rows inserted
     # before the first monthly partition is created don't fail.
-    await conn.execute("CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT")
+    await conn.execute(
+        "CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT"
+    )
 
     today = date.today()
     for delta in range(months_ahead + 1):
@@ -204,16 +206,14 @@ async def prune_old_events(retention_days: int = 90) -> int:
         if not is_partitioned:
             return 0
 
-        rows = await conn.fetch(
-            """
+        rows = await conn.fetch("""
             SELECT c.relname
             FROM pg_class c
             JOIN pg_inherits i ON i.inhrelid = c.oid
             JOIN pg_class p ON p.oid = i.inhparent
             WHERE p.relname = 'events'
               AND c.relname ~ '^events_[0-9]{6}$'
-            """
-        )
+            """)
 
         dropped = 0
         for row in rows:
@@ -225,7 +225,11 @@ async def prune_old_events(retention_days: int = 90) -> int:
                 partition_end = date(end_year, end_month, 1)
                 if partition_end <= cutoff:
                     await conn.execute(f"DROP TABLE IF EXISTS {name}")
-                    logger.info("Pruned event partition %s (data before %s)", name, partition_end)
+                    logger.info(
+                        "Pruned event partition %s (data before %s)",
+                        name,
+                        partition_end,
+                    )
                     dropped += 1
             except (ValueError, IndexError):
                 pass
@@ -249,7 +253,9 @@ async def ensure_schema() -> None:
 async def insert_events(events: list, batch_id: str) -> int:
     """Bulk insert IngestEvent objects. Called from a BackgroundTask after the response is already sent."""
     if not _pool:
-        logger.error("insert_events: pool not available, dropping %d events", len(events))
+        logger.error(
+            "insert_events: pool not available, dropping %d events", len(events)
+        )
         return 0
 
     rows = [

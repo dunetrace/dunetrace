@@ -81,7 +81,9 @@ def _patch_openai() -> None:
             if run:
                 run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
             try:
-                resp = await _orig_acreate(self, messages=messages, model=model, **kwargs)
+                resp = await _orig_acreate(
+                    self, messages=messages, model=model, **kwargs
+                )
             except Exception:
                 if run:
                     run.llm_responded(
@@ -146,7 +148,9 @@ def _patch_anthropic() -> None:
     _orig_create = _mod.Messages.create
 
     @functools.wraps(_orig_create)
-    def _patched_create(self, *, model="unknown", messages=None, max_tokens=1024, **kwargs):
+    def _patched_create(
+        self, *, model="unknown", messages=None, max_tokens=1024, **kwargs
+    ):
         run = _current_run.get()
         t0 = time.monotonic()
         if run:
@@ -182,7 +186,11 @@ def _patch_anthropic() -> None:
                 run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
             try:
                 resp = await _orig_acreate(
-                    self, model=model, messages=messages, max_tokens=max_tokens, **kwargs
+                    self,
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    **kwargs,
                 )
             except Exception:
                 if run:
@@ -397,7 +405,13 @@ def _estimate_tokens(messages) -> int:
     if not messages:
         return 0
     chars = sum(
-        len(str(m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")))
+        len(
+            str(
+                m.get("content", "")
+                if isinstance(m, dict)
+                else getattr(m, "content", "")
+            )
+        )
         for m in messages
     )
     return max(1, chars // 4)

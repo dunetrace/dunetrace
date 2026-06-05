@@ -406,9 +406,15 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
             run_id,
         )
 
-    started_at = next((e["timestamp"] for e in events if e["event_type"] == "run.started"), None)
+    started_at = next(
+        (e["timestamp"] for e in events if e["event_type"] == "run.started"), None
+    )
     completed_at = next(
-        (e["timestamp"] for e in events if e["event_type"] in ("run.completed", "run.errored")),
+        (
+            e["timestamp"]
+            for e in events
+            if e["event_type"] in ("run.completed", "run.errored")
+        ),
         None,
     )
 
@@ -470,7 +476,11 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
                 "why_it_matters": exp.why_it_matters if exp else "",
                 "evidence_summary": exp.evidence_summary if exp else "",
                 "suggested_fixes": [
-                    {"description": f.description, "language": f.language, "code": f.code}
+                    {
+                        "description": f.description,
+                        "language": f.language,
+                        "code": f.code,
+                    }
                     for f in (exp.suggested_fixes if exp else [])
                 ],
             }
@@ -481,13 +491,20 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
     llm_all = llm_called + llm_responded
     # prompt_tokens: direct SDK writes to llm.called; LangChain writes to llm.responded
     prompt_tokens = sum(e["payload"].get("prompt_tokens") or 0 for e in llm_all)
-    completion_tokens = sum(e["payload"].get("completion_tokens") or 0 for e in llm_responded)
+    completion_tokens = sum(
+        e["payload"].get("completion_tokens") or 0 for e in llm_responded
+    )
     total_tokens = (prompt_tokens + completion_tokens) or None
-    model = next((e["payload"].get("model") for e in llm_called if e["payload"].get("model")), None)
+    model = next(
+        (e["payload"].get("model") for e in llm_called if e["payload"].get("model")),
+        None,
+    )
     from explainer_svc.cost import estimate_cost
 
     raw_cost = (
-        estimate_cost(model or "", prompt_tokens, completion_tokens) if total_tokens else None
+        estimate_cost(model or "", prompt_tokens, completion_tokens)
+        if total_tokens
+        else None
     )
     cost_usd = round(raw_cost, 6) if raw_cost else None
 
@@ -499,7 +516,9 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
         "exit_reason": pr_dict["trigger"],
         "started_at": started_at,
         "completed_at": completed_at,
-        "step_count": max((e["step_index"] for e in event_list), default=0) if event_list else 0,
+        "step_count": (
+            max((e["step_index"] for e in event_list), default=0) if event_list else 0
+        ),
         "total_tokens": total_tokens,
         "cost_usd": cost_usd,
         "events": event_list,
@@ -677,7 +696,11 @@ async def list_signals(
                 "why_it_matters": exp.why_it_matters if exp else "",
                 "evidence_summary": exp.evidence_summary if exp else "",
                 "suggested_fixes": [
-                    {"description": f.description, "language": f.language, "code": f.code}
+                    {
+                        "description": f.description,
+                        "language": f.language,
+                        "code": f.code,
+                    }
                     for f in (exp.suggested_fixes if exp else [])
                 ],
             }
@@ -722,7 +745,9 @@ async def export_signals(
         params.append(failure_type.upper())
         where.append(f"failure_type = ${len(params)}")
     if from_ts is not None:
-        params.append(datetime.datetime.fromtimestamp(from_ts, tz=datetime.timezone.utc))
+        params.append(
+            datetime.datetime.fromtimestamp(from_ts, tz=datetime.timezone.utc)
+        )
         where.append(f"detected_at >= ${len(params)}")
     if to_ts is not None:
         params.append(datetime.datetime.fromtimestamp(to_ts, tz=datetime.timezone.utc))
@@ -769,7 +794,9 @@ async def export_signals(
                 evidence = json.loads(evidence)
             detected_at = s["detected_at"]
             if hasattr(detected_at, "isoformat"):
-                detected_at_str = detected_at.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                detected_at_str = (
+                    detected_at.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                )
             else:
                 detected_at_str = str(detected_at)
             batch.append(
@@ -978,7 +1005,9 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
         "p25": float(overall["p25"]) if overall["p25"] is not None else None,
         "p50": float(overall["p50"]) if overall["p50"] is not None else None,
         "p75": float(overall["p75"]) if overall["p75"] is not None else None,
-        "avg_steps": float(overall["avg_steps"]) if overall["avg_steps"] is not None else None,
+        "avg_steps": (
+            float(overall["avg_steps"]) if overall["avg_steps"] is not None else None
+        ),
         "runs_with_tool": int(overall["runs_with_tool"]),
         "total_runs": int(overall["total_runs"]),
         "daily_trend": [
@@ -986,9 +1015,11 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
                 "day": str(r["day"]),
                 "run_count": int(r["run_count"]),
                 "runs_with_tool": int(r["runs_with_tool"]),
-                "avg_first_tool_step": float(r["avg_first_tool_step"])
-                if r["avg_first_tool_step"] is not None
-                else None,
+                "avg_first_tool_step": (
+                    float(r["avg_first_tool_step"])
+                    if r["avg_first_tool_step"] is not None
+                    else None
+                ),
             }
             for r in daily
         ],
@@ -1136,7 +1167,8 @@ async def agent_failure_rates(agent_id: str) -> list:
 
 async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -> list:
     """Failure types firing on >= rate_threshold of runs in the last 7 days.
-    Returns: [{failure_type, total_runs, affected_runs, rate, first_seen, last_seen, is_systemic}]."""
+    Returns: [{failure_type, total_runs, affected_runs, rate, first_seen, last_seen, is_systemic}].
+    """
     if not _pool:
         return []
 
@@ -1462,7 +1494,11 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
             "p25": float(step_row["p25"]) if step_row["p25"] is not None else None,
             "p50": float(step_row["p50"]) if step_row["p50"] is not None else None,
             "p75": float(step_row["p75"]) if step_row["p75"] is not None else None,
-            "avg_step": float(step_row["avg_step"]) if step_row["avg_step"] is not None else None,
+            "avg_step": (
+                float(step_row["avg_step"])
+                if step_row["avg_step"] is not None
+                else None
+            ),
         },
         "evidence_aggregates": [
             {k: v for k, v in dict(r).items() if v is not None} for r in evidence_rows
@@ -1586,11 +1622,11 @@ async def get_signal_fix_status(
         "verdict": (
             "verified"
             if runs >= 10 and rec == 0
-            else "likely_fixed"
-            if runs >= 5 and rec == 0
-            else "still_occurring"
-            if rec > 0
-            else "insufficient_data"
+            else (
+                "likely_fixed"
+                if runs >= 5 and rec == 0
+                else "still_occurring" if rec > 0 else "insufficient_data"
+            )
         ),
     }
 
@@ -1750,9 +1786,18 @@ async def update_policy(policy_id: int, fields: dict) -> dict:
     set_parts = []
     params: list = []
     for key, value in fields.items():
-        if key not in {"name", "agent_id", "condition", "action", "priority", "enabled"}:
+        if key not in {
+            "name",
+            "agent_id",
+            "condition",
+            "action",
+            "priority",
+            "enabled",
+        }:
             continue
-        params.append(value if key not in {"condition", "action"} else _json_mod.dumps(value))
+        params.append(
+            value if key not in {"condition", "action"} else _json_mod.dumps(value)
+        )
         cast = "::jsonb" if key in {"condition", "action"} else ""
         set_parts.append(f"{key} = ${len(params)}{cast}")
 
@@ -1919,7 +1964,12 @@ async def get_agent_health_score(agent_id: str) -> dict:
 
     total = int(stats["total_runs"] or 0)
     if total < 3:
-        return {"score": None, "components": {}, "sample_runs": total, "baseline_ready": False}
+        return {
+            "score": None,
+            "components": {},
+            "sample_runs": total,
+            "baseline_ready": False,
+        }
 
     baseline_ready = total >= _BASELINE_MIN_RUNS
 
@@ -1927,8 +1977,14 @@ async def get_agent_health_score(agent_id: str) -> dict:
     loop_rate = (int(stats["runs_with_loops"] or 0)) / total
     avg_tokens = stats["avg_prompt_tokens"]
     avg_latency = stats["avg_latency_ms"]
-    p75_tokens = stats["p75_tokens"] if (stats["token_baseline_sample"] or 0) >= 20 else None
-    p75_latency = stats["p75_latency_ms"] if (stats["latency_baseline_sample"] or 0) >= 20 else None
+    p75_tokens = (
+        stats["p75_tokens"] if (stats["token_baseline_sample"] or 0) >= 20 else None
+    )
+    p75_latency = (
+        stats["p75_latency_ms"]
+        if (stats["latency_baseline_sample"] or 0) >= 20
+        else None
+    )
 
     # Failure component (0–40): 0% failure rate = 40 pts. Active from run 1.
     failure_score = round((1.0 - failure_rate) * 40)
@@ -1952,12 +2008,15 @@ async def get_agent_health_score(agent_id: str) -> dict:
             token_score = 0
         else:
             token_score = round(
-                20.0 * (1.0 - (avg_tokens - healthy_ceil) / (penalty_ceil - healthy_ceil))
+                20.0
+                * (1.0 - (avg_tokens - healthy_ceil) / (penalty_ceil - healthy_ceil))
             )
     else:
         # No pre-window baseline (young agent or no LLM events in 30–90 day window).
         # Use global absolutes: < 500 tokens = full score, > 4,000 = 0.
-        token_score = max(0, min(20, round(20.0 * (1.0 - max(0.0, avg_tokens - 500) / 3500))))
+        token_score = max(
+            0, min(20, round(20.0 * (1.0 - max(0.0, avg_tokens - 500) / 3500)))
+        )
 
     # Latency component (0–15). Same logic: neutral only when avg_latency is None.
     # Young agents with data scored against global absolutes: < 1,000ms = full, > 8,000ms = 0.
@@ -1972,11 +2031,14 @@ async def get_agent_health_score(agent_id: str) -> dict:
             latency_score = 0
         else:
             latency_score = round(
-                15.0 * (1.0 - (avg_latency - healthy_ceil) / (penalty_ceil - healthy_ceil))
+                15.0
+                * (1.0 - (avg_latency - healthy_ceil) / (penalty_ceil - healthy_ceil))
             )
     else:
         # No pre-window baseline — global absolutes: < 1,000ms = full, > 8,000ms = 0.
-        latency_score = max(0, min(15, round(15.0 * (1.0 - max(0.0, avg_latency - 1000) / 7000))))
+        latency_score = max(
+            0, min(15, round(15.0 * (1.0 - max(0.0, avg_latency - 1000) / 7000)))
+        )
 
     score = failure_score + loop_score + token_score + latency_score
 
@@ -2083,7 +2145,9 @@ async def agent_cost_stats(agent_id: str) -> dict:
         )
 
     # Build lookup maps
-    completion: dict[str, int] = {r["run_id"]: int(r["completion_tokens"]) for r in completion_rows}
+    completion: dict[str, int] = {
+        r["run_id"]: int(r["completion_tokens"]) for r in completion_rows
+    }
     # run_id → set of failure types
     run_signals: dict[str, set] = {}
     for r in signal_rows:
@@ -2228,12 +2292,16 @@ async def agent_token_stats(agent_id: str) -> dict:
             "wasted_run_count": wasted_run_count,
         }
 
-    windows = {w: _aggregate([r for r in runs if r["ts"] >= cut]) for w, cut in cutoffs.items()}
+    windows = {
+        w: _aggregate([r for r in runs if r["ts"] >= cut]) for w, cut in cutoffs.items()
+    }
 
     ft_stats: dict[str, dict] = {}
     for r in runs:
         for ft in r["failure_types"]:
-            e = ft_stats.setdefault(ft, {"wasted_tokens": 0, "wasted_cost": 0.0, "run_ids": set()})
+            e = ft_stats.setdefault(
+                ft, {"wasted_tokens": 0, "wasted_cost": 0.0, "run_ids": set()}
+            )
             e["wasted_tokens"] += r["total_tokens"]
             e["wasted_cost"] += r["cost"]
             e["run_ids"].add(r["run_id"])
@@ -2340,7 +2408,11 @@ async def deploy_regression_check(agent_id: str) -> list:
         after_rate = after["signal_runs"] / after["total_runs"]
         delta = after_rate - before_rate
 
-        ts = deployed_at.timestamp() if hasattr(deployed_at, "timestamp") else float(deployed_at)
+        ts = (
+            deployed_at.timestamp()
+            if hasattr(deployed_at, "timestamp")
+            else float(deployed_at)
+        )
         results.append(
             {
                 "deploy_id": int(deploy_id),
@@ -2424,11 +2496,11 @@ async def list_agent_fixes(agent_id: str) -> list:
         verdict = (
             "verified"
             if runs >= 10 and recs == 0
-            else "likely_fixed"
-            if runs >= 5 and recs == 0
-            else "still_occurring"
-            if recs > 0
-            else "insufficient_data"
+            else (
+                "likely_fixed"
+                if runs >= 5 and recs == 0
+                else "still_occurring" if recs > 0 else "insufficient_data"
+            )
         )
         results.append(
             {
@@ -2538,7 +2610,9 @@ async def cross_run_patterns(customer_id: str) -> list:
     from collections import defaultdict
 
     today = datetime.date.today()
-    days = [today - datetime.timedelta(days=i) for i in range(6, -1, -1)]  # oldest → newest
+    days = [
+        today - datetime.timedelta(days=i) for i in range(6, -1, -1)
+    ]  # oldest → newest
 
     async with _pool.acquire() as conn:
         sig_rows = await conn.fetch(
@@ -2578,7 +2652,9 @@ async def cross_run_patterns(customer_id: str) -> list:
     agent_total_runs: dict = {r["agent_id"]: int(r["total_runs"]) for r in run_rows}
 
     # (agent_id, failure_type, date) → {signal_count, affected_runs}
-    daily: dict = defaultdict(lambda: defaultdict(lambda: {"signal_count": 0, "affected_runs": 0}))
+    daily: dict = defaultdict(
+        lambda: defaultdict(lambda: {"signal_count": 0, "affected_runs": 0})
+    )
     for r in sig_rows:
         d = r["day"] if isinstance(r["day"], datetime.date) else r["day"].date()
         daily[(r["agent_id"], r["failure_type"])][d] = {

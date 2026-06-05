@@ -71,7 +71,9 @@ async def receive_otlp_traces(
 
     batch_id = str(uuid.uuid4())
     span_count = sum(
-        len(ss.get("spans", [])) for rs in resource_spans for ss in rs.get("scopeSpans", [])
+        len(ss.get("spans", []))
+        for rs in resource_spans
+        for ss in rs.get("scopeSpans", [])
     )
     logger.info(
         "OTLP traces received. resources=%d spans=%d batch_id=%s",

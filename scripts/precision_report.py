@@ -125,8 +125,14 @@ def print_summary(cur, agent_filter: str | None):
     for r in rows:
         last = fmt_ts(r["last_seen"])
         conf = fmt_confidence(float(r["avg_conf"]))
-        crit_str = colored(str(r["critical"]), "\033[91m") if r["critical"] else DIM + "0" + RESET
-        high_str = colored(str(r["high"]), "\033[93m") if r["high"] else DIM + "0" + RESET
+        crit_str = (
+            colored(str(r["critical"]), "\033[91m")
+            if r["critical"]
+            else DIM + "0" + RESET
+        )
+        high_str = (
+            colored(str(r["high"]), "\033[93m") if r["high"] else DIM + "0" + RESET
+        )
         print(
             f"{r['failure_type']:<32} {r['total']:>6} {crit_str:>14} {high_str:>14} "
             f"{r['medium']:>5} {r['low']:>5}  {conf:>18}  {r['runs_affected']:>5}  {DIM}{last}{RESET}"
@@ -135,7 +141,9 @@ def print_summary(cur, agent_filter: str | None):
     print(f"{DIM}{'─' * 90}{RESET}")
     total_signals = sum(r["total"] for r in rows)
     total_runs = len(set())
-    print(f"{BOLD}{total_signals} total shadow signals across {len(rows)} detector type(s){RESET}")
+    print(
+        f"{BOLD}{total_signals} total shadow signals across {len(rows)} detector type(s){RESET}"
+    )
     print()
 
     # Graduation recommendations
@@ -150,7 +158,9 @@ def print_summary(cur, agent_filter: str | None):
         elif conf >= 0.70:
             status = colored("~  Borderline — spot-check before graduating", "\033[94m")
         else:
-            status = colored("✗  Not ready (avg conf < 70%) — review evidence", "\033[91m")
+            status = colored(
+                "✗  Not ready (avg conf < 70%) — review evidence", "\033[91m"
+            )
         print(f"  {r['failure_type']:<32} {status}")
     print()
 
@@ -253,7 +263,9 @@ def print_inspect(cur, failure_type: str, agent_filter: str | None, limit: int =
         print(f"No shadow signals found for {failure_type}.")
         return
 
-    print(f"\n{BOLD}Inspecting: {failure_type}{RESET}  {DIM}(latest {len(rows)}){RESET}")
+    print(
+        f"\n{BOLD}Inspecting: {failure_type}{RESET}  {DIM}(latest {len(rows)}){RESET}"
+    )
     print(
         f"{DIM}Run through these manually and mark each as TP (true positive) or FP (false positive){RESET}"
     )
@@ -301,10 +313,15 @@ def main():
     )
     parser.add_argument("--agent", help="Filter to a specific agent_id")
     parser.add_argument(
-        "--inspect", help="Show detailed evidence for a specific detector type (e.g. TOOL_LOOP)"
+        "--inspect",
+        help="Show detailed evidence for a specific detector type (e.g. TOOL_LOOP)",
     )
-    parser.add_argument("--recent", action="store_true", help="Show recent individual signals")
-    parser.add_argument("--limit", type=int, default=20, help="Max signals to show (default 20)")
+    parser.add_argument(
+        "--recent", action="store_true", help="Show recent individual signals"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=20, help="Max signals to show (default 20)"
+    )
     args = parser.parse_args()
 
     try:

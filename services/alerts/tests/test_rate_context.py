@@ -34,7 +34,6 @@ from alerts_svc.formatters.slack import _rate_context_text, format_slack
 import alerts_svc.worker as worker_module
 from alerts_svc.sender import SendResult
 
-
 # ── Factories ──────────────────────────────────────────────────────────────────
 
 
@@ -55,7 +54,9 @@ def make_explanation(rate_context: dict = None, severity: str = "HIGH") -> Expla
         evidence_summary="5 calls. Confidence: 95%.",
         suggested_fixes=[
             CodeFix(
-                description="Add limit", language="python", code="MAX = 3\nassert count <= MAX"
+                description="Add limit",
+                language="python",
+                code="MAX = 3\nassert count <= MAX",
             ),
         ],
     )
@@ -221,7 +222,9 @@ class TestSlackFormatterRateContext(unittest.TestCase):
         blocks = self._get_blocks(rate_context={})
         # There should be no "section" block with rate context text
         rate_blocks = [
-            b for b in blocks if b["type"] == "section" and "Systemic" in b["text"]["text"]
+            b
+            for b in blocks
+            if b["type"] == "section" and "Systemic" in b["text"]["text"]
         ]
         self.assertEqual(len(rate_blocks), 0)
 
@@ -237,7 +240,8 @@ class TestSlackFormatterRateContext(unittest.TestCase):
         rate_blocks = [
             b
             for b in blocks
-            if b["type"] == "section" and "Systemic" in b.get("text", {}).get("text", "")
+            if b["type"] == "section"
+            and "Systemic" in b.get("text", {}).get("text", "")
         ]
         self.assertGreater(len(rate_blocks), 0)
 
@@ -253,7 +257,8 @@ class TestSlackFormatterRateContext(unittest.TestCase):
         rate_blocks = [
             b
             for b in blocks
-            if b["type"] == "section" and "First occurrence" in b.get("text", {}).get("text", "")
+            if b["type"] == "section"
+            and "First occurrence" in b.get("text", {}).get("text", "")
         ]
         self.assertGreater(len(rate_blocks), 0)
 
@@ -341,13 +346,22 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
         """fetch_signal_rate_context is called once per delivered (agent_id, failure_type) group."""
         # Two signals with different failure types → two separate groups → two rate_context calls
         rows = [self._make_row(1, "TOOL_LOOP"), self._make_row(2, "RETRY_STORM")]
-        rate_ctx = {"total_runs": 10, "affected_runs": 3, "rate": 0.3, "is_systemic": False}
+        rate_ctx = {
+            "total_runs": 10,
+            "affected_runs": 3,
+            "rate": 0.3,
+            "is_systemic": False,
+        }
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
             patch(
-                "alerts_svc.worker.fetch_signal_rate_context", AsyncMock(return_value=rate_ctx)
+                "alerts_svc.worker.fetch_signal_rate_context",
+                AsyncMock(return_value=rate_ctx),
             ) as mock_rc,
             patch(
                 "alerts_svc.worker.deliver",
@@ -362,7 +376,12 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
     async def test_rate_context_passed_to_explain(self):
         """explain() receives the rate_context returned by fetch_signal_rate_context."""
         rows = [self._make_row(1)]
-        rate_ctx = {"total_runs": 5, "affected_runs": 5, "rate": 1.0, "is_systemic": True}
+        rate_ctx = {
+            "total_runs": 5,
+            "affected_runs": 5,
+            "rate": 1.0,
+            "is_systemic": True,
+        }
 
         captured_rate_contexts = []
 
@@ -376,9 +395,15 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
             return exp
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
-            patch("alerts_svc.worker.fetch_signal_rate_context", AsyncMock(return_value=rate_ctx)),
+            patch(
+                "alerts_svc.worker.fetch_signal_rate_context",
+                AsyncMock(return_value=rate_ctx),
+            ),
             patch("alerts_svc.worker.explain", side_effect=capture_explain),
             patch(
                 "alerts_svc.worker.deliver",
@@ -395,9 +420,15 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
         rows = [self._make_row(1)]
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
-            patch("alerts_svc.worker.fetch_signal_rate_context", AsyncMock(return_value={})),
+            patch(
+                "alerts_svc.worker.fetch_signal_rate_context",
+                AsyncMock(return_value={}),
+            ),
             patch(
                 "alerts_svc.worker.deliver",
                 return_value={"slack": SendResult(True, "slack", 1, 200)},
@@ -413,7 +444,10 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
         rows = [self._make_row(1)]
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch(
                 "alerts_svc.worker.fetch_signal_rate_context",
@@ -446,7 +480,10 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
             return {}
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch(
+                "alerts_svc.worker.fetch_unalerted_signals",
+                AsyncMock(return_value=rows),
+            ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
             patch("alerts_svc.worker.fetch_signal_rate_context", side_effect=track_rc),
             patch(

@@ -28,7 +28,6 @@ import time
 import uuid
 from typing import Any
 
-
 # ── Attribute helpers ──────────────────────────────────────────────────────────
 
 
@@ -45,7 +44,9 @@ def _val(v: dict) -> Any:
     if "arrayValue" in v:
         return [_val(x) for x in v["arrayValue"].get("values", [])]
     if "kvlistValue" in v:
-        return {kv["key"]: _val(kv["value"]) for kv in v["kvlistValue"].get("values", [])}
+        return {
+            kv["key"]: _val(kv["value"]) for kv in v["kvlistValue"].get("values", [])
+        }
     return None
 
 
@@ -208,7 +209,11 @@ def otlp_to_events(
             for span in scope_span.get("spans", []):
                 tid = span.get("traceId", "") or str(uuid.uuid4()).replace("-", "")
                 if tid not in traces:
-                    traces[tid] = {"agent_id": agent_id, "agent_version": version, "spans": []}
+                    traces[tid] = {
+                        "agent_id": agent_id,
+                        "agent_version": version,
+                        "spans": [],
+                    }
                 traces[tid]["spans"].append(span)
 
     events: list[dict] = []
@@ -219,7 +224,9 @@ def otlp_to_events(
         version = trace["agent_version"]
 
         # Sort chronologically
-        spans = sorted(trace["spans"], key=lambda s: int(s.get("startTimeUnixNano") or 0))
+        spans = sorted(
+            trace["spans"], key=lambda s: int(s.get("startTimeUnixNano") or 0)
+        )
 
         root = next((s for s in spans if _is_root(s)), spans[0] if spans else None)
         if not root:
@@ -231,7 +238,11 @@ def otlp_to_events(
         errored = root.get("status", {}).get("code") == 2  # STATUS_CODE_ERROR
 
         # Infer model from root span if present (some frameworks attach it there)
-        root_model = root_ad.get("gen_ai.request.model") or root_ad.get("llm.request.model") or ""
+        root_model = (
+            root_ad.get("gen_ai.request.model")
+            or root_ad.get("llm.request.model")
+            or ""
+        )
 
         def _ev(event_type: str, step: int, ts: float, payload: dict) -> dict:
             return {
@@ -267,7 +278,9 @@ def otlp_to_events(
             kind = _classify(name, ad)
             start_ts = _ns(span.get("startTimeUnixNano"))
             end_ts = _ns(span.get("endTimeUnixNano")) or time.time()
-            lat_ms = _latency_ms(span.get("startTimeUnixNano"), span.get("endTimeUnixNano"))
+            lat_ms = _latency_ms(
+                span.get("startTimeUnixNano"), span.get("endTimeUnixNano")
+            )
             span_ok = span.get("status", {}).get("code") != 2
 
             if kind == "llm":
@@ -280,7 +293,9 @@ def otlp_to_events(
                 )
                 # Accept both Gen AI semconv (input/output) and OpenLLMetry (prompt/completion)
                 prompt_tok = int(
-                    ad.get("gen_ai.usage.input_tokens") or ad.get("llm.usage.prompt_tokens") or 0
+                    ad.get("gen_ai.usage.input_tokens")
+                    or ad.get("llm.usage.prompt_tokens")
+                    or 0
                 )
                 completion_tok = int(
                     ad.get("gen_ai.usage.output_tokens")

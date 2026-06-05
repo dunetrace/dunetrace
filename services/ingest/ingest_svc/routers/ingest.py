@@ -9,8 +9,18 @@ import uuid
 from fastapi import APIRouter, HTTPException, Query, status, BackgroundTasks
 
 import time
-from ingest_svc.db import insert_events, insert_deploy_event, verify_api_key, fetch_policies
-from ingest_svc.schemas import IngestRequest, IngestResponse, DeployRequest, DeployResponse
+from ingest_svc.db import (
+    insert_events,
+    insert_deploy_event,
+    verify_api_key,
+    fetch_policies,
+)
+from ingest_svc.schemas import (
+    IngestRequest,
+    IngestResponse,
+    DeployRequest,
+    DeployResponse,
+)
 
 logger = logging.getLogger("dunetrace.ingest")
 router = APIRouter()
@@ -38,7 +48,9 @@ async def ingest(
     batch_id = str(uuid.uuid4())
     n = len(body.events)
 
-    logger.info("Accepted. batch_id=%s agent_id=%s events=%d", batch_id, body.agent_id, n)
+    logger.info(
+        "Accepted. batch_id=%s agent_id=%s events=%d", batch_id, body.agent_id, n
+    )
 
     # Persist after response is sent
     background_tasks.add_task(_persist, body.events, batch_id, body.agent_id)
@@ -80,7 +92,9 @@ async def mark_deploy(body: DeployRequest) -> DeployResponse:
             detail="Invalid or inactive API key",
         )
     row_id = await insert_deploy_event(agent_id, body.version, body.meta)
-    logger.info("Deploy marked. agent_id=%s version=%s id=%d", agent_id, body.version, row_id)
+    logger.info(
+        "Deploy marked. agent_id=%s version=%s id=%d", agent_id, body.version, row_id
+    )
     return DeployResponse(
         id=row_id,
         agent_id=agent_id,

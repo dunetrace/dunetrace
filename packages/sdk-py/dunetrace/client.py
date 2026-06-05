@@ -78,7 +78,9 @@ class Dunetrace:
         self._emit_json = emit_as_json
         self._stdout_lock = Lock()  # one JSON line per write, no interleaving
 
-        self._otel_exporter = otel_exporter  # kept separate for notify_run_state lifecycle calls
+        self._otel_exporter = (
+            otel_exporter  # kept separate for notify_run_state lifecycle calls
+        )
         self._exporters: List[Exporter] = list(exporters or [])
         self._default_agent_id = ""  # set by init()
         self._policy_engine = PolicyEngine()
@@ -161,7 +163,11 @@ class Dunetrace:
         )
 
         # Fetch remote policies in a background thread so run start isn't delayed.
-        if self._ingest_url and self._api_key and self._policy_engine.needs_fetch(agent_id):
+        if (
+            self._ingest_url
+            and self._api_key
+            and self._policy_engine.needs_fetch(agent_id)
+        ):
             Thread(target=self._fetch_policies, args=(agent_id,), daemon=True).start()
 
         _token = _current_run.set(ctx)
@@ -369,7 +375,9 @@ class Dunetrace:
                 import json as _json
 
                 data = _json.loads(resp.read())
-                self._policy_engine.load(data.get("policies", []), secret=self._policy_secret)
+                self._policy_engine.load(
+                    data.get("policies", []), secret=self._policy_secret
+                )
         except Exception as exc:
             logger.debug("Policy fetch skipped: %s", exc)
 
@@ -691,7 +699,10 @@ class Dunetrace:
                     exporter.handle(event)
                 except Exception as exc:
                     logger.warning(
-                        "Dunetrace: exporter %s failed on %s: %s", exporter, event.event_type, exc
+                        "Dunetrace: exporter %s failed on %s: %s",
+                        exporter,
+                        event.event_type,
+                        exc,
                     )
             self._buffer.push(event)
         except Exception as exc:
@@ -705,7 +716,9 @@ class Dunetrace:
         as Loki stream labels, run_id/step_index/payload as structured fields.
         payload contains hashes only — never raw content.
         """
-        ts = datetime.datetime.utcfromtimestamp(event.timestamp).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        ts = datetime.datetime.utcfromtimestamp(event.timestamp).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
         line = {
             "ts": ts,
             "level": "info",
@@ -791,7 +804,9 @@ def _bind_args(fn: Callable, args: tuple, kwargs: dict) -> dict:
         return {}
 
 
-def _extract_input(fn: Callable, args: tuple, kwargs: dict, input_from: Optional[str]) -> str:
+def _extract_input(
+    fn: Callable, args: tuple, kwargs: dict, input_from: Optional[str]
+) -> str:
     """
     Pull the user_input string from a function call.
 

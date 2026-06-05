@@ -77,7 +77,8 @@ def make_signal_row(**kw) -> dict:
         "why_it_matters": kw.get("why_it_matters", "Burns tokens."),
         "evidence_summary": kw.get("evidence_summary", "x5. 95%."),
         "suggested_fixes": kw.get(
-            "suggested_fixes", [{"description": "Add limit", "language": "python", "code": "MAX=3"}]
+            "suggested_fixes",
+            [{"description": "Add limit", "language": "python", "code": "MAX=3"}],
         ),
     }
 
@@ -402,7 +403,9 @@ class TestPolicyInjectionCheck(unittest.TestCase):
         condition = ConditionModel(trigger="tool_call_count", operator="gt", value=5)
         action = ActionModel(
             type="inject_prompt",
-            params={"prompt": "Stop repeating tool calls. Summarise what you know so far."},
+            params={
+                "prompt": "Stop repeating tool calls. Summarise what you know so far."
+            },
         )
         _validate(condition, action)  # must not raise
 

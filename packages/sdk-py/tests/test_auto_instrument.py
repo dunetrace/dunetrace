@@ -22,7 +22,6 @@ from dunetrace import (
 from dunetrace.auto import _PATCHED
 from dunetrace.models import EventType
 
-
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -108,7 +107,9 @@ def _install_fake_anthropic():
             return FakeResponse()
 
     class AsyncMessages:
-        async def create(self, *, model="unknown", messages=None, max_tokens=1024, **kwargs):
+        async def create(
+            self, *, model="unknown", messages=None, max_tokens=1024, **kwargs
+        ):
             return FakeResponse()
 
     messages_mod.Messages = Messages
@@ -515,7 +516,9 @@ class TestAutoInstrumentHTTPX(unittest.TestCase):
         with dt.run("agent"):
             self._httpx.Client().send(self._httpx._FakeRequest())
 
-        responded = next(e for e in captured if e.event_type == EventType.TOOL_RESPONDED)
+        responded = next(
+            e for e in captured if e.event_type == EventType.TOOL_RESPONDED
+        )
         self.assertTrue(responded.payload["success"])
         dt.shutdown(timeout=1)
 
@@ -675,7 +678,9 @@ class TestASGIMiddleware(unittest.TestCase):
     def test_method_and_path_as_user_input(self):
         dt = _make_client()
         captured = _capture(dt)
-        self._run_request(dt, "api", scope={"type": "http", "method": "GET", "path": "/health"})
+        self._run_request(
+            dt, "api", scope={"type": "http", "method": "GET", "path": "/health"}
+        )
 
         started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
         # user_input is hashed — just verify it's non-empty
@@ -745,7 +750,9 @@ class TestWSGIMiddleware(unittest.TestCase):
     def test_method_and_path_as_user_input(self):
         dt = _make_client()
         captured = _capture(dt)
-        self._run_request(dt, "api", environ={"REQUEST_METHOD": "GET", "PATH_INFO": "/health"})
+        self._run_request(
+            dt, "api", environ={"REQUEST_METHOD": "GET", "PATH_INFO": "/health"}
+        )
 
         started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
         self.assertNotEqual(started.payload.get("input_hash", ""), "")

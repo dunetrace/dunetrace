@@ -20,7 +20,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py"))
+    0,
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py")
+    ),
 )
 
 from dunetrace.models import FailureSignal, FailureType, Severity
@@ -118,7 +121,12 @@ class TestGoalAbandonmentNewEvidence(unittest.TestCase):
                 "stall_steps": 4,
                 "last_tool_used": "db_query",
                 "steps_since_last_tool": 5,
-                "stall_event_sequence": ["llm.called", "llm.called", "llm.called", "llm.called"],
+                "stall_event_sequence": [
+                    "llm.called",
+                    "llm.called",
+                    "llm.called",
+                    "llm.called",
+                ],
                 "last_tool_step": 3,
             }
         )
@@ -360,7 +368,8 @@ class TestLlmTruncationLoopEnriched(unittest.TestCase):
 class TestExplainRateContext(unittest.TestCase):
     def test_rate_context_attached_to_explanation(self):
         signal = make_signal(
-            FailureType.TOOL_LOOP, evidence={"tool": "web_search", "count": 5, "window": 5}
+            FailureType.TOOL_LOOP,
+            evidence={"tool": "web_search", "count": 5, "window": 5},
         )
         rc = {"total_runs": 10, "affected_runs": 3, "rate": 0.3, "is_systemic": False}
         exp = explain(signal, rate_context=rc)
@@ -368,14 +377,16 @@ class TestExplainRateContext(unittest.TestCase):
 
     def test_rate_context_defaults_to_empty_dict(self):
         signal = make_signal(
-            FailureType.TOOL_LOOP, evidence={"tool": "web_search", "count": 5, "window": 5}
+            FailureType.TOOL_LOOP,
+            evidence={"tool": "web_search", "count": 5, "window": 5},
         )
         exp = explain(signal)
         self.assertEqual(exp.rate_context, {})
 
     def test_rate_context_none_becomes_empty_dict(self):
         signal = make_signal(
-            FailureType.TOOL_LOOP, evidence={"tool": "web_search", "count": 5, "window": 5}
+            FailureType.TOOL_LOOP,
+            evidence={"tool": "web_search", "count": 5, "window": 5},
         )
         exp = explain(signal, rate_context=None)
         self.assertEqual(exp.rate_context, {})
@@ -388,7 +399,9 @@ class TestExplainRateContext(unittest.TestCase):
         self.assertEqual(exp.rate_context, rc)
 
     def test_rate_context_preserves_all_keys(self):
-        signal = make_signal(FailureType.TOOL_LOOP, evidence={"tool": "x", "count": 5, "window": 5})
+        signal = make_signal(
+            FailureType.TOOL_LOOP, evidence={"tool": "x", "count": 5, "window": 5}
+        )
         rc = {
             "total_runs": 20,
             "affected_runs": 4,
@@ -577,7 +590,9 @@ class TestCascadingToolFailureExplanation(unittest.TestCase):
         # At least one tool name should appear in the title
         title_lower = self.exp.title.lower()
         self.assertTrue(
-            "database" in title_lower or "search_api" in title_lower or "cache" in title_lower
+            "database" in title_lower
+            or "search_api" in title_lower
+            or "cache" in title_lower
         )
 
     def test_what_mentions_distinct_tools(self):
@@ -600,7 +615,11 @@ class TestFirstStepFailureExplanation(unittest.TestCase):
         if tool:
             evidence["tool"] = tool
         return explain(
-            make_signal(FailureType.FIRST_STEP_FAILURE, severity=Severity.MEDIUM, evidence=evidence)
+            make_signal(
+                FailureType.FIRST_STEP_FAILURE,
+                severity=Severity.MEDIUM,
+                evidence=evidence,
+            )
         )
 
     def test_run_error_trigger(self):
@@ -714,7 +733,9 @@ class TestTemplateEdgeCases(unittest.TestCase):
                     self.assertIsInstance(exp, Explanation)
                     self.assertGreater(len(exp.title), 0)
                 except Exception as e:
-                    self.fail(f"explain() raised for {failure_type} with partial evidence: {e}")
+                    self.fail(
+                        f"explain() raised for {failure_type} with partial evidence: {e}"
+                    )
 
     def test_all_templates_return_json_serialisable_explanation(self):
         import json
@@ -726,7 +747,9 @@ class TestTemplateEdgeCases(unittest.TestCase):
                 try:
                     json.dumps(exp.as_dict())
                 except TypeError as e:
-                    self.fail(f"as_dict() not JSON-serialisable for {failure_type}: {e}")
+                    self.fail(
+                        f"as_dict() not JSON-serialisable for {failure_type}: {e}"
+                    )
 
     def test_tool_loop_with_all_none_success_calls(self):
         """ToolLoop where no call has a success field set."""

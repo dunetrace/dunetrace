@@ -31,7 +31,9 @@ def make_state(**kwargs) -> RunState:
 
 
 def make_tool_call(name: str, step: int = 0) -> ToolCall:
-    return ToolCall(tool_name=name, args_hash="aaa", step_index=step, timestamp=time.time())
+    return ToolCall(
+        tool_name=name, args_hash="aaa", step_index=step, timestamp=time.time()
+    )
 
 
 # ── ToolLoopDetector ──────────────────────────────────────────────────────────
@@ -277,7 +279,10 @@ from dunetrace.detectors import LlmTruncationLoopDetector, ContextBloatDetector
 
 
 def make_llm_call(
-    finish_reason: str = "stop", prompt_tokens: int = 500, step: int = 1, model: str = "gpt-4o-mini"
+    finish_reason: str = "stop",
+    prompt_tokens: int = 500,
+    step: int = 1,
+    model: str = "gpt-4o-mini",
 ) -> LlmCall:
     return LlmCall(
         model=model,
@@ -404,7 +409,9 @@ class TestContextBloatDetector(unittest.TestCase):
         ]
         state.current_step = 3
         signal = self.detector.check(state)
-        assert signal is not None  # 2100/600 = 3.5x — exceeds threshold and MIN_LAST_TOKENS=2000
+        assert (
+            signal is not None
+        )  # 2100/600 = 3.5x — exceeds threshold and MIN_LAST_TOKENS=2000
         assert signal.evidence["growth_factor"] == 3.5
 
     def test_fires_on_clear_bloat(self):
@@ -568,7 +575,9 @@ class TestReasoningSpinDetector(unittest.TestCase):
         high_state = _make_spin_state(llm_count=10, tool_count=1)
         high_signal = self.detector.check(high_state)
         assert high_signal.confidence == 1.0
-        low_state = _make_spin_state(llm_count=5, tool_count=1)  # ratio=5/4=1.25 above threshold
+        low_state = _make_spin_state(
+            llm_count=5, tool_count=1
+        )  # ratio=5/4=1.25 above threshold
         low_signal = self.detector.check(low_state)
         assert 0.5 < low_signal.confidence < high_signal.confidence
 

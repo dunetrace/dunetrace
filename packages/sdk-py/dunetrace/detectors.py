@@ -102,7 +102,8 @@ class ToolLoopDetector(BaseDetector):
                 unique_hashes = len(set(args_hashes))
                 calls_with_result = [c for c in all_calls if c.success is not None]
                 success_rate = (
-                    sum(1 for c in calls_with_result if c.success) / len(calls_with_result)
+                    sum(1 for c in calls_with_result if c.success)
+                    / len(calls_with_result)
                     if calls_with_result
                     else None
                 )
@@ -286,13 +287,22 @@ _INJECTION_PATTERNS_COMPILED = [
             "ignore_instructions",
             r"ignore\s+(all\s+)?(previous|prior|above|earlier)\s+instructions?",
         ),
-        ("disregard_instructions", r"disregard\s+(all\s+)?(previous|prior|above)\s+instructions?"),
-        ("forget_instructions", r"forget\s+(all\s+)?(previous|prior|above)\s+instructions?"),
+        (
+            "disregard_instructions",
+            r"disregard\s+(all\s+)?(previous|prior|above)\s+instructions?",
+        ),
+        (
+            "forget_instructions",
+            r"forget\s+(all\s+)?(previous|prior|above)\s+instructions?",
+        ),
         ("you_are_now", r"you\s+are\s+now\s+"),
         ("new_role", r"your\s+new\s+(role|persona|identity|instructions?)\s+(is|are)"),
         ("act_as", r"act\s+as\s+(if\s+you\s+are\s+)?(a|an|the)\s+"),
         ("pretend", r"pretend\s+(you\s+are|to\s+be)\s+"),
-        ("do_not_follow", r"do\s+not\s+follow\s+(your\s+)?(previous|prior|original)\s+"),
+        (
+            "do_not_follow",
+            r"do\s+not\s+follow\s+(your\s+)?(previous|prior|original)\s+",
+        ),
         ("system_colon", r"system\s*:\s*you\s+are"),
         ("system_tag", r"\[system\]"),
         ("im_start", r"<\|im_start\|>"),
@@ -317,7 +327,9 @@ class PromptInjectionDetector(BaseDetector):
 
     def check_input(self, input_text: str, state: RunState) -> Optional[FailureSignal]:
         matched = [
-            label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(input_text)
+            label
+            for label, pattern in _INJECTION_PATTERNS_COMPILED
+            if pattern.search(input_text)
         ]
         if not matched:
             return None
@@ -466,7 +478,9 @@ class ContextBloatDetector(BaseDetector):
 
     def check(self, state: RunState) -> Optional[FailureSignal]:
         calls_with_tokens = [
-            c for c in state.llm_calls if c.prompt_tokens is not None and c.prompt_tokens > 0
+            c
+            for c in state.llm_calls
+            if c.prompt_tokens is not None and c.prompt_tokens > 0
         ]
 
         if len(calls_with_tokens) < self.MIN_CALLS:
@@ -484,7 +498,9 @@ class ContextBloatDetector(BaseDetector):
         growth = last_tokens / first_tokens
 
         if state.baseline_p75_token_growth is not None:
-            effective_threshold = state.baseline_p75_token_growth * self.INFLATION_FACTOR
+            effective_threshold = (
+                state.baseline_p75_token_growth * self.INFLATION_FACTOR
+            )
         else:
             effective_threshold = self.GROWTH_FACTOR
 
@@ -500,7 +516,8 @@ class ContextBloatDetector(BaseDetector):
             "first_call_step": calls_with_tokens[0].step_index,
             "last_call_step": calls_with_tokens[-1].step_index,
             "token_growth_sequence": [
-                {"step": c.step_index, "tokens": c.prompt_tokens} for c in calls_with_tokens
+                {"step": c.step_index, "tokens": c.prompt_tokens}
+                for c in calls_with_tokens
             ],
         }
         if state.baseline_p75_token_growth is not None:
@@ -542,14 +559,30 @@ class SlowStepDetector(BaseDetector):
     ]
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
-    def _threshold_for(self, event_type: str, state: Optional[RunState] = None) -> tuple[int, str]:
+    def _threshold_for(
+        self, event_type: str, state: Optional[RunState] = None
+    ) -> tuple[int, str]:
         for prefix, static_ms, label in self.THRESHOLDS:
             if not prefix or event_type.startswith(prefix):
                 if state is not None:
-                    if prefix == "tool.called" and state.baseline_p75_latency_tool is not None:
-                        return int(state.baseline_p75_latency_tool * self.INFLATION_FACTOR), label
-                    if prefix == "llm.called" and state.baseline_p75_latency_llm is not None:
-                        return int(state.baseline_p75_latency_llm * self.INFLATION_FACTOR), label
+                    if (
+                        prefix == "tool.called"
+                        and state.baseline_p75_latency_tool is not None
+                    ):
+                        return (
+                            int(
+                                state.baseline_p75_latency_tool * self.INFLATION_FACTOR
+                            ),
+                            label,
+                        )
+                    if (
+                        prefix == "llm.called"
+                        and state.baseline_p75_latency_llm is not None
+                    ):
+                        return (
+                            int(state.baseline_p75_latency_llm * self.INFLATION_FACTOR),
+                            label,
+                        )
                 return static_ms, label
         return 60_000, "step"
 
@@ -566,7 +599,9 @@ class SlowStepDetector(BaseDetector):
         # Exclude external.signal events — they share the step_index of the
         # agent event they annotate and must not overwrite its event_type or
         # timestamp in the lookup dicts.
-        agent_events = [e for e in state.events if e.event_type is not EventType.EXTERNAL_SIGNAL]
+        agent_events = [
+            e for e in state.events if e.event_type is not EventType.EXTERNAL_SIGNAL
+        ]
         step_event_type = {e.step_index: e.event_type.value for e in agent_events}
         step_timestamp = {e.step_index: e.timestamp for e in agent_events}
 
@@ -610,7 +645,8 @@ class SlowStepDetector(BaseDetector):
         ):
             evidence["baseline_p75"] = round(state.baseline_p75_latency_tool, 1)
         elif (
-            worst_event_type.startswith("llm.called") and state.baseline_p75_latency_llm is not None
+            worst_event_type.startswith("llm.called")
+            and state.baseline_p75_latency_llm is not None
         ):
             evidence["baseline_p75"] = round(state.baseline_p75_latency_llm, 1)
 
@@ -715,7 +751,9 @@ class RetryStormDetector(BaseDetector):
         # the agent recovered and this is CoT/retry behaviour, not a storm.
         last_fail_step = best_streak[-1].step_index
         recovered = any(
-            tc.tool_name == best_tool and tc.success is True and tc.step_index > last_fail_step
+            tc.tool_name == best_tool
+            and tc.success is True
+            and tc.step_index > last_fail_step
             for tc in state.tool_calls
         )
         if recovered:
@@ -943,7 +981,9 @@ class FirstStepFailureDetector(BaseDetector):
             )
 
         early_fail = [
-            tc for tc in state.tool_calls if tc.step_index <= self.MAX_STEP and tc.success is False
+            tc
+            for tc in state.tool_calls
+            if tc.step_index <= self.MAX_STEP and tc.success is False
         ]
         if early_fail:
             return FailureSignal(
@@ -1001,7 +1041,9 @@ class ReasoningSpinDetector(BaseDetector):
         ratio = llm_count / max(tool_count, 1)
 
         if state.baseline_p75_llm_tool_ratio is not None:
-            effective_threshold = state.baseline_p75_llm_tool_ratio * self.INFLATION_FACTOR
+            effective_threshold = (
+                state.baseline_p75_llm_tool_ratio * self.INFLATION_FACTOR
+            )
         else:
             effective_threshold = self.RATIO_THRESHOLD
 
@@ -1010,7 +1052,9 @@ class ReasoningSpinDetector(BaseDetector):
 
         # A run that ended with a final answer is inefficient (MEDIUM).
         # A run that stalled without converging shows the ratio caused failure (HIGH).
-        severity = Severity.MEDIUM if state.exit_reason == "final_answer" else Severity.HIGH
+        severity = (
+            Severity.MEDIUM if state.exit_reason == "final_answer" else Severity.HIGH
+        )
 
         action_events = [
             e
@@ -1019,7 +1063,8 @@ class ReasoningSpinDetector(BaseDetector):
             or e.event_type.value.startswith("tool.called")
         ]
         event_sequence = [
-            "llm" if e.event_type.value.startswith("llm.") else "tool" for e in action_events
+            "llm" if e.event_type.value.startswith("llm.") else "tool"
+            for e in action_events
         ]
 
         evidence: dict = {

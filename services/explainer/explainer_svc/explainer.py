@@ -32,13 +32,17 @@ def explain(signal: FailureSignal, rate_context: dict | None = None) -> Explanat
     template = TEMPLATES.get(signal.failure_type)
 
     if template is None:
-        logger.warning("No template for failure_type=%s — using fallback", signal.failure_type)
+        logger.warning(
+            "No template for failure_type=%s — using fallback", signal.failure_type
+        )
         exp = _fallback(signal)
     else:
         try:
             exp = template(signal)
         except Exception as exc:
-            logger.error("Template failed for %s: %s — using fallback", signal.failure_type, exc)
+            logger.error(
+                "Template failed for %s: %s — using fallback", signal.failure_type, exc
+            )
             exp = _fallback(signal)
 
     if rate_context:

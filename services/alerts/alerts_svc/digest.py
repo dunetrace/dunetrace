@@ -159,7 +159,8 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*Systemic patterns* _(≥10% of runs affected)_\n" + "\n".join(lines),
+                    "text": "*Systemic patterns* _(≥10% of runs affected)_\n"
+                    + "\n".join(lines),
                 },
             }
         )
@@ -185,7 +186,11 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Open Dashboard", "emoji": True},
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Open Dashboard",
+                        "emoji": True,
+                    },
                     "url": settings.DASHBOARD_URL,
                     "style": "primary",
                 }

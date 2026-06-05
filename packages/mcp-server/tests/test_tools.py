@@ -98,7 +98,11 @@ SIGNAL_LIST = {
             "why_it_matters": "Runaway cost.",
             "evidence_summary": "80k tokens vs 15k baseline.",
             "suggested_fixes": [
-                {"description": "Add token budget guard", "language": "python", "code": ""}
+                {
+                    "description": "Add token budget guard",
+                    "language": "python",
+                    "code": "",
+                }
             ],
         },
     ],
@@ -109,10 +113,30 @@ HEALTH_SCORE = {
     "agent_id": "my-agent",
     "score": 62,
     "components": {
-        "failure_rate": {"score": 24, "max": 40, "value": 24.0, "label": "% runs with failures"},
-        "loop_avoidance": {"score": 18, "max": 25, "value": 16.0, "label": "% runs with loops"},
-        "token_efficiency": {"score": 10, "max": 20, "value": None, "label": "avg prompt tokens"},
-        "latency": {"score": 10, "max": 15, "value": 4200.0, "label": "avg LLM latency ms"},
+        "failure_rate": {
+            "score": 24,
+            "max": 40,
+            "value": 24.0,
+            "label": "% runs with failures",
+        },
+        "loop_avoidance": {
+            "score": 18,
+            "max": 25,
+            "value": 16.0,
+            "label": "% runs with loops",
+        },
+        "token_efficiency": {
+            "score": 10,
+            "max": 20,
+            "value": None,
+            "label": "avg prompt tokens",
+        },
+        "latency": {
+            "score": 10,
+            "max": 15,
+            "value": 4200.0,
+            "label": "avg LLM latency ms",
+        },
     },
     "sample_runs": 50,
     "baseline_ready": True,
@@ -183,9 +207,24 @@ INSIGHTS = {
         },
     ],
     "signal_trends": [
-        {"failure_type": "TOOL_LOOP", "agent_version": "v1.2.3", "day": "2026-05-12", "count": 4},
-        {"failure_type": "TOOL_LOOP", "agent_version": "v1.2.3", "day": "2026-05-13", "count": 3},
-        {"failure_type": "COST_SPIKE", "agent_version": "v1.2.3", "day": "2026-05-13", "count": 1},
+        {
+            "failure_type": "TOOL_LOOP",
+            "agent_version": "v1.2.3",
+            "day": "2026-05-12",
+            "count": 4,
+        },
+        {
+            "failure_type": "TOOL_LOOP",
+            "agent_version": "v1.2.3",
+            "day": "2026-05-13",
+            "count": 3,
+        },
+        {
+            "failure_type": "COST_SPIKE",
+            "agent_version": "v1.2.3",
+            "day": "2026-05-13",
+            "count": 1,
+        },
     ],
     "failure_rates": [
         {
@@ -343,7 +382,10 @@ class TestListAgents(unittest.TestCase):
         self.assertIn("ago", out)
 
     def test_no_agents(self):
-        with patch("dunetrace_mcp.client.get", return_value={"agents": [], "page": {"total": 0}}):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={"agents": [], "page": {"total": 0}},
+        ):
             out = srv.list_agents()
         self.assertIn("No agents found", out)
 
@@ -379,7 +421,10 @@ class TestGetAgentSignals(unittest.TestCase):
         self.assertIn("Deduplicate", out)
 
     def test_empty_agent(self):
-        with patch("dunetrace_mcp.client.get", return_value={"signals": [], "page": {"total": 0}}):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={"signals": [], "page": {"total": 0}},
+        ):
             out = srv.get_agent_signals("ghost-agent")
         self.assertIn("No signals found", out)
 
@@ -504,7 +549,10 @@ class TestSearchSignals(unittest.TestCase):
         self.assertIn("id=43", out)
 
     def test_no_results(self):
-        with patch("dunetrace_mcp.client.get", return_value={"signals": [], "page": {"total": 0}}):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={"signals": [], "page": {"total": 0}},
+        ):
             out = srv.search_signals()
         self.assertIn("No signals found", out)
 
@@ -563,10 +611,14 @@ class TestGetSignalDetail(unittest.TestCase):
         self.assertIn("more lines", out)
 
     def test_evidence_list_truncated(self):
-        big_evidence = {**SIGNAL_LIST["signals"][0]["evidence"], "args_hashes": ["x"] * 20}
+        big_evidence = {
+            **SIGNAL_LIST["signals"][0]["evidence"],
+            "args_hashes": ["x"] * 20,
+        }
         sig = {**SIGNAL_LIST["signals"][0], "evidence": big_evidence}
         with patch(
-            "dunetrace_mcp.client.get", return_value={"signals": [sig], "page": {"total": 1}}
+            "dunetrace_mcp.client.get",
+            return_value={"signals": [sig], "page": {"total": 1}},
         ):
             out = srv.get_signal_detail(42, "my-agent")
         self.assertIn("+14 more", out)
@@ -674,7 +726,9 @@ class TestGetAgentRuns(unittest.TestCase):
         self.assertIn("🔴", out)
 
     def test_no_runs(self):
-        with patch("dunetrace_mcp.client.get", return_value={"runs": [], "page": {"total": 0}}):
+        with patch(
+            "dunetrace_mcp.client.get", return_value={"runs": [], "page": {"total": 0}}
+        ):
             out = srv.get_agent_runs("empty-agent")
         self.assertIn("No runs found", out)
 
@@ -780,14 +834,17 @@ class TestGetAgentTokenStats(unittest.TestCase):
         self.assertNotIn("1 runs", out)
 
     def test_api_error_returns_error_string(self):
-        with patch("dunetrace_mcp.client.get", side_effect=Exception("connection refused")):
+        with patch(
+            "dunetrace_mcp.client.get", side_effect=Exception("connection refused")
+        ):
             out = srv.get_agent_token_stats("my-agent")
         self.assertIn("Could not fetch", out)
         self.assertIn("my-agent", out)
 
     def test_missing_windows_shows_header_only(self):
         with patch(
-            "dunetrace_mcp.client.get", return_value={"windows": {}, "waste_by_failure_type": []}
+            "dunetrace_mcp.client.get",
+            return_value={"windows": {}, "waste_by_failure_type": []},
         ):
             out = srv.get_agent_token_stats("my-agent")
         self.assertIn("Token stats: my-agent", out)
@@ -932,7 +989,9 @@ class TestGetInstrumentationGuide(unittest.TestCase):
         import pathlib
 
         doc_path = (
-            pathlib.Path(__file__).resolve().parents[3] / "docs" / "integrate-langchain-agent.md"
+            pathlib.Path(__file__).resolve().parents[3]
+            / "docs"
+            / "integrate-langchain-agent.md"
         )
         if doc_path.exists():
             out = srv.get_instrumentation_guide("langchain")
@@ -1123,7 +1182,9 @@ class TestSearchSignalsExtra(unittest.TestCase):
         }
         with patch(
             "dunetrace_mcp.client.get",
-            side_effect=lambda path, **p: AGENT_LIST if path == "/v1/agents" else sig_list,
+            side_effect=lambda path, **p: (
+                AGENT_LIST if path == "/v1/agents" else sig_list
+            ),
         ):
             out = srv.search_signals(failure_type="SESSION_LATENCY")
         self.assertIn("SESSION_LATENCY", out)

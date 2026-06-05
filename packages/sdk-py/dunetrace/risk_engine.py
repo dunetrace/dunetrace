@@ -139,7 +139,10 @@ class RiskEngine:
 
         # Extreme tool loop: same tool called many times with nearly identical args
         max_calls, similarity = self._loop_stats(state)
-        if max_calls >= self.HARD_LOOP_CALLS and similarity >= self.HARD_SIMILARITY_THRESH:
+        if (
+            max_calls >= self.HARD_LOOP_CALLS
+            and similarity >= self.HARD_SIMILARITY_THRESH
+        ):
             overrides.append(
                 RiskScore(
                     confidence=0.98,
@@ -223,14 +226,20 @@ class RiskEngine:
             ("llm.called", 30_000),
             ("", 60_000),
         ]
-        agent_events = [e for e in state.events if e.event_type is not EventType.EXTERNAL_SIGNAL]
+        agent_events = [
+            e for e in state.events if e.event_type is not EventType.EXTERNAL_SIGNAL
+        ]
         step_event_type = {e.step_index: e.event_type.value for e in agent_events}
 
         worst_ratio = 0.0
         for step_idx, duration_ms in state.step_durations_ms.items():
             et = step_event_type.get(step_idx, "")
             threshold = next(
-                (ms for prefix, ms in _THRESHOLDS if not prefix or et.startswith(prefix)),
+                (
+                    ms
+                    for prefix, ms in _THRESHOLDS
+                    if not prefix or et.startswith(prefix)
+                ),
                 60_000,
             )
             if duration_ms > threshold:

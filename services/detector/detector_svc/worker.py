@@ -154,7 +154,9 @@ async def process_run(
         count += written
 
     # Issue persistence: track open/resolved lifecycle per (agent_id, failure_type)
-    fired_types = [s.failure_type.value for s in signals if s.failure_type.value in LIVE_DETECTORS]
+    fired_types = [
+        s.failure_type.value for s in signals if s.failure_type.value in LIVE_DETECTORS
+    ]
     try:
         if fired_types:
             await upsert_fired_issues(agent_id, fired_types)
@@ -187,7 +189,10 @@ async def poll_once() -> tuple[int, int]:
     async def process_run_bounded(r):
         async with semaphore:
             return await process_run(
-                r["run_id"], r["agent_id"], r["agent_version"], r.get("trigger", "unknown")
+                r["run_id"],
+                r["agent_id"],
+                r["agent_version"],
+                r.get("trigger", "unknown"),
             )
 
     results = await asyncio.gather(*[process_run_bounded(r) for r in runs])
