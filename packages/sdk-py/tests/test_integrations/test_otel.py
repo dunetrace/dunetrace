@@ -31,9 +31,7 @@ except ImportError:
 
 # Skip the entire module when opentelemetry is not installed
 if not _OTEL_AVAILABLE:
-    raise unittest.SkipTest(
-        "opentelemetry not installed — skipping OTel exporter tests"
-    )
+    raise unittest.SkipTest("opentelemetry not installed — skipping OTel exporter tests")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -187,9 +185,7 @@ class TestRunSpans:
         run_id = str(uuid.uuid4())
 
         dt_otel.handle(
-            _event(
-                EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": []}
-            )
+            _event(EventType.RUN_STARTED, run_id, payload={"model": "gpt-4o", "tools": []})
         )
         dt_otel.handle(
             _event(
@@ -252,9 +248,7 @@ class TestRunSpans:
         run_id = str(uuid.uuid4())
         parent_id = str(uuid.uuid4())
 
-        dt_otel.handle(
-            _event(EventType.RUN_STARTED, run_id, payload={}, parent_run_id=parent_id)
-        )
+        dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}, parent_run_id=parent_id))
         dt_otel.handle(
             _event(
                 EventType.RUN_COMPLETED,
@@ -423,9 +417,7 @@ class TestLlmSpan:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.handle(
-            _event(
-                EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}
-            )
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
         )
         dt_otel.handle(
             _event(
@@ -454,9 +446,7 @@ class TestLlmSpan:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.handle(
-            _event(
-                EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}
-            )
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
         )
         dt_otel.handle(
             _event(
@@ -486,9 +476,7 @@ class TestLlmSpan:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.handle(
-            _event(
-                EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}
-            )
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
         )
         dt_otel.handle(
             _event(
@@ -517,9 +505,7 @@ class TestLlmSpan:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.handle(
-            _event(
-                EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}
-            )
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
         )
         dt_otel.handle(
             _event(
@@ -974,9 +960,7 @@ class TestOrphanedChildSpan:
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         # First LLM call — no response emitted (orphan)
         dt_otel.handle(
-            _event(
-                EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}
-            )
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
         )
         # Second tool call starts without LLM being closed first
         dt_otel.handle(
@@ -1045,9 +1029,7 @@ class TestOrphanedChildSpan:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.handle(
-            _event(
-                EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}
-            )
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
         )
         dt_otel.handle(
             _event(
@@ -1138,9 +1120,7 @@ class TestSignalAnnotation:
         for i, tool in enumerate(tools):
             h = args_hash if tool == "search" else f"filler{i}"
             state.tool_calls.append(
-                ToolCall(
-                    tool_name=tool, step_index=i, args_hash=h, timestamp=time.time()
-                )
+                ToolCall(tool_name=tool, step_index=i, args_hash=h, timestamp=time.time())
             )
         return state
 
@@ -1210,8 +1190,7 @@ class TestSignalAnnotation:
         spans = mem.get_finished_spans()
         root = next(s for s in spans if s.name == "agent_run")
         assert any(
-            k.startswith("dunetrace.signal.") and k.endswith(".severity")
-            for k in root.attributes
+            k.startswith("dunetrace.signal.") and k.endswith(".severity") for k in root.attributes
         )
 
     def test_no_signal_annotation_when_run_state_not_provided(self):
@@ -1345,12 +1324,8 @@ class TestConcurrentRuns:
         run_id_b = str(uuid.uuid4())
 
         # Interleave two runs
-        dt_otel.handle(
-            _event(EventType.RUN_STARTED, run_id_a, agent_id="agent-a", payload={})
-        )
-        dt_otel.handle(
-            _event(EventType.RUN_STARTED, run_id_b, agent_id="agent-b", payload={})
-        )
+        dt_otel.handle(_event(EventType.RUN_STARTED, run_id_a, agent_id="agent-a", payload={}))
+        dt_otel.handle(_event(EventType.RUN_STARTED, run_id_b, agent_id="agent-b", payload={}))
         dt_otel.handle(
             _event(
                 EventType.LLM_CALLED,
@@ -1411,9 +1386,7 @@ class TestConcurrentRuns:
         ghost_id = str(uuid.uuid4())
 
         # Should not raise
-        dt_otel.handle(
-            _event(EventType.LLM_CALLED, ghost_id, payload={"model": "gpt-4o"})
-        )
+        dt_otel.handle(_event(EventType.LLM_CALLED, ghost_id, payload={"model": "gpt-4o"}))
         dt_otel.handle(
             _event(
                 EventType.TOOL_CALLED,
@@ -1445,9 +1418,7 @@ class TestSpanHierarchy:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.handle(
-            _event(
-                EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}
-            )
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
         )
         dt_otel.handle(
             _event(
@@ -1479,9 +1450,7 @@ class TestSpanHierarchy:
 
         dt_otel.handle(_event(EventType.RUN_STARTED, run_id, payload={}))
         dt_otel.handle(
-            _event(
-                EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"}
-            )
+            _event(EventType.LLM_CALLED, run_id, step_index=1, payload={"model": "gpt-4o"})
         )
         dt_otel.handle(
             _event(

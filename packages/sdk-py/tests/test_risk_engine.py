@@ -161,9 +161,7 @@ class TestLoopScore(unittest.TestCase):
 
     def test_only_last_window_considered(self):
         # First 5 calls are all different, last 5 are all "search"
-        calls = [_tool(f"t{i}", i) for i in range(5)] + [
-            _tool("search", i + 5) for i in range(5)
-        ]
+        calls = [_tool(f"t{i}", i) for i in range(5)] + [_tool("search", i + 5) for i in range(5)]
         state = _state(tool_calls=calls)
         self.assertAlmostEqual(RiskEngine()._loop_score(state), 1.0)
 
@@ -340,9 +338,7 @@ class TestMultiSignalBoosting(unittest.TestCase):
         llm_calls = [_llm(1, prompt_tokens=100), _llm(2, prompt_tokens=500)]
         events = [_event(EventType.TOOL_CALLED, 1), _event(EventType.LLM_CALLED, 2)] * 5
         tool_calls_b = [_tool("t", i) for i in range(3)]
-        state = _state(
-            tool_calls=calls + tool_calls_b, llm_calls=llm_calls, events=events
-        )
+        state = _state(tool_calls=calls + tool_calls_b, llm_calls=llm_calls, events=events)
         score = RiskEngine().evaluate([], state)
         self.assertLessEqual(score.confidence, 1.0)
 
@@ -360,9 +356,7 @@ class TestTimeEscalation(unittest.TestCase):
 
         # Same run but with a slow tool step → latency_score > 0 → time_mult > 1
         events = [_event(EventType.TOOL_CALLED, 4)]
-        state_slow = _state(
-            tool_calls=calls, step_durations_ms={4: 100_000}, events=events
-        )
+        state_slow = _state(tool_calls=calls, step_durations_ms={4: 100_000}, events=events)
         score_slow = RiskEngine().evaluate([], state_slow)
 
         self.assertGreater(score_slow.confidence, score_fast.confidence)

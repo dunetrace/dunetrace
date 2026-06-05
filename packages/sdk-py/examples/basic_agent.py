@@ -42,9 +42,7 @@ def normal_run(user_input: str) -> None:
     ) as run:
         run.llm_called("gpt-4o", prompt_tokens=150)
         time.sleep(0.05)
-        run.llm_responded(
-            completion_tokens=30, latency_ms=100, finish_reason="tool_calls"
-        )
+        run.llm_responded(completion_tokens=30, latency_ms=100, finish_reason="tool_calls")
 
         run.tool_called("web_search", {"query": user_input})
         time.sleep(0.05)

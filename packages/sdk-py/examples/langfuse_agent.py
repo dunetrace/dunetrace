@@ -43,9 +43,7 @@ from langgraph.prebuilt import create_react_agent
 
 # The suggested migration target (langchain.agents.create_react_agent) doesn't
 # exist in the installed langchain version, so the warning is premature.
-warnings.filterwarnings(
-    "ignore", message=".*create_react_agent.*", category=DeprecationWarning
-)
+warnings.filterwarnings("ignore", message=".*create_react_agent.*", category=DeprecationWarning)
 
 from dunetrace import Dunetrace
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
@@ -70,7 +68,9 @@ DUNETRACE_API = os.getenv("DUNETRACE_API", "http://localhost:8002")
 DUNETRACE_KEY = os.getenv("DUNETRACE_KEY", "dt_dev_test")
 AGENT_ID = "langfuse-example-agent"
 
-SYSTEM_PROMPT = "You are a research assistant. Use the search tool to find information before answering."
+SYSTEM_PROMPT = (
+    "You are a research assistant. Use the search tool to find information before answering."
+)
 
 dt = Dunetrace(endpoint=DUNETRACE_ENDPOINT)
 
@@ -141,9 +141,7 @@ def run_agent(query: str) -> str:
 # ── Post-run: fetch signal + explain ──────────────────────────────────────────
 
 
-async def fetch_and_explain(
-    dt_run_id: Optional[str], lf_trace_id: Optional[str]
-) -> None:
+async def fetch_and_explain(dt_run_id: Optional[str], lf_trace_id: Optional[str]) -> None:
     """
     1. Poll until a signal for the current run_id appears (up to 30s).
     2. Call POST /v1/signals/{id}/explain, passing the Langfuse trace_id override.
@@ -210,9 +208,7 @@ async def fetch_and_explain(
         prompt_name = data.get("langfuse_prompt_name")
         source = data.get("source", "langfuse")
 
-        source_note = (
-            "" if source == "langfuse" else "  [signal-only — no Langfuse trace]"
-        )
+        source_note = "" if source == "langfuse" else "  [signal-only — no Langfuse trace]"
         print(f"\nRoot cause:{source_note}")
         print(f"{'─' * 60}")
         print(root_cause)

@@ -114,9 +114,7 @@ def ingest(agent_id: str, run_id: str, events: list[dict]) -> None:
 
 
 def fetch_signals(agent_id: str, limit: int = 200) -> list[dict]:
-    return _get(f"{API_URL}/v1/agents/{agent_id}/signals?limit={limit}").get(
-        "signals", []
-    )
+    return _get(f"{API_URL}/v1/agents/{agent_id}/signals?limit={limit}").get("signals", [])
 
 
 def mk(tag: str) -> str:
@@ -514,13 +512,9 @@ def s_reasoning_stall() -> str:
                 },
             )
         )
-    events.append(
-        ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args_hash": "h1"})
-    )
+    events.append(ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args_hash": "h1"}))
     events.append(ev("tool.responded", rid, AGENT_ID, 3, {"success": True}))
-    events.append(
-        ev("run.completed", rid, AGENT_ID, 6, {"exit_reason": "final_answer"})
-    )
+    events.append(ev("run.completed", rid, AGENT_ID, 6, {"exit_reason": "final_answer"}))
     ingest(AGENT_ID, rid, events)
     return rid
 
@@ -535,9 +529,7 @@ def _infl(
     payload: dict | None = None,
     ts: float | None = None,
 ) -> dict:
-    return ev(
-        event_type, run_id, INFL_AGENT_ID, step, payload, ts, version=INFL_VERSION
-    )
+    return ev(event_type, run_id, INFL_AGENT_ID, step, payload, ts, version=INFL_VERSION)
 
 
 def inject_inflation_baseline(n: int = 10) -> None:
@@ -629,12 +621,8 @@ def main() -> None:
         except Exception as exc:
             print(f"  WARNING: could not fetch trace ID: {exc}")
     if not lf_trace_id:
-        print(
-            f"  {RED}ABORT: cannot run explain tests without a Langfuse trace ID.{RESET}"
-        )
-        print(
-            "  Run:  SCENARIO=tool_loop python packages/sdk-py/examples/langfuse_agent.py"
-        )
+        print(f"  {RED}ABORT: cannot run explain tests without a Langfuse trace ID.{RESET}")
+        print("  Run:  SCENARIO=tool_loop python packages/sdk-py/examples/langfuse_agent.py")
         sys.exit(1)
 
     # ── Baseline for STEP_COUNT_INFLATION ─────────────────────────────────────
@@ -688,9 +676,7 @@ def main() -> None:
         if found_synth.keys() >= SYNTH_TARGETS:
             break
         missing = SYNTH_TARGETS - found_synth.keys()
-        print(
-            f"  {len(found_synth)}/{len(SYNTH_TARGETS)}  missing: {', '.join(sorted(missing))}"
-        )
+        print(f"  {len(found_synth)}/{len(SYNTH_TARGETS)}  missing: {', '.join(sorted(missing))}")
         time.sleep(5)
 
     print(f"  Found: {len(found_synth)}/{len(SYNTH_TARGETS)}")
@@ -714,9 +700,7 @@ def main() -> None:
         print(f"  {YELLOW}SKIP{RESET}  No PROMPT_INJECTION_SIGNAL found in DB")
 
     # ── Run explain on every signal ───────────────────────────────────────────
-    print(
-        f"\n[6] Running explain on each signal (Langfuse trace: {lf_trace_id[:12]}...)\n"
-    )
+    print(f"\n[6] Running explain on each signal (Langfuse trace: {lf_trace_id[:12]}...)\n")
 
     results: list[tuple[str, str, str]] = []  # (failure_type, status, detail)
 
@@ -791,9 +775,7 @@ def main() -> None:
                 )
             )
     else:
-        results.append(
-            ("PROMPT_INJECTION_SIGNAL (apply-fix guard)", "SKIP", "no signal in DB")
-        )
+        results.append(("PROMPT_INJECTION_SIGNAL (apply-fix guard)", "SKIP", "no signal in DB"))
 
     # ── Print results ─────────────────────────────────────────────────────────
     print()
@@ -818,9 +800,7 @@ def main() -> None:
     not_found = SYNTH_TARGETS - found_synth.keys()
     if not_found:
         for ft in sorted(not_found):
-            print(
-                f"  {RED}MISS  {RESET}  {ft:<35}  {DIM}signal not detected within timeout{RESET}"
-            )
+            print(f"  {RED}MISS  {RESET}  {ft:<35}  {DIM}signal not detected within timeout{RESET}")
             failed += 1
 
     print(f"\n  Skipped (needs stall timeout):  GOAL_ABANDONMENT")

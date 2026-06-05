@@ -67,9 +67,7 @@ def _check_prompt_injection(text: str) -> list:
     """Return matched pattern labels if text contains injection signatures, else []."""
     from dunetrace.detectors import _INJECTION_PATTERNS_COMPILED
 
-    return [
-        label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(text)
-    ]
+    return [label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(text)]
 
 
 def _validate(condition: ConditionModel, action: ActionModel) -> None:
@@ -151,9 +149,7 @@ async def update(
     effective_action = body.action or ActionModel(**existing["action"])
     _validate(effective_condition, effective_action)
     row = await update_policy(policy_id, body.model_dump(exclude_none=True))
-    await log_policy_audit(
-        policy_id, "updated", customer_id, before=existing, after=row
-    )
+    await log_policy_audit(policy_id, "updated", customer_id, before=existing, after=row)
     return row
 
 
@@ -166,9 +162,7 @@ async def delete(
     if existing is None:
         raise HTTPException(404, f"Policy {policy_id} not found")
     await delete_policy(policy_id)
-    await log_policy_audit(
-        policy_id, "deleted", customer_id, before=existing, after=None
-    )
+    await log_policy_audit(policy_id, "deleted", customer_id, before=existing, after=None)
     return {"deleted": True, "policy_id": policy_id}
 
 
@@ -185,7 +179,5 @@ async def toggle(
     if existing is None:
         raise HTTPException(404, f"Policy {policy_id} not found")
     row = await update_policy(policy_id, {"enabled": not existing["enabled"]})
-    await log_policy_audit(
-        policy_id, "toggled", customer_id, before=existing, after=row
-    )
+    await log_policy_audit(policy_id, "toggled", customer_id, before=existing, after=row)
     return row

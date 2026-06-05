@@ -62,9 +62,7 @@ def run_started(tools: list = None, step: int = 0) -> dict:
 
 
 def run_completed(step: int = 10) -> dict:
-    return evt(
-        "run.completed", step, {"exit_reason": "final_answer", "total_steps": step}
-    )
+    return evt("run.completed", step, {"exit_reason": "final_answer", "total_steps": step})
 
 
 def llm_evt(step: int) -> dict:
@@ -72,9 +70,7 @@ def llm_evt(step: int) -> dict:
 
 
 def llm_responded_evt(step: int, prompt_tokens: int = 500) -> dict:
-    return evt(
-        "llm.responded", step, {"prompt_tokens": prompt_tokens, "finish_reason": "stop"}
-    )
+    return evt("llm.responded", step, {"prompt_tokens": prompt_tokens, "finish_reason": "stop"})
 
 
 # ── RunBuilder tests ───────────────────────────────────────────────────────────
@@ -327,9 +323,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
             return len(signals)
 
         with (
-            patch(
-                "detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)
-            ),
+            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)),
             patch("detector_svc.worker.write_signals", mock_write),
             patch("detector_svc.worker.mark_run_processed", AsyncMock()),
         ):
@@ -355,9 +349,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
             return len(signals)
 
         with (
-            patch(
-                "detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)
-            ),
+            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)),
             patch("detector_svc.worker.write_signals", mock_write),
             patch("detector_svc.worker.mark_run_processed", AsyncMock()),
             patch("detector_svc.worker.LIVE_DETECTORS", set()),
@@ -380,9 +372,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         mark_mock = AsyncMock()
 
         with (
-            patch(
-                "detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)
-            ),
+            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)),
             patch("detector_svc.worker.write_signals", AsyncMock(return_value=0)),
             patch("detector_svc.worker.mark_run_processed", mark_mock),
         ):
@@ -454,9 +444,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
 
     async def test_poll_once_returns_zero_when_no_work(self):
         with (
-            patch(
-                "detector_svc.worker.fetch_completed_runs", AsyncMock(return_value=[])
-            ),
+            patch("detector_svc.worker.fetch_completed_runs", AsyncMock(return_value=[])),
             patch("detector_svc.worker.fetch_stalled_runs", AsyncMock(return_value=[])),
         ):
             from detector_svc.worker import poll_once
@@ -559,9 +547,7 @@ class TestCooccurrenceBoost(unittest.TestCase):
 
         s1 = self._make_signal(0.80)
         original_severity = s1.severity
-        risk = RiskScore(
-            confidence=0.75, active_signals=2, scores={"loop": 0.6, "retry": 0.7}
-        )
+        risk = RiskScore(confidence=0.75, active_signals=2, scores={"loop": 0.6, "retry": 0.7})
         _apply_hard_override([s1], risk)
 
         self.assertEqual(s1.severity, original_severity)

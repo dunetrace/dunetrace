@@ -125,9 +125,7 @@ class TestRunLifecycle(unittest.TestCase):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "root"}, run_id="lc-root")
         count_before = len(emitted)
-        handler.on_chain_start(
-            {}, {"input": "sub"}, run_id="lc-sub", parent_run_id="lc-root"
-        )
+        handler.on_chain_start({}, {"input": "sub"}, run_id="lc-sub", parent_run_id="lc-root")
         self.assertEqual(len(emitted), count_before)
 
     def test_handler_resets_after_completion(self):
@@ -159,9 +157,7 @@ class TestRunLifecycle(unittest.TestCase):
     def test_input_extracted_from_messages_format(self):
         """LangGraph passes input as {'messages': [('human', text)]}"""
         handler, emitted = _make_handler()
-        handler.on_chain_start(
-            {}, {"messages": [("human", "secret message")]}, run_id="lc-1"
-        )
+        handler.on_chain_start({}, {"messages": [("human", "secret message")]}, run_id="lc-1")
         import json
 
         self.assertNotIn("secret message", json.dumps(emitted[0].payload))
@@ -190,9 +186,7 @@ class TestLlmCallbacks(unittest.TestCase):
         gen.message = None
         response = MagicMock()
         response.generations = [[gen]]
-        response.llm_output = {
-            "token_usage": {"prompt_tokens": 100, "completion_tokens": 50}
-        }
+        response.llm_output = {"token_usage": {"prompt_tokens": 100, "completion_tokens": 50}}
         handler.on_llm_end(response, run_id="lc-llm", parent_run_id="lc-1")
 
         return handler, emitted
@@ -236,12 +230,8 @@ class TestLlmCallbacks(unittest.TestCase):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         handler.on_chat_model_start({}, [[]], run_id="lc-llm", parent_run_id="lc-1")
-        handler.on_llm_error(
-            RuntimeError("timeout"), run_id="lc-llm", parent_run_id="lc-1"
-        )
-        responded = next(
-            (e for e in emitted if e.event_type == EventType.LLM_RESPONDED), None
-        )
+        handler.on_llm_error(RuntimeError("timeout"), run_id="lc-llm", parent_run_id="lc-1")
+        responded = next((e for e in emitted if e.event_type == EventType.LLM_RESPONDED), None)
         self.assertIsNotNone(responded)
         self.assertEqual(responded.payload["finish_reason"], "error")
 
@@ -273,9 +263,7 @@ class TestToolCallbacks(unittest.TestCase):
     def test_tool_called_payload_has_tool_name(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_tool_start(
-            {"name": "calculator"}, "1+1", run_id="lc-tool", parent_run_id="lc-1"
-        )
+        handler.on_tool_start({"name": "calculator"}, "1+1", run_id="lc-tool", parent_run_id="lc-1")
         called = next(e for e in emitted if e.event_type == EventType.TOOL_CALLED)
         self.assertEqual(called.payload["tool_name"], "calculator")
 
@@ -292,28 +280,18 @@ class TestToolCallbacks(unittest.TestCase):
     def test_tool_end_emits_tool_responded_success(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_tool_start(
-            {"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1"
-        )
+        handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
         handler.on_tool_end("result", run_id="lc-tool", parent_run_id="lc-1")
-        responded = next(
-            (e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None
-        )
+        responded = next((e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None)
         self.assertIsNotNone(responded)
         self.assertTrue(responded.payload["success"])
 
     def test_tool_error_emits_tool_responded_failure(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_tool_start(
-            {"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1"
-        )
-        handler.on_tool_error(
-            RuntimeError("timeout"), run_id="lc-tool", parent_run_id="lc-1"
-        )
-        responded = next(
-            (e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None
-        )
+        handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
+        handler.on_tool_error(RuntimeError("timeout"), run_id="lc-tool", parent_run_id="lc-1")
+        responded = next((e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None)
         self.assertIsNotNone(responded)
         self.assertFalse(responded.payload["success"])
 
@@ -321,9 +299,7 @@ class TestToolCallbacks(unittest.TestCase):
         """handle_tool_error=True / LangGraph ToolNode calls on_tool_end with error= kwarg."""
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_tool_start(
-            {"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1"
-        )
+        handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
         handler.on_tool_end(
             "Error: timeout",
             run_id="lc-tool",
@@ -331,9 +307,7 @@ class TestToolCallbacks(unittest.TestCase):
             name="search",
             error=RuntimeError("timeout"),
         )
-        responded = next(
-            (e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None
-        )
+        responded = next((e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None)
         self.assertIsNotNone(responded)
         self.assertFalse(responded.payload["success"])
         self.assertIn("error_hash", responded.payload)
@@ -342,32 +316,22 @@ class TestToolCallbacks(unittest.TestCase):
         """Normal on_tool_end (no error kwarg) still reports success=True."""
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_tool_start(
-            {"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1"
-        )
-        handler.on_tool_end(
-            "result text", run_id="lc-tool", parent_run_id="lc-1", name="search"
-        )
-        responded = next(
-            (e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None
-        )
+        handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
+        handler.on_tool_end("result text", run_id="lc-tool", parent_run_id="lc-1", name="search")
+        responded = next((e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None)
         self.assertIsNotNone(responded)
         self.assertTrue(responded.payload["success"])
 
     def test_tool_error_does_not_include_raw_error(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_tool_start(
-            {"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1"
-        )
+        handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
         handler.on_tool_error(
             RuntimeError("secret error details"), run_id="lc-tool", parent_run_id="lc-1"
         )
         import json
 
-        self.assertNotIn(
-            "secret error details", json.dumps([e.payload for e in emitted])
-        )
+        self.assertNotIn("secret error details", json.dumps([e.payload for e in emitted]))
 
     def test_on_agent_action_emits_tool_called(self):
         """AgentExecutor path (LangChain < 1.x)."""
@@ -406,9 +370,7 @@ class TestRetrievalCallbacks(unittest.TestCase):
     def test_retriever_end_emits_retrieval_responded(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_retriever_start(
-            {"name": "idx"}, "q", run_id="lc-ret", parent_run_id="lc-1"
-        )
+        handler.on_retriever_start({"name": "idx"}, "q", run_id="lc-ret", parent_run_id="lc-1")
         doc = MagicMock()
         doc.metadata = {"score": 0.9}
         handler.on_retriever_end([doc, doc], run_id="lc-ret", parent_run_id="lc-1")
@@ -422,28 +384,20 @@ class TestRetrievalCallbacks(unittest.TestCase):
     def test_retriever_end_with_no_documents(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_retriever_start(
-            {"name": "idx"}, "q", run_id="lc-ret", parent_run_id="lc-1"
-        )
+        handler.on_retriever_start({"name": "idx"}, "q", run_id="lc-ret", parent_run_id="lc-1")
         handler.on_retriever_end([], run_id="lc-ret", parent_run_id="lc-1")
-        responded = next(
-            e for e in emitted if e.event_type == EventType.RETRIEVAL_RESPONDED
-        )
+        responded = next(e for e in emitted if e.event_type == EventType.RETRIEVAL_RESPONDED)
         self.assertEqual(responded.payload["result_count"], 0)
         self.assertIsNone(responded.payload["top_score"])
 
     def test_retriever_error_emits_retrieval_responded_with_zero_count(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
-        handler.on_retriever_start(
-            {"name": "idx"}, "q", run_id="lc-ret", parent_run_id="lc-1"
-        )
+        handler.on_retriever_start({"name": "idx"}, "q", run_id="lc-ret", parent_run_id="lc-1")
         handler.on_retriever_error(
             RuntimeError("index down"), run_id="lc-ret", parent_run_id="lc-1"
         )
-        responded = next(
-            e for e in emitted if e.event_type == EventType.RETRIEVAL_RESPONDED
-        )
+        responded = next(e for e in emitted if e.event_type == EventType.RETRIEVAL_RESPONDED)
         self.assertEqual(responded.payload["result_count"], 0)
 
     def test_retriever_hashes_query(self):
@@ -533,9 +487,7 @@ class TestStalePruning(unittest.TestCase):
 
         # Back-date the run's start_time past the stale threshold
         with handler._lock:
-            handler._runs["old-run"].start_time = (
-                time.time() - lc_mod._STALE_RUN_SECS - 1
-            )
+            handler._runs["old-run"].start_time = time.time() - lc_mod._STALE_RUN_SECS - 1
 
         # Starting a new run should prune the stale one
         handler.on_chain_start({}, {"input": "q2"}, run_id="new-run")

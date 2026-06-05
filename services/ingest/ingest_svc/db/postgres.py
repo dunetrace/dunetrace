@@ -165,9 +165,7 @@ async def _ensure_event_partitions(conn, months_ahead: int = 3) -> None:
 
     # Default partition must exist before any named partitions so rows inserted
     # before the first monthly partition is created don't fail.
-    await conn.execute(
-        "CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT"
-    )
+    await conn.execute("CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT")
 
     today = date.today()
     for delta in range(months_ahead + 1):
@@ -253,9 +251,7 @@ async def ensure_schema() -> None:
 async def insert_events(events: list, batch_id: str) -> int:
     """Bulk insert IngestEvent objects. Called from a BackgroundTask after the response is already sent."""
     if not _pool:
-        logger.error(
-            "insert_events: pool not available, dropping %d events", len(events)
-        )
+        logger.error("insert_events: pool not available, dropping %d events", len(events))
         return 0
 
     rows = [

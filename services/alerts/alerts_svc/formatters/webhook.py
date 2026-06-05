@@ -37,9 +37,7 @@ def sign_payload(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-def build_signed_request(
-    explanation: Explanation, secret: str = ""
-) -> tuple[bytes, dict]:
+def build_signed_request(explanation: Explanation, secret: str = "") -> tuple[bytes, dict]:
     payload = format_webhook(explanation)
     body = json.dumps(payload, separators=(",", ":")).encode()
     headers = {

@@ -124,21 +124,15 @@ class TestSlackFormatter(unittest.TestCase):
         self.assertEqual(color, "#FF0000")
 
     def test_high_is_orange(self):
-        color = format_slack(make_explanation(severity="HIGH"))["attachments"][0][
-            "color"
-        ]
+        color = format_slack(make_explanation(severity="HIGH"))["attachments"][0]["color"]
         self.assertEqual(color, "#FF6B00")
 
     def test_medium_is_amber(self):
-        color = format_slack(make_explanation(severity="MEDIUM"))["attachments"][0][
-            "color"
-        ]
+        color = format_slack(make_explanation(severity="MEDIUM"))["attachments"][0]["color"]
         self.assertEqual(color, "#FFB800")
 
     def test_low_is_green(self):
-        color = format_slack(make_explanation(severity="LOW"))["attachments"][0][
-            "color"
-        ]
+        color = format_slack(make_explanation(severity="LOW"))["attachments"][0]["color"]
         self.assertEqual(color, "#36A64F")
 
     def test_blocks_present(self):
@@ -262,9 +256,7 @@ class TestWebhookFormatter(unittest.TestCase):
 
     def test_sign_payload_different_secret_different_sig(self):
         body = b"test"
-        self.assertNotEqual(
-            sign_payload(body, "secret1"), sign_payload(body, "secret2")
-        )
+        self.assertNotEqual(sign_payload(body, "secret1"), sign_payload(body, "secret2"))
 
     def test_sign_payload_empty_secret_returns_empty_string(self):
         self.assertEqual(sign_payload(b"body", ""), "")
@@ -397,9 +389,7 @@ class TestSeverityThreshold(unittest.TestCase):
 
     def test_critical_meets_all_thresholds(self):
         for threshold in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]:
-            meets = SEVERITY_ORDER.get("CRITICAL", 0) >= SEVERITY_ORDER.get(
-                threshold, 0
-            )
+            meets = SEVERITY_ORDER.get("CRITICAL", 0) >= SEVERITY_ORDER.get(threshold, 0)
             self.assertTrue(meets, f"CRITICAL should meet {threshold} threshold")
 
 
@@ -527,9 +517,7 @@ class TestWorkerDeliver(unittest.TestCase):
 
 class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
     async def test_poll_once_empty_returns_zeros(self):
-        with patch(
-            "alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[])
-        ):
+        with patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[])):
             found, delivered = await worker_module.poll_once()
         self.assertEqual(found, 0)
         self.assertEqual(delivered, 0)

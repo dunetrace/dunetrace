@@ -32,9 +32,7 @@ def mock_db(monkeypatch):
     monkeypatch.setattr("ingest_svc.db.postgres.close_pool", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.check_db", AsyncMock(return_value="ok"))
-    monkeypatch.setattr(
-        "ingest_svc.db.postgres.insert_events", AsyncMock(return_value=1)
-    )
+    monkeypatch.setattr("ingest_svc.db.postgres.insert_events", AsyncMock(return_value=1))
     monkeypatch.setattr(
         "ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value="agent-123")
     )
@@ -114,9 +112,7 @@ class TestHappyPath:
             "retrieval.called",
             "retrieval.responded",
         ]
-        events = [
-            make_event(event_type=t, step_index=i) for i, t in enumerate(event_types)
-        ]
+        events = [make_event(event_type=t, step_index=i) for i, t in enumerate(event_types)]
         r = await client.post("/v1/ingest", json=make_batch(events=events))
         assert r.status_code == 202
         assert r.json()["accepted"] == len(event_types)
@@ -129,9 +125,7 @@ class TestHappyPath:
         assert r.status_code == 202
 
     async def test_empty_payload_accepted(self, client):
-        r = await client.post(
-            "/v1/ingest", json=make_batch(events=[make_event(payload={})])
-        )
+        r = await client.post("/v1/ingest", json=make_batch(events=[make_event(payload={})]))
         assert r.status_code == 202
 
     async def test_missing_timestamp_uses_default(self, client):
@@ -185,21 +179,15 @@ class TestValidation:
         assert r.status_code == 422
 
     async def test_empty_run_id_rejected_422(self, client):
-        r = await client.post(
-            "/v1/ingest", json=make_batch(events=[make_event(run_id="")])
-        )
+        r = await client.post("/v1/ingest", json=make_batch(events=[make_event(run_id="")]))
         assert r.status_code == 422
 
     async def test_empty_agent_id_rejected_422(self, client):
-        r = await client.post(
-            "/v1/ingest", json=make_batch(events=[make_event(agent_id="")])
-        )
+        r = await client.post("/v1/ingest", json=make_batch(events=[make_event(agent_id="")]))
         assert r.status_code == 422
 
     async def test_negative_step_index_rejected_422(self, client):
-        r = await client.post(
-            "/v1/ingest", json=make_batch(events=[make_event(step_index=-1)])
-        )
+        r = await client.post("/v1/ingest", json=make_batch(events=[make_event(step_index=-1)]))
         assert r.status_code == 422
 
     async def test_missing_api_key_accepted(self, client):
@@ -228,15 +216,11 @@ class TestValidation:
         assert r.status_code == 422
 
     async def test_422_has_detail_field(self, client):
-        r = await client.post(
-            "/v1/ingest", json=make_batch(events=[make_event(event_type="bad")])
-        )
+        r = await client.post("/v1/ingest", json=make_batch(events=[make_event(event_type="bad")]))
         assert "detail" in r.json()
 
     async def test_non_dict_payload_rejected_422(self, client):
-        r = await client.post(
-            "/v1/ingest", json=make_batch(events=[make_event(payload="string")])
-        )
+        r = await client.post("/v1/ingest", json=make_batch(events=[make_event(payload="string")]))
         assert r.status_code == 422
 
 
@@ -245,16 +229,12 @@ class TestValidation:
 
 class TestAuth:
     async def test_invalid_key_returns_401(self, client, monkeypatch):
-        monkeypatch.setattr(
-            "ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value=None)
-        )
+        monkeypatch.setattr("ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value=None))
         r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_bad"))
         assert r.status_code == 401
 
     async def test_401_has_detail(self, client, monkeypatch):
-        monkeypatch.setattr(
-            "ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value=None)
-        )
+        monkeypatch.setattr("ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value=None))
         r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_bad"))
         assert "detail" in r.json()
 
@@ -279,9 +259,7 @@ class TestHealth:
         assert "db" in body
 
     async def test_db_status_reported(self, client, monkeypatch):
-        monkeypatch.setattr(
-            "ingest_svc.routers.health.check_db", AsyncMock(return_value="no_pool")
-        )
+        monkeypatch.setattr("ingest_svc.routers.health.check_db", AsyncMock(return_value="no_pool"))
         body = (await client.get("/health")).json()
         assert body["db"] == "no_pool"
 

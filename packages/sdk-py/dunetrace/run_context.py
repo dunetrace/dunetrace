@@ -128,9 +128,7 @@ class RunContext:
 
     # ── Tool hooks ────────────────────────────────────────────────────────────
 
-    def tool_called(
-        self, tool_name: str, args: Optional[Dict[str, Any]] = None
-    ) -> None:
+    def tool_called(self, tool_name: str, args: Optional[Dict[str, Any]] = None) -> None:
         args_hash = hash_content(str(args or {}))
         self.state.tool_calls.append(
             ToolCall(
@@ -290,10 +288,7 @@ class RunContext:
 
         # Augment metrics with signal detection if any policy uses trigger="signal".
         # We do this lazily to avoid running detectors when no signal policies exist.
-        if (
-            self._needs_signal is None
-            or self._needs_signal_generation != engine._generation
-        ):
+        if self._needs_signal is None or self._needs_signal_generation != engine._generation:
             with engine._lock:
                 self._needs_signal = any(
                     p.condition.get("trigger") == "signal"
@@ -350,9 +345,7 @@ class RunContext:
             prompt = params.get("prompt", "")
             if prompt:
                 self.prompt_additions.append(prompt)
-                logger.info(
-                    "Policy '%s': injected prompt (%d chars)", policy.name, len(prompt)
-                )
+                logger.info("Policy '%s': injected prompt (%d chars)", policy.name, len(prompt))
             self._triggered_policies.add(policy.key)
 
         elif action_type == "log":
@@ -364,9 +357,7 @@ class RunContext:
                 metrics.get(policy.condition.get("trigger", "")),
             )
 
-    def _emit(
-        self, event_type: EventType, payload: dict, *, advance: bool = True
-    ) -> None:
+    def _emit(self, event_type: EventType, payload: dict, *, advance: bool = True) -> None:
         if advance:
             self.step += 1
         event = AgentEvent(

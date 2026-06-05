@@ -58,9 +58,7 @@ async def get_runs(
     ]
     return RunListResponse(
         runs=runs,
-        page=Page(
-            total=total, offset=offset, limit=limit, has_more=(offset + limit) < total
-        ),
+        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
     )
 
 

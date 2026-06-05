@@ -207,15 +207,21 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             """)
 
         # Issues opened and resolved this week
-        issues_opened = await conn.fetchval("""
+        issues_opened = (
+            await conn.fetchval("""
             SELECT COUNT(*) FROM issues
             WHERE first_seen >= NOW() - INTERVAL '7 days'
-            """) or 0
+            """)
+            or 0
+        )
 
-        issues_resolved = await conn.fetchval("""
+        issues_resolved = (
+            await conn.fetchval("""
             SELECT COUNT(*) FROM issues
             WHERE resolved_at >= NOW() - INTERVAL '7 days'
-            """) or 0
+            """)
+            or 0
+        )
 
     return {
         "total_runs": int(totals["total_runs"] or 0),
@@ -301,9 +307,7 @@ async def fetch_agent_overrides(
             if (r["agent_id"], r["failure_type"]) in pair_set
         }
     except Exception as exc:
-        logger.warning(
-            "fetch_agent_overrides failed (table may not exist yet): %s", exc
-        )
+        logger.warning("fetch_agent_overrides failed (table may not exist yet): %s", exc)
         return {}
 
 
@@ -442,9 +446,7 @@ async def record_alert_sent(agent_id: str, failure_type: str) -> None:
         )
 
 
-async def increment_suppressed_count(
-    agent_id: str, failure_type: str, count: int
-) -> None:
+async def increment_suppressed_count(agent_id: str, failure_type: str, count: int) -> None:
     """Increment suppressed_count for a key that is within its silence window."""
     if not _pool:
         return

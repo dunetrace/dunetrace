@@ -81,9 +81,7 @@ def web_search(query: str) -> str:
     for k, v in _FACTS.items():
         if k in key:
             return v
-    return (
-        f"Search results for '{query}': Relevant information about {query}. (simulated)"
-    )
+    return f"Search results for '{query}': Relevant information about {query}. (simulated)"
 
 
 search_tool = Tool(

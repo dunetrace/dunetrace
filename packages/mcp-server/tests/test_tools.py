@@ -726,9 +726,7 @@ class TestGetAgentRuns(unittest.TestCase):
         self.assertIn("🔴", out)
 
     def test_no_runs(self):
-        with patch(
-            "dunetrace_mcp.client.get", return_value={"runs": [], "page": {"total": 0}}
-        ):
+        with patch("dunetrace_mcp.client.get", return_value={"runs": [], "page": {"total": 0}}):
             out = srv.get_agent_runs("empty-agent")
         self.assertIn("No runs found", out)
 
@@ -834,9 +832,7 @@ class TestGetAgentTokenStats(unittest.TestCase):
         self.assertNotIn("1 runs", out)
 
     def test_api_error_returns_error_string(self):
-        with patch(
-            "dunetrace_mcp.client.get", side_effect=Exception("connection refused")
-        ):
+        with patch("dunetrace_mcp.client.get", side_effect=Exception("connection refused")):
             out = srv.get_agent_token_stats("my-agent")
         self.assertIn("Could not fetch", out)
         self.assertIn("my-agent", out)
@@ -989,9 +985,7 @@ class TestGetInstrumentationGuide(unittest.TestCase):
         import pathlib
 
         doc_path = (
-            pathlib.Path(__file__).resolve().parents[3]
-            / "docs"
-            / "integrate-langchain-agent.md"
+            pathlib.Path(__file__).resolve().parents[3] / "docs" / "integrate-langchain-agent.md"
         )
         if doc_path.exists():
             out = srv.get_instrumentation_guide("langchain")
@@ -1182,9 +1176,7 @@ class TestSearchSignalsExtra(unittest.TestCase):
         }
         with patch(
             "dunetrace_mcp.client.get",
-            side_effect=lambda path, **p: (
-                AGENT_LIST if path == "/v1/agents" else sig_list
-            ),
+            side_effect=lambda path, **p: AGENT_LIST if path == "/v1/agents" else sig_list,
         ):
             out = srv.search_signals(failure_type="SESSION_LATENCY")
         self.assertIn("SESSION_LATENCY", out)

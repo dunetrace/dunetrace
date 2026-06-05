@@ -154,9 +154,7 @@ async def process_run(
         count += written
 
     # Issue persistence: track open/resolved lifecycle per (agent_id, failure_type)
-    fired_types = [
-        s.failure_type.value for s in signals if s.failure_type.value in LIVE_DETECTORS
-    ]
+    fired_types = [s.failure_type.value for s in signals if s.failure_type.value in LIVE_DETECTORS]
     try:
         if fired_types:
             await upsert_fired_issues(agent_id, fired_types)

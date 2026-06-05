@@ -76,9 +76,7 @@ async def get_signals(
     severity: Optional[str] = Query(
         None, description="Filter by severity: LOW | MEDIUM | HIGH | CRITICAL"
     ),
-    failure_type: Optional[str] = Query(
-        None, description="Filter by failure type e.g. TOOL_LOOP"
-    ),
+    failure_type: Optional[str] = Query(None, description="Filter by failure type e.g. TOOL_LOOP"),
     include_shadow: bool = Query(
         False, description="Include shadow signals (stored but not alerted) in results"
     ),
@@ -103,14 +101,10 @@ async def get_signals(
             return None
         return v.timestamp() if hasattr(v, "timestamp") else float(v)
 
-    signals = [
-        SignalDetail(**{**r, "detected_at": _ts(r["detected_at"])}) for r in rows
-    ]
+    signals = [SignalDetail(**{**r, "detected_at": _ts(r["detected_at"])}) for r in rows]
     return SignalListResponse(
         signals=signals,
-        page=Page(
-            total=total, offset=offset, limit=limit, has_more=(offset + limit) < total
-        ),
+        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
     )
 
 
@@ -138,12 +132,8 @@ async def export_signals_endpoint(
     format: str = Query("csv", pattern="^(csv|ndjson)$", description="csv or ndjson"),
     severity: Optional[str] = Query(None, description="LOW | MEDIUM | HIGH | CRITICAL"),
     failure_type: Optional[str] = Query(None, description="e.g. TOOL_LOOP"),
-    from_: Optional[str] = Query(
-        None, alias="from", description="ISO-8601 start datetime (UTC)"
-    ),
-    to_: Optional[str] = Query(
-        None, alias="to", description="ISO-8601 end datetime (UTC)"
-    ),
+    from_: Optional[str] = Query(None, alias="from", description="ISO-8601 start datetime (UTC)"),
+    to_: Optional[str] = Query(None, alias="to", description="ISO-8601 end datetime (UTC)"),
     include_shadow: bool = Query(False),
     customer_id: str = Depends(require_customer),
 ) -> StreamingResponse:
@@ -164,18 +154,12 @@ async def export_signals_endpoint(
             from datetime import datetime, timezone
 
             from_ts = (
-                datetime.fromisoformat(from_.rstrip("Z"))
-                .replace(tzinfo=timezone.utc)
-                .timestamp()
+                datetime.fromisoformat(from_.rstrip("Z")).replace(tzinfo=timezone.utc).timestamp()
             )
         if to_:
             from datetime import datetime, timezone
 
-            to_ts = (
-                datetime.fromisoformat(to_.rstrip("Z"))
-                .replace(tzinfo=timezone.utc)
-                .timestamp()
-            )
+            to_ts = datetime.fromisoformat(to_.rstrip("Z")).replace(tzinfo=timezone.utc).timestamp()
     except ValueError as exc:
         raise HTTPException(422, f"Invalid datetime: {exc}")
 
@@ -211,9 +195,7 @@ async def export_signals_endpoint(
         yield buf.getvalue()
         async for batch in batches:
             buf = io.StringIO()
-            writer = csv.DictWriter(
-                buf, fieldnames=_EXPORT_COLUMNS, extrasaction="ignore"
-            )
+            writer = csv.DictWriter(buf, fieldnames=_EXPORT_COLUMNS, extrasaction="ignore")
             for row in batch:
                 row["evidence"] = _json.dumps(row["evidence"])
                 writer.writerow(row)
@@ -554,9 +536,7 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         try:
             import anthropic
         except ImportError as exc:
-            raise ImportError(
-                "anthropic package required: pip install anthropic"
-            ) from exc
+            raise ImportError("anthropic package required: pip install anthropic") from exc
 
         client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
         msg = await client.messages.create(

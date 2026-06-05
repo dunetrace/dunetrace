@@ -36,9 +36,7 @@ class IngestEvent(BaseModel):
     @classmethod
     def valid_event_type(cls, v: str) -> str:
         if v not in VALID_EVENT_TYPES:
-            raise ValueError(
-                f"Unknown event_type {v!r}. Valid: {sorted(VALID_EVENT_TYPES)}"
-            )
+            raise ValueError(f"Unknown event_type {v!r}. Valid: {sorted(VALID_EVENT_TYPES)}")
         return v
 
 
@@ -53,9 +51,7 @@ class IngestRequest(BaseModel):
         from ingest_svc.config import settings
 
         if len(v) > settings.MAX_BATCH_SIZE:
-            raise ValueError(
-                f"Batch size {len(v)} exceeds maximum of {settings.MAX_BATCH_SIZE}"
-            )
+            raise ValueError(f"Batch size {len(v)} exceeds maximum of {settings.MAX_BATCH_SIZE}")
         return v
 
 

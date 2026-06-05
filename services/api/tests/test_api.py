@@ -403,9 +403,7 @@ class TestPolicyInjectionCheck(unittest.TestCase):
         condition = ConditionModel(trigger="tool_call_count", operator="gt", value=5)
         action = ActionModel(
             type="inject_prompt",
-            params={
-                "prompt": "Stop repeating tool calls. Summarise what you know so far."
-            },
+            params={"prompt": "Stop repeating tool calls. Summarise what you know so far."},
         )
         _validate(condition, action)  # must not raise
 

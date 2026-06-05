@@ -167,16 +167,12 @@ class RunState:
     baseline_p75_steps: Optional[float] = None
     baseline_p75_latency_tool: Optional[float] = None  # ms, P75 tool step duration
     baseline_p75_latency_llm: Optional[float] = None  # ms, P75 LLM step duration
-    baseline_p75_token_growth: Optional[float] = (
-        None  # ratio, P75 context growth factor
-    )
+    baseline_p75_token_growth: Optional[float] = None  # ratio, P75 context growth factor
     baseline_p75_llm_tool_ratio: Optional[float] = None  # P75 LLM:tool call ratio
     baseline_p75_total_tokens: Optional[float] = (
         None  # P75 total tokens (prompt+completion) per run
     )
-    baseline_p75_duration_s: Optional[float] = (
-        None  # P75 wall-clock run duration in seconds
-    )
+    baseline_p75_duration_s: Optional[float] = None  # P75 wall-clock run duration in seconds
 
 
 # ── Risk Score ────────────────────────────────────────────────────────────────

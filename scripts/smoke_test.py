@@ -219,9 +219,7 @@ def main() -> None:
 
     print(f"  Signals detected: {len(signals)}")
     for s in sorted(signals, key=lambda x: (x["failure_type"],)):
-        print(
-            f"\n  [{s['severity']:8s}] {s['failure_type']}  confidence={s['confidence']:.0%}"
-        )
+        print(f"\n  [{s['severity']:8s}] {s['failure_type']}  confidence={s['confidence']:.0%}")
         if s.get("what"):
             print(f"    What:  {s['what']}")
         if s.get("why_it_matters"):

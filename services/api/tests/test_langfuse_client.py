@@ -48,9 +48,7 @@ def _make_signal(**kw) -> dict:
         "confidence": kw.get("confidence", 0.92),
         "run_id": kw.get("run_id", "run-abc"),
         "what": kw.get("what", "Agent called search 7 times"),
-        "evidence_summary": kw.get(
-            "evidence_summary", "Steps 2-6 repeated identical calls"
-        ),
+        "evidence_summary": kw.get("evidence_summary", "Steps 2-6 repeated identical calls"),
         "evidence": kw.get("evidence", {"first_step": 2, "last_step": 6}),
     }
 
@@ -291,9 +289,7 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
         trace_body = {"id": "abc", "observations": [{"type": "SPAN"}] * 5}
         mock_get = AsyncMock(return_value=self._make_response(200, trace_body))
 
-        with self._patch_client(mock_get), patch(
-            "api_svc.config.settings", self._make_settings()
-        ):
+        with self._patch_client(mock_get), patch("api_svc.config.settings", self._make_settings()):
             from api_svc.langfuse_client import fetch_langfuse_trace
 
             result = await fetch_langfuse_trace("abc")
@@ -315,9 +311,7 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        with self._patch_client(mock_get), patch(
-            "api_svc.config.settings", self._make_settings()
-        ):
+        with self._patch_client(mock_get), patch("api_svc.config.settings", self._make_settings()):
             from api_svc.langfuse_client import fetch_langfuse_trace
 
             result = await fetch_langfuse_trace("abc")
@@ -354,9 +348,7 @@ class TestFetchLangfuseTrace(unittest.IsolatedAsyncioTestCase):
         trace_body = {"id": "abc123", "observations": []}
         mock_get = AsyncMock(return_value=self._make_response(200, trace_body))
 
-        with self._patch_client(mock_get), patch(
-            "api_svc.config.settings", self._make_settings()
-        ):
+        with self._patch_client(mock_get), patch("api_svc.config.settings", self._make_settings()):
             from api_svc.langfuse_client import fetch_langfuse_trace
 
             await fetch_langfuse_trace("abc-123-def")
@@ -473,11 +465,7 @@ class TestBuildExplainPrompt(unittest.IsolatedAsyncioTestCase):
 
     async def test_observations_present_in_prompt(self):
         signal = _make_signal()
-        obs = [
-            _make_span(
-                "web_search", input_val="climate data", output_val="found 5 results"
-            )
-        ]
+        obs = [_make_span("web_search", input_val="climate data", output_val="found 5 results")]
         trace = self._make_trace(observations=obs)
 
         from api_svc.langfuse_client import build_explain_prompt

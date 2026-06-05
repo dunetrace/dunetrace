@@ -103,11 +103,7 @@ def web_search(query: str) -> str:
     """Search the web. For paginated results append 'page=N' to your query string."""
     page_m = re.search(r"\bpage[=:]?\s*(\d+)", query, re.IGNORECASE)
     page = int(page_m.group(1)) if page_m else 1
-    clean = (
-        re.sub(r"\bpage[=:]?\s*\d+", "", query, flags=re.IGNORECASE)
-        .strip()
-        .strip("'\"")
-    )
+    clean = re.sub(r"\bpage[=:]?\s*\d+", "", query, flags=re.IGNORECASE).strip().strip("'\"")
     key = clean.lower()
 
     _search_call_counts[key] = _search_call_counts.get(key, 0) + 1
@@ -760,9 +756,7 @@ def main() -> None:
     for i, task in enumerate(tasks, 1):
         # ── Batch pause ────────────────────────────────────────────────────────
         if i > 1 and (i - 1) % BATCH_SIZE == 0:
-            print(
-                f"\n  — Batch complete. Pausing {BATCH_DELAY:.0f}s to respect rate limits —\n"
-            )
+            print(f"\n  — Batch complete. Pausing {BATCH_DELAY:.0f}s to respect rate limits —\n")
             time.sleep(BATCH_DELAY)
 
         cat = task["cat"]

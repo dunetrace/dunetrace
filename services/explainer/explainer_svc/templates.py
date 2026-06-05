@@ -135,9 +135,7 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
     wasted_tokens = ev.get("wasted_tokens")
     if wasted_tokens:
         cost_usd = wasted_tokens * 15.0 / 1_000_000
-        token_cost_str = (
-            f"{wasted_tokens:,} wasted tokens ≈ ${cost_usd:.2f} at gpt-4o pricing — "
-        )
+        token_cost_str = f"{wasted_tokens:,} wasted tokens ≈ ${cost_usd:.2f} at gpt-4o pricing — "
     else:
         token_cost_str = (
             f"A {window}-step loop at typical gpt-4o pricing costs roughly "
@@ -574,11 +572,7 @@ def explain_llm_truncation_loop(signal: FailureSignal) -> Explanation:
         if token_counts
         else ""
     )
-    model_note = (
-        f" Model{'s' if len(models) > 1 else ''}: {', '.join(models)}."
-        if models
-        else ""
-    )
+    model_note = f" Model{'s' if len(models) > 1 else ''}: {', '.join(models)}." if models else ""
 
     return Explanation(
         **_base(signal),
@@ -1221,7 +1215,9 @@ def explain_slow_step(signal: FailureSignal) -> Explanation:
     coincident_note = ""
     if coincident:
         names = ", ".join(s.get("signal_name", "unknown") for s in coincident)
-        coincident_note = f" A coincident infrastructure signal was recorded during this step: {names}."
+        coincident_note = (
+            f" A coincident infrastructure signal was recorded during this step: {names}."
+        )
 
     return Explanation(
         **_base(signal),

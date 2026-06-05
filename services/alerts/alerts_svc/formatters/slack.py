@@ -51,13 +51,9 @@ def _rate_context_text(explanation: Explanation) -> str:
     if systemic:
         return f":warning: *Systemic pattern* — {affected}/{total} runs affected ({pct} of runs in the last 7 days)"
     elif affected == 1:
-        return (
-            f":information_source: First occurrence of this pattern in the last 7 days"
-        )
+        return f":information_source: First occurrence of this pattern in the last 7 days"
     else:
-        return (
-            f":bar_chart: {affected}/{total} runs affected ({pct}) in the last 7 days"
-        )
+        return f":bar_chart: {affected}/{total} runs affected ({pct}) in the last 7 days"
 
 
 def _fmt_window(seconds: int) -> str:
@@ -148,9 +144,7 @@ def format_slack(
     ]
 
     if rate_text:
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": rate_text}}
-        )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": rate_text}})
 
     blocks += [
         {

@@ -99,14 +99,10 @@ def list_agents() -> str:
     if not agents:
         return "No agents found. Instrument your agent with the Dunetrace SDK to start monitoring."
 
-    lines = [
-        f"{'AGENT':<35} {'RUNS':>5} {'SIGS':>5} {'CRIT':>4} {'HIGH':>4}  LAST SEEN"
-    ]
+    lines = [f"{'AGENT':<35} {'RUNS':>5} {'SIGS':>5} {'CRIT':>4} {'HIGH':>4}  LAST SEEN"]
     lines.append("─" * 75)
     for a in agents:
-        ft_str = ", ".join(
-            f"{k}×{v}" for k, v in (a.get("failure_types") or {}).items()
-        )
+        ft_str = ", ".join(f"{k}×{v}" for k, v in (a.get("failure_types") or {}).items())
         lines.append(
             f"{a['agent_id']:<35} {a['run_count']:>5} {a['signal_count']:>5}"
             f" {a['critical_count']:>4} {a['high_count']:>4}  {_ago(a.get('last_seen'))}"
@@ -162,9 +158,7 @@ def get_agent_signals(
         lines.append("")
 
     page = data.get("page", {})
-    lines.append(
-        f"Showing {len(signals)} of {page.get('total', len(signals))} signals."
-    )
+    lines.append(f"Showing {len(signals)} of {page.get('total', len(signals))} signals.")
     return "\n".join(lines)
 
 
@@ -245,9 +239,7 @@ def get_run_detail(run_id: str, agent_id: str = "") -> str:
             lines.append(f"     {s['title']}")
             lines.append(f"     {s['what']}")
             if s.get("suggested_fixes"):
-                lines.append(
-                    f"     Fix: {s['suggested_fixes'][0].get('description', '')}"
-                )
+                lines.append(f"     Fix: {s['suggested_fixes'][0].get('description', '')}")
     else:
         lines.append("\nNo signals — clean run.")
 
@@ -279,9 +271,7 @@ def get_run_detail(run_id: str, agent_id: str = "") -> str:
                     detail += f"  {p['latency_ms']}ms"
             elif e["event_type"] in ("run.started", "run.completed"):
                 detail = p.get("exit_reason", "")
-            lines.append(
-                f"  [{e['step_index']:>3}] {ts_rel:>8}  {e['event_type']:<20} {detail}"
-            )
+            lines.append(f"  [{e['step_index']:>3}] {ts_rel:>8}  {e['event_type']:<20} {detail}")
         if len(events) > 40:
             lines.append(f"  … {len(events) - 40} more events")
 
@@ -335,9 +325,7 @@ def search_signals(
     if severity:
         all_signals = [s for s in all_signals if s.get("severity") == severity.upper()]
     if failure_type:
-        all_signals = [
-            s for s in all_signals if s.get("failure_type") == failure_type.upper()
-        ]
+        all_signals = [s for s in all_signals if s.get("failure_type") == failure_type.upper()]
 
     all_signals.sort(key=lambda s: s.get("detected_at") or 0, reverse=True)
     shown = all_signals[: min(limit, 200)]
@@ -360,9 +348,7 @@ def search_signals(
             f"{icon} {_ago(s.get('detected_at')):>10}  [{s['severity']:<8}]"
             f"  {s['failure_type']:<30}  agent={s['agent_id']}"
         )
-        lines.append(
-            f"   id={s['id']}  run={s['run_id'][:12]}…  conf={s['confidence']:.0%}"
-        )
+        lines.append(f"   id={s['id']}  run={s['run_id'][:12]}…  conf={s['confidence']:.0%}")
         lines.append(f"   {s['title']}")
         lines.append("")
 
@@ -392,9 +378,9 @@ def get_signal_detail(signal_id: int, agent_id: str = "") -> str:
     signal = None
     for a in agents:
         aid = a["agent_id"]
-        sigs = client.get(
-            f"/v1/agents/{aid}/signals", limit=500, include_shadow="false"
-        ).get("signals", [])
+        sigs = client.get(f"/v1/agents/{aid}/signals", limit=500, include_shadow="false").get(
+            "signals", []
+        )
         signal = next((s for s in sigs if s["id"] == signal_id), None)
         if signal:
             break
@@ -565,15 +551,11 @@ def summarize_agent(agent_id: str) -> str:
     """
     # Fetch in parallel would be ideal; sequential is fine for an MCP tool
     agents_data = client.get("/v1/agents", limit=100)
-    agent_meta = next(
-        (a for a in agents_data.get("agents", []) if a["agent_id"] == agent_id), None
-    )
+    agent_meta = next((a for a in agents_data.get("agents", []) if a["agent_id"] == agent_id), None)
     if not agent_meta:
         return f"Agent '{agent_id}' not found. Use list_agents to see available agents."
 
-    signals_data = client.get(
-        f"/v1/agents/{agent_id}/signals", limit=50, include_shadow="false"
-    )
+    signals_data = client.get(f"/v1/agents/{agent_id}/signals", limit=50, include_shadow="false")
     signals = signals_data.get("signals", [])
 
     try:
@@ -623,9 +605,7 @@ def summarize_agent(agent_id: str) -> str:
             if s.get("why_it_matters"):
                 lines.append(f"     Impact: {s['why_it_matters']}")
             if s.get("suggested_fixes"):
-                lines.append(
-                    f"     Fix: {s['suggested_fixes'][0].get('description', '')}"
-                )
+                lines.append(f"     Fix: {s['suggested_fixes'][0].get('description', '')}")
             lines.append("")
 
     # Health component detail
@@ -1272,9 +1252,7 @@ def get_agent_token_stats(agent_id: str) -> str:
         label = {"1d": "Last 24 h", "7d": "Last 7 days", "30d": "Last 30 days"}[win]
         cost_wst_pct = int(round((w.get("wasted_pct") or 0) * 100))
         total_tok = w.get("total_tokens") or 0
-        tok_wst_pct = (
-            int(round(w.get("wasted_tokens", 0) / total_tok * 100)) if total_tok else 0
-        )
+        tok_wst_pct = int(round(w.get("wasted_tokens", 0) / total_tok * 100)) if total_tok else 0
         lines += [
             f"── {label} ──",
             f"  Runs:            {w.get('run_count', 0):>6}  ({w.get('wasted_run_count', 0)} with failures)",

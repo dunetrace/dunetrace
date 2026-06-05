@@ -166,11 +166,7 @@ def _extract_tokens(output: Any) -> tuple[Optional[int], Optional[int], str, str
         meta = reply.get("meta", {}) or {}
 
     usage = meta.get("usage") or meta.get("token_usage") or {}
-    pt = (
-        usage.get("prompt_tokens")
-        or usage.get("input_tokens")
-        or usage.get("prompt_token_count")
-    )
+    pt = usage.get("prompt_tokens") or usage.get("input_tokens") or usage.get("prompt_token_count")
     ct = (
         usage.get("completion_tokens")
         or usage.get("output_tokens")
@@ -254,9 +250,7 @@ class _DunetraceSpan:
         self._tracer = tracer
         self._operation = operation_name
         self._tags: Dict[str, Any] = dict(tags)
-        self._ctags: Dict[str, Any] = (
-            {}
-        )  # content tags (locally only, never transmitted)
+        self._ctags: Dict[str, Any] = {}  # content tags (locally only, never transmitted)
         self._parent = parent_span
         self._start = time.time()
         # Set by root pipeline spans:
@@ -339,15 +333,9 @@ class _DunetraceSpan:
         while parent:
             if parent._operation == "haystack.component.run":
                 tok = parent._provider_tok
-                if (
-                    "response.usage.prompt_tokens" in key
-                    or "usage.prompt_tokens" in key
-                ):
+                if "response.usage.prompt_tokens" in key or "usage.prompt_tokens" in key:
                     tok.prompt_tokens = int(value) if value is not None else None
-                elif (
-                    "response.usage.completion_tokens" in key
-                    or "usage.completion_tokens" in key
-                ):
+                elif "response.usage.completion_tokens" in key or "usage.completion_tokens" in key:
                     tok.completion_tokens = int(value) if value is not None else None
                 elif "response.model" in key or ".model" in key:
                     if not tok.model:
@@ -562,11 +550,7 @@ class _DunetraceSpan:
                         payload={
                             "result_count": 0 if exc_type else result_count,
                             "top_score": None if exc_type else top_score,
-                            **(
-                                {"error_hash": hash_content(str(exc_val))}
-                                if exc_type
-                                else {}
-                            ),
+                            **({"error_hash": hash_content(str(exc_val))} if exc_type else {}),
                         },
                     )
                 )
@@ -602,11 +586,7 @@ class _DunetraceSpan:
                                 "tool_name": tool_name,
                                 "success": success,
                                 "latency_ms": latency_ms,
-                                **(
-                                    {"error_hash": hash_content(str(exc_val))}
-                                    if exc_type
-                                    else {}
-                                ),
+                                **({"error_hash": hash_content(str(exc_val))} if exc_type else {}),
                             },
                         )
                     )

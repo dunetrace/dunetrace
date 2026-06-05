@@ -329,9 +329,7 @@ if _PYDANTIC:
         score: Optional[int]  # None when <3 sample runs
         components: Dict[str, Any]  # keyed by component name
         sample_runs: int
-        baseline_ready: (
-            bool  # False when <30 runs; token/latency components are neutral
-        )
+        baseline_ready: bool  # False when <30 runs; token/latency components are neutral
 
     class PatternDay(_Model):
         date: str

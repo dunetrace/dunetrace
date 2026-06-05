@@ -43,9 +43,7 @@ async def create_fix_pr(
     slug = re.sub(r"[^a-z0-9]+", "-", failure_type.lower()).strip("-")
     branch = f"dunetrace/signal-{signal_id}-{slug}"
 
-    async with httpx.AsyncClient(
-        base_url=_GITHUB_API, headers=_headers(), timeout=20
-    ) as client:
+    async with httpx.AsyncClient(base_url=_GITHUB_API, headers=_headers(), timeout=20) as client:
         base_sha = await _get_branch_sha(client, repo, base_branch)
         await _create_branch(client, repo, branch, base_sha)
         await _upsert_file(
@@ -79,9 +77,7 @@ async def _get_branch_sha(client: httpx.AsyncClient, repo: str, branch: str) -> 
     return r.json()["object"]["sha"]
 
 
-async def _create_branch(
-    client: httpx.AsyncClient, repo: str, branch: str, sha: str
-) -> None:
+async def _create_branch(client: httpx.AsyncClient, repo: str, branch: str, sha: str) -> None:
     r = await client.post(
         f"/repos/{repo}/git/refs",
         json={
@@ -107,9 +103,7 @@ async def _upsert_file(
     fix_patch: str,
 ) -> None:
     path = f"dunetrace-fixes/signal-{signal_id}.md"
-    content = _build_fix_file(
-        signal_id, agent_id, failure_type, root_cause, fix_content, fix_patch
-    )
+    content = _build_fix_file(signal_id, agent_id, failure_type, root_cause, fix_content, fix_patch)
     encoded = base64.b64encode(content.encode()).decode()
 
     existing_sha = None
@@ -145,9 +139,7 @@ async def _open_pr(
         f"[DuneTrace] Fix {failure_type.replace('_', ' ').title()} "
         f"in {agent_id} (signal #{signal_id})"
     )
-    pr_body = _build_pr_body(
-        signal_id, agent_id, failure_type, root_cause, fix_content, fix_patch
-    )
+    pr_body = _build_pr_body(signal_id, agent_id, failure_type, root_cause, fix_content, fix_patch)
     r = await client.post(
         f"/repos/{repo}/pulls",
         json={

@@ -628,9 +628,7 @@ async def fetch_run_events(run_id: str) -> list[dict]:
         {
             **dict(r),
             "payload": (
-                json.loads(r["payload"])
-                if isinstance(r["payload"], str)
-                else dict(r["payload"])
+                json.loads(r["payload"]) if isinstance(r["payload"], str) else dict(r["payload"])
             ),
         }
         for r in rows

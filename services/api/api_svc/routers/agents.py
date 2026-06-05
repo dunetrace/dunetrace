@@ -59,9 +59,7 @@ async def get_agents(
     ]
     return AgentListResponse(
         agents=agents,
-        page=Page(
-            total=total, offset=offset, limit=limit, has_more=(offset + limit) < total
-        ),
+        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
     )
 
 

@@ -110,9 +110,7 @@ class TestShouldSendDigest(unittest.TestCase):
     def _frozen(self, weekday: int, hour: int):
         """Return a UTC datetime with the given weekday (0=Mon) and hour."""
         # Find next date with desired weekday
-        base = datetime.datetime(
-            2026, 4, 13, hour, 0, 0, tzinfo=datetime.timezone.utc
-        )  # Monday
+        base = datetime.datetime(2026, 4, 13, hour, 0, 0, tzinfo=datetime.timezone.utc)  # Monday
         delta = (weekday - base.weekday()) % 7
         return base + datetime.timedelta(days=delta)
 
@@ -173,9 +171,7 @@ class TestFormatDigestSlack(unittest.TestCase):
         self.assertIn("Digest", header["text"]["text"])
 
     def test_context_block_shows_totals(self):
-        blocks = self._blocks(
-            _sample_data(total_runs=50, total_agents=2, total_signals=10)
-        )
+        blocks = self._blocks(_sample_data(total_runs=50, total_agents=2, total_signals=10))
         context = blocks[1]
         text = context["elements"][0]["text"]
         self.assertIn("50", text)

@@ -55,9 +55,7 @@ class Settings:
 
     # Retry behaviour for failed HTTP calls
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
-    RETRY_BACKOFF: float = float(
-        os.getenv("RETRY_BACKOFF", "2.0")
-    )  # seconds, doubled each retry
+    RETRY_BACKOFF: float = float(os.getenv("RETRY_BACKOFF", "2.0"))  # seconds, doubled each retry
 
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 

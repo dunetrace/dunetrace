@@ -86,9 +86,7 @@ def make_llm_call(
     )
 
 
-def make_event(
-    event_type: EventType, step: int = 1, ts: float | None = None
-) -> AgentEvent:
+def make_event(event_type: EventType, step: int = 1, ts: float | None = None) -> AgentEvent:
     return AgentEvent(
         event_type=event_type,
         step_index=step,
@@ -419,9 +417,7 @@ class TestRetryStormDetector(unittest.TestCase):
             ah = args_hashes[i] if args_hashes else f"arg{i}"
             eh = error_hashes[i] if error_hashes else None
             calls.append(
-                make_tool_call(
-                    tool, step=i + 1, success=False, args_hash=ah, error_hash=eh
-                )
+                make_tool_call(tool, step=i + 1, success=False, args_hash=ah, error_hash=eh)
             )
         state.tool_calls = calls
         state.current_step = count
@@ -439,9 +435,7 @@ class TestRetryStormDetector(unittest.TestCase):
 
     def test_no_signal_when_all_succeed(self):
         state = make_state()
-        state.tool_calls = [
-            make_tool_call("tool", step=i, success=True) for i in range(5)
-        ]
+        state.tool_calls = [make_tool_call("tool", step=i, success=True) for i in range(5)]
         state.current_step = 5
         assert self.detector.check(state) is None
 
@@ -676,9 +670,7 @@ class TestSlowStepDetector(unittest.TestCase):
         signal = self.detector.check(state)
         assert signal is not None
         assert "coincident_signals" in signal.evidence
-        assert (
-            signal.evidence["coincident_signals"][0]["signal_name"] == "high_db_latency"
-        )
+        assert signal.evidence["coincident_signals"][0]["signal_name"] == "high_db_latency"
 
     def test_external_signal_outside_window_not_coincident(self):
         ts = time.time()
@@ -841,9 +833,7 @@ class TestCascadingToolFailureDetector(unittest.TestCase):
     def test_no_signal_when_only_one_tool(self):
         """Same tool failing ≥ threshold = RetryStorm, not CascadingToolFailure."""
         state = make_state()
-        state.tool_calls = [
-            make_tool_call("api", step=i, success=False) for i in range(4)
-        ]
+        state.tool_calls = [make_tool_call("api", step=i, success=False) for i in range(4)]
         state.current_step = 4
         assert self.detector.check(state) is None
 
@@ -892,9 +882,7 @@ class TestCascadingToolFailureDetector(unittest.TestCase):
 
     def test_severity_is_high(self):
         state = make_state()
-        state.tool_calls = [
-            make_tool_call("x", step=i, success=False) for i in range(3)
-        ]
+        state.tool_calls = [make_tool_call("x", step=i, success=False) for i in range(3)]
         # Need 2 distinct tools
         state.tool_calls[1] = make_tool_call("y", step=1, success=False)
         state.current_step = 3

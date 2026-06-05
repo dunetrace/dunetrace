@@ -222,9 +222,7 @@ class TestSlackFormatterRateContext(unittest.TestCase):
         blocks = self._get_blocks(rate_context={})
         # There should be no "section" block with rate context text
         rate_blocks = [
-            b
-            for b in blocks
-            if b["type"] == "section" and "Systemic" in b["text"]["text"]
+            b for b in blocks if b["type"] == "section" and "Systemic" in b["text"]["text"]
         ]
         self.assertEqual(len(rate_blocks), 0)
 
@@ -240,8 +238,7 @@ class TestSlackFormatterRateContext(unittest.TestCase):
         rate_blocks = [
             b
             for b in blocks
-            if b["type"] == "section"
-            and "Systemic" in b.get("text", {}).get("text", "")
+            if b["type"] == "section" and "Systemic" in b.get("text", {}).get("text", "")
         ]
         self.assertGreater(len(rate_blocks), 0)
 
@@ -257,8 +254,7 @@ class TestSlackFormatterRateContext(unittest.TestCase):
         rate_blocks = [
             b
             for b in blocks
-            if b["type"] == "section"
-            and "First occurrence" in b.get("text", {}).get("text", "")
+            if b["type"] == "section" and "First occurrence" in b.get("text", {}).get("text", "")
         ]
         self.assertGreater(len(rate_blocks), 0)
 

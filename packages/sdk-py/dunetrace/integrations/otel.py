@@ -196,9 +196,7 @@ class DunetraceOTelExporter:
 
         # Guard: close any orphaned child (mismatched called/responded pairs).
         if rs.child_span:
-            rs.child_span.set_status(
-                StatusCode.ERROR, "span ended without a response event"
-            )
+            rs.child_span.set_status(StatusCode.ERROR, "span ended without a response event")
             rs.child_span.end(end_time=_ns(event.timestamp))
 
         parent_ctx = trace.set_span_in_context(rs.root_span)
@@ -252,9 +250,7 @@ class DunetraceOTelExporter:
         if p.get("output_length"):
             span.set_attribute("dunetrace.output_length", p["output_length"])
         if p.get("finish_reason") == "length":
-            span.set_status(
-                StatusCode.ERROR, "LLM output truncated (finish_reason=length)"
-            )
+            span.set_status(StatusCode.ERROR, "LLM output truncated (finish_reason=length)")
 
         span.end(end_time=_ns(event.timestamp))
         rs.child_span = None
@@ -330,9 +326,7 @@ class DunetraceOTelExporter:
         # Close any orphaned child span (e.g. tool that never got a response event).
         # Mark ERROR — if we're here without a response, something went wrong mid-step.
         if rs.child_span:
-            rs.child_span.set_status(
-                StatusCode.ERROR, "span ended without a response event"
-            )
+            rs.child_span.set_status(StatusCode.ERROR, "span ended without a response event")
             rs.child_span.end(end_time=_ns(event.timestamp))
 
         root = rs.root_span
@@ -355,9 +349,7 @@ class DunetraceOTelExporter:
                         root.set_attribute(f"{pfx}.evidence.{k}", v)
 
             # Set span ERROR status for any HIGH or CRITICAL signal.
-            severe = [
-                s for s in signals if s.severity in (Severity.HIGH, Severity.CRITICAL)
-            ]
+            severe = [s for s in signals if s.severity in (Severity.HIGH, Severity.CRITICAL)]
             if severe:
                 worst = severe[0]
                 root.set_status(
@@ -366,17 +358,11 @@ class DunetraceOTelExporter:
                 )
 
         root.set_attribute("dunetrace.total_steps", event.payload.get("total_steps", 0))
-        root.set_attribute(
-            "dunetrace.exit_reason", event.payload.get("exit_reason", "")
-        )
-        root.set_attribute(
-            "dunetrace.tool_call_count", event.payload.get("tool_call_count", 0)
-        )
+        root.set_attribute("dunetrace.exit_reason", event.payload.get("exit_reason", ""))
+        root.set_attribute("dunetrace.tool_call_count", event.payload.get("tool_call_count", 0))
 
         if event.event_type is EventType.RUN_ERRORED:
-            root.set_attribute(
-                "dunetrace.error_type", event.payload.get("error_type", "")
-            )
+            root.set_attribute("dunetrace.error_type", event.payload.get("error_type", ""))
             root.set_status(
                 StatusCode.ERROR,
                 event.payload.get("error_type", "run errored"),

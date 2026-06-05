@@ -85,9 +85,7 @@ async def main() -> None:
     base_client = OpenAIChatCompletionClient(model=MODEL)
     dt_client = observer.wrap_client(base_client)  # instruments LLM calls
 
-    search_tool = FunctionTool(
-        web_search, description="Search the web for information."
-    )
+    search_tool = FunctionTool(web_search, description="Search the web for information.")
 
     assistant = AssistantAgent(
         name="assistant",

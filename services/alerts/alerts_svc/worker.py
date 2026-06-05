@@ -89,9 +89,7 @@ def _row_to_signal(row: dict) -> FailureSignal:
 
 
 def _meets_slack_threshold(severity: str) -> bool:
-    return SEVERITY_ORDER.get(severity, 0) >= SEVERITY_ORDER.get(
-        settings.SLACK_MIN_SEVERITY, 2
-    )
+    return SEVERITY_ORDER.get(severity, 0) >= SEVERITY_ORDER.get(settings.SLACK_MIN_SEVERITY, 2)
 
 
 # Per-signal delivery
@@ -276,9 +274,7 @@ async def poll_once() -> tuple[int, int]:
         try:
             signals_by_row.append((row, _row_to_signal(row)))
         except Exception as exc:
-            logger.error(
-                "Failed to reconstruct signal for signal_id=%d: %s", row["id"], exc
-            )
+            logger.error("Failed to reconstruct signal for signal_id=%d: %s", row["id"], exc)
 
     rate_contexts = await asyncio.gather(
         *[
@@ -301,14 +297,10 @@ async def poll_once() -> tuple[int, int]:
                 pt = int(tk.get("prompt_tokens") or 0)
                 ct = int(tk.get("completion_tokens") or 0)
                 explanation.total_tokens = pt + ct or None
-                explanation.cost_usd = (
-                    estimate_cost(tk.get("model") or "", pt, ct) or None
-                )
+                explanation.cost_usd = estimate_cost(tk.get("model") or "", pt, ct) or None
             work.append((row["id"], explanation, deliver_idx.get(row["id"], 0)))
         except Exception as exc:
-            logger.error(
-                "Failed to build explanation for signal_id=%d: %s", row["id"], exc
-            )
+            logger.error("Failed to build explanation for signal_id=%d: %s", row["id"], exc)
 
     if not work:
         return len(rows), 0
@@ -337,9 +329,7 @@ async def poll_once() -> tuple[int, int]:
                 explanation.confidence_pct(),
             )
         try:
-            results = await asyncio.to_thread(
-                deliver, explanation, suppressed_count, signal_id
-            )
+            results = await asyncio.to_thread(deliver, explanation, suppressed_count, signal_id)
         except Exception as exc:
             logger.error("Delivery error for signal_id=%d: %s", signal_id, exc)
             return None
@@ -364,9 +354,7 @@ async def poll_once() -> tuple[int, int]:
             )
             return None
 
-    outcomes = await asyncio.gather(
-        *[_deliver_one(sid, exp, sup) for sid, exp, sup in work]
-    )
+    outcomes = await asyncio.gather(*[_deliver_one(sid, exp, sup) for sid, exp, sup in work])
     delivered_ids = [sid for sid in outcomes if sid is not None]
 
     if delivered_ids:
@@ -394,9 +382,7 @@ async def run_worker() -> None:
 
     enabled = []
     if settings.slack_enabled:
-        enabled.append(
-            f"Slack ({settings.SLACK_CHANNEL}, min={settings.SLACK_MIN_SEVERITY})"
-        )
+        enabled.append(f"Slack ({settings.SLACK_CHANNEL}, min={settings.SLACK_MIN_SEVERITY})")
     if settings.webhook_enabled:
         enabled.append(f"Webhook ({settings.WEBHOOK_URL[:40]}...)")
         if not settings.WEBHOOK_SECRET:
@@ -419,9 +405,7 @@ async def run_worker() -> None:
             len(alert_policies),
         )
     else:
-        logger.info(
-            "No alert policies found in detectors.yml — using immediate for all detectors"
-        )
+        logger.info("No alert policies found in detectors.yml — using immediate for all detectors")
 
     if settings.ALERT_DEDUP_WINDOW > 0:
         logger.info(

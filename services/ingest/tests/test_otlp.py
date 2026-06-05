@@ -94,9 +94,7 @@ def test_trace_to_uuid_format():
 # ── otlp_to_events ────────────────────────────────────────────────────────────
 
 
-def _make_resource_span(
-    trace_id, spans, service_name="my-agent", service_version="1.0"
-):
+def _make_resource_span(trace_id, spans, service_name="my-agent", service_version="1.0"):
     return {
         "resource": {
             "attributes": [
@@ -205,9 +203,7 @@ def test_retrieval_span_produces_called_and_responded():
 
 
 def test_errored_root_span_produces_run_errored():
-    root = _span(
-        "root", "", "agent", 1_000_000_000_000, 2_000_000_000_000, status_code=2
-    )
+    root = _span("root", "", "agent", 1_000_000_000_000, 2_000_000_000_000, status_code=2)
     events = otlp_to_events([_make_resource_span("t", [root])])
     types = [e["event_type"] for e in events]
     assert "run.errored" in types
@@ -216,9 +212,7 @@ def test_errored_root_span_produces_run_errored():
 
 def test_lifecycle_spans_not_counted_as_steps():
     root = _span("root", "", "agent", 1_000_000_000_000, 4_000_000_000_000)
-    lc = _span(
-        "lc1", "root", "langchain.chain.invoke", 1_100_000_000_000, 1_200_000_000_000
-    )
+    lc = _span("lc1", "root", "langchain.chain.invoke", 1_100_000_000_000, 1_200_000_000_000)
     llm = _span(
         "llm1",
         "root",

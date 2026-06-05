@@ -584,9 +584,7 @@ def scenario_step_count_inflation() -> str:
             )
         )
         events.append(
-            _infl_ev(
-                "tool.called", rid, i, {"tool_name": "search", "args_hash": f"h{i}"}
-            )
+            _infl_ev("tool.called", rid, i, {"tool_name": "search", "args_hash": f"h{i}"})
         )
         events.append(_infl_ev("tool.responded", rid, i, {"success": True}))
     events.append(_infl_ev("run.completed", rid, 20, {"exit_reason": "completed"}))

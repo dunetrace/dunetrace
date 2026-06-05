@@ -101,9 +101,7 @@ async def fetch_langfuse_trace(trace_id: str, max_retries: int = 3) -> Dict[str,
     try:
         import httpx
     except ImportError as exc:
-        raise ImportError(
-            "httpx is required for Langfuse integration: pip install httpx"
-        ) from exc
+        raise ImportError("httpx is required for Langfuse integration: pip install httpx") from exc
 
     from api_svc.config import settings
 
@@ -118,9 +116,7 @@ async def fetch_langfuse_trace(trace_id: str, max_retries: int = 3) -> Dict[str,
     lf_trace_id = trace_id.replace("-", "")
     base_url = settings.LANGFUSE_HOST.rstrip("/")
     headers = {
-        "Authorization": _basic_auth(
-            settings.LANGFUSE_PUBLIC_KEY, settings.LANGFUSE_SECRET_KEY
-        ),
+        "Authorization": _basic_auth(settings.LANGFUSE_PUBLIC_KEY, settings.LANGFUSE_SECRET_KEY),
         "Accept": "application/json",
     }
 
@@ -264,9 +260,7 @@ async def apply_langfuse_fix(prompt_name: str, fix_content: str) -> Dict[str, An
     try:
         import httpx
     except ImportError as exc:
-        raise ImportError(
-            "httpx is required for Langfuse integration: pip install httpx"
-        ) from exc
+        raise ImportError("httpx is required for Langfuse integration: pip install httpx") from exc
 
     from api_svc.config import settings
 
@@ -275,9 +269,7 @@ async def apply_langfuse_fix(prompt_name: str, fix_content: str) -> Dict[str, An
 
     base_url = settings.LANGFUSE_HOST.rstrip("/")
     headers = {
-        "Authorization": _basic_auth(
-            settings.LANGFUSE_PUBLIC_KEY, settings.LANGFUSE_SECRET_KEY
-        ),
+        "Authorization": _basic_auth(settings.LANGFUSE_PUBLIC_KEY, settings.LANGFUSE_SECRET_KEY),
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
@@ -344,9 +336,7 @@ async def build_explain_prompt(signal_dict: dict, trace: Dict[str, Any]) -> str:
         trace_input = str(trace_input)[:_TRACE_INPUT_LIMIT]
 
     confidence_pct = int(signal_dict.get("confidence", 0) * 100)
-    step_range_str = (
-        f"{first_step}–{last_step}" if first_step != last_step else str(first_step)
-    )
+    step_range_str = f"{first_step}–{last_step}" if first_step != last_step else str(first_step)
 
     system_prompt_section = (
         f"System prompt in use:\n{system_prompt}"

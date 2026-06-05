@@ -67,9 +67,7 @@ class _RunCtx:
     model: str = ""
     children: Set[str] = field(default_factory=set)  # child lc_run_ids
     start_time: float = field(default_factory=time.time)
-    child_steps: Dict[str, int] = field(
-        default_factory=dict
-    )  # lc_run_id → step_index at call time
+    child_steps: Dict[str, int] = field(default_factory=dict)  # lc_run_id → step_index at call time
     ctx_token: Any = field(default=None, repr=False)  # _current_run reset token
 
 
@@ -94,9 +92,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
         tools: Optional[List[str]] = None,
     ) -> None:
         if not _LANGCHAIN_AVAILABLE:
-            raise ImportError(
-                "langchain is not installed. Run: pip install 'dunetrace[langchain]'"
-            )
+            raise ImportError("langchain is not installed. Run: pip install 'dunetrace[langchain]'")
         super().__init__()
         self._client = client
         self._agent_id = agent_id
@@ -108,9 +104,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
         self._lock: Lock = Lock()
         self._runs: Dict[str, _RunCtx] = {}  # root_lc_run_id → ctx
         self._lc_parent: Dict[str, str] = {}  # any_lc_run_id  → root_lc_run_id
-        self._last_run_id: Optional[str] = (
-            None  # Dunetrace run_id of the last completed root run
-        )
+        self._last_run_id: Optional[str] = None  # Dunetrace run_id of the last completed root run
 
     @property
     def last_run_id(self) -> Optional[str]:
@@ -126,9 +120,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 lc_id = str(kwargs.get(key) or "")
                 if not lc_id:
                     continue
-                root = self._lc_parent.get(lc_id) or (
-                    lc_id if lc_id in self._runs else None
-                )
+                root = self._lc_parent.get(lc_id) or (lc_id if lc_id in self._runs else None)
                 if root and root in self._runs:
                     return self._runs[root]
         return None
@@ -170,8 +162,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
 
             with self._lock:
                 is_root = not parent_lc_id or (
-                    parent_lc_id not in self._runs
-                    and parent_lc_id not in self._lc_parent
+                    parent_lc_id not in self._runs and parent_lc_id not in self._lc_parent
                 )
 
             if not is_root:
@@ -329,11 +320,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             if not ctx:
                 return
 
-            latency_ms = (
-                int((time.time() - ctx.llm_start_time) * 1000)
-                if ctx.llm_start_time
-                else 0
-            )
+            latency_ms = int((time.time() - ctx.llm_start_time) * 1000) if ctx.llm_start_time else 0
             ctx.llm_start_time = None
 
             gen = response.generations[0][0] if response.generations else None
@@ -556,11 +543,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             top_score: Optional[float] = None
             for doc in docs:
                 meta = getattr(doc, "metadata", {}) or {}
-                score = (
-                    meta.get("score")
-                    or meta.get("relevance_score")
-                    or meta.get("similarity")
-                )
+                score = meta.get("score") or meta.get("relevance_score") or meta.get("similarity")
                 if score is not None:
                     top_score = max(top_score or 0.0, float(score))
 

@@ -16,9 +16,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(
     0,
-    os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py")
-    ),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py")),
 )
 
 from dunetrace.models import FailureSignal, FailureType, Severity
@@ -101,9 +99,7 @@ class TestExplanationContract(unittest.TestCase):
 
         # Text fields must be non-empty strings
         self.assertIsInstance(exp.title, str)
-        self.assertGreater(
-            len(exp.title), 10, f"{failure_type}: title too short: {exp.title!r}"
-        )
+        self.assertGreater(len(exp.title), 10, f"{failure_type}: title too short: {exp.title!r}")
 
         self.assertIsInstance(exp.what, str)
         self.assertGreater(len(exp.what), 20, f"{failure_type}: 'what' too short")
@@ -120,9 +116,7 @@ class TestExplanationContract(unittest.TestCase):
 
         # Must have at least one fix
         self.assertIsInstance(exp.suggested_fixes, list)
-        self.assertGreater(
-            len(exp.suggested_fixes), 0, f"{failure_type}: no suggested fixes"
-        )
+        self.assertGreater(len(exp.suggested_fixes), 0, f"{failure_type}: no suggested fixes")
 
         for fix in exp.suggested_fixes:
             self.assertIsInstance(fix, CodeFix)
@@ -342,9 +336,7 @@ class TestPromptInjectionExplanation(unittest.TestCase):
         self.assertIn("security", self.exp.why_it_matters.lower())
 
     def test_has_logging_fix(self):
-        all_text = " ".join(
-            f.description + " " + f.code for f in self.exp.suggested_fixes
-        )
+        all_text = " ".join(f.description + " " + f.code for f in self.exp.suggested_fixes)
         self.assertIn("log", all_text.lower())
 
     def test_single_pattern_grammar(self):

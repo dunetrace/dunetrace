@@ -127,12 +127,8 @@ if explain_status == 200:
     if pname:
         ok(f"langfuse_prompt_name = {pname!r}  version = {pver}")
     else:
-        print(
-            f"  NOTE  langfuse_prompt_name = null — trace didn't use a managed prompt"
-        )
-        print(
-            f"        'Apply via Langfuse' button will NOT be shown (correct behaviour)"
-        )
+        print(f"  NOTE  langfuse_prompt_name = null — trace didn't use a managed prompt")
+        print(f"        'Apply via Langfuse' button will NOT be shown (correct behaviour)")
 
     fix_content = explain_data.get("fix_content", "")
     prompt_name = explain_data.get("langfuse_prompt_name")
@@ -145,9 +141,7 @@ elif explain_status == 503:
         print(f"  SKIP  LLM not configured ({detail})")
     else:
         fail(f"explain 503", detail)
-    fix_content = (
-        sig["suggested_fixes"][0]["code"] if sig.get("suggested_fixes") else ""
-    )
+    fix_content = sig["suggested_fixes"][0]["code"] if sig.get("suggested_fixes") else ""
     prompt_name = None
 else:
     fail(f"explain returned {explain_status}", explain_data.get("detail", ""))
@@ -160,9 +154,7 @@ else:
 print("\n[2] POST /v1/signals/{id}/record-copy")
 if not fix_content:
     fix_content = (
-        sig["suggested_fixes"][0]["code"]
-        if sig.get("suggested_fixes")
-        else "Add deduplication"
+        sig["suggested_fixes"][0]["code"] if sig.get("suggested_fixes") else "Add deduplication"
     )
 
 copy_data, copy_status = post(
@@ -189,9 +181,7 @@ if status_code == 200:
     if fix_applied:
         ok(f"fix_applied = True  →  verdict = {status_data.get('verdict')!r}")
         print(f"      runs_after_fix        = {status_data.get('runs_after_fix')}")
-        print(
-            f"      recurrences_after_fix = {status_data.get('recurrences_after_fix')}"
-        )
+        print(f"      recurrences_after_fix = {status_data.get('recurrences_after_fix')}")
     else:
         fail("fix_applied = False — record-copy did not persist")
 else:
