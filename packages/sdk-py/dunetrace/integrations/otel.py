@@ -245,6 +245,8 @@ class DunetraceOTelExporter:
         span.set_attribute("gen_ai.response.finish_reason", p.get("finish_reason", ""))
         if p.get("completion_tokens"):
             span.set_attribute("gen_ai.usage.output_tokens", p["completion_tokens"])
+        if p.get("reasoning_tokens"):
+            span.set_attribute("gen_ai.usage.reasoning_tokens", p["reasoning_tokens"])
         if p.get("latency_ms"):
             span.set_attribute("dunetrace.latency_ms", p["latency_ms"])
         if p.get("output_length"):

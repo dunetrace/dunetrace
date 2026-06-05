@@ -2185,6 +2185,8 @@ async def agent_token_stats(agent_id: str) -> dict:
                 SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
                 SUM(CASE WHEN event_type = 'llm.responded'
                     THEN COALESCE((payload->>'completion_tokens')::int, 0) ELSE 0 END) AS completion_tokens,
+                SUM(CASE WHEN event_type = 'llm.responded'
+                    THEN COALESCE((payload->>'reasoning_tokens')::int, 0) ELSE 0 END) AS reasoning_tokens,
                 MIN(received_at) AS run_start
             FROM events
             WHERE agent_id = $1
@@ -2217,14 +2219,15 @@ async def agent_token_stats(agent_id: str) -> dict:
     for r in token_rows:
         prompt = int(r["prompt_tokens"])
         comp = int(r["completion_tokens"])
-        cost = estimate_cost(r["model"] or "unknown", prompt, comp)
+        reasoning = int(r["reasoning_tokens"])
+        cost = estimate_cost(r["model"] or "unknown", prompt, comp, reasoning)
         ts = r["run_start"].timestamp() if r["run_start"] else 0.0
         runs.append(
             {
                 "run_id": r["run_id"],
                 "prompt_tokens": prompt,
                 "completion_tokens": comp,
-                "total_tokens": prompt + comp,
+                "total_tokens": prompt + comp + reasoning,
                 "cost": cost,
                 "ts": ts,
                 "failure_types": run_signals.get(r["run_id"], set()),

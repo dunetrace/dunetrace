@@ -1086,7 +1086,8 @@ class CostSpikeDetector(BaseDetector):
             return None
 
         total_tokens = sum(
-            (c.prompt_tokens or 0) + (c.completion_tokens or 0) for c in state.llm_calls
+            (c.prompt_tokens or 0) + (c.completion_tokens or 0) + (c.reasoning_tokens or 0)
+            for c in state.llm_calls
         )
         if total_tokens == 0:
             return None

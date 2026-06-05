@@ -119,6 +119,7 @@ class LlmCall:
     timestamp: float
     output_length: Optional[int] = None
     completion_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
 
 
 @dataclass
