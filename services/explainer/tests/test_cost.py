@@ -42,14 +42,16 @@ class TestCostEstimation(unittest.TestCase):
                 )
 
     def test_reasoning_tokens_are_billed_as_output_tokens(self):
+        # reasoning_tokens is a subset of completion_tokens; no double-billing
         self.assertAlmostEqual(
             estimate_cost("o4-mini", 1_000_000, 1_000_000, reasoning_tokens=500_000),
-            7.70,
+            5.50,
         )
 
     def test_only_reasoning_tokens_are_billable(self):
+        # Pure reasoning run: completion_tokens == reasoning_tokens
         self.assertAlmostEqual(
-            estimate_cost("o3", 0, 0, reasoning_tokens=1_000_000),
+            estimate_cost("o3", 0, 1_000_000, reasoning_tokens=1_000_000),
             8.00,
         )
 
