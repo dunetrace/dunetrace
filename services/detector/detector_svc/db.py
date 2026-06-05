@@ -531,8 +531,17 @@ async def fetch_duration_baseline(
     return float(row["p75"]) if row["p75"] is not None else None
 
 
-async def fetch_completed_runs(limit: int) -> list[dict]:
-    """Runs with a terminal event (run.completed or run.errored) that haven't been processed yet."""
+async def fetch_completed_runs(
+    limit: int,
+    shard_count: int = 1,
+    shard_index: int = 0,
+) -> list[dict]:
+    """Runs with a terminal event (run.completed or run.errored) that haven't been processed yet.
+
+    When shard_count > 1 each worker instance claims only the runs whose agent_id
+    hashes to its bucket: abs(hashtext(agent_id)) % shard_count = shard_index.
+    shard_count=1 (default) bypasses the filter entirely.
+    """
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -546,16 +555,27 @@ async def fetch_completed_runs(limit: int) -> list[dict]:
               AND NOT EXISTS (
                   SELECT 1 FROM processed_runs p WHERE p.run_id = e.run_id
               )
+              AND ($2::int = 1 OR abs(hashtext(e.agent_id)) % $2 = $3)
             ORDER BY e.run_id, e.received_at ASC
             LIMIT $1
             """,
             limit,
+            shard_count,
+            shard_index,
         )
     return [dict(r) for r in rows]
 
 
-async def fetch_stalled_runs(stall_timeout_secs: float, limit: int) -> list[dict]:
-    """Runs that started, never completed, and haven't received a new event in stall_timeout_secs — likely agents stuck mid-run."""
+async def fetch_stalled_runs(
+    stall_timeout_secs: float,
+    limit: int,
+    shard_count: int = 1,
+    shard_index: int = 0,
+) -> list[dict]:
+    """Runs that started, never completed, and haven't received a new event in stall_timeout_secs — likely agents stuck mid-run.
+
+    When shard_count > 1 only the runs whose agent_id hashes to shard_index are returned.
+    """
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -579,10 +599,13 @@ async def fetch_stalled_runs(stall_timeout_secs: float, limit: int) -> list[dict
                   WHERE recent.run_id = e.run_id
                     AND recent.received_at > NOW() - ($1 || ' seconds')::INTERVAL
               )
+              AND ($3::int = 1 OR abs(hashtext(e.agent_id)) % $3 = $4)
             LIMIT $2
             """,
             str(stall_timeout_secs),
             limit,
+            shard_count,
+            shard_index,
         )
     return [dict(r) for r in rows]
 

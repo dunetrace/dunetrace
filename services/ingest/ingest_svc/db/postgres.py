@@ -57,8 +57,14 @@ async def check_db() -> str:
 # ── Schema ─────────────────────────────────────────────────────────────────────
 
 _SCHEMA = """
+-- Partitioned by received_at (monthly range partitions).
+-- PRIMARY KEY includes received_at because Postgres requires the partition key
+-- in the PK of a partitioned table.  No other table references events.id as a
+-- FK — cross-table joins use run_id (TEXT) — so the composite PK is safe.
+-- NOTE: this CREATE is a no-op on existing deployments that already have a
+-- non-partitioned events table; those require an explicit offline migration.
 CREATE TABLE IF NOT EXISTS events (
-    id             BIGSERIAL PRIMARY KEY,
+    id             BIGSERIAL        NOT NULL,
     batch_id       TEXT             NOT NULL,
     event_type     TEXT             NOT NULL,
     run_id         TEXT             NOT NULL,
@@ -68,8 +74,9 @@ CREATE TABLE IF NOT EXISTS events (
     timestamp      DOUBLE PRECISION NOT NULL,
     payload        JSONB            NOT NULL DEFAULT '{}',
     parent_run_id  TEXT,
-    received_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW()
-);
+    received_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, received_at)
+) PARTITION BY RANGE (received_at);
 
 CREATE INDEX IF NOT EXISTS idx_events_run_id  ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_agent   ON events(agent_id, received_at DESC);
@@ -141,12 +148,100 @@ CREATE INDEX IF NOT EXISTS idx_deploys_agent ON deploy_events(agent_id, deployed
 """
 
 
+async def _ensure_event_partitions(conn, months_ahead: int = 3) -> None:
+    """Create monthly child partitions for the events table from the current month
+    through months_ahead months from now.  Safe to call on every startup.
+
+    Only runs when events is actually a partitioned table (relkind='p').
+    This is a no-op on existing non-partitioned deployments.
+    """
+    from datetime import date
+
+    is_partitioned = await conn.fetchval(
+        "SELECT COUNT(*) FROM pg_class WHERE relname = 'events' AND relkind = 'p'"
+    )
+    if not is_partitioned:
+        return
+
+    # Default partition must exist before any named partitions so rows inserted
+    # before the first monthly partition is created don't fail.
+    await conn.execute(
+        "CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT"
+    )
+
+    today = date.today()
+    for delta in range(months_ahead + 1):
+        offset = today.month - 1 + delta
+        year, month = today.year + offset // 12, offset % 12 + 1
+        end_year = year + (1 if month == 12 else 0)
+        end_month = month % 12 + 1
+        start, end = date(year, month, 1), date(end_year, end_month, 1)
+        name = f"events_{start.strftime('%Y%m')}"
+        await conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {name} "
+            f"PARTITION OF events FOR VALUES FROM ('{start}') TO ('{end}')"
+        )
+        logger.debug("Ensured partition %s (%s–%s)", name, start, end)
+
+
+async def prune_old_events(retention_days: int = 90) -> int:
+    """Drop monthly event partitions whose data is entirely older than retention_days.
+
+    Uses the partition name (events_YYYYMM) to determine the end of each partition
+    window without parsing pg_partbound.  Only touches partitions matching that
+    naming convention; the default partition (events_default) is never dropped.
+
+    Returns the number of partitions dropped.  Safe to call at any time.
+    """
+    from datetime import date, timedelta
+
+    if not _pool:
+        return 0
+
+    cutoff = date.today() - timedelta(days=retention_days)
+    async with _pool.acquire() as conn:
+        is_partitioned = await conn.fetchval(
+            "SELECT COUNT(*) FROM pg_class WHERE relname = 'events' AND relkind = 'p'"
+        )
+        if not is_partitioned:
+            return 0
+
+        rows = await conn.fetch(
+            """
+            SELECT c.relname
+            FROM pg_class c
+            JOIN pg_inherits i ON i.inhrelid = c.oid
+            JOIN pg_class p ON p.oid = i.inhparent
+            WHERE p.relname = 'events'
+              AND c.relname ~ '^events_[0-9]{6}$'
+            """
+        )
+
+        dropped = 0
+        for row in rows:
+            name = row["relname"]
+            try:
+                year, month = int(name[7:11]), int(name[11:13])
+                end_year = year + (1 if month == 12 else 0)
+                end_month = month % 12 + 1
+                partition_end = date(end_year, end_month, 1)
+                if partition_end <= cutoff:
+                    await conn.execute(f"DROP TABLE IF EXISTS {name}")
+                    logger.info("Pruned event partition %s (data before %s)", name, partition_end)
+                    dropped += 1
+            except (ValueError, IndexError):
+                pass
+
+        return dropped
+
+
 async def ensure_schema() -> None:
     """Idempotent — safe to call on every startup."""
     if not _pool:
         return
     async with _pool.acquire() as conn:
         await conn.execute(_SCHEMA)
+        await _ensure_event_partitions(conn)
     logger.info("Schema ready")
 
 
@@ -226,7 +321,7 @@ async def fetch_policies(agent_id: str) -> list:
         async with _pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, agent_id, name, condition, action, enabled, priority
+                SELECT id, agent_id, name, condition, action, enabled, priority, signature
                 FROM policies
                 WHERE enabled = TRUE
                   AND (agent_id = $1 OR agent_id = '*')
@@ -251,6 +346,7 @@ async def fetch_policies(agent_id: str) -> list:
                 "action": _j(r["action"]),
                 "enabled": r["enabled"],
                 "priority": r["priority"],
+                "signature": r["signature"] or "",
             }
             for r in rows
         ]

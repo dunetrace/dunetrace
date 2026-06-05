@@ -21,7 +21,7 @@ from typing import Callable, List, Optional, Union
 from dunetrace.buffer import RingBuffer
 from dunetrace.context import _current_run
 from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
-from dunetrace.models import AgentEvent, EventType, hash_content, agent_version
+from dunetrace.models import AgentEvent, EventType, hash_content, agent_version, Exporter, CallableExporter
 from dunetrace.policies import Policy, PolicyEngine, PolicyViolation
 from dunetrace.run_context import RunContext
 
@@ -58,16 +58,21 @@ class Dunetrace:
         flush_interval_ms: int = 200,
         emit_as_json: bool = False,
         otel_exporter: Optional[object] = None,
+        exporters: Optional[List[Exporter]] = None,
+        policy_secret: str = "",
         debug: bool = False,
     ) -> None:
         self._ingest_url = endpoint.rstrip("/") + "/v1/ingest" if endpoint else None
         self._api_key = api_key or ""
+        self._policy_secret = policy_secret
         self._buffer = RingBuffer[AgentEvent](maxsize=buffer_size)
         self._stop_evt = Event()
         self._flush_interval = flush_interval_ms / 1000.0
         self._emit_json = emit_as_json
-        self._otel_exporter = otel_exporter  # DunetraceOTelExporter or None
         self._stdout_lock = Lock()  # one JSON line per write, no interleaving
+
+        self._otel_exporter = otel_exporter  # kept separate for notify_run_state lifecycle calls
+        self._exporters: List[Exporter] = list(exporters or [])
         self._default_agent_id = ""  # set by init()
         self._policy_engine = PolicyEngine()
 
@@ -83,10 +88,11 @@ class Dunetrace:
         )
         self._drain_thread.start()
         logger.debug(
-            "Dunetrace started. endpoint=%s emit_as_json=%s otel=%s",
+            "Dunetrace started. endpoint=%s emit_as_json=%s otel=%s exporters=%d",
             endpoint,
             emit_as_json,
             otel_exporter is not None,
+            len(self._exporters),
         )
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -356,7 +362,7 @@ class Dunetrace:
                 import json as _json
 
                 data = _json.loads(resp.read())
-                self._policy_engine.load(data.get("policies", []))
+                self._policy_engine.load(data.get("policies", []), secret=self._policy_secret)
         except Exception as exc:
             logger.debug("Policy fetch skipped: %s", exc)
 
@@ -673,6 +679,11 @@ class Dunetrace:
                 self._write_json_line(event)
             if self._otel_exporter is not None:
                 self._otel_exporter.handle(event)
+            for exporter in self._exporters:
+                try:
+                    exporter.handle(event)
+                except Exception as exc:
+                    logger.warning("Dunetrace: exporter %s failed on %s: %s", exporter, event.event_type, exc)
             self._buffer.push(event)
         except Exception as exc:
             logger.warning("Dunetrace: failed to emit %s: %s", event.event_type, exc)

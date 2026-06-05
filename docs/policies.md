@@ -2,6 +2,8 @@
 
 Runtime guardrails evaluated mid-run after every `tool_called`, `llm_responded`, and `tool_responded` event. Policies fire at most once per run (except `log` policies, which fire every time).
 
+Policy checks are synchronous and O(1) — running totals for `error_count` and `cost_usd` are maintained incrementally, and signal detector results are cached per step.
+
 ---
 
 ## Local policies (no backend required)
@@ -54,6 +56,8 @@ dt = Dunetrace(api_key="dt_live_...", endpoint="https://ingest.dunetrace.com")
 ```
 
 Local policies (added via `add_policy`) take priority over remote ones at the same `priority` level and are never replaced by remote fetches.
+
+**Long-running agents:** the 60-second remote refresh window means a newly pushed policy may not reach an already-running agent until its next run. Signal-trigger policy checks (`trigger="signal"`) cache whether any such policy is active per engine generation — adding a new signal policy via `add_policy()` mid-run takes effect on the next policy-checked event.
 
 ---
 
@@ -122,6 +126,18 @@ with dt.run("my-agent", user_input=query) as run:
         response = openai_client.chat.completions.create(model="gpt-4o", messages=messages, ...)
 ```
 
+**Security:** `inject_prompt` policy content is validated against known prompt injection patterns at write time. Content matching patterns such as "ignore previous instructions," role-switching commands, or jailbreak phrases is rejected with HTTP 422. The same detector runs on both creation and updates (including action-only updates). See [Trust boundary](#trust-boundary) below.
+
+---
+
+## Conflict resolution
+
+When multiple policies match simultaneously, only the highest-priority one fires per event (lower `priority` number = higher priority). The others are skipped for that event. If the same policy matches on the next event it will fire then, unless it has already been added to `_triggered_policies`.
+
+- A `stop` policy raises immediately — lower-priority policies in the same event never execute.
+- Multiple `inject_prompt` policies that fire on different events accumulate additively in `run.prompt_additions`.
+- Multiple `switch_model` policies: whichever fires last wins — the override is overwritten silently.
+
 ---
 
 ## `add_policy` parameters
@@ -134,6 +150,33 @@ with dt.run("my-agent", user_input=query) as run:
 | `agent_id` | `"*"` | `"*"` applies to all agents; pass a specific agent_id to scope |
 | `priority` | `100` | Lower numbers fire first |
 | `enabled` | `True` | Set to `False` to disable without removing |
+
+---
+
+## Trust boundary
+
+**Who can define policies:** Bearer token authentication is required for all policy CRUD endpoints. In `AUTH_MODE=dev` (local Docker only), auth is skipped — do not expose port 8002 beyond localhost in dev mode. `dt.add_policy()` in-process requires no auth; trust is whoever controls the code.
+
+**Validation at write time:**
+1. Trigger, operator, and action type are checked against fixed allowlists — unknown values are rejected with 422.
+2. `inject_prompt` prompt content is scanned against the prompt injection pattern detector. Matching content is rejected before it reaches the database.
+3. Every policy is signed with HMAC-SHA256 at write time. The signature is stored alongside the policy.
+
+**Signature verification:** Configure `POLICY_SIGNING_SECRET` (same value on server and SDK client) to enable end-to-end verification:
+
+```python
+dt = Dunetrace(
+    api_key="dt_live_...",
+    endpoint="https://ingest.dunetrace.com",
+    policy_secret="your-shared-secret",
+)
+```
+
+The SDK verifies each policy's signature before loading it. Policies with a non-matching signature are skipped and logged as warnings — a tampered or replayed policy never reaches the agent.
+
+**Migration note:** Policies created before `POLICY_SIGNING_SECRET` was set will have an empty signature. These are loaded with a warning rather than silently dropped. Re-save each policy in the dashboard to sign it.
+
+**Audit log:** Every create, update, delete, and toggle is written to `policy_audit_log` with the customer ID, timestamp, and full before/after diff. Query it directly in Postgres for forensic review.
 
 ---
 

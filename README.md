@@ -237,6 +237,16 @@ dt.add_policy(
 
 Policies can also be created in the dashboard and are fetched automatically by the SDK (60s TTL).
 
+`inject_prompt` content is validated against known prompt injection patterns at write time — adversarial content is rejected before it reaches the database. Every policy mutation is written to an append-only audit log. In production, set `POLICY_SIGNING_SECRET` on both the server and the SDK client to enable HMAC verification of fetched policies:
+
+```python
+dt = Dunetrace(
+    api_key="dt_live_...",
+    endpoint="https://ingest.dunetrace.com",
+    policy_secret="your-shared-secret",   # must match POLICY_SIGNING_SECRET env var
+)
+```
+
 → [docs/policies.md](docs/policies.md)
 
 ---
@@ -250,6 +260,34 @@ dt.mark_deploy("my-agent", version="v1.4.2", commit="abc1234", env="production")
 ```
 
 The dashboard overlays blue dashed lines at each deploy boundary so you can immediately see whether a spike started before or after a release.
+
+---
+
+## Custom exporters
+
+Forward every agent event to an external sink in real time — Splunk, Datadog, a webhook, or any custom destination:
+
+```python
+from dunetrace import Dunetrace, CallableExporter
+
+dt = Dunetrace(exporters=[
+    CallableExporter(lambda event: send_to_splunk(event.to_dict())),
+])
+```
+
+Or implement the `Exporter` protocol for full control:
+
+```python
+from dunetrace import Dunetrace, Exporter
+
+class MyExporter:
+    def handle(self, event) -> None:
+        requests.post("https://my-sink.example.com", json=event.to_dict())
+
+dt = Dunetrace(exporters=[MyExporter()])
+```
+
+Multiple exporters can be registered. A failing exporter logs a warning and does not affect others or the agent. The existing `otel_exporter` parameter continues to work alongside `exporters`.
 
 ---
 
@@ -274,6 +312,7 @@ Ten tools that cover the full diagnostic workflow:
 | `get_agent_runs` | "List recent runs for my agent with their status." |
 | `search_signals` | "Show me all CRITICAL signals in the last 24 hours." |
 | `summarize_agent` | "Give me a one-shot diagnosis of my agent." |
+| `get_agent_token_stats` | "How much is my agent wasting on failed runs?" |
 | `get_instrumentation_guide` | "How do I instrument my LangChain agent?" |
 
 **Claude Code**: already registered in `~/.claude.json` after `pip install dunetrace-mcp`. Restart Claude Code to load.

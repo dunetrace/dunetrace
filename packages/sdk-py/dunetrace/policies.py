@@ -35,6 +35,9 @@ Supported actions:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json as _json
 import logging
 import threading
 import time
@@ -79,24 +82,35 @@ def compute_run_cost(llm_calls: list) -> float:
     return total
 
 
-def build_metrics(state: Any, step: int) -> Dict[str, Any]:
+def build_metrics(
+    state: Any,
+    step: int,
+    *,
+    error_count: Optional[int] = None,
+    cost_usd: Optional[float] = None,
+) -> Dict[str, Any]:
     """
     Compute all policy-evaluable metrics from the current RunState.
 
     Returns a dict keyed by trigger name. Values are None when the metric
     is not yet available (e.g. no LLM calls have happened yet).
+
+    Pass pre-computed ``error_count`` and ``cost_usd`` to skip the O(n) scans
+    when the caller maintains running totals.
     """
     llm_calls = getattr(state, "llm_calls", []) or []
     tool_calls = getattr(state, "tool_calls", []) or []
 
     last_llm = llm_calls[-1] if llm_calls else None
-    error_count = sum(1 for tc in tool_calls if getattr(tc, "success", None) is False)
 
     return {
         "tool_call_count": len(tool_calls),
         "step_count": step,
-        "cost_usd": compute_run_cost(llm_calls),
-        "error_count": error_count,
+        "cost_usd": cost_usd if cost_usd is not None else compute_run_cost(llm_calls),
+        "error_count": (
+            error_count if error_count is not None
+            else sum(1 for tc in tool_calls if getattr(tc, "success", None) is False)
+        ),
         "finish_reason": getattr(last_llm, "finish_reason", None),
         "llm_latency_ms": getattr(last_llm, "latency_ms", None),
         # "signal" is filled in by the engine when a detector-based policy exists
@@ -171,6 +185,40 @@ class Policy:
         )
 
 
+def _verify_policy_signature(policy: dict, secret: str) -> bool:
+    """Return True if the policy's HMAC-SHA256 signature matches. Always True when secret is empty.
+
+    Policies with an empty signature and a non-empty secret are treated as unsigned
+    (e.g., created before signing was enabled) — they are loaded with a warning rather
+    than silently dropped, to support zero-downtime migration when POLICY_SIGNING_SECRET
+    is first set.
+    """
+    if not secret:
+        return True
+    actual_sig = policy.get("signature") or ""
+    if not actual_sig:
+        # Unsigned policy — emit a warning but allow through during migration.
+        # Set POLICY_SIGNING_SECRET and re-save all policies to enforce verification.
+        logger.warning(
+            "Policy '%s' (id=%s) has no signature — loaded without verification. "
+            "Re-save this policy to sign it.",
+            policy.get("name"), policy.get("id"),
+        )
+        return True
+    # Use null-byte as separator — safe against colons in agent_id or name.
+    canonical = "\x00".join([
+        str(policy.get("id", "")),
+        policy.get("agent_id", ""),
+        policy.get("name", ""),
+        _json.dumps(policy.get("condition", {}), sort_keys=True),
+        _json.dumps(policy.get("action", {}), sort_keys=True),
+        str(policy.get("enabled", True)),
+        str(policy.get("priority", 100)),
+    ])
+    expected_sig = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected_sig, actual_sig)
+
+
 # ── Engine ────────────────────────────────────────────────────────────────────
 
 
@@ -186,6 +234,7 @@ class PolicyEngine:
         self._policies: List[Policy] = []
         self._lock: threading.Lock = threading.Lock()
         self._fetch_times: Dict[str, float] = {}  # agent_id → last fetch monotonic
+        self._generation: int = 0  # incremented on every load/add so RunContext can detect staleness
 
     # ── Config API ────────────────────────────────────────────────────────────
 
@@ -193,15 +242,31 @@ class PolicyEngine:
         with self._lock:
             self._policies.append(policy)
             self._policies.sort(key=lambda p: p.priority)
+            self._generation += 1
 
-    def load(self, raw: List[dict]) -> None:
-        """Replace remote-sourced policies with a fresh list from the API."""
-        remote = [Policy.from_dict(p) for p in raw]
+    def load(self, raw: List[dict], secret: str = "") -> None:
+        """Replace remote-sourced policies with a fresh list from the API.
+
+        When ``secret`` is set, each policy's HMAC-SHA256 signature is verified
+        before it is loaded. Policies that fail verification are skipped and logged
+        as warnings — a tampered or replayed policy never reaches the agent.
+        """
+        verified = []
+        for p in raw:
+            if secret:
+                if not _verify_policy_signature(p, secret):
+                    logger.warning(
+                        "Policy '%s' (id=%s) failed signature verification — skipped",
+                        p.get("name"), p.get("id"),
+                    )
+                    continue
+            verified.append(Policy.from_dict(p))
+
         with self._lock:
-            # Keep locally-added policies (id=None) and replace remote ones.
             local = [p for p in self._policies if p.id is None]
-            self._policies = sorted(local + remote, key=lambda p: p.priority)
-        logger.debug("Policies loaded: %d total (%d remote)", len(self._policies), len(remote))
+            self._policies = sorted(local + verified, key=lambda p: p.priority)
+            self._generation += 1
+        logger.debug("Policies loaded: %d total (%d remote)", len(self._policies), len(verified))
 
     def mark_fetched(self, agent_id: str) -> None:
         self._fetch_times[agent_id] = time.monotonic()

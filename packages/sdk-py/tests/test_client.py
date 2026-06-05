@@ -450,5 +450,215 @@ class TestConcurrentIsolation(unittest.TestCase):
         self.assertEqual(len(set(tool_run_ids)), 2, "each tool must belong to a different run")
 
 
+class TestCustomExporters(unittest.TestCase):
+    def _client(self, **kwargs):
+        c = _make_client(**kwargs)
+        c._ship = lambda batch: None
+        return c
+
+    def test_exporter_receives_all_events(self):
+        received = []
+
+        class MyExporter:
+            def handle(self, event):
+                received.append(event)
+
+        c = self._client(exporters=[MyExporter()])
+        with c.run("agent") as run:
+            run.llm_called("gpt-4o", prompt_tokens=10)
+            run.llm_responded(finish_reason="stop")
+        c.shutdown(timeout=2)
+
+        types = [e.event_type for e in received]
+        self.assertIn(EventType.RUN_STARTED, types)
+        self.assertIn(EventType.LLM_CALLED, types)
+        self.assertIn(EventType.LLM_RESPONDED, types)
+        self.assertIn(EventType.RUN_COMPLETED, types)
+
+    def test_callable_exporter_wraps_plain_function(self):
+        from dunetrace.models import CallableExporter
+
+        received = []
+        c = self._client(exporters=[CallableExporter(received.append)])
+        with c.run("agent"):
+            pass
+        c.shutdown(timeout=2)
+        self.assertTrue(len(received) >= 2)
+
+    def test_multiple_exporters_all_called(self):
+        received_a, received_b = [], []
+
+        class ExporterA:
+            def handle(self, event): received_a.append(event)
+
+        class ExporterB:
+            def handle(self, event): received_b.append(event)
+
+        c = self._client(exporters=[ExporterA(), ExporterB()])
+        with c.run("agent"):
+            pass
+        c.shutdown(timeout=2)
+        self.assertEqual(len(received_a), len(received_b))
+        self.assertGreater(len(received_a), 0)
+
+    def test_failing_exporter_does_not_affect_others(self):
+        received = []
+
+        class BrokenExporter:
+            def handle(self, event): raise RuntimeError("boom")
+
+        class GoodExporter:
+            def handle(self, event): received.append(event)
+
+        c = self._client(exporters=[BrokenExporter(), GoodExporter()])
+        with c.run("agent"):
+            pass
+        c.shutdown(timeout=2)
+        self.assertGreater(len(received), 0)
+
+    def test_exporter_protocol_satisfied_by_duck_typing(self):
+        from dunetrace.models import Exporter
+
+        class MyExporter:
+            def handle(self, event): pass
+
+        self.assertIsInstance(MyExporter(), Exporter)
+
+    def test_otel_exporter_still_works_alongside_exporters(self):
+        """Legacy otel_exporter param must still receive events when exporters are also set."""
+        otel_calls = []
+
+        class FakeOtelExporter:
+            def handle(self, event): otel_calls.append(event)
+            def notify_run_state(self, run_id, state): pass
+
+        custom_calls = []
+
+        class MyExporter:
+            def handle(self, event): custom_calls.append(event)
+
+        c = self._client(otel_exporter=FakeOtelExporter(), exporters=[MyExporter()])
+        with c.run("agent"):
+            pass
+        c.shutdown(timeout=2)
+        self.assertGreater(len(otel_calls), 0)
+        self.assertGreater(len(custom_calls), 0)
+
+
+class TestSignalTriggerDebounce(unittest.TestCase):
+    """run_detectors must fire at most once per step when signal policies are active."""
+
+    def _client_with_signal_policy(self):
+        c = _make_client()
+        c._ship = lambda batch: None
+        c.add_policy(
+            name="watch-tool-loop",
+            condition={"trigger": "signal", "operator": "contains", "value": "TOOL_LOOP"},
+            action={"type": "log"},
+        )
+        return c
+
+    def test_llm_called_and_responded_share_one_detector_run(self):
+        """llm_called advances the step; llm_responded stays at the same step.
+        Detectors should run once for the pair, not twice."""
+        c = self._client_with_signal_policy()
+        with patch("dunetrace.detectors.run_detectors", return_value=[]) as mock_rd:
+            with c.run("agent") as run:
+                run.llm_called("gpt-4o", prompt_tokens=100)
+                run.llm_responded(finish_reason="stop")
+            c.shutdown(timeout=2)
+        self.assertEqual(mock_rd.call_count, 1)
+
+    def test_tool_called_and_responded_share_one_detector_run(self):
+        """tool_called advances the step; tool_responded stays at the same step."""
+        c = self._client_with_signal_policy()
+        with patch("dunetrace.detectors.run_detectors", return_value=[]) as mock_rd:
+            with c.run("agent") as run:
+                run.tool_called("search", {"q": "hello"})
+                run.tool_responded("search", success=True)
+            c.shutdown(timeout=2)
+        self.assertEqual(mock_rd.call_count, 1)
+
+    def test_detectors_rerun_on_new_step(self):
+        """Each new step (step-advancing event) must trigger a fresh detector run."""
+        c = self._client_with_signal_policy()
+        with patch("dunetrace.detectors.run_detectors", return_value=[]) as mock_rd:
+            with c.run("agent") as run:
+                run.llm_called("gpt-4o", prompt_tokens=100)   # step 1 — detectors run
+                run.llm_responded(finish_reason="tool_calls")  # step 1 — reuses cache
+                run.tool_called("search", {"q": "x"})          # step 2 — detectors run
+                run.tool_responded("search", success=True)     # step 2 — reuses cache
+            c.shutdown(timeout=2)
+        self.assertEqual(mock_rd.call_count, 2)
+
+    def test_no_signal_policy_skips_detectors_entirely(self):
+        """Without a signal-trigger policy, run_detectors must never be called."""
+        c = _make_client()
+        c._ship = lambda batch: None
+        c.add_policy(
+            name="cost-guard",
+            condition={"trigger": "cost_usd", "operator": "gt", "value": 10.0},
+            action={"type": "log"},
+        )
+        with patch("dunetrace.detectors.run_detectors", return_value=[]) as mock_rd:
+            with c.run("agent") as run:
+                run.llm_called("gpt-4o", prompt_tokens=100)
+                run.llm_responded(finish_reason="stop")
+            c.shutdown(timeout=2)
+        mock_rd.assert_not_called()
+
+    def test_incremental_error_count_matches_full_scan(self):
+        """_error_count running total must match what build_metrics computes from scratch."""
+        from dunetrace.policies import build_metrics
+
+        c = _make_client()
+        c._ship = lambda batch: None
+        with c.run("agent") as run:
+            run.tool_called("a", {})
+            run.tool_responded("a", success=False)
+            run.tool_called("b", {})
+            run.tool_responded("b", success=True)
+            run.tool_called("c", {})
+            run.tool_responded("c", success=False)
+            self.assertEqual(run._error_count, 2)
+            self.assertEqual(run._error_count, build_metrics(run.state, run.step)["error_count"])
+        c.shutdown(timeout=2)
+
+    def test_incremental_cost_usd_matches_full_scan(self):
+        """_cost_usd running total must match what build_metrics computes from scratch."""
+        from dunetrace.policies import build_metrics
+
+        c = _make_client()
+        c._ship = lambda batch: None
+        with c.run("agent") as run:
+            run.llm_called("gpt-4o-mini", prompt_tokens=1000)
+            run.llm_responded(completion_tokens=500)
+            run.llm_called("gpt-4o-mini", prompt_tokens=2000)
+            run.llm_responded(completion_tokens=800)
+            self.assertGreater(run._cost_usd, 0)
+            self.assertAlmostEqual(run._cost_usd, build_metrics(run.state, run.step)["cost_usd"], places=10)
+        c.shutdown(timeout=2)
+
+    def test_needs_signal_cached_after_first_check(self):
+        """_needs_signal must be None before any event and set after the first policy check."""
+        c = self._client_with_signal_policy()
+        with patch("dunetrace.detectors.run_detectors", return_value=[]):
+            with c.run("agent") as run:
+                self.assertIsNone(run._needs_signal)
+                run.llm_called("gpt-4o", prompt_tokens=100)
+                self.assertIsNone(run._needs_signal)  # llm_called doesn't trigger _check_policies
+                run.llm_responded(finish_reason="tool_calls")
+                self.assertIsNotNone(run._needs_signal)
+                self.assertTrue(run._needs_signal)
+                gen_after_first = run._needs_signal_generation
+                # Subsequent events reuse the cached value when engine generation unchanged.
+                run.llm_responded(finish_reason="tool_calls")
+                run.tool_called("search", {"q": "x"})
+                run.tool_responded("search", success=True)
+                self.assertTrue(run._needs_signal)
+                self.assertEqual(run._needs_signal_generation, gen_after_first)
+            c.shutdown(timeout=2)
+
+
 if __name__ == "__main__":
     unittest.main()

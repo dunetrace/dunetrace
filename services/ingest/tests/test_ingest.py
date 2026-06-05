@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient, ASGITransport
@@ -261,3 +261,110 @@ class TestHealth:
         monkeypatch.setattr("ingest_svc.routers.health.check_db", AsyncMock(return_value="no_pool"))
         body = (await client.get("/health")).json()
         assert body["db"] == "no_pool"
+
+
+# ── Partition management tests ─────────────────────────────────────────────────
+
+
+class _FakeRecord:
+    """Minimal asyncpg Record stand-in that supports dict-style access."""
+
+    def __init__(self, **kwargs):
+        self._data = kwargs
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+
+def _make_pool(fetchval_return, fetch_return=None, execute_side_effect=None):
+    """Build a mock asyncpg pool whose acquire() context manager yields a mock conn."""
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=fetchval_return)
+    conn.fetch = AsyncMock(return_value=fetch_return or [])
+    if execute_side_effect:
+        conn.execute = AsyncMock(side_effect=execute_side_effect)
+    else:
+        conn.execute = AsyncMock()
+
+    pool = MagicMock()
+    pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
+    pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+    return pool, conn
+
+
+@pytest.mark.asyncio
+class TestPruneOldEvents:
+    async def test_returns_zero_when_no_pool(self, monkeypatch):
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
+        from ingest_svc.db.postgres import prune_old_events
+        result = await prune_old_events(retention_days=90)
+        assert result == 0
+
+    async def test_returns_zero_on_non_partitioned_table(self, monkeypatch):
+        pool, conn = _make_pool(fetchval_return=0)  # relkind != 'p'
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import prune_old_events
+        result = await prune_old_events(retention_days=90)
+        assert result == 0
+        conn.execute.assert_not_called()
+
+    async def test_drops_old_partition(self, monkeypatch):
+        # events_202001 ends 2020-02-01 — always older than any reasonable retention
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[_FakeRecord(relname="events_202001")],
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import prune_old_events
+        dropped = await prune_old_events(retention_days=30)
+        assert dropped == 1
+        conn.execute.assert_called_once()
+        call_sql = conn.execute.call_args[0][0]
+        assert "events_202001" in call_sql
+
+    async def test_keeps_recent_partition(self, monkeypatch):
+        # events_209912 ends 2100-01-01 — always in the future
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[_FakeRecord(relname="events_209912")],
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import prune_old_events
+        dropped = await prune_old_events(retention_days=30)
+        assert dropped == 0
+        conn.execute.assert_not_called()
+
+    async def test_drops_old_keeps_recent_mixed(self, monkeypatch):
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[
+                _FakeRecord(relname="events_202001"),  # old → drop
+                _FakeRecord(relname="events_209901"),  # future → keep
+            ],
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import prune_old_events
+        dropped = await prune_old_events(retention_days=30)
+        assert dropped == 1
+
+    async def test_december_partition_end_wraps_to_january(self, monkeypatch):
+        # events_202012 ends 2021-01-01 — should be treated as old
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[_FakeRecord(relname="events_202012")],
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import prune_old_events
+        dropped = await prune_old_events(retention_days=30)
+        assert dropped == 1
+
+    async def test_malformed_partition_name_skipped(self, monkeypatch):
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[_FakeRecord(relname="events_badname")],
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import prune_old_events
+        dropped = await prune_old_events(retention_days=30)
+        assert dropped == 0
+        conn.execute.assert_not_called()
