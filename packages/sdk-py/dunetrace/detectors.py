@@ -1180,6 +1180,43 @@ class SessionLatencyDetector(BaseDetector):
             evidence=evidence,
         )
 
+class RagQualityDegradationDetector(BaseDetector):
+    def check(self, state: RunState) -> Optional[FailureSignal]:
+        retrievals = getattr(state, "retrievals", [])
+        retrieval_count = len(retrievals)
+        
+        if retrieval_count < 3:
+            return None
+            
+        mid = retrieval_count // 2
+        early_retrievals = retrievals[:mid]
+        late_retrievals = retrievals[-mid:]
+        
+        early_avg_score = sum(getattr(r, "top_score", 0.0) for r in early_retrievals) / len(early_retrievals)
+        late_avg_score = sum(getattr(r, "top_score", 0.0) for r in late_retrievals) / len(late_retrievals)
+        
+        if early_avg_score > 0:
+            drop_pct = (early_avg_score - late_avg_score) / early_avg_score
+        else:
+            drop_pct = 0.0
+            
+        if drop_pct > 0.30:
+            return FailureSignal(
+                failure_type=FailureType.RAG_QUALITY_DEGRADATION,
+                severity=Severity.MEDIUM,
+                run_id=state.run_id,
+                agent_id=state.agent_id,
+                agent_version=state.agent_version,
+                step_index=state.current_step,
+                confidence=min(drop_pct, 1.0),
+                evidence={
+                    "early_avg_score": early_avg_score,
+                    "late_avg_score": late_avg_score,
+                    "drop_pct": drop_pct,
+                    "retrieval_count": retrieval_count
+                }
+            )
+        return None
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
@@ -1200,6 +1237,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     ReasoningSpinDetector(),
     CostSpikeDetector(),
     SessionLatencyDetector(),
+    RagQualityDegradationDetector(),
     # PromptInjectionDetector is handled separately (needs raw input)
 ]
 
