@@ -286,13 +286,22 @@ _INJECTION_PATTERNS_COMPILED = [
             "ignore_instructions",
             r"ignore\s+(all\s+)?(previous|prior|above|earlier)\s+instructions?",
         ),
-        ("disregard_instructions", r"disregard\s+(all\s+)?(previous|prior|above)\s+instructions?"),
-        ("forget_instructions", r"forget\s+(all\s+)?(previous|prior|above)\s+instructions?"),
+        (
+            "disregard_instructions",
+            r"disregard\s+(all\s+)?(previous|prior|above)\s+instructions?",
+        ),
+        (
+            "forget_instructions",
+            r"forget\s+(all\s+)?(previous|prior|above)\s+instructions?",
+        ),
         ("you_are_now", r"you\s+are\s+now\s+"),
         ("new_role", r"your\s+new\s+(role|persona|identity|instructions?)\s+(is|are)"),
         ("act_as", r"act\s+as\s+(if\s+you\s+are\s+)?(a|an|the)\s+"),
         ("pretend", r"pretend\s+(you\s+are|to\s+be)\s+"),
-        ("do_not_follow", r"do\s+not\s+follow\s+(your\s+)?(previous|prior|original)\s+"),
+        (
+            "do_not_follow",
+            r"do\s+not\s+follow\s+(your\s+)?(previous|prior|original)\s+",
+        ),
         ("system_colon", r"system\s*:\s*you\s+are"),
         ("system_tag", r"\[system\]"),
         ("im_start", r"<\|im_start\|>"),
@@ -547,9 +556,15 @@ class SlowStepDetector(BaseDetector):
             if not prefix or event_type.startswith(prefix):
                 if state is not None:
                     if prefix == "tool.called" and state.baseline_p75_latency_tool is not None:
-                        return int(state.baseline_p75_latency_tool * self.INFLATION_FACTOR), label
+                        return (
+                            int(state.baseline_p75_latency_tool * self.INFLATION_FACTOR),
+                            label,
+                        )
                     if prefix == "llm.called" and state.baseline_p75_latency_llm is not None:
-                        return int(state.baseline_p75_latency_llm * self.INFLATION_FACTOR), label
+                        return (
+                            int(state.baseline_p75_latency_llm * self.INFLATION_FACTOR),
+                            label,
+                        )
                 return static_ms, label
         return 60_000, "step"
 

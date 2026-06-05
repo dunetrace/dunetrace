@@ -15,13 +15,13 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py"))
+    0,
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../packages/sdk-py")),
 )
 
 from dunetrace.models import FailureSignal, FailureType, Severity
 from explainer_svc.explainer import explain
 from explainer_svc.models import Explanation, CodeFix
-
 
 # ── Factories ──────────────────────────────────────────────────────────────────
 
@@ -65,10 +65,16 @@ class TestExplanationContract(unittest.TestCase):
             FailureType.TOOL_AVOIDANCE,
             {"available_tools": ["web_search", "calculator"], "tool_calls_made": 0},
         ),
-        (FailureType.GOAL_ABANDONMENT, {"stall_steps": 4, "last_tool_used": "database_lookup"}),
+        (
+            FailureType.GOAL_ABANDONMENT,
+            {"stall_steps": 4, "last_tool_used": "database_lookup"},
+        ),
         (
             FailureType.PROMPT_INJECTION_SIGNAL,
-            {"matched_patterns": ["ignore_instructions", "you_are_now"], "pattern_count": 2},
+            {
+                "matched_patterns": ["ignore_instructions", "you_are_now"],
+                "pattern_count": 2,
+            },
         ),
         (
             FailureType.RAG_EMPTY_RETRIEVAL,
@@ -252,7 +258,10 @@ class TestToolAvoidanceExplanation(unittest.TestCase):
             FailureType.TOOL_AVOIDANCE,
             severity=Severity.MEDIUM,
             confidence=0.75,
-            evidence={"available_tools": ["web_search", "calculator"], "tool_calls_made": 0},
+            evidence={
+                "available_tools": ["web_search", "calculator"],
+                "tool_calls_made": 0,
+            },
         )
         self.exp = explain(self.signal)
 

@@ -7,7 +7,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from dunetrace.models import AgentEvent, EventType, RunState, ToolCall, LlmCall, RetrievalResult
+from dunetrace.models import (
+    AgentEvent,
+    EventType,
+    RunState,
+    ToolCall,
+    LlmCall,
+    RetrievalResult,
+)
 
 
 def build_run_state(events: list[dict]) -> RunState:

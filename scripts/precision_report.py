@@ -301,7 +301,8 @@ def main():
     )
     parser.add_argument("--agent", help="Filter to a specific agent_id")
     parser.add_argument(
-        "--inspect", help="Show detailed evidence for a specific detector type (e.g. TOOL_LOOP)"
+        "--inspect",
+        help="Show detailed evidence for a specific detector type (e.g. TOOL_LOOP)",
     )
     parser.add_argument("--recent", action="store_true", help="Show recent individual signals")
     parser.add_argument("--limit", type=int, default=20, help="Max signals to show (default 20)")

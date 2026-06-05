@@ -1,14 +1,23 @@
 """Signals endpoints — list, filter, explain, and apply fixes for detected failure signals."""
 
 from __future__ import annotations
+import csv
+import io
 import json as _json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from api_svc.auth import require_customer
 from api_svc.config import settings
-from api_svc.db.queries import get_signal_by_id, list_signals, record_fix, get_signal_fix_status
+from api_svc.db.queries import (
+    get_signal_by_id,
+    list_signals,
+    export_signals,
+    record_fix,
+    get_signal_fix_status,
+)
 from api_svc.schemas import SignalDetail, SignalListResponse, Page
 
 logger = logging.getLogger("dunetrace.api.signals")
@@ -99,6 +108,106 @@ async def get_signals(
     )
 
 
+_EXPORT_COLUMNS = [
+    "id",
+    "failure_type",
+    "severity",
+    "run_id",
+    "agent_id",
+    "agent_version",
+    "step_index",
+    "confidence",
+    "detected_at",
+    "evidence",
+]
+
+
+@router.get(
+    "/v1/agents/{agent_id}/signals/export",
+    summary="Export filtered signals as CSV or NDJSON",
+    response_class=StreamingResponse,
+)
+async def export_signals_endpoint(
+    agent_id: str,
+    format: str = Query("csv", pattern="^(csv|ndjson)$", description="csv or ndjson"),
+    severity: Optional[str] = Query(None, description="LOW | MEDIUM | HIGH | CRITICAL"),
+    failure_type: Optional[str] = Query(None, description="e.g. TOOL_LOOP"),
+    from_: Optional[str] = Query(None, alias="from", description="ISO-8601 start datetime (UTC)"),
+    to_: Optional[str] = Query(None, alias="to", description="ISO-8601 end datetime (UTC)"),
+    include_shadow: bool = Query(False),
+    customer_id: str = Depends(require_customer),
+) -> StreamingResponse:
+    if severity and severity.upper() not in _VALID_SEVERITIES:
+        raise HTTPException(
+            422, f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}"
+        )
+    if failure_type and failure_type.upper() not in _VALID_FAILURE_TYPES:
+        raise HTTPException(
+            422,
+            f"Invalid failure_type {failure_type!r}. Valid: {sorted(_VALID_FAILURE_TYPES)}",
+        )
+
+    from_ts: Optional[float] = None
+    to_ts: Optional[float] = None
+    try:
+        if from_:
+            from datetime import datetime, timezone
+
+            from_ts = (
+                datetime.fromisoformat(from_.rstrip("Z")).replace(tzinfo=timezone.utc).timestamp()
+            )
+        if to_:
+            from datetime import datetime, timezone
+
+            to_ts = datetime.fromisoformat(to_.rstrip("Z")).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError as exc:
+        raise HTTPException(422, f"Invalid datetime: {exc}")
+
+    gen = export_signals(
+        agent_id,
+        severity=severity,
+        failure_type=failure_type,
+        include_shadow=include_shadow,
+        from_ts=from_ts,
+        to_ts=to_ts,
+    )
+
+    filename = f"signals-{agent_id}.{format}"
+
+    if format == "ndjson":
+
+        async def _ndjson_stream(batches: AsyncGenerator) -> AsyncGenerator[str, None]:
+            async for batch in batches:
+                for row in batch:
+                    # evidence is already a dict — serialize the whole row in one pass
+                    yield _json.dumps(row, separators=(",", ":")) + "\n"
+
+        return StreamingResponse(
+            _ndjson_stream(gen),
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    async def _csv_stream(batches: AsyncGenerator) -> AsyncGenerator[str, None]:
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=_EXPORT_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        yield buf.getvalue()
+        async for batch in batches:
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=_EXPORT_COLUMNS, extrasaction="ignore")
+            for row in batch:
+                row["evidence"] = _json.dumps(row["evidence"])
+                writer.writerow(row)
+            yield buf.getvalue()
+
+    return StreamingResponse(
+        _csv_stream(gen),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 class ExplainRequest(BaseModel):
     langfuse_trace_id: Optional[str] = None
 
@@ -154,7 +263,8 @@ async def explain_signal(
         source = "langfuse"
     except LookupError:
         logger.info(
-            "Trace %s not in Langfuse; falling back to signal-only analysis", trace_lookup_id
+            "Trace %s not in Langfuse; falling back to signal-only analysis",
+            trace_lookup_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc))

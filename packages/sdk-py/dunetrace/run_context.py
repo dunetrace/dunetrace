@@ -20,7 +20,7 @@ from dunetrace.models import (
     hash_content,
 )
 import logging
-from dunetrace.policies import PolicyViolation, build_metrics
+from dunetrace.policies import PolicyViolation, build_metrics, compute_run_cost
 
 logger = logging.getLogger("dunetrace.run")
 
@@ -61,6 +61,21 @@ class RunContext:
         self.model_override: str | None = None  # set by switch_model action
         self.prompt_additions: list = []  # appended by inject_prompt action
         self._triggered_policies: set = set()  # policy keys fired in this run
+
+        # Detector result cache — signal-trigger policies reuse this within a step
+        # so detectors don't run twice for (llm_called, llm_responded) at the same step.
+        self._detector_cache_step: int = -1
+        self._detector_cache_signals: list = []
+
+        # Cached per engine generation: whether any active policy uses trigger="signal".
+        # Invalidated when the engine reloads (remote refresh) or add_policy() is called
+        # so long-running agents pick up newly added signal-trigger policies.
+        self._needs_signal: bool | None = None
+        self._needs_signal_generation: int = -1
+
+        # Running totals kept in sync with state — makes build_metrics O(1) for these fields.
+        self._error_count: int = 0
+        self._cost_usd: float = 0.0
 
     # ── LLM hooks ─────────────────────────────────────────────────────────────
 
@@ -110,6 +125,18 @@ class RunContext:
         if reasoning_tokens:
             payload["reasoning_tokens"] = reasoning_tokens
         self._emit(EventType.LLM_RESPONDED, payload, advance=False)
+            self._cost_usd += compute_run_cost([lc])
+        self._emit(
+            EventType.LLM_RESPONDED,
+            {
+                "completion_tokens": completion_tokens,
+                "latency_ms": latency_ms,
+                "finish_reason": finish_reason,
+                "output_hash": output_hash,
+                "output_length": output_length,
+            },
+            advance=False,
+        )
 
     # ── Tool hooks ────────────────────────────────────────────────────────────
 
@@ -140,11 +167,15 @@ class RunContext:
         error: Optional[str] = None,
     ) -> None:
         error_hash = hash_content(error) if (not success and error) else None
-        # Back-fill success and error_hash on the most recent matching ToolCall
+        # Back-fill success and error_hash on the most recent matching ToolCall.
+        # _error_count increments only when a ToolCall is actually found and back-filled
+        # so the running total stays in sync with the full-scan baseline in build_metrics.
         for tc in reversed(self.state.tool_calls):
             if tc.tool_name == tool_name and tc.success is None:
                 tc.success = success
                 tc.error_hash = error_hash
+                if not success:
+                    self._error_count += 1
                 break
         payload: dict = {
             "tool_name": tool_name,
@@ -260,20 +291,31 @@ class RunContext:
         if not len(engine):
             return
 
-        metrics = build_metrics(self.state, self.step)
+        metrics = build_metrics(
+            self.state,
+            self.step,
+            error_count=self._error_count,
+            cost_usd=self._cost_usd,
+        )
 
         # Augment metrics with signal detection if any policy uses trigger="signal".
         # We do this lazily to avoid running detectors when no signal policies exist.
-        with engine._lock:
-            needs_signal = any(
-                p.condition.get("trigger") == "signal"
-                for p in engine._policies
-                if p.enabled and p.agent_id in ("*", self.agent_id)
-            )
+        if self._needs_signal is None or self._needs_signal_generation != engine._generation:
+            with engine._lock:
+                self._needs_signal = any(
+                    p.condition.get("trigger") == "signal"
+                    for p in engine._policies
+                    if p.enabled and p.agent_id in ("*", self.agent_id)
+                )
+                self._needs_signal_generation = engine._generation
+        needs_signal = self._needs_signal
         if needs_signal:
             from dunetrace.detectors import run_detectors
 
-            sigs = run_detectors(self.state)
+            if self.step != self._detector_cache_step:
+                self._detector_cache_signals = run_detectors(self.state)
+                self._detector_cache_step = self.step
+            sigs = self._detector_cache_signals
             metrics["signal"] = [s.failure_type.value for s in sigs] if sigs else []
 
         result = engine.evaluate(self.agent_id, metrics, self._triggered_policies)

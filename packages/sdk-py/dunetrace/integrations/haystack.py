@@ -666,6 +666,7 @@ class DunetraceHaystackTracer:
             stale = [k for k, s in self._active_runs.items() if s.start_time < cutoff]
             for k in stale:
                 logger.warning(
-                    "Dunetrace haystack: pruning stale run %s", self._active_runs[k].run_id
+                    "Dunetrace haystack: pruning stale run %s",
+                    self._active_runs[k].run_id,
                 )
                 del self._active_runs[k]

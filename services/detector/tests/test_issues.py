@@ -27,7 +27,6 @@ for _p in [
 import detector_svc.db as db_module
 from detector_svc.db import CLEAN_RUNS_THRESHOLD
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -160,7 +159,10 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
                 "detector_svc.worker.build_run_state",
                 return_value=MagicMock(baseline_p75_steps=None),
             ),
-            patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)),
+            patch(
+                "detector_svc.worker.fetch_step_count_baseline",
+                AsyncMock(return_value=None),
+            ),
             patch("detector_svc.worker.run_detectors", return_value=signals),
             patch(
                 "detector_svc.worker.RiskEngine",
@@ -193,7 +195,10 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
                 "detector_svc.worker.build_run_state",
                 return_value=MagicMock(baseline_p75_steps=None),
             ),
-            patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)),
+            patch(
+                "detector_svc.worker.fetch_step_count_baseline",
+                AsyncMock(return_value=None),
+            ),
             patch("detector_svc.worker.run_detectors", return_value=[]),
             patch(
                 "detector_svc.worker.RiskEngine",
@@ -225,7 +230,10 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
                 "detector_svc.worker.build_run_state",
                 return_value=MagicMock(baseline_p75_steps=None),
             ),
-            patch("detector_svc.worker.fetch_step_count_baseline", AsyncMock(return_value=None)),
+            patch(
+                "detector_svc.worker.fetch_step_count_baseline",
+                AsyncMock(return_value=None),
+            ),
             patch("detector_svc.worker.run_detectors", return_value=signals),
             patch(
                 "detector_svc.worker.RiskEngine",

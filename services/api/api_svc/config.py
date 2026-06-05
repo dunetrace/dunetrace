@@ -54,6 +54,11 @@ class Settings:
     # Required to verify that button-click payloads actually come from Slack.
     SLACK_SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
 
+    # Policy payload signing — HMAC-SHA256 key shared between the API and SDK clients.
+    # Set POLICY_SIGNING_SECRET to the same value in both environments.
+    # If empty, signatures are not verified (dev/test only).
+    POLICY_SIGNING_SECRET: str = os.getenv("POLICY_SIGNING_SECRET", "")
+
     @property
     def langfuse_configured(self) -> bool:
         return bool(self.LANGFUSE_PUBLIC_KEY and self.LANGFUSE_SECRET_KEY)

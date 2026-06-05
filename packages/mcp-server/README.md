@@ -412,6 +412,41 @@ RUN ID       STARTED                  DUR  STEPS SIGS  STATUS
 
 ---
 
+### `get_agent_token_stats`
+
+Per-window token usage and waste breakdown for an agent (1d / 7d / 30d). Shows total tokens consumed, wasted tokens (on runs with at least one live failure signal), and estimated API cost for each window. The 30-day view adds a `Waste by failure type` breakdown so you can see which failure types cost the most to leave unfixed.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | required | Agent ID (from `list_agents`) |
+
+**Example output:**
+```
+═══ Token stats: research-agent ═══
+
+── Last 24 h ──
+  Runs:               10  (3 with failures)
+  Total tokens:     50.0k
+  Wasted tokens:    15.0k  (30% of total)
+  Total cost:       $0.0500
+  Wasted cost:      $0.0150  (30% of total)
+
+── Last 7 days ──
+  Runs:               50  (12 with failures)
+  Total tokens:    250.0k
+  Wasted tokens:    60.0k  (24% of total)
+  Total cost:       $0.2500
+  Wasted cost:      $0.0600  (24% of total)
+
+Waste by failure type (30 days):
+  TOOL_LOOP                            150.0k tok     $0.15  (30 runs)
+  COST_SPIKE                            75.0k tok     $0.08  (15 runs)
+```
+
+---
+
 ### `get_instrumentation_guide`
 
 Get a quick-start code snippet for instrumenting an agent with Dunetrace. Works for Python, LangChain/LangGraph, TypeScript, and plain tool-call tracking.
@@ -510,7 +545,7 @@ python -m pytest tests/ -v
 dunetrace_mcp/
   __init__.py
   client.py      # thin httpx wrapper around the Customer API
-  server.py      # FastMCP server with 10 tools + 6 doc resources
+  server.py      # FastMCP server with 11 tools + 6 doc resources
 tests/
   test_tools.py  # 83 unit tests (all offline)
 pyproject.toml

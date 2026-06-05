@@ -49,7 +49,9 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
 }
 
 
-def load_detector_kwargs(config_path: str | None = None) -> dict[str, dict[str, dict[str, Any]]]:
+def load_detector_kwargs(
+    config_path: str | None = None,
+) -> dict[str, dict[str, dict[str, Any]]]:
     """
     Parse detectors.yml into a nested dict of detector kwargs keyed by category, then detector name:
 

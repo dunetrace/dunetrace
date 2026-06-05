@@ -72,7 +72,10 @@ def send_with_retry(
             # Slack returns 200 with body "ok" on success
             if 200 <= status < 300:
                 logger.info(
-                    "Alert sent. dest=%s attempt=%d status=%d", destination, attempt, status
+                    "Alert sent. dest=%s attempt=%d status=%d",
+                    destination,
+                    attempt,
+                    status,
                 )
                 return SendResult(
                     success=True,
@@ -95,13 +98,19 @@ def send_with_retry(
             last_error = f"HTTPError {exc.code}: {exc.reason}"
             last_status = exc.code
             logger.warning(
-                "Alert HTTPError. dest=%s attempt=%d error=%s", destination, attempt, last_error
+                "Alert HTTPError. dest=%s attempt=%d error=%s",
+                destination,
+                attempt,
+                last_error,
             )
 
         except urllib.error.URLError as exc:
             last_error = f"URLError: {exc.reason}"
             logger.warning(
-                "Alert URLError. dest=%s attempt=%d error=%s", destination, attempt, last_error
+                "Alert URLError. dest=%s attempt=%d error=%s",
+                destination,
+                attempt,
+                last_error,
             )
 
         except Exception as exc:
@@ -120,7 +129,10 @@ def send_with_retry(
             delay *= 2
 
     logger.error(
-        "Alert failed after %d attempts. dest=%s error=%s", max_retries + 1, destination, last_error
+        "Alert failed after %d attempts. dest=%s error=%s",
+        max_retries + 1,
+        destination,
+        last_error,
     )
     return SendResult(
         success=False,

@@ -24,7 +24,9 @@ def get(path: str, **params: Any) -> Any:
     url = _api_url() + path
     with httpx.Client(timeout=15) as c:
         r = c.get(
-            url, headers=_headers(), params={k: v for k, v in params.items() if v is not None}
+            url,
+            headers=_headers(),
+            params={k: v for k, v in params.items() if v is not None},
         )
         r.raise_for_status()
         return r.json()

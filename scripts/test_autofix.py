@@ -32,7 +32,10 @@ except ImportError:
     pass
 
 API = "http://localhost:8002"
-AUTH_HEADER = {"Authorization": "Bearer dt_dev_test", "Content-Type": "application/json"}
+AUTH_HEADER = {
+    "Authorization": "Bearer dt_dev_test",
+    "Content-Type": "application/json",
+}
 SIGNAL_ID = 348  # TOOL_LOOP on langfuse-example-agent, steps 2-7
 APPLY = "--apply" in sys.argv
 

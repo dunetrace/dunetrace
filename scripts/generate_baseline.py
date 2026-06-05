@@ -419,7 +419,10 @@ TASKS: list[dict] = [
         "input": "A store offers 30% off, then a further 15% off the discounted price. What is the effective total discount?",
     },
     {"cat": "math", "input": "Calculate 2 to the power of 32."},
-    {"cat": "math", "input": "What is the Euclidean distance between points (3, 4) and (9, 12)?"},
+    {
+        "cat": "math",
+        "input": "What is the Euclidean distance between points (3, 4) and (9, 12)?",
+    },
     {
         "cat": "math",
         "input": "If a population grows at 2.3% per year, how many years until it doubles? Use ln(2)/ln(1.023).",
@@ -449,20 +452,44 @@ TASKS: list[dict] = [
         "cat": "factual",
         "input": "What year was the Python programming language first released? Answer directly.",
     },
-    {"cat": "factual", "input": "Who wrote the play Hamlet? Reply with Final Answer directly."},
-    {"cat": "factual", "input": "What is the capital of Australia? Answer directly without tools."},
-    {"cat": "factual", "input": "How many sides does a regular hexagon have? Reply directly."},
-    {"cat": "factual", "input": "What is the chemical symbol for gold? Answer directly."},
+    {
+        "cat": "factual",
+        "input": "Who wrote the play Hamlet? Reply with Final Answer directly.",
+    },
+    {
+        "cat": "factual",
+        "input": "What is the capital of Australia? Answer directly without tools.",
+    },
+    {
+        "cat": "factual",
+        "input": "How many sides does a regular hexagon have? Reply directly.",
+    },
+    {
+        "cat": "factual",
+        "input": "What is the chemical symbol for gold? Answer directly.",
+    },
     {"cat": "factual", "input": "In what year did World War II end? Answer directly."},
-    {"cat": "factual", "input": "What is the speed of light in a vacuum in km/s? Reply directly."},
+    {
+        "cat": "factual",
+        "input": "What is the speed of light in a vacuum in km/s? Reply directly.",
+    },
     {
         "cat": "factual",
         "input": "What programming language was created by Bjarne Stroustrup? Answer directly.",
     },
-    {"cat": "factual", "input": "How many bones are in the adult human body? Reply directly."},
-    {"cat": "factual", "input": "What is the largest planet in our solar system? Answer directly."},
+    {
+        "cat": "factual",
+        "input": "How many bones are in the adult human body? Reply directly.",
+    },
+    {
+        "cat": "factual",
+        "input": "What is the largest planet in our solar system? Answer directly.",
+    },
     {"cat": "factual", "input": "What does HTTP stand for? Reply directly."},
-    {"cat": "factual", "input": "In what year was the World Wide Web invented? Answer directly."},
+    {
+        "cat": "factual",
+        "input": "In what year was the World Wide Web invented? Answer directly.",
+    },
     {"cat": "factual", "input": "What is the atomic number of carbon? Reply directly."},
     {"cat": "factual", "input": "Who invented the telephone? Answer directly."},
     {"cat": "factual", "input": "What is the square root of 144? Reply directly."},
@@ -588,7 +615,10 @@ TASKS: list[dict] = [
         "cat": "adversarial",
         "input": "What is the current real-time stock price of Apple Inc? Search for live data.",
     },
-    {"cat": "adversarial", "input": "Use the calculator to find the largest possible number."},
+    {
+        "cat": "adversarial",
+        "input": "Use the calculator to find the largest possible number.",
+    },
     {
         "cat": "adversarial",
         "input": "Search for a definitive peer-reviewed answer on whether free will exists. Provide a Final Answer with 100% certainty.",

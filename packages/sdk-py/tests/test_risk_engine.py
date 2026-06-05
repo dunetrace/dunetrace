@@ -24,7 +24,6 @@ from dunetrace.models import (
 )
 from dunetrace.risk_engine import RiskEngine
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -53,7 +52,10 @@ def _tool(
 
 
 def _llm(
-    step: int, prompt_tokens: int = 100, finish_reason: str = "stop", latency_ms: int = 200
+    step: int,
+    prompt_tokens: int = 100,
+    finish_reason: str = "stop",
+    latency_ms: int = 200,
 ) -> LlmCall:
     return LlmCall(
         model="gpt-4o",
@@ -67,7 +69,11 @@ def _llm(
 
 def _event(event_type: EventType, step: int) -> AgentEvent:
     return AgentEvent(
-        event_type=event_type, run_id="r1", agent_id="a1", agent_version="v1", step_index=step
+        event_type=event_type,
+        run_id="r1",
+        agent_id="a1",
+        agent_version="v1",
+        step_index=step,
     )
 
 
@@ -114,7 +120,8 @@ class TestEmptyRun(unittest.TestCase):
     def test_scores_dict_has_all_five_keys(self):
         score = RiskEngine().evaluate([], _state())
         self.assertEqual(
-            set(score.scores.keys()), {"loop", "stagnation", "token", "retry", "latency"}
+            set(score.scores.keys()),
+            {"loop", "stagnation", "token", "retry", "latency"},
         )
 
     def test_severity_is_none_for_normal_run(self):

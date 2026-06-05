@@ -47,7 +47,6 @@ from dunetrace.models import (
     Severity,
 )
 
-
 # ── State builders ─────────────────────────────────────────────────────────────
 
 
@@ -74,7 +73,10 @@ def make_tool_call(
 
 
 def make_llm_call(
-    step: int, prompt_tokens: int = 500, finish_reason: str = "stop", output_length: int = 100
+    step: int,
+    prompt_tokens: int = 500,
+    finish_reason: str = "stop",
+    output_length: int = 100,
 ) -> LlmCall:
     return LlmCall(
         model="gpt-4o",

@@ -6,7 +6,12 @@ import os
 
 from explainer_svc.models import Explanation
 
-_SEVERITY_COLORS = {"CRITICAL": "#FF0000", "HIGH": "#FF6B00", "MEDIUM": "#FFB800", "LOW": "#36A64F"}
+_SEVERITY_COLORS = {
+    "CRITICAL": "#FF0000",
+    "HIGH": "#FF6B00",
+    "MEDIUM": "#FFB800",
+    "LOW": "#36A64F",
+}
 _SEVERITY_EMOJI = {
     "CRITICAL": ":red_circle:",
     "HIGH": ":large_orange_circle:",
@@ -77,7 +82,11 @@ def format_slack(
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"{emoji}  {explanation.title}", "emoji": True},
+            "text": {
+                "type": "plain_text",
+                "text": f"{emoji}  {explanation.title}",
+                "emoji": True,
+            },
         },
         {
             "type": "context",
@@ -144,11 +153,17 @@ def format_slack(
         },
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Why it matters*\n{explanation.why_it_matters}"},
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Why it matters*\n{explanation.why_it_matters}",
+            },
         },
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Evidence*\n```{explanation.evidence_summary}```"},
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Evidence*\n```{explanation.evidence_summary}```",
+            },
         },
     ]
 
@@ -181,13 +196,21 @@ def format_slack(
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Mark resolved", "emoji": True},
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Mark resolved",
+                        "emoji": True,
+                    },
                     "action_id": "mark_resolved",
                     "value": _btn_val,
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Not a problem", "emoji": True},
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Not a problem",
+                        "emoji": True,
+                    },
                     "action_id": "false_positive",
                     "value": _btn_val,
                     "style": "danger",

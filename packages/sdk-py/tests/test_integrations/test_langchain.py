@@ -174,7 +174,10 @@ class TestLlmCallbacks(unittest.TestCase):
 
         # on_chat_model_start (chat models)
         handler.on_chat_model_start(
-            {"kwargs": {"model_name": "gpt-4o"}}, [[]], run_id="lc-llm", parent_run_id="lc-1"
+            {"kwargs": {"model_name": "gpt-4o"}},
+            [[]],
+            run_id="lc-llm",
+            parent_run_id="lc-1",
         )
 
         gen = MagicMock()

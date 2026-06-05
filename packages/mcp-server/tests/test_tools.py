@@ -98,7 +98,11 @@ SIGNAL_LIST = {
             "why_it_matters": "Runaway cost.",
             "evidence_summary": "80k tokens vs 15k baseline.",
             "suggested_fixes": [
-                {"description": "Add token budget guard", "language": "python", "code": ""}
+                {
+                    "description": "Add token budget guard",
+                    "language": "python",
+                    "code": "",
+                }
             ],
         },
     ],
@@ -109,10 +113,30 @@ HEALTH_SCORE = {
     "agent_id": "my-agent",
     "score": 62,
     "components": {
-        "failure_rate": {"score": 24, "max": 40, "value": 24.0, "label": "% runs with failures"},
-        "loop_avoidance": {"score": 18, "max": 25, "value": 16.0, "label": "% runs with loops"},
-        "token_efficiency": {"score": 10, "max": 20, "value": None, "label": "avg prompt tokens"},
-        "latency": {"score": 10, "max": 15, "value": 4200.0, "label": "avg LLM latency ms"},
+        "failure_rate": {
+            "score": 24,
+            "max": 40,
+            "value": 24.0,
+            "label": "% runs with failures",
+        },
+        "loop_avoidance": {
+            "score": 18,
+            "max": 25,
+            "value": 16.0,
+            "label": "% runs with loops",
+        },
+        "token_efficiency": {
+            "score": 10,
+            "max": 20,
+            "value": None,
+            "label": "avg prompt tokens",
+        },
+        "latency": {
+            "score": 10,
+            "max": 15,
+            "value": 4200.0,
+            "label": "avg LLM latency ms",
+        },
     },
     "sample_runs": 50,
     "baseline_ready": True,
@@ -183,9 +207,24 @@ INSIGHTS = {
         },
     ],
     "signal_trends": [
-        {"failure_type": "TOOL_LOOP", "agent_version": "v1.2.3", "day": "2026-05-12", "count": 4},
-        {"failure_type": "TOOL_LOOP", "agent_version": "v1.2.3", "day": "2026-05-13", "count": 3},
-        {"failure_type": "COST_SPIKE", "agent_version": "v1.2.3", "day": "2026-05-13", "count": 1},
+        {
+            "failure_type": "TOOL_LOOP",
+            "agent_version": "v1.2.3",
+            "day": "2026-05-12",
+            "count": 4,
+        },
+        {
+            "failure_type": "TOOL_LOOP",
+            "agent_version": "v1.2.3",
+            "day": "2026-05-13",
+            "count": 3,
+        },
+        {
+            "failure_type": "COST_SPIKE",
+            "agent_version": "v1.2.3",
+            "day": "2026-05-13",
+            "count": 1,
+        },
     ],
     "failure_rates": [
         {
@@ -228,6 +267,59 @@ INSIGHTS = {
     "deploy_events": [],
 }
 
+TOKEN_STATS = {
+    "agent_id": "my-agent",
+    "windows": {
+        "1d": {
+            "run_count": 10,
+            "wasted_run_count": 3,
+            "total_tokens": 50000,
+            "wasted_tokens": 15000,
+            "prompt_tokens": 40000,
+            "completion_tokens": 10000,
+            "total_cost_usd": 0.05,
+            "wasted_cost_usd": 0.015,
+            "wasted_pct": 0.3,
+        },
+        "7d": {
+            "run_count": 50,
+            "wasted_run_count": 12,
+            "total_tokens": 250000,
+            "wasted_tokens": 60000,
+            "prompt_tokens": 200000,
+            "completion_tokens": 50000,
+            "total_cost_usd": 0.25,
+            "wasted_cost_usd": 0.06,
+            "wasted_pct": 0.24,
+        },
+        "30d": {
+            "run_count": 200,
+            "wasted_run_count": 45,
+            "total_tokens": 1_000_000,
+            "wasted_tokens": 225000,
+            "prompt_tokens": 800000,
+            "completion_tokens": 200000,
+            "total_cost_usd": 1.0,
+            "wasted_cost_usd": 0.225,
+            "wasted_pct": 0.225,
+        },
+    },
+    "waste_by_failure_type": [
+        {
+            "failure_type": "TOOL_LOOP",
+            "wasted_tokens": 150000,
+            "wasted_cost_usd": 0.15,
+            "affected_runs": 30,
+        },
+        {
+            "failure_type": "COST_SPIKE",
+            "wasted_tokens": 75000,
+            "wasted_cost_usd": 0.075,
+            "affected_runs": 15,
+        },
+    ],
+}
+
 
 def _mock_get(path, **params):
     """Route mock API calls to the right fixture based on path."""
@@ -239,6 +331,8 @@ def _mock_get(path, **params):
         return HEALTH_SCORE
     if path.endswith("/insights"):
         return INSIGHTS
+    if path.endswith("/token-stats"):
+        return TOKEN_STATS
     if "/runs/" in path:
         return RUN_DETAIL
     if path.endswith("/runs"):
@@ -288,7 +382,10 @@ class TestListAgents(unittest.TestCase):
         self.assertIn("ago", out)
 
     def test_no_agents(self):
-        with patch("dunetrace_mcp.client.get", return_value={"agents": [], "page": {"total": 0}}):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={"agents": [], "page": {"total": 0}},
+        ):
             out = srv.list_agents()
         self.assertIn("No agents found", out)
 
@@ -324,7 +421,10 @@ class TestGetAgentSignals(unittest.TestCase):
         self.assertIn("Deduplicate", out)
 
     def test_empty_agent(self):
-        with patch("dunetrace_mcp.client.get", return_value={"signals": [], "page": {"total": 0}}):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={"signals": [], "page": {"total": 0}},
+        ):
             out = srv.get_agent_signals("ghost-agent")
         self.assertIn("No signals found", out)
 
@@ -449,7 +549,10 @@ class TestSearchSignals(unittest.TestCase):
         self.assertIn("id=43", out)
 
     def test_no_results(self):
-        with patch("dunetrace_mcp.client.get", return_value={"signals": [], "page": {"total": 0}}):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={"signals": [], "page": {"total": 0}},
+        ):
             out = srv.search_signals()
         self.assertIn("No signals found", out)
 
@@ -508,10 +611,14 @@ class TestGetSignalDetail(unittest.TestCase):
         self.assertIn("more lines", out)
 
     def test_evidence_list_truncated(self):
-        big_evidence = {**SIGNAL_LIST["signals"][0]["evidence"], "args_hashes": ["x"] * 20}
+        big_evidence = {
+            **SIGNAL_LIST["signals"][0]["evidence"],
+            "args_hashes": ["x"] * 20,
+        }
         sig = {**SIGNAL_LIST["signals"][0], "evidence": big_evidence}
         with patch(
-            "dunetrace_mcp.client.get", return_value={"signals": [sig], "page": {"total": 1}}
+            "dunetrace_mcp.client.get",
+            return_value={"signals": [sig], "page": {"total": 1}},
         ):
             out = srv.get_signal_detail(42, "my-agent")
         self.assertIn("+14 more", out)
@@ -622,6 +729,144 @@ class TestGetAgentRuns(unittest.TestCase):
         with patch("dunetrace_mcp.client.get", return_value={"runs": [], "page": {"total": 0}}):
             out = srv.get_agent_runs("empty-agent")
         self.assertIn("No runs found", out)
+
+
+class TestGetAgentTokenStats(unittest.TestCase):
+    def setUp(self):
+        self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_shows_header(self):
+        out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("Token stats: my-agent", out)
+
+    def test_shows_all_windows(self):
+        out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("Last 24 h", out)
+        self.assertIn("Last 7 days", out)
+        self.assertIn("Last 30 days", out)
+
+    def test_shows_run_counts(self):
+        out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("10", out)  # 1d run_count
+        self.assertIn("3 with failures", out)
+
+    def test_shows_token_amounts(self):
+        out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("50.0k", out)  # total_tokens 1d
+        self.assertIn("15.0k", out)  # wasted_tokens 1d
+
+    def test_token_waste_pct_uses_token_ratio(self):
+        # 1d: wasted_tokens=15000 / total_tokens=50000 = 30%
+        # 30d: wasted_tokens=225000 / total_tokens=1000000 = 22% (not 22.5% from cost ratio)
+        out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("30% of total", out)  # token-based pct for 1d
+
+    def test_cost_waste_pct_uses_cost_ratio(self):
+        # 1d: wasted_pct=0.3 → 30% for cost line; same value here but computed from different field
+        # 30d: wasted_pct=0.225 → 22% for cost line (int(round(0.225*100))=22)
+        out = srv.get_agent_token_stats("my-agent")
+        # 30d token pct: 225000/1000000 = 22%, cost pct: 22% — both round to 22 here
+        self.assertIn("22% of total", out)
+
+    def test_shows_cost_figures(self):
+        out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("$0.0500", out)  # total_cost_usd 1d
+        self.assertIn("$0.0150", out)  # wasted_cost_usd 1d
+
+    def test_fmt_cost_sub_cent_no_dollar_prefix(self):
+        # $0.0005 should render as "0.0500¢", not "$0.0500¢"
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={
+                "windows": {
+                    "1d": {
+                        "run_count": 1,
+                        "wasted_run_count": 1,
+                        "total_tokens": 100,
+                        "wasted_tokens": 100,
+                        "total_cost_usd": 0.0005,
+                        "wasted_cost_usd": 0.0005,
+                        "wasted_pct": 1.0,
+                    }
+                },
+                "waste_by_failure_type": [],
+            },
+        ):
+            out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("¢", out)
+        self.assertNotIn("$0.0500¢", out)  # the old bug
+
+    def test_shows_waste_by_failure_type(self):
+        out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("Waste by failure type", out)
+        self.assertIn("TOOL_LOOP", out)
+        self.assertIn("COST_SPIKE", out)
+
+    def test_waste_by_ft_shows_affected_runs(self):
+        out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("30 runs", out)
+        self.assertIn("15 runs", out)
+
+    def test_waste_by_ft_singular_run(self):
+        single_run = [
+            {
+                "failure_type": "RETRY_STORM",
+                "wasted_tokens": 5000,
+                "wasted_cost_usd": 0.005,
+                "affected_runs": 1,
+            }
+        ]
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={
+                "windows": TOKEN_STATS["windows"],
+                "waste_by_failure_type": single_run,
+            },
+        ):
+            out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("1 run", out)
+        self.assertNotIn("1 runs", out)
+
+    def test_api_error_returns_error_string(self):
+        with patch("dunetrace_mcp.client.get", side_effect=Exception("connection refused")):
+            out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("Could not fetch", out)
+        self.assertIn("my-agent", out)
+
+    def test_missing_windows_shows_header_only(self):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={"windows": {}, "waste_by_failure_type": []},
+        ):
+            out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("Token stats: my-agent", out)
+        self.assertNotIn("Last 24 h", out)
+
+    def test_million_token_formatting(self):
+        with patch(
+            "dunetrace_mcp.client.get",
+            return_value={
+                "windows": {
+                    "30d": {
+                        "run_count": 500,
+                        "wasted_run_count": 100,
+                        "total_tokens": 2_000_000,
+                        "wasted_tokens": 500_000,
+                        "total_cost_usd": 2.0,
+                        "wasted_cost_usd": 0.5,
+                        "wasted_pct": 0.25,
+                    }
+                },
+                "waste_by_failure_type": [],
+            },
+        ):
+            out = srv.get_agent_token_stats("my-agent")
+        self.assertIn("2.0M", out)
+        self.assertIn("500.0k", out)
 
 
 class TestHelpers(unittest.TestCase):

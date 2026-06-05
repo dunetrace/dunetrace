@@ -82,15 +82,13 @@ async def ensure_digest_schema() -> None:
     if not _pool:
         return
     async with _pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS digest_log (
                 id          BIGSERIAL    PRIMARY KEY,
                 digest_type TEXT         NOT NULL DEFAULT 'weekly',
                 sent_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
             )
-            """
-        )
+            """)
 
 
 async def was_digest_sent_recently(within_days: int = 6) -> bool:
@@ -123,8 +121,7 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
         return {}
     async with _pool.acquire() as conn:
         # Total runs and signals across all agents in the last 7 days
-        totals = await conn.fetchrow(
-            """
+        totals = await conn.fetchrow("""
             SELECT
                 COUNT(DISTINCT pr.run_id)              AS total_runs,
                 COUNT(DISTINCT pr.agent_id)            AS total_agents,
@@ -133,12 +130,10 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             LEFT JOIN failure_signals fs
                 ON fs.run_id = pr.run_id AND fs.shadow = FALSE
             WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
-            """
-        )
+            """)
 
         # Top failure types by affected run count
-        top_failures = await conn.fetch(
-            """
+        top_failures = await conn.fetch("""
             SELECT
                 fs.failure_type,
                 COUNT(DISTINCT fs.run_id)::int  AS affected_runs,
@@ -154,12 +149,10 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             GROUP BY fs.failure_type
             ORDER BY affected_runs DESC
             LIMIT 5
-            """
-        )
+            """)
 
         # Top agents by signal volume with dominant failure type
-        top_agents = await conn.fetch(
-            """
+        top_agents = await conn.fetch("""
             WITH agent_signals AS (
                 SELECT
                     pr.agent_id,
@@ -187,12 +180,10 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             JOIN dominant d ON d.agent_id = a.agent_id
             ORDER BY a.signal_count DESC
             LIMIT 5
-            """
-        )
+            """)
 
         # Systemic patterns: failure types at ≥10% of runs per agent in last 7 days
-        systemic = await conn.fetch(
-            """
+        systemic = await conn.fetch("""
             SELECT
                 pr.agent_id,
                 fs.failure_type,
@@ -213,27 +204,22 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             ) >= 0.10
             ORDER BY rate DESC
             LIMIT 10
-            """
-        )
+            """)
 
         # Issues opened and resolved this week
         issues_opened = (
-            await conn.fetchval(
-                """
+            await conn.fetchval("""
             SELECT COUNT(*) FROM issues
             WHERE first_seen >= NOW() - INTERVAL '7 days'
-            """
-            )
+            """)
             or 0
         )
 
         issues_resolved = (
-            await conn.fetchval(
-                """
+            await conn.fetchval("""
             SELECT COUNT(*) FROM issues
             WHERE resolved_at >= NOW() - INTERVAL '7 days'
-            """
-            )
+            """)
             or 0
         )
 
@@ -381,14 +367,20 @@ async def evaluate_alert_policy(
         met = len(last_n) == threshold and hit == threshold
         if met:
             return True, ""
-        return False, f"{hit}/{threshold} consecutive runs — waiting for {threshold - hit} more"
+        return (
+            False,
+            f"{hit}/{threshold} consecutive runs — waiting for {threshold - hit} more",
+        )
 
     if mode == "frequency":
         hit = sum(1 for rid in run_ids if rid in flagged)
         met = hit >= threshold
         if met:
             return True, ""
-        return False, f"{hit}/{threshold} of last {len(run_ids)} runs — need {threshold - hit} more"
+        return (
+            False,
+            f"{hit}/{threshold} of last {len(run_ids)} runs — need {threshold - hit} more",
+        )
 
     # Unknown mode — fail open
     return True, f"unknown mode '{mode}'"
@@ -399,8 +391,7 @@ async def ensure_dedup_schema() -> None:
     if not _pool:
         return
     async with _pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS alert_dedup (
                 agent_id         TEXT        NOT NULL,
                 failure_type     TEXT        NOT NULL,
@@ -408,8 +399,7 @@ async def ensure_dedup_schema() -> None:
                 suppressed_count INTEGER     NOT NULL DEFAULT 0,
                 PRIMARY KEY (agent_id, failure_type)
             )
-            """
-        )
+            """)
 
 
 async def fetch_dedup_states(

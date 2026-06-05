@@ -32,6 +32,19 @@ class Settings:
     STALL_TIMEOUT_SECS: float = float(os.getenv("STALL_TIMEOUT_SECS", "90"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "100"))
     DETECTOR_CONCURRENCY: int = int(os.getenv("DETECTOR_CONCURRENCY", "8"))
+    # Horizontal sharding by agent_id.  Run N replicas with SHARD_COUNT=N and
+    # SHARD_INDEX=0..N-1.  Each worker only polls runs whose agent_id hashes
+    # to its bucket.  SHARD_COUNT=1 (default) disables filtering entirely.
+    SHARD_COUNT: int = int(os.getenv("SHARD_COUNT", "1"))
+    SHARD_INDEX: int = int(os.getenv("SHARD_INDEX", "0"))
 
 
 settings = Settings()
+
+if settings.SHARD_COUNT < 1:
+    raise ValueError(f"SHARD_COUNT must be >= 1, got {settings.SHARD_COUNT}")
+if not (0 <= settings.SHARD_INDEX < settings.SHARD_COUNT):
+    raise ValueError(
+        f"SHARD_INDEX must be in [0, SHARD_COUNT), "
+        f"got SHARD_INDEX={settings.SHARD_INDEX} SHARD_COUNT={settings.SHARD_COUNT}"
+    )

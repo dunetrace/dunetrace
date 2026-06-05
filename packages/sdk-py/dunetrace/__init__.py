@@ -1,7 +1,14 @@
 from dunetrace.client import Dunetrace, DunetraceClient
 from dunetrace.context import get_current_run
 from dunetrace.middleware import DunetraceASGIMiddleware, DunetraceWSGIMiddleware
-from dunetrace.models import RunState, FailureType, Severity, RiskScore
+from dunetrace.models import (
+    RunState,
+    FailureType,
+    Severity,
+    RiskScore,
+    Exporter,
+    CallableExporter,
+)
 from dunetrace.detectors import (
     BaseDetector,
     TIER1_DETECTORS,
@@ -34,4 +41,6 @@ __all__ = [
     "PolicyViolation",
     "RiskEngine",
     "RiskScore",
+    "Exporter",
+    "CallableExporter",
 ]

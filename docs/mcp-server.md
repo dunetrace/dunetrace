@@ -428,6 +428,37 @@ The prompt token growth across LLM calls (512 → 612 → 710 → 805) is a seco
 
 ---
 
+### `get_agent_token_stats`
+
+Per-window token usage and waste breakdown for an agent: total tokens, wasted tokens (on runs with detected failures), and estimated API cost — for 1d / 7d / 30d windows. The 30-day view also breaks waste down by failure type so you can prioritise which failures to fix first.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID (from `list_agents`) |
+
+**Example output:**
+```
+═══ Token stats: langchain-example-agent ═══
+
+── Last 24 h ──
+  Runs:               12  (4 with failures)
+  Total tokens:     62.4k
+  Wasted tokens:    18.1k  (29% of total)
+  Total cost:       $0.0624
+  Wasted cost:      $0.0181  (29% of total)
+
+── Last 7 days ──
+  ...
+
+Waste by failure type (30 days):
+  TOOL_LOOP                            150.0k tok     $0.15  (30 runs)
+  COST_SPIKE                            75.0k tok     $0.08  (15 runs)
+```
+
+---
+
 ### `get_instrumentation_guide`
 
 Quick-start code snippet for instrumenting an agent with Dunetrace.

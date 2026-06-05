@@ -221,6 +221,8 @@ Signals are written with `shadow=TRUE` unless the detector is in `LIVE_DETECTORS
 
 **Why polling instead of streaming?** Simplicity and reliability. A polling worker requires no message broker, survives restarts gracefully, and is trivial to reason about. At current scale (sub-100 runs/sec), 5-second polling latency is acceptable. ClickHouse and Kafka are future considerations.
 
+**Horizontal scaling:** Set `SHARD_COUNT=N` and run N replicas each with a distinct `SHARD_INDEX`. Each replica polls only its `agent_id` hash bucket. See [Detector Sharding](#detector-sharding) below.
+
 ---
 
 ### Explain Layer (library, not a service)
@@ -325,9 +327,13 @@ CREATE TABLE deploy_events (
     meta         JSONB       NOT NULL DEFAULT '{}'   -- arbitrary key/value (commit, env, …)
 );
 
--- All agent events, raw
+-- All agent events, raw.
+-- Partitioned by received_at (monthly range partitions).
+-- PRIMARY KEY is composite (id, received_at) as Postgres requires the partition
+-- key in the PK.  No other table uses events.id as a FK — cross-table joins
+-- use run_id (TEXT) — so the composite PK is safe.
 CREATE TABLE events (
-    id             BIGSERIAL PRIMARY KEY,
+    id             BIGSERIAL        NOT NULL,
     batch_id       TEXT             NOT NULL,
     event_type     TEXT             NOT NULL,
     run_id         TEXT             NOT NULL,
@@ -337,8 +343,9 @@ CREATE TABLE events (
     timestamp      DOUBLE PRECISION NOT NULL,   -- unix epoch, from SDK
     payload        JSONB            NOT NULL,
     parent_run_id  TEXT,
-    received_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW()
-);
+    received_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, received_at)
+) PARTITION BY RANGE (received_at);
 
 -- Detected failures
 CREATE TABLE failure_signals (
@@ -409,6 +416,77 @@ CREATE TABLE fixes (
     applied_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 ```
+
+---
+
+## Partitioning & Retention
+
+### events table
+
+The `events` table uses PostgreSQL range partitioning on `received_at` with monthly child partitions (`events_202606`, `events_202607`, …). A `events_default` partition catches any rows that fall outside the defined monthly range (e.g. rows written during startup before the first monthly partition is created).
+
+Partition management runs automatically on every ingest service startup via `ensure_schema()`:
+
+- `_ensure_event_partitions()` creates child partitions for the current month through 3 months ahead. All `CREATE TABLE IF NOT EXISTS` — idempotent and safe to call on every restart.
+- `prune_old_events(retention_days=90)` drops monthly partitions whose entire window is older than the retention cutoff. Dropping a partition is an instant DDL operation — no row-by-row DELETE, no vacuum debt.
+
+**Why partitioning matters at scale:** Without it, `events` grows unboundedly and the `fetch_run_events` and baseline queries (which scan by `run_id` and `agent_id`) degrade as the table crosses hundreds of millions of rows. Monthly partitions let Postgres prune non-matching partitions from baseline queries that filter by `received_at` range, and make retention instant.
+
+**Naming convention:** `events_YYYYMM` (e.g. `events_202606` for June 2026). `prune_old_events` identifies droppable partitions by name — it only touches tables matching `^events_[0-9]{6}$` and never touches `events_default`.
+
+**Existing deployments:** The `CREATE TABLE IF NOT EXISTS events … PARTITION BY RANGE …` is a no-op when a non-partitioned `events` table already exists. Existing stacks continue to work unchanged. To adopt partitioning on an existing deployment, an offline migration is required:
+
+```sql
+-- Offline migration sketch (run with the ingest service stopped)
+ALTER TABLE events RENAME TO events_old;
+CREATE TABLE events ( … PRIMARY KEY (id, received_at) ) PARTITION BY RANGE (received_at);
+CREATE TABLE events_default PARTITION OF events DEFAULT;
+INSERT INTO events SELECT * FROM events_old;
+DROP TABLE events_old;
+```
+
+### Other tables
+
+`failure_signals` and `processed_runs` grow proportionally to run volume and are not yet partitioned. At moderate scale (< 50M rows), the existing indexes on `(agent_id, detected_at DESC)` and the `run_id TEXT PRIMARY KEY` are sufficient. Partitioning or periodic pruning of these tables follows the same pattern as `events` when needed.
+
+---
+
+## Detector Sharding
+
+The detector worker is horizontally scalable by `agent_id`. Set `SHARD_COUNT=N` and run N replicas, each with a different `SHARD_INDEX` (0 through N-1):
+
+```
+docker compose up --scale detector=4 -d   # not enough — each replica needs its own SHARD_INDEX
+
+# Use separate compose service entries or K8s deployments with env-var overrides:
+# detector-0: SHARD_COUNT=4, SHARD_INDEX=0
+# detector-1: SHARD_COUNT=4, SHARD_INDEX=1
+# detector-2: SHARD_COUNT=4, SHARD_INDEX=2
+# detector-3: SHARD_COUNT=4, SHARD_INDEX=3
+```
+
+Each worker polls only runs whose `agent_id` hashes to its bucket:
+
+```sql
+AND ($n::int = 1 OR abs(hashtext(e.agent_id)) % $n = $m)
+```
+
+`abs()` is required because `hashtext()` returns signed int4 and Postgres modulo of a negative dividend is negative.
+
+**`SHARD_COUNT=1` (default)** — the condition short-circuits to `TRUE` and all runs are processed. No configuration change needed for single-instance deployments.
+
+**Invariants:**
+- A run belongs to exactly one agent, so there is no cross-shard coordination.
+- `processed_runs` deduplication still works — a run can only be claimed by the shard whose bucket matches its `agent_id`.
+- Baseline queries (`fetch_step_count_baseline`, `fetch_token_growth_baseline`, etc.) are already scoped by `agent_id` and require no changes.
+- The alerts worker and customer API are stateless readers — they do not need sharding.
+
+**Validation:** The detector worker raises `ValueError` at startup if `SHARD_COUNT < 1` or `SHARD_INDEX` is outside `[0, SHARD_COUNT)`, so misconfigured replicas crash immediately rather than silently claiming no work.
+
+| Env var | Default | Description |
+|---|---|---|
+| `SHARD_COUNT` | `1` | Total number of detector replicas |
+| `SHARD_INDEX` | `0` | This replica's bucket index (0-based) |
 
 ---
 

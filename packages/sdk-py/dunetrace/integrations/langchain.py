@@ -34,7 +34,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 try:
     try:
-        from langchain_core.callbacks.base import BaseCallbackHandler  # langchain >= 0.2
+        from langchain_core.callbacks.base import (
+            BaseCallbackHandler,
+        )  # langchain >= 0.2
     except ImportError:
         from langchain.callbacks.base import BaseCallbackHandler  # langchain < 0.2
     _LANGCHAIN_AVAILABLE = True
@@ -514,9 +516,11 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 ctx.child_steps[lc_run_id] = ctx.step
             index_name = serialized.get(
                 "name",
-                serialized.get("id", ["unknown"])[-1]
-                if isinstance(serialized.get("id"), list)
-                else "unknown",
+                (
+                    serialized.get("id", ["unknown"])[-1]
+                    if isinstance(serialized.get("id"), list)
+                    else "unknown"
+                ),
             )
             from dunetrace.models import EventType
 
@@ -606,7 +610,9 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             stale = [k for k, ctx in self._runs.items() if ctx.start_time < cutoff]
         for root_id in stale:
             logger.warning(
-                "Dunetrace: pruning stale run %s (started >%ds ago)", root_id, _STALE_RUN_SECS
+                "Dunetrace: pruning stale run %s (started >%ds ago)",
+                root_id,
+                _STALE_RUN_SECS,
             )
             self._cleanup(root_id)
 

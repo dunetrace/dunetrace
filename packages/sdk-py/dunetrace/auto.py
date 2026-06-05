@@ -195,7 +195,11 @@ def _patch_anthropic() -> None:
                 run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
             try:
                 resp = await _orig_acreate(
-                    self, model=model, messages=messages, max_tokens=max_tokens, **kwargs
+                    self,
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    **kwargs,
                 )
             except Exception:
                 if run:

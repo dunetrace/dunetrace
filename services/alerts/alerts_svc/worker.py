@@ -76,9 +76,11 @@ def _row_to_signal(row: dict) -> FailureSignal:
         agent_version=row["agent_version"],
         step_index=row["step_index"],
         confidence=row["confidence"],
-        evidence=json.loads(row["evidence"])
-        if isinstance(row.get("evidence"), str)
-        else (row.get("evidence") or {}),
+        evidence=(
+            json.loads(row["evidence"])
+            if isinstance(row.get("evidence"), str)
+            else (row.get("evidence") or {})
+        ),
         detected_at=detected_at,
     )
 
@@ -347,7 +349,8 @@ async def poll_once() -> tuple[int, int]:
             return signal_id
         else:
             logger.error(
-                "All destinations failed for signal_id=%d — will retry next cycle", signal_id
+                "All destinations failed for signal_id=%d — will retry next cycle",
+                signal_id,
             )
             return None
 

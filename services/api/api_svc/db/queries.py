@@ -5,9 +5,13 @@ processed_runs, and api_keys. This service never writes.
 
 from __future__ import annotations
 
+import datetime
+import hashlib
+import hmac
+import json as _json_mod
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, AsyncGenerator, Optional
 
 try:
     import asyncpg
@@ -59,6 +63,22 @@ CREATE TABLE IF NOT EXISTS policies (
 CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
 """
 
+_POLICY_SECURITY_DDL = """
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS policy_audit_log (
+    id          BIGSERIAL    PRIMARY KEY,
+    policy_id   BIGINT,
+    action      TEXT         NOT NULL,
+    customer_id TEXT         NOT NULL,
+    before      JSONB,
+    after       JSONB,
+    changed_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_policy_audit_policy_id  ON policy_audit_log(policy_id);
+CREATE INDEX IF NOT EXISTS idx_policy_audit_changed_at ON policy_audit_log(changed_at DESC);
+"""
+
 _FEEDBACK_DDL = """
 ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
 
@@ -88,6 +108,7 @@ async def init_pool() -> None:
         await conn.execute(_MIGRATIONS_DDL)
         await conn.execute(_FIXES_DDL)
         await conn.execute(_POLICIES_DDL)
+        await conn.execute(_POLICY_SECURITY_DDL)
         await conn.execute(_FEEDBACK_DDL)
     logger.info("DB pool ready")
 
@@ -449,7 +470,11 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
                 "why_it_matters": exp.why_it_matters if exp else "",
                 "evidence_summary": exp.evidence_summary if exp else "",
                 "suggested_fixes": [
-                    {"description": f.description, "language": f.language, "code": f.code}
+                    {
+                        "description": f.description,
+                        "language": f.language,
+                        "code": f.code,
+                    }
                     for f in (exp.suggested_fixes if exp else [])
                 ],
             }
@@ -462,7 +487,10 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
     prompt_tokens = sum(e["payload"].get("prompt_tokens") or 0 for e in llm_all)
     completion_tokens = sum(e["payload"].get("completion_tokens") or 0 for e in llm_responded)
     total_tokens = (prompt_tokens + completion_tokens) or None
-    model = next((e["payload"].get("model") for e in llm_called if e["payload"].get("model")), None)
+    model = next(
+        (e["payload"].get("model") for e in llm_called if e["payload"].get("model")),
+        None,
+    )
     from explainer_svc.cost import estimate_cost
 
     raw_cost = (
@@ -478,7 +506,7 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
         "exit_reason": pr_dict["trigger"],
         "started_at": started_at,
         "completed_at": completed_at,
-        "step_count": max((e["step_index"] for e in event_list), default=0) if event_list else 0,
+        "step_count": (max((e["step_index"] for e in event_list), default=0) if event_list else 0),
         "total_tokens": total_tokens,
         "cost_usd": cost_usd,
         "events": event_list,
@@ -656,13 +684,128 @@ async def list_signals(
                 "why_it_matters": exp.why_it_matters if exp else "",
                 "evidence_summary": exp.evidence_summary if exp else "",
                 "suggested_fixes": [
-                    {"description": f.description, "language": f.language, "code": f.code}
+                    {
+                        "description": f.description,
+                        "language": f.language,
+                        "code": f.code,
+                    }
                     for f in (exp.suggested_fixes if exp else [])
                 ],
             }
         )
 
     return results, total or 0
+
+
+async def export_signals(
+    agent_id: str,
+    severity: Optional[str] = None,
+    failure_type: Optional[str] = None,
+    include_shadow: bool = False,
+    from_ts: Optional[float] = None,
+    to_ts: Optional[float] = None,
+    batch_size: int = 500,
+) -> AsyncGenerator[list, None]:
+    """
+    Async generator that yields batches of raw signal rows for streaming export.
+
+    Uses keyset pagination on (detected_at DESC, id DESC) so performance is
+    stable regardless of result set size — no OFFSET scan.
+
+    Each yielded batch is a list of dicts with fields:
+      id, failure_type, severity, run_id, agent_id, agent_version,
+      step_index, confidence, detected_at (ISO-8601 UTC), evidence (dict)
+    """
+    if not _pool:
+        return
+
+    import json
+
+    where = ["agent_id = $1"]
+    params: list = [agent_id]
+
+    if not include_shadow:
+        where.append("shadow = FALSE")
+    if severity:
+        params.append(severity.upper())
+        where.append(f"severity = ${len(params)}")
+    if failure_type:
+        params.append(failure_type.upper())
+        where.append(f"failure_type = ${len(params)}")
+    if from_ts is not None:
+        params.append(datetime.datetime.fromtimestamp(from_ts, tz=datetime.timezone.utc))
+        where.append(f"detected_at >= ${len(params)}")
+    if to_ts is not None:
+        params.append(datetime.datetime.fromtimestamp(to_ts, tz=datetime.timezone.utc))
+        where.append(f"detected_at <= ${len(params)}")
+
+    base_where = " AND ".join(where)
+    # Keyset cursor added per-batch: (detected_at, id) < (cursor_ts, cursor_id)
+    cursor_ts: Optional[datetime.datetime] = None
+    cursor_id: Optional[int] = None
+
+    while True:
+        async with _pool.acquire() as conn:
+            if cursor_ts is None:
+                query = f"""
+                    SELECT id, failure_type, severity, run_id, agent_id, agent_version,
+                           step_index, confidence, detected_at, evidence
+                    FROM failure_signals
+                    WHERE {base_where}
+                    ORDER BY detected_at DESC, id DESC
+                    LIMIT {batch_size}
+                """
+                rows = await conn.fetch(query, *params)
+            else:
+                keyset_params = params + [cursor_ts, cursor_id]
+                query = f"""
+                    SELECT id, failure_type, severity, run_id, agent_id, agent_version,
+                           step_index, confidence, detected_at, evidence
+                    FROM failure_signals
+                    WHERE {base_where}
+                      AND (detected_at < ${len(params) + 1}
+                           OR (detected_at = ${len(params) + 1} AND id < ${len(params) + 2}))
+                    ORDER BY detected_at DESC, id DESC
+                    LIMIT {batch_size}
+                """
+                rows = await conn.fetch(query, *keyset_params)
+
+        if not rows:
+            break
+
+        batch = []
+        for s in rows:
+            evidence = s["evidence"]
+            if isinstance(evidence, str):
+                evidence = json.loads(evidence)
+            detected_at = s["detected_at"]
+            if hasattr(detected_at, "isoformat"):
+                detected_at_str = detected_at.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            else:
+                detected_at_str = str(detected_at)
+            batch.append(
+                {
+                    "id": s["id"],
+                    "failure_type": s["failure_type"],
+                    "severity": s["severity"],
+                    "run_id": s["run_id"],
+                    "agent_id": s["agent_id"],
+                    "agent_version": s["agent_version"],
+                    "step_index": s["step_index"],
+                    "confidence": round(float(s["confidence"]), 4),
+                    "detected_at": detected_at_str,
+                    "evidence": dict(evidence) if evidence else {},
+                }
+            )
+
+        yield batch
+
+        last = rows[-1]
+        cursor_ts = last["detected_at"]
+        cursor_id = last["id"]
+
+        if len(rows) < batch_size:
+            break
 
 
 # ── Insights ───────────────────────────────────────────────────────────────────
@@ -846,7 +989,7 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
         "p25": float(overall["p25"]) if overall["p25"] is not None else None,
         "p50": float(overall["p50"]) if overall["p50"] is not None else None,
         "p75": float(overall["p75"]) if overall["p75"] is not None else None,
-        "avg_steps": float(overall["avg_steps"]) if overall["avg_steps"] is not None else None,
+        "avg_steps": (float(overall["avg_steps"]) if overall["avg_steps"] is not None else None),
         "runs_with_tool": int(overall["runs_with_tool"]),
         "total_runs": int(overall["total_runs"]),
         "daily_trend": [
@@ -854,9 +997,11 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
                 "day": str(r["day"]),
                 "run_count": int(r["run_count"]),
                 "runs_with_tool": int(r["runs_with_tool"]),
-                "avg_first_tool_step": float(r["avg_first_tool_step"])
-                if r["avg_first_tool_step"] is not None
-                else None,
+                "avg_first_tool_step": (
+                    float(r["avg_first_tool_step"])
+                    if r["avg_first_tool_step"] is not None
+                    else None
+                ),
             }
             for r in daily
         ],
@@ -1004,7 +1149,8 @@ async def agent_failure_rates(agent_id: str) -> list:
 
 async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -> list:
     """Failure types firing on >= rate_threshold of runs in the last 7 days.
-    Returns: [{failure_type, total_runs, affected_runs, rate, first_seen, last_seen, is_systemic}]."""
+    Returns: [{failure_type, total_runs, affected_runs, rate, first_seen, last_seen, is_systemic}].
+    """
     if not _pool:
         return []
 
@@ -1330,7 +1476,7 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
             "p25": float(step_row["p25"]) if step_row["p25"] is not None else None,
             "p50": float(step_row["p50"]) if step_row["p50"] is not None else None,
             "p75": float(step_row["p75"]) if step_row["p75"] is not None else None,
-            "avg_step": float(step_row["avg_step"]) if step_row["avg_step"] is not None else None,
+            "avg_step": (float(step_row["avg_step"]) if step_row["avg_step"] is not None else None),
         },
         "evidence_aggregates": [
             {k: v for k, v in dict(r).items() if v is not None} for r in evidence_rows
@@ -1454,11 +1600,13 @@ async def get_signal_fix_status(
         "verdict": (
             "verified"
             if runs >= 10 and rec == 0
-            else "likely_fixed"
-            if runs >= 5 and rec == 0
-            else "still_occurring"
-            if rec > 0
-            else "insufficient_data"
+            else (
+                "likely_fixed"
+                if runs >= 5 and rec == 0
+                else "still_occurring"
+                if rec > 0
+                else "insufficient_data"
+            )
         ),
     }
 
@@ -1485,9 +1633,64 @@ def _policy_row(r: Any) -> dict:
         "action": dict(act) if act else {},
         "enabled": r["enabled"],
         "priority": r["priority"],
+        "signature": r.get("signature", "") or "",
         "created_at": ca.timestamp() if hasattr(ca, "timestamp") else ca,
         "updated_at": ua.timestamp() if hasattr(ua, "timestamp") else ua,
     }
+
+
+def _sign_policy(
+    policy_id: int,
+    agent_id: str,
+    name: str,
+    condition: dict,
+    action: dict,
+    enabled: bool,
+    priority: int,
+    secret: str,
+) -> str:
+    """HMAC-SHA256 over canonical policy fields. Returns '' when secret is empty (dev mode).
+
+    Uses null-byte field separator to prevent ambiguity from colons in agent_id or name.
+    Must stay in sync with _verify_policy_signature in the SDK's policies.py.
+    """
+    if not secret:
+        return ""
+    canonical = "\x00".join(
+        [
+            str(policy_id),
+            agent_id,
+            name,
+            _json_mod.dumps(condition, sort_keys=True),
+            _json_mod.dumps(action, sort_keys=True),
+            str(enabled),
+            str(priority),
+        ]
+    )
+    return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+
+
+async def log_policy_audit(
+    policy_id: Optional[int],
+    action: str,
+    customer_id: str,
+    before: Optional[dict],
+    after: Optional[dict],
+) -> None:
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO policy_audit_log (policy_id, action, customer_id, before, after)
+            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+            """,
+            policy_id,
+            action,
+            customer_id,
+            _json_mod.dumps(before) if before is not None else None,
+            _json_mod.dumps(after) if after is not None else None,
+        )
 
 
 async def list_policies(agent_id: Optional[str] = None) -> list:
@@ -1520,39 +1723,59 @@ async def create_policy(
     priority: int = 100,
     enabled: bool = True,
 ) -> dict:
-    import json as _json
-
     if not _pool:
         raise RuntimeError("DB pool not available")
     async with _pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO policies (name, agent_id, condition, action, priority, enabled)
-            VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
-            RETURNING *
-            """,
-            name,
-            agent_id,
-            _json.dumps(condition),
-            _json.dumps(action),
-            priority,
-            enabled,
-        )
+        # Insert first to get the id, then back-fill the signature in one transaction.
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO policies (name, agent_id, condition, action, priority, enabled)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+                RETURNING *
+                """,
+                name,
+                agent_id,
+                _json_mod.dumps(condition),
+                _json_mod.dumps(action),
+                priority,
+                enabled,
+            )
+            sig = _sign_policy(
+                row["id"],
+                agent_id,
+                name,
+                condition,
+                action,
+                enabled,
+                priority,
+                settings.POLICY_SIGNING_SECRET,
+            )
+            row = await conn.fetchrow(
+                "UPDATE policies SET signature = $1 WHERE id = $2 RETURNING *",
+                sig,
+                row["id"],
+            )
     return _policy_row(row)
 
 
 async def update_policy(policy_id: int, fields: dict) -> dict:
-    import json as _json
-
     if not _pool:
         raise RuntimeError("DB pool not available")
 
     set_parts = []
     params: list = []
     for key, value in fields.items():
-        if key not in {"name", "agent_id", "condition", "action", "priority", "enabled"}:
+        if key not in {
+            "name",
+            "agent_id",
+            "condition",
+            "action",
+            "priority",
+            "enabled",
+        }:
             continue
-        params.append(value if key not in {"condition", "action"} else _json.dumps(value))
+        params.append(value if key not in {"condition", "action"} else _json_mod.dumps(value))
         cast = "::jsonb" if key in {"condition", "action"} else ""
         set_parts.append(f"{key} = ${len(params)}{cast}")
 
@@ -1561,11 +1784,34 @@ async def update_policy(policy_id: int, fields: dict) -> dict:
 
     params.append(policy_id)
     async with _pool.acquire() as conn:
-        row = await conn.fetchrow(
-            f"UPDATE policies SET {', '.join(set_parts)}, updated_at = NOW() "
-            f"WHERE id = ${len(params)} RETURNING *",
-            *params,
-        )
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                f"UPDATE policies SET {', '.join(set_parts)}, updated_at = NOW() "
+                f"WHERE id = ${len(params)} RETURNING *",
+                *params,
+            )
+            # Recompute signature over the full updated record.
+            cond = row["condition"]
+            act = row["action"]
+            if isinstance(cond, str):
+                cond = _json_mod.loads(cond)
+            if isinstance(act, str):
+                act = _json_mod.loads(act)
+            sig = _sign_policy(
+                row["id"],
+                row["agent_id"],
+                row["name"],
+                dict(cond),
+                dict(act),
+                row["enabled"],
+                row["priority"],
+                settings.POLICY_SIGNING_SECRET,
+            )
+            row = await conn.fetchrow(
+                "UPDATE policies SET signature = $1 WHERE id = $2 RETURNING *",
+                sig,
+                policy_id,
+            )
     return _policy_row(row)
 
 
@@ -1696,7 +1942,12 @@ async def get_agent_health_score(agent_id: str) -> dict:
 
     total = int(stats["total_runs"] or 0)
     if total < 3:
-        return {"score": None, "components": {}, "sample_runs": total, "baseline_ready": False}
+        return {
+            "score": None,
+            "components": {},
+            "sample_runs": total,
+            "baseline_ready": False,
+        }
 
     baseline_ready = total >= _BASELINE_MIN_RUNS
 
@@ -2204,11 +2455,13 @@ async def list_agent_fixes(agent_id: str) -> list:
         verdict = (
             "verified"
             if runs >= 10 and recs == 0
-            else "likely_fixed"
-            if runs >= 5 and recs == 0
-            else "still_occurring"
-            if recs > 0
-            else "insufficient_data"
+            else (
+                "likely_fixed"
+                if runs >= 5 and recs == 0
+                else "still_occurring"
+                if recs > 0
+                else "insufficient_data"
+            )
         )
         results.append(
             {

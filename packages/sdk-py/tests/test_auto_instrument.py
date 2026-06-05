@@ -22,7 +22,6 @@ from dunetrace import (
 from dunetrace.auto import _PATCHED
 from dunetrace.models import EventType
 
-
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
