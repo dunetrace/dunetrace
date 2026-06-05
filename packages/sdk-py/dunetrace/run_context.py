@@ -115,6 +115,7 @@ class RunContext:
             lc.output_length = output_length
             lc.completion_tokens = completion_tokens or None
             lc.reasoning_tokens = reasoning_tokens or None
+            self._cost_usd += compute_run_cost([lc])
         payload: dict = {
             "completion_tokens": completion_tokens,
             "latency_ms": latency_ms,
@@ -125,18 +126,6 @@ class RunContext:
         if reasoning_tokens:
             payload["reasoning_tokens"] = reasoning_tokens
         self._emit(EventType.LLM_RESPONDED, payload, advance=False)
-            self._cost_usd += compute_run_cost([lc])
-        self._emit(
-            EventType.LLM_RESPONDED,
-            {
-                "completion_tokens": completion_tokens,
-                "latency_ms": latency_ms,
-                "finish_reason": finish_reason,
-                "output_hash": output_hash,
-                "output_length": output_length,
-            },
-            advance=False,
-        )
 
     # ── Tool hooks ────────────────────────────────────────────────────────────
 

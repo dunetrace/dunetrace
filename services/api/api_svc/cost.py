@@ -85,11 +85,10 @@ def estimate_cost(
     completion_tokens: int,
     reasoning_tokens: int = 0,
 ) -> float:
-    """Return estimated cost in USD. Returns 0.0 when both token counts are zero."""
+    """Return estimated cost in USD. Returns 0.0 when prompt_tokens and completion_tokens are both zero."""
     prompt_tokens = prompt_tokens or 0
     completion_tokens = completion_tokens or 0
-    reasoning_tokens = reasoning_tokens or 0
-    billed_output_tokens = completion_tokens + reasoning_tokens
+    billed_output_tokens = completion_tokens
     if not prompt_tokens and not billed_output_tokens:
         return 0.0
     inp, out = _PRICES.get(_normalise(model), _DEFAULT)
