@@ -30,6 +30,7 @@ class Settings:
         "postgresql://dunetrace:dunetrace@localhost:5432/dunetrace",
     )
     AUTH_MODE: str = os.getenv("AUTH_MODE", "dev")
+    INTERNAL_TOKEN: str = os.getenv("INTERNAL_TOKEN", "")
     MAX_BATCH_SIZE: int = int(os.getenv("MAX_BATCH_SIZE", "500"))
     RATE_LIMIT_REQUESTS: int = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))  # per IP per minute
 

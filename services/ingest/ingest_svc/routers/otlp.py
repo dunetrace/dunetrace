@@ -25,6 +25,7 @@ import uuid
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 
+from ingest_svc.auth import is_trusted
 from ingest_svc.config import settings
 from ingest_svc.db import insert_events, verify_api_key
 from ingest_svc.otel import otlp_to_events
@@ -45,15 +46,14 @@ async def receive_otlp_traces(
     background_tasks: BackgroundTasks,
 ) -> dict:
     # ── Auth ──────────────────────────────────────────────────────────────────
-    auth = request.headers.get("Authorization", "")
-    api_key = auth[7:].strip() if auth.startswith("Bearer ") else ""
-
-    resolved = await verify_api_key(api_key)
-    if resolved is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or inactive API key",
-        )
+    if not is_trusted(request):
+        auth = request.headers.get("Authorization", "")
+        api_key = auth[7:].strip() if auth.startswith("Bearer ") else ""
+        if await verify_api_key(api_key) is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or inactive API key",
+            )
 
     # ── Parse body ────────────────────────────────────────────────────────────
     try:

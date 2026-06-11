@@ -5,14 +5,18 @@ GET  /v1/policies — returns runtime policies for the SDK to enforce.
 from __future__ import annotations
 
 import logging
-import uuid
-from fastapi import APIRouter, HTTPException, Query, status, BackgroundTasks
-
+import os
 import time
+import uuid
+
+from fastapi import APIRouter, HTTPException, Query, Request, status, BackgroundTasks
+
+from ingest_svc.auth import is_trusted
 from ingest_svc.db import (
     insert_events,
     insert_deploy_event,
     verify_api_key,
+    create_api_key,
     fetch_policies,
 )
 from ingest_svc.schemas import (
@@ -20,6 +24,8 @@ from ingest_svc.schemas import (
     IngestResponse,
     DeployRequest,
     DeployResponse,
+    KeyCreateRequest,
+    KeyCreateResponse,
 )
 
 logger = logging.getLogger("dunetrace.ingest")
@@ -62,16 +68,19 @@ async def ingest(
     include_in_schema=False,
 )
 async def get_policies(
+    request: Request,
     agent_id: str = Query(...),
     api_key: str = Query(...),
 ) -> dict:
     """
     Called by the SDK at run start to retrieve active policies.
     Authenticates via api_key query param — same key used for event ingestion.
+    Trusted internal requests (from auth service) skip DB validation.
     """
-    resolved = await verify_api_key(api_key)
-    if resolved is None:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    if not is_trusted(request):
+        resolved = await verify_api_key(api_key)
+        if resolved is None:
+            raise HTTPException(status_code=401, detail="Invalid API key")
     policies = await fetch_policies(agent_id)
     return {"policies": policies}
 
@@ -97,6 +106,24 @@ async def mark_deploy(body: DeployRequest) -> DeployResponse:
         version=body.version,
         deployed_at=time.time(),
     )
+
+
+@router.post(
+    "/v1/keys",
+    response_model=KeyCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate a new API key for an agent",
+    include_in_schema=False,
+)
+async def create_key(body: KeyCreateRequest) -> KeyCreateResponse:
+    """Admin-only endpoint. Requires ADMIN_API_KEY env var to match body.admin_key."""
+    admin_key = os.getenv("ADMIN_API_KEY", "")
+    if not admin_key or body.admin_key != admin_key:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
+    name = body.company_name or body.customer_id
+    key = await create_api_key(body.agent_id, body.customer_id, company_name=name, rate_limit_rpm=body.rate_limit_rpm)
+    logger.info("API key created. agent_id=%s customer_id=%s company=%s rpm=%d", body.agent_id, body.customer_id, name, body.rate_limit_rpm)
+    return KeyCreateResponse(key=key, agent_id=body.agent_id, customer_id=body.customer_id, company_name=name)
 
 
 async def _persist(events: list, batch_id: str, agent_id: str) -> None:
