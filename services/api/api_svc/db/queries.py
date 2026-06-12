@@ -93,6 +93,18 @@ CREATE TABLE IF NOT EXISTS agent_detector_overrides (
 );
 """
 
+_KEYS_DDL = """
+CREATE TABLE IF NOT EXISTS companies (
+    id          TEXT PRIMARY KEY,
+    name        TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS id BIGSERIAL;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE SET NULL;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_rpm INTEGER NOT NULL DEFAULT 600;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_id ON api_keys(id);
+"""
+
 
 async def init_pool() -> None:
     global _pool
@@ -110,6 +122,7 @@ async def init_pool() -> None:
         await conn.execute(_POLICIES_DDL)
         await conn.execute(_POLICY_SECURITY_DDL)
         await conn.execute(_FEEDBACK_DDL)
+        await conn.execute(_KEYS_DDL)
     logger.info("DB pool ready")
 
 
@@ -2733,3 +2746,109 @@ async def get_detector_override(agent_id: str, failure_type: str) -> Optional[di
             failure_type,
         )
     return dict(row) if row else None
+
+
+# ── API key management ─────────────────────────────────────────────────────────
+
+def _mask_key(key: str) -> str:
+    """Return first 10 + last 4 chars with ellipsis — never expose the full secret."""
+    if len(key) <= 14:
+        return key[:4] + "…"
+    return key[:10] + "…" + key[-4:]
+
+
+async def list_api_keys(
+    agent_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    active_only: bool = True,
+    limit: int = 100,
+) -> list:
+    if not _pool:
+        return []
+    conditions = []
+    params: list = []
+    if active_only:
+        params.append(True)
+        conditions.append(f"k.active = ${len(params)}")
+    if agent_id:
+        params.append(agent_id)
+        conditions.append(f"k.agent_id = ${len(params)}")
+    if customer_id:
+        params.append(customer_id)
+        conditions.append(f"k.customer_id = ${len(params)}")
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT k.id, k.key, k.agent_id, k.customer_id, k.active,
+                   k.rate_limit_rpm, k.created_at, c.name AS company_name
+            FROM api_keys k
+            LEFT JOIN companies c ON c.id = k.company_id
+            {where}
+            ORDER BY k.id DESC
+            LIMIT ${len(params)}
+            """,
+            *params,
+        )
+    return [
+        {
+            "id": r["id"],
+            "key_prefix": _mask_key(r["key"]),
+            "agent_id": r["agent_id"],
+            "customer_id": r["customer_id"],
+            "company_name": r["company_name"],
+            "active": r["active"],
+            "rate_limit_rpm": r["rate_limit_rpm"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+async def create_api_key(
+    agent_id: str,
+    customer_id: str,
+    company_name: Optional[str] = None,
+    rate_limit_rpm: int = 600,
+) -> dict:
+    import secrets as _sec
+    key = "dt_" + _sec.token_urlsafe(32)
+    name = company_name or customer_id
+    if not _pool:
+        raise RuntimeError("DB pool not ready")
+    async with _pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO companies (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
+                customer_id, name,
+            )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO api_keys (key, agent_id, customer_id, company_id, rate_limit_rpm)
+                VALUES ($1, $2, $3, $3, $4)
+                RETURNING id, created_at
+                """,
+                key, agent_id, customer_id, rate_limit_rpm,
+            )
+    return {
+        "id": row["id"],
+        "key": key,
+        "key_prefix": _mask_key(key),
+        "agent_id": agent_id,
+        "customer_id": customer_id,
+        "company_name": name,
+        "rate_limit_rpm": rate_limit_rpm,
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+async def revoke_api_key(key_id: int) -> bool:
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE api_keys SET active = FALSE WHERE id = $1 AND active = TRUE",
+            key_id,
+        )
+    return result.split()[-1] != "0"

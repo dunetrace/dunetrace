@@ -686,6 +686,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       Policies
       <span class="sb-count" id="badge-policies" style="background:rgba(74,158,222,0.1);color:var(--blue)">—</span>
     </div>
+    <div class="sb-item" onclick="nav('keys',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6" cy="9" r="3.5"/><path d="M8.5 6.5l5-5M12 4l1.5 1.5M10 2l1.5 1.5"/></svg>
+      API keys
+    </div>
   </div>
 </nav>
 
@@ -1404,6 +1408,72 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <tr><td colspan="8" class="loading">loading…</td></tr>
       </tbody>
     </table>
+  </div>
+</div>
+
+<!-- ── API KEYS PAGE ── -->
+<div id="page-keys" class="page">
+  <div class="sec-head">
+    <span class="sec-title">API keys</span>
+    <button class="btn-primary" onclick="openKeyForm()">+ New key</button>
+  </div>
+
+  <!-- Key table -->
+  <div class="table-card" style="margin-bottom:1.5rem">
+    <table class="run-table">
+      <thead><tr>
+        <th>Key</th>
+        <th>Agent</th>
+        <th>Company</th>
+        <th>Rate limit</th>
+        <th>Created</th>
+        <th>Status</th>
+        <th></th>
+      </tr></thead>
+      <tbody id="keys-tbody">
+        <tr><td colspan="7" class="loading">loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Newly-created key banner (shown once) -->
+  <div id="key-created-banner" style="display:none;background:rgba(56,161,105,0.08);border:1px solid rgba(56,161,105,0.3);border-radius:8px;padding:1.25rem;margin-bottom:1.5rem">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--green);letter-spacing:2px;text-transform:uppercase;margin-bottom:.6rem">Key created — copy it now, it won't be shown again</div>
+    <div style="display:flex;align-items:center;gap:.75rem">
+      <code id="key-created-value" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--chalk1);background:var(--s3);padding:6px 10px;border-radius:4px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></code>
+      <button class="btn-secondary" onclick="copyNewKey()" id="key-copy-btn">Copy</button>
+      <button class="btn-secondary" onclick="document.getElementById('key-created-banner').style.display='none'" style="padding:4px 10px">Dismiss</button>
+    </div>
+  </div>
+
+  <!-- Create form -->
+  <div id="key-form-wrap" style="display:none;background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.5rem;margin-bottom:1.5rem">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--orange);letter-spacing:2px;text-transform:uppercase;margin-bottom:1.25rem">New API key</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem">
+      <div>
+        <div class="cfg-label">Agent ID</div>
+        <input id="kf-agent" type="text" class="cfg-input" placeholder="my-agent" style="width:100%">
+      </div>
+      <div>
+        <div class="cfg-label">Customer ID (slug)</div>
+        <input id="kf-customer" type="text" class="cfg-input" placeholder="acme-corp" style="width:100%">
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem">
+      <div>
+        <div class="cfg-label">Company display name (optional)</div>
+        <input id="kf-company" type="text" class="cfg-input" placeholder="Acme Corporation" style="width:100%">
+      </div>
+      <div>
+        <div class="cfg-label">Rate limit (requests / minute)</div>
+        <input id="kf-rpm" type="number" class="cfg-input" value="600" min="1" max="100000" style="width:100%">
+      </div>
+    </div>
+    <div style="display:flex;gap:.75rem;align-items:center">
+      <button class="btn-primary" onclick="submitKeyForm()">Create key</button>
+      <button class="btn-secondary" onclick="closeKeyForm()">Cancel</button>
+      <span id="kf-error" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--red)"></span>
+    </div>
   </div>
 </div>
 
@@ -2760,6 +2830,7 @@ function nav(id, el) {
   if (id === 'agents')   { renderAgents(); loadHealthScores(); }
   if (id === 'tokens')   { renderTokens(); loadTokenStats(); }
   if (id === 'policies') loadAndRenderPolicies();
+  if (id === 'keys')     loadAndRenderKeys();
 }
 
 // ── Detail tabs ───────────────────────────────────────────────────────────────
@@ -3896,6 +3967,100 @@ function toggleTheme() {
     if (btn) btn.textContent = '🌙';
   }
 })();
+
+// ── API Keys ──────────────────────────────────────────────────────────────────
+let _keys = [];
+let _newKeyFull = null;
+
+async function loadAndRenderKeys() {
+  try {
+    _keys = await apiFetch('/v1/keys?active_only=false&limit=200');
+  } catch(e) {
+    _keys = [];
+  }
+  renderKeys();
+}
+
+function renderKeys() {
+  const tbody = document.getElementById('keys-tbody');
+  if (!tbody) return;
+  if (!_keys.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="padding:1.5rem;text-align:center;color:var(--chalk4);font-family:\'IBM Plex Mono\',monospace;font-size:11px">No keys yet — create one above</td></tr>';
+    return;
+  }
+  tbody.innerHTML = _keys.map(k => {
+    const ago = k.created_at ? timeAgo(k.created_at) : '—';
+    const statusBadge = k.active
+      ? '<span style="color:var(--green);font-size:10px">● active</span>'
+      : '<span style="color:var(--chalk4);font-size:10px">● revoked</span>';
+    const revokeBtn = k.active
+      ? `<button class="act-btn act-danger" style="padding:3px 10px;font-size:10px" onclick="revokeKey(${k.id})">Revoke</button>`
+      : '';
+    return `<tr>
+      <td><code style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk2)">${k.key_prefix}</code></td>
+      <td style="font-size:12px">${k.agent_id}</td>
+      <td style="font-size:12px">${k.company_name || k.customer_id}</td>
+      <td style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3)">${k.rate_limit_rpm} rpm</td>
+      <td style="font-size:11px;color:var(--chalk4)">${ago}</td>
+      <td>${statusBadge}</td>
+      <td style="text-align:right">${revokeBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+function openKeyForm() {
+  document.getElementById('key-form-wrap').style.display = 'block';
+  document.getElementById('kf-error').textContent = '';
+  document.getElementById('kf-agent').focus();
+}
+
+function closeKeyForm() {
+  document.getElementById('key-form-wrap').style.display = 'none';
+}
+
+async function submitKeyForm() {
+  const agent_id    = document.getElementById('kf-agent').value.trim();
+  const customer_id = document.getElementById('kf-customer').value.trim();
+  const company_name = document.getElementById('kf-company').value.trim() || null;
+  const rate_limit_rpm = parseInt(document.getElementById('kf-rpm').value) || 600;
+  const errEl = document.getElementById('kf-error');
+  errEl.textContent = '';
+  if (!agent_id || !customer_id) { errEl.textContent = 'Agent ID and Customer ID are required'; return; }
+  try {
+    const res = await apiPost('/v1/keys', { agent_id, customer_id, company_name, rate_limit_rpm });
+    _newKeyFull = res.key;
+    document.getElementById('key-created-value').textContent = res.key;
+    document.getElementById('key-created-banner').style.display = 'block';
+    document.getElementById('key-copy-btn').textContent = 'Copy';
+    closeKeyForm();
+    await loadAndRenderKeys();
+  } catch(e) {
+    errEl.textContent = e.message;
+  }
+}
+
+async function revokeKey(id) {
+  if (!confirm('Revoke this key? Any SDK calls using it will immediately start returning 401.')) return;
+  try {
+    const r = await fetch(API + '/v1/keys/' + id, { method: 'DELETE', headers: { Authorization: 'Bearer ' + KEY } });
+    if (!r.ok && r.status !== 204) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.detail || 'HTTP ' + r.status);
+    }
+    await loadAndRenderKeys();
+  } catch(e) {
+    alert('Failed to revoke: ' + e.message);
+  }
+}
+
+function copyNewKey() {
+  if (!_newKeyFull) return;
+  navigator.clipboard.writeText(_newKeyFull).then(() => {
+    const btn = document.getElementById('key-copy-btn');
+    btn.textContent = 'Copied ✓';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+  });
+}
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 loadAll().then(handleDeepLink);

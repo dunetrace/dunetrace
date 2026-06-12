@@ -79,3 +79,19 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"
     db: str = "unknown"
+
+
+class KeyCreateRequest(BaseModel):
+    agent_id: str = Field(min_length=1)
+    customer_id: str = Field(min_length=1)
+    admin_key: str = Field(min_length=1)
+    company_name: Optional[str] = None
+    rate_limit_rpm: int = Field(default=600, ge=1, le=100_000)
+
+
+class KeyCreateResponse(BaseModel):
+    key: str
+    agent_id: str
+    customer_id: str
+    company_name: str
+    created_at: float = Field(default_factory=time.time)

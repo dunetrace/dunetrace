@@ -1,7 +1,12 @@
 # DuneTrace — Postgres + Ingest + Detector + Alerts + Customer API
 # Usage: docker compose up -d
-# Ingest API:   http://localhost:8001
 # Customer API: http://localhost:8002  (docs at /docs)
+# Ingest API:   http://localhost:8001  (dev only — in production, traffic goes via auth service)
+#
+# Auth service lives in the private dunetrace-cloud repo.
+# To run the full production stack locally:
+#   docker compose -f docker-compose.yml \
+#     -f ../dunetrace-cloud/infrastructure/docker-compose.auth.yml up -d
 
 services:
   postgres:

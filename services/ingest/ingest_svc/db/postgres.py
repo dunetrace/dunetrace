@@ -23,6 +23,10 @@ _pool: Optional[asyncpg.Pool] = None  # type: ignore[attr-defined]
 # ── Pool lifecycle ─────────────────────────────────────────────────────────────
 
 
+def get_pool():
+    return _pool
+
+
 async def init_pool() -> None:
     global _pool
     if asyncpg is None:
@@ -101,12 +105,19 @@ CREATE INDEX IF NOT EXISTS idx_signals_unalerted ON failure_signals(alerted) WHE
 
 ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS co_signal_count INTEGER NOT NULL DEFAULT 0;
 
+CREATE TABLE IF NOT EXISTS companies (
+    id          TEXT PRIMARY KEY,
+    name        TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS api_keys (
     key         TEXT PRIMARY KEY,
     agent_id    TEXT        NOT NULL,
     customer_id TEXT        NOT NULL,
     active      BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    company_id  TEXT        REFERENCES companies(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS fixes (
@@ -353,6 +364,32 @@ async def fetch_policies(agent_id: str) -> list:
     except Exception as exc:
         logger.error("fetch_policies failed: %s", exc)
         return []
+
+
+async def create_api_key(
+    agent_id: str, customer_id: str, company_name: str | None = None, rate_limit_rpm: int = 600
+) -> str:
+    """Generate a new API key, upsert the company, store the key, and return it."""
+    import secrets
+    key = "dt_" + secrets.token_urlsafe(32)
+    if not _pool:
+        raise RuntimeError("DB pool not ready")
+    name = company_name or customer_id
+    async with _pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO companies (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
+                customer_id,
+                name,
+            )
+            await conn.execute(
+                "INSERT INTO api_keys (key, agent_id, customer_id, company_id, rate_limit_rpm) VALUES ($1, $2, $3, $3, $4)",
+                key,
+                agent_id,
+                customer_id,
+                rate_limit_rpm,
+            )
+    return key
 
 
 async def verify_api_key(api_key: str) -> Optional[str]:

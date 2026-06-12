@@ -1,5 +1,5 @@
 """
-Customer REST API. Read-only — serves runs, signals, and agent summaries.
+Customer REST API — serves runs, signals, agent summaries, and key management.
 
 Run:
     cd services/api
@@ -15,9 +15,10 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from api_svc.auth import require_customer
 from api_svc.config import settings
 from api_svc.db.queries import init_pool, close_pool, check_db
 from api_svc.routers import (
@@ -30,6 +31,7 @@ from api_svc.routers import (
     policies,
     patterns,
     slack,
+    keys,
 )
 from api_svc.schemas import HealthResponse
 
@@ -63,7 +65,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"] if settings.is_dev else ["https://app.dunetrace.io"],
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE", "PATCH"],
         allow_headers=["Authorization", "Content-Type"],
     )
 
@@ -81,15 +83,17 @@ def create_app() -> FastAPI:
         )
         return response
 
-    app.include_router(agents.router)
-    app.include_router(runs.router)
-    app.include_router(signals.router)
-    app.include_router(insights.router)
-    app.include_router(issues.router)
-    app.include_router(failure_patterns.router)
-    app.include_router(patterns.router)
-    app.include_router(policies.router)
-    app.include_router(slack.router)
+    _auth = [Depends(require_customer)]
+    app.include_router(agents.router, dependencies=_auth)
+    app.include_router(runs.router, dependencies=_auth)
+    app.include_router(signals.router, dependencies=_auth)
+    app.include_router(insights.router, dependencies=_auth)
+    app.include_router(issues.router, dependencies=_auth)
+    app.include_router(failure_patterns.router, dependencies=_auth)
+    app.include_router(patterns.router, dependencies=_auth)
+    app.include_router(policies.router, dependencies=_auth)
+    app.include_router(slack.router)  # uses Slack signature verification, not API key auth
+    app.include_router(keys.router, dependencies=_auth)
 
     @app.get("/health", response_model=HealthResponse, include_in_schema=False)
     async def health() -> HealthResponse:

@@ -43,6 +43,7 @@ coverage.xml
 # Claude Code
 CLAUDE.md
 .claude/
+.claude.json
 
 # macOS
 .DS_Store
