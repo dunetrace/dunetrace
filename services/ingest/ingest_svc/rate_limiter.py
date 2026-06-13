@@ -35,6 +35,7 @@ class RateLimiter:
         rpm = self._default_rpm
         try:
             from ingest_svc.db.postgres import get_pool
+
             pool = get_pool()
             if pool:
                 async with pool.acquire() as conn:
@@ -85,6 +86,7 @@ def get_limiter() -> RateLimiter:
     global _limiter
     if _limiter is None:
         import os
+
         default_rpm = int(os.getenv("RATE_LIMIT_RPM", "600"))
         _limiter = RateLimiter(default_rpm=default_rpm)
     return _limiter

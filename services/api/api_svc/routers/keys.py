@@ -17,6 +17,7 @@ router = APIRouter(prefix="/v1/keys", tags=["Keys"])
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
 
+
 class KeyOut(BaseModel):
     id: int
     key_prefix: str
@@ -37,7 +38,7 @@ class KeyCreateBody(BaseModel):
 
 class KeyCreateResponse(BaseModel):
     id: int
-    key: str           # full key — only returned once
+    key: str  # full key — only returned once
     key_prefix: str
     agent_id: str
     customer_id: str
@@ -47,6 +48,7 @@ class KeyCreateResponse(BaseModel):
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
 
 @router.get("", response_model=List[KeyOut])
 async def list_keys(

@@ -121,9 +121,19 @@ async def create_key(body: KeyCreateRequest) -> KeyCreateResponse:
     if not admin_key or body.admin_key != admin_key:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
     name = body.company_name or body.customer_id
-    key = await create_api_key(body.agent_id, body.customer_id, company_name=name, rate_limit_rpm=body.rate_limit_rpm)
-    logger.info("API key created. agent_id=%s customer_id=%s company=%s rpm=%d", body.agent_id, body.customer_id, name, body.rate_limit_rpm)
-    return KeyCreateResponse(key=key, agent_id=body.agent_id, customer_id=body.customer_id, company_name=name)
+    key = await create_api_key(
+        body.agent_id, body.customer_id, company_name=name, rate_limit_rpm=body.rate_limit_rpm
+    )
+    logger.info(
+        "API key created. agent_id=%s customer_id=%s company=%s rpm=%d",
+        body.agent_id,
+        body.customer_id,
+        name,
+        body.rate_limit_rpm,
+    )
+    return KeyCreateResponse(
+        key=key, agent_id=body.agent_id, customer_id=body.customer_id, company_name=name
+    )
 
 
 async def _persist(events: list, batch_id: str, agent_id: str) -> None:

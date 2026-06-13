@@ -10,6 +10,7 @@ import functools
 import inspect
 import json
 import logging
+import os
 import sys
 import time
 import urllib.request
@@ -58,7 +59,7 @@ class Dunetrace:
 
     def __init__(
         self,
-        endpoint: str = "http://localhost:8001",
+        endpoint: Optional[str] = None,
         api_key: Optional[str] = None,
         *,
         buffer_size: int = 10_000,
@@ -69,8 +70,9 @@ class Dunetrace:
         policy_secret: str = "",
         debug: bool = False,
     ) -> None:
-        self._ingest_url = endpoint.rstrip("/") + "/v1/ingest" if endpoint else None
-        self._api_key = api_key or ""
+        _endpoint = endpoint or os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8001")
+        self._ingest_url = _endpoint.rstrip("/") + "/v1/ingest"
+        self._api_key = api_key or os.environ.get("DUNETRACE_API_KEY", "")
         self._policy_secret = policy_secret
         self._buffer = RingBuffer[AgentEvent](maxsize=buffer_size)
         self._stop_evt = Event()
@@ -259,7 +261,7 @@ class Dunetrace:
         :param frameworks: Subset of frameworks to patch. ``None`` patches all
                            installed ones (openai, anthropic, httpx, requests).
         """
-        self._default_agent_id = agent_id
+        self._default_agent_id = agent_id or os.environ.get("DUNETRACE_AGENT_ID", "")
         from dunetrace.auto import auto_instrument as _auto_instrument
 
         _auto_instrument(frameworks=frameworks)

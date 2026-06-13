@@ -371,6 +371,7 @@ async def create_api_key(
 ) -> str:
     """Generate a new API key, upsert the company, store the key, and return it."""
     import secrets
+
     key = "dt_" + secrets.token_urlsafe(32)
     if not _pool:
         raise RuntimeError("DB pool not ready")

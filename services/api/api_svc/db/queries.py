@@ -2750,6 +2750,7 @@ async def get_detector_override(agent_id: str, failure_type: str) -> Optional[di
 
 # ── API key management ─────────────────────────────────────────────────────────
 
+
 def _mask_key(key: str) -> str:
     """Return first 10 + last 4 chars with ellipsis — never expose the full secret."""
     if len(key) <= 14:
@@ -2813,6 +2814,7 @@ async def create_api_key(
     rate_limit_rpm: int = 600,
 ) -> dict:
     import secrets as _sec
+
     key = "dt_" + _sec.token_urlsafe(32)
     name = company_name or customer_id
     if not _pool:
@@ -2821,7 +2823,8 @@ async def create_api_key(
         async with conn.transaction():
             await conn.execute(
                 "INSERT INTO companies (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
-                customer_id, name,
+                customer_id,
+                name,
             )
             row = await conn.fetchrow(
                 """
@@ -2829,7 +2832,10 @@ async def create_api_key(
                 VALUES ($1, $2, $3, $3, $4)
                 RETURNING id, created_at
                 """,
-                key, agent_id, customer_id, rate_limit_rpm,
+                key,
+                agent_id,
+                customer_id,
+                rate_limit_rpm,
             )
     return {
         "id": row["id"],

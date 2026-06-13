@@ -100,6 +100,7 @@ def create_app() -> FastAPI:
             return await call_next(request)
 
         import json as _json
+
         agent_id: str | None = None
         try:
             if request.method == "POST" and request.url.path in ("/v1/ingest", "/v1/deploy"):
@@ -134,7 +135,13 @@ def create_app() -> FastAPI:
             t = time.monotonic()
             response = await call_next(request)
             ms = (time.monotonic() - t) * 1000
-            logger.info("%s %s %d %.1fms [proxy]", request.method, request.url.path, response.status_code, ms)
+            logger.info(
+                "%s %s %d %.1fms [proxy]",
+                request.method,
+                request.url.path,
+                response.status_code,
+                ms,
+            )
             return response
 
         import json as _json
@@ -149,8 +156,10 @@ def create_app() -> FastAPI:
                 pass
 
         if request.url.path in ("/v1/ingest", "/v1/deploy"):
-            bucket = api_key if api_key and not api_key.startswith("dt_dev_") else (
-                request.client.host if request.client else "unknown"
+            bucket = (
+                api_key
+                if api_key and not api_key.startswith("dt_dev_")
+                else (request.client.host if request.client else "unknown")
             )
             limiter = get_limiter()
             allowed, retry_after = await limiter.is_allowed(bucket)
