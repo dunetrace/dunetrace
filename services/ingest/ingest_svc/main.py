@@ -91,12 +91,15 @@ def create_app() -> FastAPI:
             if agent_id:
                 pool = get_pool()
                 if pool:
-                    async with pool.acquire() as conn:
-                        async with conn.transaction():
-                            await conn.execute(
-                                "SELECT set_config('app.current_agent_id', $1, true)",
-                                agent_id,
-                            )
+                    try:
+                        async with pool.acquire() as conn:
+                            async with conn.transaction():
+                                await conn.execute(
+                                    "SELECT set_config('app.current_agent_id', $1, true)",
+                                    agent_id,
+                                )
+                    except Exception:
+                        pass
             return await call_next(request)
 
         import json as _json
@@ -118,12 +121,15 @@ def create_app() -> FastAPI:
         if agent_id:
             pool = get_pool()
             if pool:
-                async with pool.acquire() as conn:
-                    async with conn.transaction():
-                        await conn.execute(
-                            "SELECT set_config('app.current_agent_id', $1, true)",
-                            agent_id,
-                        )
+                try:
+                    async with pool.acquire() as conn:
+                        async with conn.transaction():
+                            await conn.execute(
+                                "SELECT set_config('app.current_agent_id', $1, true)",
+                                agent_id,
+                            )
+                except Exception:
+                    pass
         return await call_next(request)
 
     # Registered second = outer = runs FIRST.
