@@ -1,0 +1,16 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.11
+    hooks:
+      - id: ruff          # lint — auto-fixes what it can
+        args: [--fix]
+      - id: ruff-format   # format
+
+  - repo: local
+    hooks:
+      - id: ts-typecheck
+        name: TypeScript typecheck
+        language: system
+        entry: bash -c 'cd packages/sdk-ts && npm run typecheck'
+        pass_filenames: false
+        files: ^packages/sdk-ts/.*\.(ts|json)$

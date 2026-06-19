@@ -46,7 +46,7 @@ class RateLimiter:
                 if row:
                     rpm = row["rate_limit_rpm"]
         except Exception as exc:
-            logger.debug("rpm lookup failed for key %s…: %s", api_key[:10], exc)
+            logger.debug("rpm lookup failed: %s", exc)
 
         self._rpm_cache[api_key] = (rpm, now)
         return rpm
