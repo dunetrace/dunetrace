@@ -12,7 +12,6 @@ Docs:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -171,8 +170,7 @@ def create_app() -> FastAPI:
             limiter = get_limiter()
             allowed, retry_after = await limiter.is_allowed(bucket)
             if not allowed:
-                bucket_id = hashlib.sha256(bucket.encode()).hexdigest()[:8]
-                logger.warning("Rate limit exceeded. bucket=%s", bucket_id)
+                logger.warning("Rate limit exceeded. retry_after=%ds", retry_after)
                 return JSONResponse(
                     status_code=429,
                     content={"detail": "Rate limit exceeded."},

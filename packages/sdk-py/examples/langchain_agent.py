@@ -76,7 +76,7 @@ def calculator(expression: str) -> str:
     try:
         allowed = set("0123456789+-*/()., ")
         if all(c in allowed for c in expression):
-            return f"{expression} = {eval(expression)}"  # noqa: S307
+            return f"{expression} = {eval(expression)}"  # noqa: S307  # nosec B307
         return f"Cannot evaluate '{expression}' — only basic arithmetic supported."
     except Exception as e:
         return f"Error: {e}"

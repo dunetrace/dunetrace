@@ -6,6 +6,19 @@ repos:
         args: [--fix]
       - id: ruff-format   # format
 
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.8.3
+    hooks:
+      - id: bandit
+        args:
+          - --severity-level=medium   # skip LOW findings
+          - --confidence-level=medium # skip low-confidence findings
+          - --skip=B310,B608
+          # B310: urllib.request.urlopen — intentional in SDK client and alert webhook sender
+          # B608: SQL injection (low-confidence) — asyncpg uses $1/$2 parameterised queries;
+          #        bandit cannot see through f-string construction of WHERE clauses
+        files: ^(services|packages/sdk-py)/
+
   - repo: local
     hooks:
       - id: ts-typecheck
