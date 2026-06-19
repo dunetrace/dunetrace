@@ -71,30 +71,143 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-All 17 built-in detectors are live (`shadow = false`) by default. Custom detectors start in shadow mode — signals are stored and visible in the dashboard, but no Slack/webhook alert fires — until you add them to `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`:
-
-```python
-LIVE_DETECTORS: set[str] = {
-    "TOOL_LOOP",
-    "YOUR_NEW_DETECTOR",   # promote once precision > 80%
-    ...
-}
-```
-
-This lets you validate a new detector against real traffic before it pages anyone.
+All 17 built-in detectors are live (`shadow = false`) by default. User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
 
 ### Shadow signals in the dashboard
 
 The **Alerts** page surfaces shadow signals in a dedicated section below the live alert groups. Shadow signals are rendered with a dashed border, reduced opacity, and a `SHADOW` badge so they're visually distinct from alerted signals. The section only appears when at least one shadow signal exists.
 
-The API exposes shadow signals via `?include_shadow=true` on the signals endpoint. Each signal object includes a `shadow: bool` field:
+The API exposes shadow signals via `?include_shadow=true` on the signals and run-detail endpoints. Each signal object includes a `shadow: bool` field:
 
 ```bash
 curl "http://localhost:8002/v1/agents/my-agent/signals?include_shadow=true" \
   -H "Authorization: Bearer dt_dev_test"
+
+curl "http://localhost:8002/v1/runs/<run_id>?include_shadow=true" \
+  -H "Authorization: Bearer dt_dev_test"
 ```
 
-Use this to evaluate detector precision before graduating — compare shadow signal rate against run outcomes manually, then promote to `LIVE_DETECTORS` when confidence is high enough.
+Use shadow mode to evaluate detector precision before going live — review the fire rate via `/shadow-stats`, then activate when you're satisfied.
+
+---
+
+## Custom detectors
+
+Write a detector in plain English. An LLM translates your description into a structured condition set and the detector runs in shadow mode against all subsequent runs of your agent, accumulating results before any alert fires.
+
+### Creating a custom detector
+
+**Dashboard** — go to **Config → Custom detectors**, click **Add detector**, describe what you want to catch, preview the generated config, and save.
+
+**API**
+
+```bash
+# Step 1: translate description to config
+curl -s -X POST "http://localhost:8002/v1/custom-detectors/preview" \
+  -H "Authorization: Bearer dt_dev_test" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Alert if the same tool is called more than 3 times in a row with the same arguments", "agent_id": "*"}'
+
+# Response:
+{
+  "detector_name": "CUSTOM_CONSECUTIVE_IDENTICAL_TOOL_CALLS",
+  "conditions": [{"metric": "consecutive_identical_tool_calls", "operator": ">", "threshold": 3}],
+  "severity": "HIGH",
+  "evidence_template": "Same tool called {consecutive_identical_tool_calls} times with identical args.",
+  "fix_template": "Add deduplication logic before calling the tool.",
+  "requires_content": false
+}
+
+# Step 2: save it (always starts in shadow mode)
+curl -s -X POST "http://localhost:8002/v1/custom-detectors" \
+  -H "Authorization: Bearer dt_dev_test" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "...", "agent_id": "*", "config": <config from step 1>}'
+```
+
+### What you can detect
+
+Custom detectors evaluate structural metrics computed from the `RunState`. They cannot access raw content (prompts, tool arguments, model outputs — those are hashed at the SDK).
+
+| Metric | What it measures |
+|---|---|
+| `step_count` | Total steps in the run |
+| `tool_call_count` | Total tool calls |
+| `llm_call_count` | Total LLM calls |
+| `consecutive_identical_tool_calls` | Longest streak of the same tool with identical args |
+| `consecutive_tool_failures` | Longest streak of consecutive tool errors |
+| `token_growth_ratio` | Ratio of last-call tokens to first-call tokens |
+| `total_latency_ms` | Total wall-clock run duration in milliseconds |
+| `steps_since_last_tool` | Steps since the last tool call (measures reasoning stalls) |
+| `finish_reason_length_count` | Number of LLM calls that ended with `finish_reason=length` |
+| `tool_failure_rate` | Fraction of tool calls that returned an error |
+| `avg_llm_latency_ms` | Mean per-LLM-call latency in milliseconds |
+| `max_step_latency_ms` | Latency of the single slowest step |
+
+Supported operators: `>`, `>=`, `<`, `<=`, `==`, `!=`. Multiple conditions are ANDed — all must be true for the detector to fire.
+
+**What cannot be detected**: content patterns (specific words in prompts, tool output values, model names), multi-run trends, or any condition that requires access to raw text. The preview endpoint will return `{"requires_content": true, "reason": "..."}` for these cases and the config cannot be saved.
+
+### Shadow stats
+
+After a detector has run against some traffic:
+
+```bash
+curl "http://localhost:8002/v1/custom-detectors/1/shadow-stats" \
+  -H "Authorization: Bearer dt_dev_test"
+
+{
+  "total_runs": 42,
+  "fire_count": 7,
+  "fire_rate": 0.167,
+  "sample_runs": [{"run_id": "...", "agent_id": "...", "fired": true, "evaluated_at": "..."}]
+}
+```
+
+A fire rate above ~5–10% on production traffic is usually a good sign the detector is catching something real. Review the sample runs in the dashboard to check for false positives before activating.
+
+### Lifecycle
+
+```bash
+# Activate (alerts will fire on future runs)
+curl -X PATCH "http://localhost:8002/v1/custom-detectors/1" \
+  -H "Authorization: Bearer dt_dev_test" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "active"}'
+
+# Pause (stops evaluation entirely)
+curl -X PATCH "http://localhost:8002/v1/custom-detectors/1" \
+  -d '{"status": "paused"}'
+
+# Return to shadow (evaluates but doesn't alert)
+curl -X PATCH "http://localhost:8002/v1/custom-detectors/1" \
+  -d '{"status": "shadow"}'
+
+# Delete
+curl -X DELETE "http://localhost:8002/v1/custom-detectors/1"
+```
+
+| Status | Evaluated | Signal written | Shadow flag | Alert fires |
+|---|---|---|---|---|
+| `shadow` | yes | yes | `true` | no |
+| `active` | yes | yes | `false` | yes |
+| `paused` | no | no | — | no |
+
+### Agent scoping
+
+Set `agent_id` to a specific agent ID to restrict evaluation to that agent, or leave it as `"*"` to run against all agents. Per-agent detectors take priority over wildcard detectors when both match the same run.
+
+### API reference
+
+| Endpoint | Description |
+|---|---|
+| `POST /v1/custom-detectors/preview` | Translate description to config via LLM |
+| `GET /v1/custom-detectors` | List all detectors (optional `?agent_id=` filter) |
+| `POST /v1/custom-detectors` | Create a new detector (201) |
+| `GET /v1/custom-detectors/{id}` | Get one detector |
+| `GET /v1/custom-detectors/{id}/shadow-stats` | Fire rate + sample runs |
+| `PATCH /v1/custom-detectors/{id}` | Update status (`shadow` / `active` / `paused`) |
+| `DELETE /v1/custom-detectors/{id}` | Delete (204) |
 
 ---
 

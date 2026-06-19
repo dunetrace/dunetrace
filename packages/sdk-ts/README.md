@@ -203,6 +203,8 @@ Token counts, latencies, step counts, and model names are sent as plain metadata
 | Quality | `REASONING_STALL` `EMPTY_LLM_RESPONSE` `RAG_EMPTY_RETRIEVAL` `CASCADING_TOOL_FAILURE` |
 | Security | `PROMPT_INJECTION_SIGNAL` |
 
+You can also define **custom detectors** in plain English from the dashboard or API. They run in shadow mode on every run and accumulate results before any alert fires. → [Custom detectors](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md#custom-detectors)
+
 ## Backend
 
 ```bash

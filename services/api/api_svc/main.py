@@ -23,6 +23,7 @@ from api_svc.config import settings
 from api_svc.db.queries import init_pool, close_pool, check_db
 from api_svc.routers import (
     agents,
+    custom_detectors,
     runs,
     signals,
     insights,
@@ -85,6 +86,7 @@ def create_app() -> FastAPI:
 
     _auth = [Depends(require_customer)]
     app.include_router(agents.router, dependencies=_auth)
+    app.include_router(custom_detectors.router, dependencies=_auth)
     app.include_router(runs.router, dependencies=_auth)
     app.include_router(signals.router, dependencies=_auth)
     app.include_router(insights.router, dependencies=_auth)

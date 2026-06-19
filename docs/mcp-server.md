@@ -363,10 +363,12 @@ Search signals across all agents with combined filters. Useful for cross-agent a
 | Argument | Type | Default | Description |
 |---|---|---|---|
 | `severity` | string | — | Filter: `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW` |
-| `failure_type` | string | — | Detector name e.g. `TOOL_LOOP`, `COST_SPIKE`, `CONTEXT_BLOAT` |
+| `failure_type` | string | — | Detector name e.g. `TOOL_LOOP`, `COST_SPIKE`, `CUSTOM_MY_DETECTOR` |
 | `since_hours` | int | — | Only signals from the last N hours |
 | `agent_id` | string | — | Restrict to one agent; searches all agents if omitted |
 | `limit` | int | 30 | Max signals to return (max 200) |
+
+Custom detector signals have `failure_type` values starting with `CUSTOM_` (e.g. `CUSTOM_CONSECUTIVE_IDENTICAL_TOOL_CALLS`). Only **active** custom detector signals appear here by default — shadow signals are excluded unless explicitly requested via the Customer API (`?include_shadow=true`).
 
 **Example — all TOOL_LOOP signals for `langchain-example-agent`:**
 ```

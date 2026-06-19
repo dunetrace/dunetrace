@@ -102,6 +102,32 @@ CREATE TABLE IF NOT EXISTS issues (
     clean_runs_since INTEGER      NOT NULL DEFAULT 0,
     UNIQUE (agent_id, failure_type)
 );
+
+-- Custom detector tables (also created by the API service; duplicated here so the
+-- detector worker can start before the API without failing on missing tables).
+CREATE TABLE IF NOT EXISTS custom_detectors (
+    id                BIGSERIAL    PRIMARY KEY,
+    agent_id          TEXT         NOT NULL DEFAULT '*',
+    name              TEXT         NOT NULL,
+    description       TEXT         NOT NULL,
+    config_json       JSONB        NOT NULL,
+    status            TEXT         NOT NULL DEFAULT 'shadow',
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    total_runs        INTEGER      NOT NULL DEFAULT 0,
+    shadow_fire_count INTEGER      NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_custom_detectors_agent ON custom_detectors(agent_id, status);
+
+CREATE TABLE IF NOT EXISTS custom_detector_results (
+    id           BIGSERIAL    PRIMARY KEY,
+    detector_id  BIGINT       NOT NULL REFERENCES custom_detectors(id) ON DELETE CASCADE,
+    run_id       TEXT         NOT NULL,
+    agent_id     TEXT         NOT NULL,
+    fired        BOOLEAN      NOT NULL,
+    evaluated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
 """
 
 # Detectors that have graduated out of shadow mode.
@@ -747,6 +773,104 @@ async def advance_clean_runs(agent_id: str, fired_types: list[str]) -> None:
             agent_id,
             fired_types or None,
             CLEAN_RUNS_THRESHOLD,
+        )
+
+
+async def fetch_custom_detectors(agent_id: str) -> list[dict]:
+    """Load active and shadow custom detectors for the given agent_id (plus '*' wildcards)."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, name, config_json, status
+            FROM custom_detectors
+            WHERE (agent_id = $1 OR agent_id = '*')
+              AND status IN ('shadow', 'active')
+            ORDER BY id
+            """,
+            agent_id,
+        )
+    return [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "config": json.loads(r["config_json"]) if isinstance(r["config_json"], str) else dict(r["config_json"]),
+            "shadow": r["status"] == "shadow",
+        }
+        for r in rows
+    ]
+
+
+async def record_custom_detector_results(
+    results: list[dict],
+) -> None:
+    """Bulk-insert custom detector evaluation results for shadow analytics.
+
+    Each entry: {detector_id, run_id, agent_id, fired}
+    """
+    if not results or not _pool:
+        return
+    fired_ids = [r["detector_id"] for r in results if r["fired"]]
+    all_ids = [r["detector_id"] for r in results]
+    async with _pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.executemany(
+                """
+                INSERT INTO custom_detector_results (detector_id, run_id, agent_id, fired)
+                VALUES ($1, $2, $3, $4)
+                """,
+                [(r["detector_id"], r["run_id"], r["agent_id"], r["fired"]) for r in results],
+            )
+            if all_ids:
+                await conn.execute(
+                    "UPDATE custom_detectors SET total_runs = total_runs + 1 WHERE id = ANY($1::bigint[])",
+                    all_ids,
+                )
+            if fired_ids:
+                # Only increment shadow_fire_count for detectors still in shadow mode;
+                # active detectors that fire should not skew the shadow analytics.
+                await conn.execute(
+                    """
+                    UPDATE custom_detectors
+                    SET shadow_fire_count = shadow_fire_count + 1
+                    WHERE id = ANY($1::bigint[]) AND status = 'shadow'
+                    """,
+                    fired_ids,
+                )
+
+
+async def write_custom_signal(
+    failure_type: str,
+    severity: str,
+    run_id: str,
+    agent_id: str,
+    agent_version: str,
+    step_index: int,
+    confidence: float,
+    evidence: dict,
+    shadow: bool,
+) -> None:
+    """Write a custom detector signal directly as TEXT failure_type (no enum required)."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO failure_signals
+                (failure_type, severity, run_id, agent_id, agent_version,
+                 step_index, confidence, evidence, shadow, co_signal_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 0)
+            """,
+            failure_type,
+            severity,
+            run_id,
+            agent_id,
+            agent_version,
+            step_index,
+            confidence,
+            json.dumps(evidence),
+            shadow,
         )
 
 

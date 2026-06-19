@@ -1206,6 +1206,39 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <div id="config-preview" style="font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.8;color:var(--chalk4)">loading…</div>
     </div>
   </div>
+
+  <!-- ── CUSTOM DETECTORS ── -->
+  <div class="sec-head" style="margin-top:2rem">
+    <span class="sec-title">Custom detectors</span>
+    <button class="btn-primary" onclick="openCustomDetectorForm()" id="cd-new-btn">+ New detector</button>
+  </div>
+
+  <!-- Create form -->
+  <div id="cd-form" class="table-card" style="display:none;padding:1.5rem">
+    <div style="font-size:12px;color:var(--chalk3);margin-bottom:.5rem">Describe what you want to detect — in plain English</div>
+    <textarea id="cd-description" rows="3" placeholder="e.g. Alert me when the same tool is called more than 3 times in a row without making progress" style="width:100%;box-sizing:border-box;background:var(--s2);border:1px solid var(--wire);border-radius:6px;padding:.75rem;font-size:13px;color:var(--chalk1);resize:vertical;font-family:inherit;line-height:1.5"></textarea>
+    <div style="margin-top:.75rem;display:flex;gap:.5rem;align-items:center">
+      <select id="cd-agent-id" style="background:var(--s2);border:1px solid var(--wire);border-radius:4px;padding:.4rem .6rem;font-size:12px;color:var(--chalk2)">
+        <option value="*">All agents</option>
+      </select>
+      <button class="btn-primary" onclick="previewCustomDetector()" id="cd-preview-btn">Preview</button>
+      <button class="act-btn act-secondary" onclick="closeCustomDetectorForm()">Cancel</button>
+    </div>
+
+    <!-- Preview result -->
+    <div id="cd-preview-result" style="display:none;margin-top:1.25rem;padding-top:1.25rem;border-top:1px solid var(--wire)">
+      <div id="cd-preview-content"></div>
+      <div id="cd-save-row" style="display:none;margin-top:1rem;gap:.5rem">
+        <button class="btn-primary" onclick="saveCustomDetector()">Save in shadow mode</button>
+        <button class="act-btn act-secondary" onclick="document.getElementById('cd-preview-result').style.display='none'">Edit description</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- List of existing custom detectors -->
+  <div id="cd-list" style="margin-top:1rem">
+    <div class="loading" id="cd-list-loading" style="display:none">loading…</div>
+  </div>
 </div>
 
 <!-- ── AGENTS PAGE ── -->
@@ -2831,6 +2864,7 @@ function nav(id, el) {
   if (id === 'tokens')   { renderTokens(); loadTokenStats(); }
   if (id === 'policies') loadAndRenderPolicies();
   if (id === 'keys')     loadAndRenderKeys();
+  if (id === 'config')   loadCustomDetectors();
 }
 
 // ── Detail tabs ───────────────────────────────────────────────────────────────
@@ -4065,6 +4099,196 @@ function copyNewKey() {
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 loadAll().then(handleDeepLink);
 setInterval(loadAll, 15000);
+
+// ── Custom detectors ──────────────────────────────────────────────────────────
+
+let _cdPreviewConfig = null;
+
+async function cdPatch(path, body) {
+  const r = await fetch(API + path, {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer ' + KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || r.status); }
+  return r.json();
+}
+
+async function cdDelete(path) {
+  const r = await fetch(API + path, { method: 'DELETE', headers: { Authorization: 'Bearer ' + KEY } });
+  if (!r.ok && r.status !== 204) throw new Error(r.status);
+}
+
+function openCustomDetectorForm() {
+  const form = document.getElementById('cd-form');
+  form.style.display = 'block';
+  document.getElementById('cd-description').focus();
+  document.getElementById('cd-preview-result').style.display = 'none';
+  _cdPreviewConfig = null;
+  const sel = document.getElementById('cd-agent-id');
+  if (sel.options.length === 1) {
+    _agents.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a.agent_id;
+      opt.textContent = a.agent_id;
+      sel.appendChild(opt);
+    });
+  }
+}
+
+function closeCustomDetectorForm() {
+  document.getElementById('cd-form').style.display = 'none';
+  document.getElementById('cd-description').value = '';
+  document.getElementById('cd-preview-result').style.display = 'none';
+  _cdPreviewConfig = null;
+}
+
+async function previewCustomDetector() {
+  const desc = document.getElementById('cd-description').value.trim();
+  if (!desc) return;
+  const btn = document.getElementById('cd-preview-btn');
+  btn.textContent = 'Translating…';
+  btn.disabled = true;
+  const result = document.getElementById('cd-preview-result');
+  const content = document.getElementById('cd-preview-content');
+  result.style.display = 'none';
+  _cdPreviewConfig = null;
+  try {
+    const agentId = document.getElementById('cd-agent-id').value;
+    const data = await apiPost('/v1/custom-detectors/preview', { description: desc, agent_id: agentId });
+    result.style.display = 'block';
+    if (data.requires_content) {
+      content.innerHTML = `
+        <div style="padding:1rem;background:rgba(255,200,0,0.07);border:1px solid rgba(255,200,0,0.2);border-radius:6px">
+          <div style="font-size:12px;color:var(--amber);font-weight:600;margin-bottom:.4rem">Cannot be detected from metadata</div>
+          <div style="font-size:12px;color:var(--chalk3)">${esc(data.reason)}</div>
+          <div style="font-size:11px;color:var(--chalk4);margin-top:.75rem">Dunetrace only monitors agent metadata — no prompts or outputs stored. For semantic quality checks, connect Langfuse via Settings → Integrations.</div>
+        </div>`;
+      document.getElementById('cd-save-row').style.display = 'none';
+    } else {
+      _cdPreviewConfig = data;
+      const conditions = (data.conditions || []).map(c =>
+        `<span class="mono" style="font-size:11px;color:var(--chalk2)">${esc(c.metric)} ${esc(c.operator)} ${c.threshold}</span>`
+      ).join(' <span style="color:var(--chalk4)">AND</span> ');
+      content.innerHTML = `
+        <div style="display:grid;grid-template-columns:120px 1fr;gap:.5rem .75rem;font-size:12px">
+          <span style="color:var(--chalk4)">Name</span>
+          <span class="mono" style="color:var(--orange)">${esc(data.detector_name)}</span>
+          <span style="color:var(--chalk4)">Condition</span>
+          <span>${conditions}</span>
+          <span style="color:var(--chalk4)">Severity</span>
+          <span style="color:var(--chalk2)">${esc(data.severity)}</span>
+          <span style="color:var(--chalk4)">Evidence</span>
+          <span style="color:var(--chalk3)">${esc(data.evidence_template || '')}</span>
+          <span style="color:var(--chalk4)">Fix hint</span>
+          <span style="color:var(--chalk3)">${esc(data.fix_template || '')}</span>
+        </div>
+        <div style="margin-top:.75rem;font-size:11px;color:var(--chalk4);font-style:italic">Starts in shadow mode — runs silently on every new agent run until you review results and activate it.</div>`;
+      document.getElementById('cd-save-row').style.display = 'flex';
+    }
+  } catch(e) {
+    result.style.display = 'block';
+    content.innerHTML = `<div style="color:var(--red);font-size:12px">Translation failed: ${esc(String(e))}</div>`;
+    document.getElementById('cd-save-row').style.display = 'none';
+  } finally {
+    btn.textContent = 'Preview';
+    btn.disabled = false;
+  }
+}
+
+async function saveCustomDetector() {
+  if (!_cdPreviewConfig) return;
+  const desc = document.getElementById('cd-description').value.trim();
+  const agentId = document.getElementById('cd-agent-id').value;
+  const saveBtn = document.querySelector('#cd-save-row .btn-primary');
+  saveBtn.textContent = 'Saving…';
+  saveBtn.disabled = true;
+  try {
+    await apiPost('/v1/custom-detectors', { description: desc, agent_id: agentId, config: _cdPreviewConfig });
+    closeCustomDetectorForm();
+    await loadCustomDetectors();
+  } catch(e) {
+    alert('Failed to save: ' + e);
+  } finally {
+    saveBtn.textContent = 'Save in shadow mode';
+    saveBtn.disabled = false;
+  }
+}
+
+async function loadCustomDetectors() {
+  const list = document.getElementById('cd-list');
+  if (!list) return;
+  list.innerHTML = '<div class="loading">loading…</div>';
+  try {
+    const dets = await apiFetch('/v1/custom-detectors');
+    if (!dets || dets.length === 0) {
+      list.innerHTML = '<div style="font-size:12px;color:var(--chalk4);padding:.5rem 0">No custom detectors yet. Create one above to get started.</div>';
+      return;
+    }
+    list.innerHTML = dets.map(d => renderCustomDetectorCard(d)).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--chalk4)">Failed to load custom detectors.</div>';
+  }
+}
+
+function renderCustomDetectorCard(d) {
+  const fireRate = d.total_runs > 0 ? ((d.shadow_fire_count / d.total_runs) * 100).toFixed(1) : null;
+  const statusColor = d.status === 'active' ? 'var(--green)' : d.status === 'shadow' ? 'var(--amber)' : 'var(--chalk4)';
+  const statusLabel = d.status === 'shadow' ? 'shadow mode' : d.status;
+  const conditions = (d.config.conditions || []).map(c =>
+    `<code style="font-size:11px">${esc(c.metric)} ${esc(c.operator)} ${c.threshold}</code>`
+  ).join(' AND ');
+  const shadowNote = d.status === 'shadow' && d.total_runs > 0
+    ? `<div style="font-size:11px;color:var(--chalk4);margin-top:.4rem">Evaluated on ${d.total_runs} runs — would have fired ${d.shadow_fire_count} times${fireRate !== null ? ` (${fireRate}%)` : ''}</div>`
+    : d.status === 'shadow' && d.total_runs === 0
+    ? `<div style="font-size:11px;color:var(--chalk4);margin-top:.4rem">Waiting for first run to evaluate…</div>`
+    : '';
+  const activateBtn = d.status === 'shadow'
+    ? `<button class="act-btn act-secondary" onclick="activateCustomDetector(${d.id})" style="font-size:11px">Activate</button>`
+    : d.status === 'active'
+    ? `<button class="act-btn act-secondary" onclick="pauseCustomDetector(${d.id})" style="font-size:11px">Pause</button>`
+    : `<button class="act-btn act-secondary" onclick="resumeCustomDetector(${d.id})" style="font-size:11px">Resume</button>`;
+  return `
+    <div class="table-card" style="padding:1.25rem;margin-bottom:.75rem">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.35rem">
+            <span class="mono" style="font-size:12px;color:var(--orange)">${esc(d.name)}</span>
+            <span style="font-size:10px;color:${statusColor};padding:1px 6px;border-radius:3px;border:1px solid ${statusColor}">${statusLabel}</span>
+          </div>
+          <div style="font-size:12px;color:var(--chalk3);margin-bottom:.4rem">${esc(d.description)}</div>
+          <div style="font-size:11px;color:var(--chalk4)">Condition: ${conditions}</div>
+          ${shadowNote}
+        </div>
+        <div style="display:flex;gap:.4rem;align-items:center;margin-left:1rem;flex-shrink:0">
+          ${activateBtn}
+          <button class="act-btn" style="font-size:11px;color:var(--red);background:transparent;border:1px solid rgba(255,80,80,0.2)" data-cd-id="${d.id}" data-cd-name="${esc(d.name)}" onclick="deleteCustomDetector(parseInt(this.dataset.cdId,10),this.dataset.cdName)">Delete</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function activateCustomDetector(id) {
+  try { await cdPatch(`/v1/custom-detectors/${id}`, {status:'active'}); await loadCustomDetectors(); }
+  catch(e) { alert('Failed: ' + e); }
+}
+
+async function pauseCustomDetector(id) {
+  try { await cdPatch(`/v1/custom-detectors/${id}`, {status:'paused'}); await loadCustomDetectors(); }
+  catch(e) { alert('Failed: ' + e); }
+}
+
+async function resumeCustomDetector(id) {
+  try { await cdPatch(`/v1/custom-detectors/${id}`, {status:'shadow'}); await loadCustomDetectors(); }
+  catch(e) { alert('Failed: ' + e); }
+}
+
+async function deleteCustomDetector(id, name) {
+  if (!confirm(`Delete custom detector "${name}"?\nThis cannot be undone.`)) return;
+  try { await cdDelete(`/v1/custom-detectors/${id}`); await loadCustomDetectors(); }
+  catch(e) { alert('Failed to delete: ' + e); }
+}
+
 </script>
 </body>
 </html>

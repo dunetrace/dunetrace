@@ -78,6 +78,7 @@ if _PYDANTIC:
         confidence: float
         detected_at: float
         evidence: Dict[str, Any]
+        shadow: bool = False
         title: str
         what: str
         why_it_matters: str

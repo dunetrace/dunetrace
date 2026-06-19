@@ -69,9 +69,10 @@ async def get_runs(
 )
 async def get_run(
     run_id: str,
+    include_shadow: bool = False,
     _customer: str = Depends(require_customer),
 ) -> RunDetail:
-    data = await get_run_detail(run_id)
+    data = await get_run_detail(run_id, include_shadow=include_shadow)
     if not data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Run {run_id!r} not found"

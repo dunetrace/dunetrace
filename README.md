@@ -33,7 +33,7 @@ Dunetrace answers a different question: **is something breaking right now?**  an
 
 **Monitor** - watches every run as it completes: tool calls, LLM calls, latency, token usage, retrieval results.
 
-**Detect** - 17 structural detectors run automatically. No LLM, no configuration. Catches tool loops, retry storms, context bloat, runaway cost, slow sessions, goal abandonment, and more.
+**Detect** - 17 structural detectors run automatically. No LLM, no configuration. Catches tool loops, retry storms, context bloat, runaway cost, slow sessions, goal abandonment, and more. Write your own detectors in plain English — they run in shadow mode and accumulate results before any alert fires.
 
 **Diagnose** - each alert includes a plain-English explanation: what happened, why it matters, and a concrete fix. If you use Langfuse, click **Explain +** to get an LLM root-cause analysis against the actual trace.
 
@@ -171,6 +171,16 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 Each alert includes: what fired, why it matters, a concrete fix, and a rate context line (first occurrence / recurring / systemic).
 
 → [docs/detectors.md](docs/detectors.md)
+
+---
+
+## Custom Detectors
+
+Write a detector in plain English. Dunetrace translates your description into a structured condition set, runs it in shadow mode against real traffic, and lets you review the fire rate before any alert fires.
+
+In the dashboard: **Config → Custom detectors → Add detector**.
+
+→ [docs/detectors.md#custom-detectors](docs/detectors.md#custom-detectors)
 
 ---
 

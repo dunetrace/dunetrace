@@ -105,6 +105,32 @@ ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_rpm INTEGER NOT NULL DE
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_id ON api_keys(id);
 """
 
+_CUSTOM_DETECTORS_DDL = """
+CREATE TABLE IF NOT EXISTS custom_detectors (
+    id                BIGSERIAL    PRIMARY KEY,
+    agent_id          TEXT         NOT NULL DEFAULT '*',
+    name              TEXT         NOT NULL,
+    description       TEXT         NOT NULL,
+    config_json       JSONB        NOT NULL,
+    status            TEXT         NOT NULL DEFAULT 'shadow',
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    total_runs        INTEGER      NOT NULL DEFAULT 0,
+    shadow_fire_count INTEGER      NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_custom_detectors_agent ON custom_detectors(agent_id, status);
+
+CREATE TABLE IF NOT EXISTS custom_detector_results (
+    id           BIGSERIAL    PRIMARY KEY,
+    detector_id  BIGINT       NOT NULL REFERENCES custom_detectors(id) ON DELETE CASCADE,
+    run_id       TEXT         NOT NULL,
+    agent_id     TEXT         NOT NULL,
+    fired        BOOLEAN      NOT NULL,
+    evaluated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
+"""
+
 
 async def init_pool() -> None:
     global _pool
@@ -123,6 +149,7 @@ async def init_pool() -> None:
         await conn.execute(_POLICY_SECURITY_DDL)
         await conn.execute(_FEEDBACK_DDL)
         await conn.execute(_KEYS_DDL)
+        await conn.execute(_CUSTOM_DETECTORS_DDL)
     logger.info("DB pool ready")
 
 
@@ -384,7 +411,7 @@ async def list_runs(
     return results, total or 0
 
 
-async def get_run_detail(run_id: str) -> Optional[dict]:
+async def get_run_detail(run_id: str, include_shadow: bool = False) -> Optional[dict]:
     """Full run detail: metadata + events + signals with explanations."""
     if not _pool:
         return None
@@ -408,13 +435,14 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
             run_id,
         )
 
+        shadow_filter = "" if include_shadow else "AND shadow = FALSE"
         signals = await conn.fetch(
-            """
+            f"""
             SELECT id, failure_type, severity, step_index, confidence,
-                   detected_at, evidence
+                   detected_at, evidence, shadow
             FROM failure_signals
-            WHERE run_id = $1 AND shadow = FALSE
-            ORDER BY step_index ASC
+            WHERE run_id = $1 {shadow_filter}
+            ORDER BY shadow ASC, step_index ASC
             """,
             run_id,
         )
@@ -452,9 +480,11 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
         if hasattr(detected_at, "timestamp"):
             detected_at = detected_at.timestamp()
 
+        exp = None
         try:
+            ft = FailureType(s["failure_type"])
             fs = FailureSignal(
-                failure_type=FailureType(s["failure_type"]),
+                failure_type=ft,
                 severity=Severity(s["severity"]),
                 run_id=run_id,
                 agent_id=dict(pr)["agent_id"],
@@ -465,9 +495,10 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
                 detected_at=detected_at,
             )
             exp = explain(fs)
+        except ValueError:
+            pass  # custom failure types (CUSTOM_*) are not in the FailureType enum
         except Exception as exc:
             logger.error("Explain failed for signal %d: %s", s["id"], exc)
-            exp = None
 
         signal_list.append(
             {
@@ -478,6 +509,7 @@ async def get_run_detail(run_id: str) -> Optional[dict]:
                 "confidence": s["confidence"],
                 "detected_at": detected_at,
                 "evidence": dict(evidence) if evidence else {},
+                "shadow": s["shadow"],
                 "title": exp.title if exp else s["failure_type"],
                 "what": exp.what if exp else "",
                 "why_it_matters": exp.why_it_matters if exp else "",
@@ -2858,3 +2890,120 @@ async def revoke_api_key(key_id: int) -> bool:
             key_id,
         )
     return result.split()[-1] != "0"
+
+
+# ── Custom detectors ───────────────────────────────────────────────────────────
+
+
+def _custom_detector_row(r) -> dict:
+    return {
+        "id": r["id"],
+        "agent_id": r["agent_id"],
+        "name": r["name"],
+        "description": r["description"],
+        "config": r["config_json"] if isinstance(r["config_json"], dict) else _json_mod.loads(r["config_json"]),
+        "status": r["status"],
+        "created_at": r["created_at"].isoformat(),
+        "total_runs": r["total_runs"],
+        "shadow_fire_count": r["shadow_fire_count"],
+    }
+
+
+async def list_custom_detectors(agent_id: Optional[str] = None) -> list[dict]:
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        if agent_id:
+            rows = await conn.fetch(
+                "SELECT * FROM custom_detectors WHERE agent_id = $1 OR agent_id = '*' ORDER BY created_at DESC",
+                agent_id,
+            )
+        else:
+            rows = await conn.fetch("SELECT * FROM custom_detectors ORDER BY created_at DESC")
+    return [_custom_detector_row(r) for r in rows]
+
+
+async def get_custom_detector(detector_id: int) -> Optional[dict]:
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM custom_detectors WHERE id = $1", detector_id)
+    return _custom_detector_row(row) if row else None
+
+
+async def create_custom_detector(
+    agent_id: str, name: str, description: str, config: dict
+) -> dict:
+    if not _pool:
+        raise RuntimeError("DB pool not initialized")
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO custom_detectors (agent_id, name, description, config_json, status)
+            VALUES ($1, $2, $3, $4::jsonb, 'shadow')
+            RETURNING *
+            """,
+            agent_id,
+            name,
+            description,
+            _json_mod.dumps(config),
+        )
+    return _custom_detector_row(row)
+
+
+async def update_custom_detector_status(detector_id: int, status: str) -> Optional[dict]:
+    if not _pool:
+        raise RuntimeError("DB pool not initialized")
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE custom_detectors SET status = $2 WHERE id = $1 RETURNING *",
+            detector_id,
+            status,
+        )
+    return _custom_detector_row(row) if row else None
+
+
+async def delete_custom_detector(detector_id: int) -> bool:
+    if not _pool:
+        raise RuntimeError("DB pool not initialized")
+    async with _pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM custom_detectors WHERE id = $1", detector_id)
+    return result.split()[-1] != "0"
+
+
+async def get_custom_detector_shadow_stats(detector_id: int) -> dict:
+    """Return shadow evaluation stats: total runs evaluated and sample firing runs."""
+    if not _pool:
+        return {"total_runs": 0, "fire_count": 0, "fire_rate": 0.0, "sample_runs": []}
+    async with _pool.acquire() as conn:
+        stats = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*)                                   AS total_runs,
+                COUNT(*) FILTER (WHERE fired = TRUE)       AS fire_count
+            FROM custom_detector_results
+            WHERE detector_id = $1
+            """,
+            detector_id,
+        )
+        samples = await conn.fetch(
+            """
+            SELECT run_id, agent_id, evaluated_at
+            FROM custom_detector_results
+            WHERE detector_id = $1 AND fired = TRUE
+            ORDER BY evaluated_at DESC
+            LIMIT 5
+            """,
+            detector_id,
+        )
+    total = stats["total_runs"] or 0
+    fires = stats["fire_count"] or 0
+    return {
+        "total_runs": total,
+        "fire_count": fires,
+        "fire_rate": round(fires / total, 4) if total > 0 else 0.0,
+        "sample_runs": [
+            {"run_id": r["run_id"], "agent_id": r["agent_id"], "evaluated_at": r["evaluated_at"].isoformat()}
+            for r in samples
+        ],
+    }

@@ -14,11 +14,13 @@ from dunetrace.risk_engine import RiskEngine
 from detector_svc.detectors import get_detectors
 
 from detector_svc.config import settings
+from detector_svc.custom_detector import evaluate_custom_detector
 from detector_svc.db import (
     LIVE_DETECTORS,
     close_pool,
     ensure_detector_schema,
     fetch_completed_runs,
+    fetch_custom_detectors,
     fetch_duration_baseline,
     fetch_latency_baseline,
     fetch_llm_tool_ratio_baseline,
@@ -29,6 +31,8 @@ from detector_svc.db import (
     fetch_total_tokens_baseline,
     init_pool,
     mark_run_processed,
+    record_custom_detector_results,
+    write_custom_signal,
     write_signals,
     upsert_fired_issues,
     advance_clean_runs,
@@ -161,6 +165,34 @@ async def process_run(
         await advance_clean_runs(agent_id, fired_types)
     except Exception as exc:
         logger.warning("Issue tracking failed for run_id=%s: %s", run_id, exc)
+
+    # Custom detectors — run after built-ins, tracked separately
+    try:
+        custom_defs = await fetch_custom_detectors(agent_id)
+        if custom_defs:
+            cdr_records = []
+            for cd in custom_defs:
+                result = evaluate_custom_detector(cd["config"], state)
+                fired = result is not None
+                cdr_records.append(
+                    {"detector_id": cd["id"], "run_id": run_id, "agent_id": agent_id, "fired": fired}
+                )
+                if fired:
+                    await write_custom_signal(
+                        failure_type=result["failure_type"],
+                        severity=result["severity"],
+                        run_id=run_id,
+                        agent_id=agent_id,
+                        agent_version=agent_version,
+                        step_index=result["step_index"],
+                        confidence=result["confidence"],
+                        evidence=result["evidence"],
+                        shadow=cd["shadow"],
+                    )
+                    count += 1
+            await record_custom_detector_results(cdr_records)
+    except Exception as exc:
+        logger.warning("Custom detector processing failed for run_id=%s: %s", run_id, exc)
 
     await mark_run_processed(run_id, agent_id, agent_version, trigger, count)
     return count
