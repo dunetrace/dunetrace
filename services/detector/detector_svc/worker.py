@@ -175,7 +175,12 @@ async def process_run(
                 result = evaluate_custom_detector(cd["config"], state)
                 fired = result is not None
                 cdr_records.append(
-                    {"detector_id": cd["id"], "run_id": run_id, "agent_id": agent_id, "fired": fired}
+                    {
+                        "detector_id": cd["id"],
+                        "run_id": run_id,
+                        "agent_id": agent_id,
+                        "fired": fired,
+                    }
                 )
                 if fired:
                     await write_custom_signal(

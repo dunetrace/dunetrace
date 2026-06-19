@@ -12,8 +12,8 @@ logger = logging.getLogger("dunetrace.detector.custom")
 _OPERATORS = {
     ">=": lambda a, b: a >= b,
     "<=": lambda a, b: a <= b,
-    ">":  lambda a, b: a > b,
-    "<":  lambda a, b: a < b,
+    ">": lambda a, b: a > b,
+    "<": lambda a, b: a < b,
     "==": lambda a, b: a == b,
     "!=": lambda a, b: a != b,
 }
@@ -105,7 +105,9 @@ def evaluate_custom_detector(config: dict, state: RunState) -> Optional[dict]:
         value = _compute_metric(state, metric)
         op_fn = _OPERATORS.get(operator)
         if op_fn is None:
-            logger.warning("Unknown operator %r in custom detector %s", operator, config.get("detector_name"))
+            logger.warning(
+                "Unknown operator %r in custom detector %s", operator, config.get("detector_name")
+            )
             return None
         if not op_fn(value, threshold):
             return None

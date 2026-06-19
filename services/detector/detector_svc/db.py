@@ -795,7 +795,9 @@ async def fetch_custom_detectors(agent_id: str) -> list[dict]:
         {
             "id": r["id"],
             "name": r["name"],
-            "config": json.loads(r["config_json"]) if isinstance(r["config_json"], str) else dict(r["config_json"]),
+            "config": json.loads(r["config_json"])
+            if isinstance(r["config_json"], str)
+            else dict(r["config_json"]),
             "shadow": r["status"] == "shadow",
         }
         for r in rows

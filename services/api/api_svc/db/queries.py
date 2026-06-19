@@ -2901,7 +2901,9 @@ def _custom_detector_row(r) -> dict:
         "agent_id": r["agent_id"],
         "name": r["name"],
         "description": r["description"],
-        "config": r["config_json"] if isinstance(r["config_json"], dict) else _json_mod.loads(r["config_json"]),
+        "config": r["config_json"]
+        if isinstance(r["config_json"], dict)
+        else _json_mod.loads(r["config_json"]),
         "status": r["status"],
         "created_at": r["created_at"].isoformat(),
         "total_runs": r["total_runs"],
@@ -2931,9 +2933,7 @@ async def get_custom_detector(detector_id: int) -> Optional[dict]:
     return _custom_detector_row(row) if row else None
 
 
-async def create_custom_detector(
-    agent_id: str, name: str, description: str, config: dict
-) -> dict:
+async def create_custom_detector(agent_id: str, name: str, description: str, config: dict) -> dict:
     if not _pool:
         raise RuntimeError("DB pool not initialized")
     async with _pool.acquire() as conn:
@@ -3003,7 +3003,11 @@ async def get_custom_detector_shadow_stats(detector_id: int) -> dict:
         "fire_count": fires,
         "fire_rate": round(fires / total, 4) if total > 0 else 0.0,
         "sample_runs": [
-            {"run_id": r["run_id"], "agent_id": r["agent_id"], "evaluated_at": r["evaluated_at"].isoformat()}
+            {
+                "run_id": r["run_id"],
+                "agent_id": r["agent_id"],
+                "evaluated_at": r["evaluated_at"].isoformat(),
+            }
             for r in samples
         ],
     }
