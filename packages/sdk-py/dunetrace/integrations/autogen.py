@@ -120,8 +120,9 @@ class DunetraceModelClient(ChatCompletionClient):  # type: ignore[misc]
             if run:
                 latency = int((time.time() - t0) * 1000)
                 output_text = result.content if isinstance(result.content, str) else ""
+                usage = result.usage
                 run.llm_responded(
-                    completion_tokens=result.usage.completion_tokens,
+                    completion_tokens=usage.completion_tokens if usage else 0,
                     latency_ms=latency,
                     finish_reason=str(result.finish_reason),
                     output_hash=hash_content(output_text),
@@ -167,7 +168,9 @@ class DunetraceModelClient(ChatCompletionClient):  # type: ignore[misc]
     def _model_name(self) -> str:
         try:
             info = self._inner.model_info
-            return info.get("model", "unknown") if isinstance(info, dict) else str(info)
+            if isinstance(info, dict):
+                return info.get("model") or "unknown"
+            return "unknown"
         except Exception:
             return "unknown"
 

@@ -619,5 +619,308 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
         mock_mark.assert_called_once_with([7])
 
 
+class TestWorkerRowToSignalCustomType(unittest.IsolatedAsyncioTestCase):
+    """Custom detector signals have failure_type strings not in the FailureType enum."""
+
+    def _make_row(self, failure_type: str, evidence: dict | None = None) -> dict:
+        return {
+            "id": 1,
+            "failure_type": failure_type,
+            "severity": "HIGH",
+            "run_id": "run-custom",
+            "agent_id": "agent-1",
+            "agent_version": "v1",
+            "step_index": 3,
+            "confidence": 0.75,
+            "evidence": evidence or {"detector_name": failure_type, "description": "fired"},
+            "detected_at": time.time(),
+        }
+
+    def test_custom_failure_type_does_not_raise(self):
+        """CUSTOM_* failure types must not raise ValueError — they break the retry loop if they do."""
+        row = self._make_row("CUSTOM_HIGH_LATENCY")
+        signal = worker_module._row_to_signal(row)
+        from dunetrace.models import FailureType
+
+        self.assertEqual(signal.failure_type, FailureType.CUSTOM)
+
+    def test_raw_failure_type_stored_in_evidence(self):
+        row = self._make_row("CUSTOM_HIGH_LATENCY")
+        signal = worker_module._row_to_signal(row)
+        self.assertEqual(signal.evidence["raw_failure_type"], "CUSTOM_HIGH_LATENCY")
+
+    def test_existing_raw_failure_type_not_overwritten(self):
+        row = self._make_row("CUSTOM_FOO", evidence={"raw_failure_type": "already-set"})
+        signal = worker_module._row_to_signal(row)
+        self.assertEqual(signal.evidence["raw_failure_type"], "already-set")
+
+    def test_custom_signal_explain_uses_raw_name(self):
+        """The explainer fallback should use the raw detector name, not 'Custom'."""
+        from explainer_svc.explainer import explain as do_explain
+
+        row = self._make_row("CUSTOM_CONSECUTIVE_IDENTICAL_TOOL_CALLS")
+        signal = worker_module._row_to_signal(row)
+        exp = do_explain(signal)
+        self.assertIn("Consecutive Identical Tool Calls", exp.title)
+
+    def test_custom_signal_explain_failure_type_is_raw(self):
+        from explainer_svc.explainer import explain as do_explain
+
+        row = self._make_row("CUSTOM_MY_DETECTOR")
+        signal = worker_module._row_to_signal(row)
+        exp = do_explain(signal)
+        self.assertEqual(exp.failure_type, "CUSTOM_MY_DETECTOR")
+
+    async def test_custom_signal_delivers_in_poll_once(self):
+        """Active custom detector signals must be delivered without crashing poll_once."""
+        rows = [
+            {
+                "id": 77,
+                "failure_type": "CUSTOM_HIGH_LATENCY",
+                "severity": "HIGH",
+                "run_id": "run-cust",
+                "agent_id": "agent-1",
+                "agent_version": "v1",
+                "step_index": 2,
+                "confidence": 0.75,
+                "evidence": {"detector_name": "CUSTOM_HIGH_LATENCY", "description": "fired"},
+                "detected_at": time.time(),
+            }
+        ]
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
+            patch(
+                "alerts_svc.worker.deliver",
+                return_value={"slack": SendResult(True, "slack", 1, 200)},
+            ),
+        ):
+            found, delivered = await worker_module.poll_once()
+        self.assertEqual(found, 1)
+        self.assertEqual(delivered, 1)
+        mock_mark.assert_called_once_with([77])
+
+
+class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
+    """Verify token and cost fields are set on Explanation objects in poll_once."""
+
+    def _make_row(self, run_id: str = "run-tok") -> dict:
+        return {
+            "id": 10,
+            "failure_type": "TOOL_LOOP",
+            "severity": "HIGH",
+            "run_id": run_id,
+            "agent_id": "agent-1",
+            "agent_version": "v1",
+            "step_index": 5,
+            "confidence": 0.9,
+            "evidence": {"tool": "web_search", "count": 5},
+            "detected_at": time.time(),
+        }
+
+    async def _run(self, token_map: dict, captured: list) -> tuple:
+        rows = [self._make_row()]
+
+        def fake_deliver(explanation, suppressed_count=0, signal_id=None):
+            captured.append(explanation)
+            return {"slack": SendResult(True, "slack", 1, 200)}
+
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
+            patch("alerts_svc.worker.fetch_run_tokens", AsyncMock(return_value=token_map)),
+            patch("alerts_svc.worker.deliver", side_effect=fake_deliver),
+        ):
+            return await worker_module.poll_once()
+
+    async def test_token_counts_set_when_llm_events_present(self):
+        captured = []
+        await self._run(
+            {"run-tok": {"prompt_tokens": 300, "completion_tokens": 80, "model": "gpt-4o"}},
+            captured,
+        )
+        self.assertIsNotNone(captured[0].total_tokens)
+        self.assertEqual(captured[0].total_tokens, 380)
+
+    async def test_cost_set_when_model_known(self):
+        captured = []
+        await self._run(
+            {"run-tok": {"prompt_tokens": 1_000_000, "completion_tokens": 0, "model": "gpt-4o"}},
+            captured,
+        )
+        self.assertAlmostEqual(captured[0].cost_usd, 2.50)
+
+    async def test_token_fields_none_when_no_llm_events(self):
+        captured = []
+        await self._run({}, captured)  # run_id not in token_map
+        self.assertIsNone(captured[0].total_tokens)
+        self.assertIsNone(captured[0].cost_usd)
+
+    async def test_token_fields_none_when_both_zero(self):
+        """Both tokens = 0 should yield total_tokens=None, not 0."""
+        captured = []
+        await self._run(
+            {"run-tok": {"prompt_tokens": 0, "completion_tokens": 0, "model": "gpt-4o"}}, captured
+        )
+        self.assertIsNone(captured[0].total_tokens)
+        self.assertIsNone(captured[0].cost_usd)
+
+
+class TestAlertPolicyModes(unittest.IsolatedAsyncioTestCase):
+    """evaluate_alert_policy with consecutive and frequency modes — no DB required."""
+
+    async def test_immediate_always_met(self):
+        met, reason = await worker_module.evaluate_alert_policy(
+            "agent", "TOOL_LOOP", mode="immediate", threshold=1, window_runs=1
+        )
+        self.assertTrue(met)
+
+    async def test_unknown_mode_fails_open(self):
+        met, _ = await worker_module.evaluate_alert_policy(
+            "agent", "TOOL_LOOP", mode="unknown_mode", threshold=1, window_runs=1
+        )
+        self.assertTrue(met)
+
+    async def test_consecutive_no_pool_fails_open(self):
+        """Without a DB pool, policy must fail open so alerts aren't silently lost."""
+        met, _ = await worker_module.evaluate_alert_policy(
+            "agent", "TOOL_LOOP", mode="consecutive", threshold=3, window_runs=5
+        )
+        self.assertTrue(met)
+
+    async def test_frequency_no_pool_fails_open(self):
+        met, _ = await worker_module.evaluate_alert_policy(
+            "agent", "TOOL_LOOP", mode="frequency", threshold=2, window_runs=5
+        )
+        self.assertTrue(met)
+
+
+class TestDedupWindowHandling(unittest.IsolatedAsyncioTestCase):
+    """Dedup window suppresses signals within window; lets them through after expiry."""
+
+    def _make_row(self, signal_id=1, run_id="run-1"):
+        return {
+            "id": signal_id,
+            "failure_type": "TOOL_LOOP",
+            "severity": "HIGH",
+            "run_id": run_id,
+            "agent_id": "agent-1",
+            "agent_version": "v1",
+            "step_index": 5,
+            "confidence": 0.9,
+            "evidence": {"tool": "search", "count": 5},
+            "detected_at": time.time(),
+        }
+
+    async def test_within_dedup_window_suppresses_signal(self):
+        """Signal within dedup window → not delivered, but marked alerted."""
+        from datetime import datetime, timezone, timedelta
+        import alerts_svc.worker as wm
+
+        row = self._make_row()
+        dedup_state = {
+            ("agent-1", "TOOL_LOOP"): {
+                "last_alerted_at": datetime.now(timezone.utc) - timedelta(seconds=60),
+                "suppressed_count": 0,
+            }
+        }
+
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
+            patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value=dedup_state)),
+            patch("alerts_svc.worker.increment_suppressed_count", AsyncMock()),
+            patch("alerts_svc.worker.settings") as mock_s,
+            patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value={})),
+        ):
+            mock_s.BATCH_SIZE = 50
+            mock_s.ALERT_DEDUP_WINDOW = 3600  # 1 hour window
+            mock_s.slack_enabled = False
+            mock_s.webhook_enabled = False
+            found, delivered = await wm.poll_once()
+
+        self.assertEqual(found, 1)
+        self.assertEqual(delivered, 0)
+
+    async def test_outside_dedup_window_delivers_signal(self):
+        """Signal outside dedup window → delivered."""
+        from datetime import datetime, timezone, timedelta
+        import alerts_svc.worker as wm
+
+        row = self._make_row()
+        dedup_state = {
+            ("agent-1", "TOOL_LOOP"): {
+                "last_alerted_at": datetime.now(timezone.utc) - timedelta(seconds=7200),
+                "suppressed_count": 3,
+            }
+        }
+
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
+            patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value=dedup_state)),
+            patch("alerts_svc.worker.increment_suppressed_count", AsyncMock()),
+            patch("alerts_svc.worker.record_alert_sent", AsyncMock()),
+            patch("alerts_svc.worker.fetch_run_tokens", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_signal_rate_context", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value={})),
+            patch(
+                "alerts_svc.worker.deliver",
+                return_value={"slack": SendResult(True, "slack", 1, 200)},
+            ),
+            patch("alerts_svc.worker.settings") as mock_s,
+        ):
+            mock_s.BATCH_SIZE = 50
+            mock_s.ALERT_DEDUP_WINDOW = 3600
+            mock_s.slack_enabled = True
+            mock_s.webhook_enabled = False
+            mock_s.SLACK_MIN_SEVERITY = "LOW"
+            found, delivered = await wm.poll_once()
+
+        self.assertEqual(found, 1)
+        self.assertEqual(delivered, 1)
+
+    async def test_multiple_signals_same_group_only_best_sent(self):
+        """Two signals for same (agent, failure_type) — only highest confidence is delivered."""
+        import alerts_svc.worker as wm
+
+        rows = [
+            {**self._make_row(1, "run-1"), "confidence": 0.7},
+            {**self._make_row(2, "run-2"), "confidence": 0.95},
+        ]
+
+        delivered_ids = []
+
+        async def fake_mark(ids):
+            delivered_ids.extend(ids)
+
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.mark_alerted_batch", side_effect=fake_mark),
+            patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_run_tokens", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_signal_rate_context", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.record_alert_sent", AsyncMock()),
+            patch(
+                "alerts_svc.worker.deliver",
+                return_value={"slack": SendResult(True, "slack", 1, 200)},
+            ),
+            patch("alerts_svc.worker.settings") as mock_s,
+        ):
+            mock_s.BATCH_SIZE = 50
+            mock_s.ALERT_DEDUP_WINDOW = 0  # no dedup
+            mock_s.slack_enabled = True
+            mock_s.webhook_enabled = False
+            mock_s.SLACK_MIN_SEVERITY = "LOW"
+            found, delivered = await wm.poll_once()
+
+        self.assertEqual(found, 2)
+        self.assertEqual(delivered, 1)
+        # Lower-confidence duplicate (id=1) must also be marked
+        self.assertIn(1, delivered_ids)
+        self.assertIn(2, delivered_ids)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -68,19 +68,32 @@ def _row_to_signal(row: dict) -> FailureSignal:
     elif detected_at is None:
         detected_at = time.time()
 
+    evidence = (
+        json.loads(row["evidence"])
+        if isinstance(row.get("evidence"), str)
+        else (row.get("evidence") or {})
+    )
+
+    raw_ft = row["failure_type"]
+    try:
+        failure_type = FailureType(raw_ft)
+    except ValueError:
+        # Custom detector signal — raw type not in the built-in FailureType enum.
+        # Use the CUSTOM sentinel so the explainer's fallback template fires.
+        # Preserve the raw name in evidence so the alert displays it correctly.
+        failure_type = FailureType.CUSTOM
+        evidence = dict(evidence)
+        evidence.setdefault("raw_failure_type", raw_ft)
+
     return FailureSignal(
-        failure_type=FailureType(row["failure_type"]),
+        failure_type=failure_type,
         severity=Severity(row["severity"]),
         run_id=row["run_id"],
         agent_id=row["agent_id"],
         agent_version=row["agent_version"],
         step_index=row["step_index"],
         confidence=row["confidence"],
-        evidence=(
-            json.loads(row["evidence"])
-            if isinstance(row.get("evidence"), str)
-            else (row.get("evidence") or {})
-        ),
+        evidence=evidence,
         detected_at=detected_at,
     )
 

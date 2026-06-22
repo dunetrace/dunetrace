@@ -381,6 +381,7 @@ Agent Code
 - [CrewAI](docs/integrate-crewai-agent.md)
 - [AutoGen (Microsoft)](docs/integrate-autogen-agent.md)
 - [Haystack 2.x](docs/integrate-haystack-agent.md)
+- [Hermes Agent (Nous Research)](docs/integrate-hermes-agent.md)
 - [LlamaIndex](docs/integrate-llamaindex.md)
 - [TypeScript / JavaScript](docs/integrate-typescript-agent.md)
 - [Langdock](docs/integrate-langdock.md)

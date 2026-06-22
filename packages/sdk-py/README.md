@@ -198,7 +198,13 @@ SDK: 307 tests · MCP server: 105 tests — both run fully offline.
 
 ## Links
 
-- [Integration guides](../../docs/)
+- [LangChain / LangGraph](../../docs/integrate-langchain-agent.md)
+- [Hermes Agent (Nous Research)](../../docs/integrate-hermes-agent.md)
+- [CrewAI](../../docs/integrate-crewai-agent.md)
+- [AutoGen](../../docs/integrate-autogen-agent.md)
+- [Haystack 2.x](../../docs/integrate-haystack-agent.md)
+- [LlamaIndex](../../docs/integrate-llamaindex.md)
+- [All integration guides](../../docs/)
 - [GitHub](https://github.com/dunetrace/dunetrace)
 - [Issues](https://github.com/dunetrace/dunetrace/issues)
 

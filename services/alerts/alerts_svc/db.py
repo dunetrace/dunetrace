@@ -474,7 +474,21 @@ async def fetch_run_tokens(run_ids: list[str]) -> dict[str, dict]:
             """
             SELECT
                 r.run_id,
-                SUM(COALESCE((r.payload->>'prompt_tokens')::integer, 0))    AS prompt_tokens,
+                -- Prefer prompt_tokens from llm.called (SDK/Hermes pattern).
+                -- Fall back to llm.responded when llm.called has none (LangChain pattern).
+                -- This mirrors run_builder's "prefer called, fall back to responded" logic
+                -- and prevents double-counting when both events carry the field.
+                CASE
+                    WHEN SUM(CASE WHEN r.event_type = 'llm.called'
+                                 THEN COALESCE((r.payload->>'prompt_tokens')::integer, 0)
+                                 ELSE 0 END) > 0
+                    THEN SUM(CASE WHEN r.event_type = 'llm.called'
+                                 THEN COALESCE((r.payload->>'prompt_tokens')::integer, 0)
+                                 ELSE 0 END)
+                    ELSE SUM(CASE WHEN r.event_type = 'llm.responded'
+                                 THEN COALESCE((r.payload->>'prompt_tokens')::integer, 0)
+                                 ELSE 0 END)
+                END AS prompt_tokens,
                 SUM(COALESCE((r.payload->>'completion_tokens')::integer, 0)) AS completion_tokens,
                 (SELECT MIN(c.payload->>'model') FROM events c
                  WHERE c.run_id = r.run_id AND c.event_type = 'llm.called'

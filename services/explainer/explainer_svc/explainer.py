@@ -47,9 +47,12 @@ def explain(signal: FailureSignal, rate_context: dict | None = None) -> Explanat
 
 
 def _fallback(signal: FailureSignal) -> Explanation:
-    """Generic explanation for failure types without a template. Used for Tier 2/3 types not yet implemented, and as a safety net when a template raises."""
+    """Generic explanation for failure types without a template. Used for Tier 2/3 types not yet implemented, custom detector signals, and as a safety net when a template raises."""
+    # For custom detector signals, the raw failure_type name is preserved in evidence.
+    display_name = signal.evidence.get("raw_failure_type", signal.failure_type.value)
+    detector_label = display_name.replace("_", " ").title()
     return Explanation(
-        failure_type=signal.failure_type.value,
+        failure_type=display_name,
         severity=signal.severity.value,
         run_id=signal.run_id,
         agent_id=signal.agent_id,
@@ -58,9 +61,9 @@ def _fallback(signal: FailureSignal) -> Explanation:
         step_index=signal.step_index,
         detected_at=signal.detected_at,
         evidence=signal.evidence,
-        title=f"{signal.failure_type.value.replace('_', ' ').title()} detected",
+        title=f"{detector_label} detected",
         what=(
-            f"The detector identified a {signal.failure_type.value} condition "
+            f"The detector identified a {detector_label} condition "
             f"in run `{signal.run_id}` at step {signal.step_index}."
         ),
         why_it_matters=(

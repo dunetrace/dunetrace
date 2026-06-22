@@ -169,11 +169,13 @@ class DunetraceCrewCallback:
         with self._lock:
             t0 = self._tool_start.pop(key, None)
         latency = int((time.time() - (t0 or time.time())) * 1000)
-        result = ctx.tool_result or ""
+        tool_result = ctx.tool_result
+        # success: None result or explicit error attribute means the tool failed.
+        success = tool_result is not None and not getattr(ctx, "error", None)
         run.tool_responded(
             ctx.tool_name,
-            success=True,
-            output_length=len(result),
+            success=success,
+            output_length=len(str(tool_result)) if tool_result is not None else 0,
             latency_ms=latency,
         )
 

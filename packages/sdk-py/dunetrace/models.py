@@ -63,6 +63,7 @@ class FailureType(str, Enum):
     POLICY_VIOLATION = "POLICY_VIOLATION"
     COST_SPIKE = "COST_SPIKE"
     SESSION_LATENCY = "SESSION_LATENCY"
+    CUSTOM = "CUSTOM"  # sentinel for user-defined custom detectors
 
 
 # ── Agent Event ────────────────────────────────────────────────────────────────
