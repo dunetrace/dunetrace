@@ -11,8 +11,7 @@ By wrapping your Dify API calls, Dunetrace automatically captures the input, out
 | Dify Event | Dunetrace Event |
 |---|---|
 | Client API Call | `RUN_STARTED` |
-| Client receives response | `LLM_RESPONDED` (with latency and output length) |
-| API call ends | `RUN_COMPLETED` |
+| Client receives response | `RUN_COMPLETED` (with latency and output length) |
 | API throws error | `RUN_ERRORED` |
 
 > **Note:** Because Dify manages its own internal tool executions on the server-side, standard client wrapping captures the entire Dify workflow as a single "black box" step.
