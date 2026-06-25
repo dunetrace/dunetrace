@@ -12,6 +12,8 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/yxFjATwHW4)
 
+**If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
+
 ![Slack alert](slack-alert.png)
 
 ---
@@ -56,6 +58,7 @@ npm install dunetrace                       # Node.js / TypeScript
 
 **3. Instrument your agent**
 
+**Python**
 ```python
 from dunetrace import Dunetrace
 
@@ -69,6 +72,7 @@ def my_agent(question: str) -> str:
     return web_search(question)[0]
 ```
 
+**TypeScript / Node.js**
 ```typescript
 import { Dunetrace } from "dunetrace";
 import OpenAI from "openai";
@@ -82,13 +86,17 @@ await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
 });
 ```
 
+**Try the built-in failure scenarios**
+```bash
+cd packages/sdk-py
+
+python examples/basic_agent.py                          # No LLM calls
+SCENARIO=tool_loop python examples/langchain_agent.py   # TOOL_LOOP via LangChain
+SCENARIO=failures python examples/decorator_agent.py    # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
+SCENARIO=tool_loop python examples/langfuse_agent.py    # TOOL_LOOP + Langfuse explain
+```
+
 Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
-
----
-
-## ⭐ Star this if it saves you debugging time
-
-[![Star History Chart](https://api.star-history.com/svg?repos=dunetrace/dunetrace&type=Date)](https://star-history.com/#dunetrace/dunetrace&Date)
 
 ---
 
@@ -281,6 +289,10 @@ Agent Code
 Fork, branch, change, `make test`, PR. For larger changes (new detectors, architecture changes), open an issue first.
 
 Requires Python 3.11+, Node.js 18+, Docker + Docker Compose.
+
+## ⭐ Star this if it saves you debugging time
+
+[![Star History Chart](https://api.star-history.com/svg?repos=dunetrace/dunetrace&type=Date)](https://star-history.com/#dunetrace/dunetrace&Date)
 
 ## Contact
 
