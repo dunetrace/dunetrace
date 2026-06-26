@@ -293,7 +293,9 @@ class PolicyEngine:
         self._fetch_times[agent_id] = time.monotonic()
 
     def needs_fetch(self, agent_id: str) -> bool:
-        last = self._fetch_times.get(agent_id, 0.0)
+        last = self._fetch_times.get(agent_id)
+        if last is None:
+            return True
         return (time.monotonic() - last) > self._FETCH_TTL
 
     def __len__(self) -> int:
