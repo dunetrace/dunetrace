@@ -1020,7 +1020,8 @@ class TestMainCLI(unittest.TestCase):
         with patch.object(sys, "argv", ["dunetrace-mcp", "--sse"]):
             with patch.object(srv.mcp, "run") as mock_run:
                 srv.main()
-        mock_run.assert_called_once_with(transport="sse", port=8000)
+        mock_run.assert_called_once_with(transport="sse")
+        assert srv.mcp.settings.port == 8000
 
     def test_sse_with_custom_port(self):
         import sys
@@ -1028,7 +1029,8 @@ class TestMainCLI(unittest.TestCase):
         with patch.object(sys, "argv", ["dunetrace-mcp", "--sse", "--port", "9000"]):
             with patch.object(srv.mcp, "run") as mock_run:
                 srv.main()
-        mock_run.assert_called_once_with(transport="sse", port=9000)
+        mock_run.assert_called_once_with(transport="sse")
+        assert srv.mcp.settings.port == 9000
 
     def test_port_without_sse_still_runs_stdio(self):
         import sys

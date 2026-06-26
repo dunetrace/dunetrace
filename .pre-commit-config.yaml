@@ -27,3 +27,10 @@ repos:
         entry: bash -c 'cd packages/sdk-ts && npm run typecheck'
         pass_filenames: false
         files: ^packages/sdk-ts/.*\.(ts|json)$
+
+      - id: mcp-mypy
+        name: MCP server mypy
+        language: system
+        entry: python -m mypy packages/mcp-server/dunetrace_mcp/ --ignore-missing-imports --no-error-summary
+        pass_filenames: false
+        files: ^packages/mcp-server/.*\.py$
