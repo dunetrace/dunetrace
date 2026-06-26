@@ -160,18 +160,31 @@ async function runAgent(scenario: string): Promise<void> {
       const msg         = response.choices[0].message;
       const finishReason = response.choices[0].finish_reason;
 
+      // The OpenAI tool-call union may include custom tool calls; this agent
+      // only defines a function tool, so narrow to the function variant.
+      const firstToolCall = msg.tool_calls?.[0];
+      const firstToolArgs =
+        firstToolCall?.type === "function" ? firstToolCall.function.arguments : "";
+
       run.llmResponded({
         completionTokens: response.usage?.completion_tokens,
         latencyMs,
         finishReason,
         // outputText is hashed before transmission — never sent raw
-        outputText: msg.content ?? (msg.tool_calls?.[0]?.function?.arguments ?? ""),
+        outputText: msg.content ?? firstToolArgs,
       });
 
       // End the Langfuse generation — output is structural metadata only
       generation?.end({
         output:             "[hashed — see Langfuse for full content]",
-        usage:              response.usage ?? undefined,
+        usage:              response.usage
+          ? {
+              input:  response.usage.prompt_tokens,
+              output: response.usage.completion_tokens,
+              total:  response.usage.total_tokens,
+              unit:   "TOKENS",
+            }
+          : undefined,
         completionStartTime: new Date(t0),
       });
 
@@ -186,6 +199,7 @@ async function runAgent(scenario: string): Promise<void> {
 
       // Process tool calls
       for (const tc of msg.tool_calls ?? []) {
+        if (tc.type !== "function") continue;
         const args = JSON.parse(tc.function.arguments) as { query?: string };
 
         // Dunetrace: args are SHA-256 hashed before transmission

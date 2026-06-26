@@ -13,12 +13,14 @@ The integration hooks into Vercel AI SDK lifecycle callbacks and translates them
 
 | Vercel AI SDK callback | Dunetrace event |
 | --- | --- |
-| `onStepFinish` (each LLM step) | `llm.called` + `llm.responded` |
+| `onStepEnd` (each LLM step) | `llm.called` + `llm.responded` |
 | `toolCalls` in step result | `tool.called` |
 | `toolResults` in step result | `tool.responded` |
 | `traceGenerateText` / `traceStreamText` wrapper | `run.started` + `run.completed` |
 
-Both `generateText` and `streamText` fire `onStepFinish` once per step, so a single hook captures every LLM call and tool invocation. Your own `onStepFinish` is preserved and called after Dunetrace's; your `onFinish` is left untouched.
+Both `generateText` and `streamText` fire `onStepEnd` once per step, so a single hook captures every LLM call and tool invocation. Dunetrace also seeds `onStepStart` to measure per-step latency. Your own `onStepStart` / `onStepEnd` are preserved and called after Dunetrace's; your `onEnd` is left untouched.
+
+> The AI SDK v7 callbacks `onStepStart` / `onStepEnd` / `onEnd` replace the v5 `onStepFinish` / `onFinish`. Pass the new callbacks if you want them chained.
 
 No changes to your tool definitions or model providers are required.
 
@@ -27,8 +29,8 @@ No changes to your tool definitions or model providers are required.
 ## Prerequisites
 
 - Dunetrace backend running (`docker compose up -d`)
-- Node 18+
-- Vercel AI SDK (`npm install ai`)
+- Node 22+
+- Vercel AI SDK v7+ (`npm install ai`)
 
 > **Local dev — no API key needed.** The backend accepts requests without authentication when running in dev mode.
 
@@ -69,7 +71,7 @@ export async function runAgent(prompt: string) {
       model: openai("gpt-4o"),
       prompt,
       tools: { weather: weatherTool },
-      stopWhen: stepCountIs(5),   // AI SDK v5: enable multi-step tool loops
+      stopWhen: stepCountIs(5),   // AI SDK v7: enable multi-step tool loops
     });
     // ↑ each LLM step + tool call is tracked automatically
 
@@ -83,7 +85,7 @@ export async function runAgent(prompt: string) {
 
 ### Streaming
 
-`wrapStreamText` instruments per-step callbacks during streaming. `streamText` returns synchronously (you consume the stream afterwards), so the wrapper does too — use it the same way:
+`wrapStreamText` instruments per-step callbacks during streaming. `streamText` returns synchronously (you consume the stream afterward), so the wrapper does too — use it the same way:
 
 ```typescript
 const result = instrumentedStreamText({
@@ -122,7 +124,7 @@ await dt.run("my-vercel-agent", { userInput: prompt, model: "gpt-4o" }, async (r
 });
 ```
 
-Your existing `onStepFinish` and `onFinish` callbacks are preserved — Dunetrace chains its handlers before yours.
+Your existing `onStepStart` / `onStepEnd` callbacks are preserved — Dunetrace chains its handlers before yours — and your `onEnd` is left untouched.
 
 ---
 
@@ -152,7 +154,7 @@ await dt.shutdown();
 console.log(result.text);
 ```
 
-> **Streaming with `traceStreamText`:** because `onStepFinish` only fires while a stream is consumed, `traceStreamText` drains the stream internally before closing the run so events stay inside the run boundary. The returned result is therefore already consumed — use it when you just need `result.text` / `result.usage`. For incremental streaming to a client, use `wrapStreamText` (Option A) inside an explicit `dt.run()` and call `run.finalAnswer()` yourself.
+> **Streaming with `traceStreamText`:** because `onStepEnd` only fires while a stream is consumed, `traceStreamText` drains the stream internally before closing the run so events stay inside the run boundary. The returned result is therefore already consumed — use it when you just need `result.text` / `result.usage`. For incremental streaming to a client, use `wrapStreamText` (Option A) inside an explicit `dt.run()` and call `run.finalAnswer()` yourself.
 
 ---
 
@@ -227,8 +229,8 @@ SCENARIO=failures python packages/sdk-py/examples/decorator_agent.py
 
 **No events from a streamed run**
 
-- `onStepFinish` only fires once the stream is consumed. Make sure you read `result.textStream` (or return a `toTextStreamResponse()`); an abandoned stream emits nothing.
+- `onStepEnd` only fires once the stream is consumed. Make sure you read `result.textStream` (or return a `toTextStreamResponse()`); an abandoned stream emits nothing.
 
 **Type errors with AI SDK versions**
 
-- Install a matching `ai` peer dependency (`npm install ai@^5`). Types are taken directly from the Vercel AI SDK.
+- Install a matching `ai` peer dependency (`npm install ai@^7`). Types are taken directly from the Vercel AI SDK.

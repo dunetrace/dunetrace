@@ -32,55 +32,57 @@ export type StreamTextOptions = Parameters<typeof streamText>[0];
 
 // ── Instrumentation ───────────────────────────────────────────────────────────
 
+/**
+ * Shared instrumentation for generateText/streamText options. No-op outside a
+ * run. `generateText` and `streamText` accept the same step callbacks, so both
+ * public wrappers delegate here.
+ *
+ * Per-step latency is measured from `onStepStart` (fired before the provider
+ * call) to `onStepEnd` — not from instrumentation time, which for streaming can
+ * be long before the stream is consumed. `stepStart` is seeded at call time as
+ * a fallback in case `onStepStart` does not fire for the first step.
+ *
+ * Events are emitted from `onStepEnd`, which the AI SDK fires once per step
+ * (including the final step). We deliberately do NOT also emit from `onFinish`
+ * — doing so would double-count the last step. Any user-supplied `onStepStart`
+ * / `onStepEnd` is chained after ours; `onFinish` is preserved untouched.
+ */
+function injectStepInstrumentation<OPTIONS extends GenerateTextOptions | StreamTextOptions>(
+  opts: OPTIONS,
+): OPTIONS {
+  const run = getCurrentRun();
+  if (!run) return opts;
+
+  const model           = modelId(opts.model);
+  const userOnStepStart = opts.onStepStart;
+  const userOnStepEnd   = opts.onStepEnd;
+  let   stepStart       = Date.now();
+
+  return {
+    ...opts,
+    onStepStart: async (event: unknown) => {
+      stepStart = Date.now();
+      if (userOnStepStart) await (userOnStepStart as (e: unknown) => unknown)(event);
+    },
+    onStepEnd: async (step: StepResult<ToolSet>) => {
+      emitStepEvents(run, step, model, Date.now() - stepStart);
+      if (userOnStepEnd) await (userOnStepEnd as (s: unknown) => unknown)(step);
+    },
+  } as OPTIONS;
+}
+
 /** Inject Dunetrace callbacks into generateText options. No-op outside a run. */
 export function instrumentGenerateTextOptions<OPTIONS extends GenerateTextOptions>(
   opts: OPTIONS,
 ): OPTIONS {
-  const run = getCurrentRun();
-  if (!run) return opts;
-
-  const model            = modelId(opts.model);
-  const userOnStepFinish = opts.onStepFinish;
-  let   stepStart        = Date.now();
-
-  return {
-    ...opts,
-    onStepFinish: async (step) => {
-      const latencyMs = Date.now() - stepStart;
-      emitStepEvents(run, step, model, latencyMs);
-      stepStart = Date.now();
-      if (userOnStepFinish) await userOnStepFinish(step);
-    },
-  };
+  return injectStepInstrumentation(opts);
 }
 
-/**
- * Inject Dunetrace callbacks into streamText options. No-op outside a run.
- *
- * Events are emitted from `onStepFinish`, which the AI SDK fires once per step
- * (including the final step). We deliberately do NOT also emit from `onFinish`
- * — doing so would double-count the last step. Any user-supplied `onStepFinish`
- * is chained after ours; a user-supplied `onFinish` is preserved untouched.
- */
+/** Inject Dunetrace callbacks into streamText options. No-op outside a run. */
 export function instrumentStreamTextOptions<OPTIONS extends StreamTextOptions>(
   opts: OPTIONS,
 ): OPTIONS {
-  const run = getCurrentRun();
-  if (!run) return opts;
-
-  const model            = modelId(opts.model);
-  const userOnStepFinish = opts.onStepFinish;
-  let   stepStart        = Date.now();
-
-  return {
-    ...opts,
-    onStepFinish: async (step) => {
-      const latencyMs = Date.now() - stepStart;
-      emitStepEvents(run, step, model, latencyMs);
-      stepStart = Date.now();
-      if (userOnStepFinish) await userOnStepFinish(step);
-    },
-  };
+  return injectStepInstrumentation(opts);
 }
 
 /** Wrap a `generateText` import to auto-instrument every call. */
@@ -125,7 +127,7 @@ export async function traceGenerateText(
 /**
  * Open a Dunetrace run, call streamText with instrumentation, and close the run.
  *
- * Because `onStepFinish` only fires while the stream is being consumed, this
+ * Because `onStepEnd` only fires while the stream is being consumed, this
  * helper drains the stream (`consumeStream()`) before emitting `run.completed`,
  * so the per-step `llm.*` / `tool.*` events are ordered inside the run boundary.
  * As a result the returned stream is already consumed — use this when you only
@@ -233,23 +235,29 @@ export function toolNames(tools: ToolSet | undefined): string[] {
 /**
  * Best-effort run input fingerprint from generateText/streamText options.
  *
- * Prefers `prompt` (string form). Falls back to the last message in a
- * `messages` array — the common chat pattern — so multi-turn calls don't
- * produce an empty input_hash. The text content of that message is used when
- * available; otherwise the message is JSON-stringified.
+ * Prefers a string `prompt`. The AI SDK also allows `prompt` to be a message
+ * array, and supports a separate `messages` array (the common chat pattern);
+ * for either, the last message is used so multi-turn calls don't collapse to a
+ * constant input_hash. The text content of that message is used when available;
+ * otherwise the message is JSON-stringified.
  */
 function deriveUserInput(opts: { prompt?: unknown; messages?: unknown }): string {
-  if (opts.prompt != null) return String(opts.prompt);
+  const { prompt, messages } = opts;
+  if (typeof prompt === "string") return prompt;
 
-  const messages = opts.messages;
-  if (Array.isArray(messages) && messages.length > 0) {
-    const last = messages[messages.length - 1] as { content?: unknown };
+  // `prompt` may itself be a ModelMessage[] (AI SDK accepts string | array).
+  const list = Array.isArray(prompt) ? prompt : messages;
+  if (Array.isArray(list) && list.length > 0) {
+    const last = list[list.length - 1] as { content?: unknown };
     const content = last?.content;
     if (typeof content === "string") return content;
     if (content != null) {
       try { return JSON.stringify(content); } catch { /* fall through */ }
     }
     try { return JSON.stringify(last); } catch { return ""; }
+  }
+  if (prompt != null) {
+    try { return JSON.stringify(prompt); } catch { return String(prompt); }
   }
   return "";
 }
@@ -260,4 +268,3 @@ function normalizeUsage(usage: LanguageModelUsage): { promptTokens: number; comp
     completionTokens: usage.outputTokens ?? 0,
   };
 }
-

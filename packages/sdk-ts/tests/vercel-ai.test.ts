@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { StepResult, ToolSet } from "ai";
+import type { StepResult, ToolSet, LanguageModelUsage } from "ai";
 import { Dunetrace } from "../src/client.js";
 import {
   instrumentGenerateTextOptions,
@@ -10,6 +10,8 @@ import {
   traceStreamText,
   modelId,
   toolNames,
+  type GenerateTextOptions,
+  type StreamTextOptions,
 } from "../src/integrations/vercel-ai.js";
 import type { AgentEvent } from "../src/models.js";
 
@@ -21,8 +23,38 @@ function captureEvents(dt: Dunetrace): AgentEvent[] {
 
 const FAKE_MODEL = { modelId: "gpt-4o" };
 
-function makeStep(overrides: Partial<StepResult<ToolSet>> = {}): StepResult<ToolSet> {
+/** Build generateText options that satisfy the SDK's prompt/messages requirement. */
+function genOpts(extra: Partial<GenerateTextOptions> = {}): GenerateTextOptions {
+  return { model: FAKE_MODEL as never, prompt: "test prompt", ...extra } as GenerateTextOptions;
+}
+
+/** Build streamText options that satisfy the SDK's prompt/messages requirement. */
+function streamOpts(extra: Partial<StreamTextOptions> = {}): StreamTextOptions {
+  return { model: FAKE_MODEL as never, prompt: "test prompt", ...extra } as StreamTextOptions;
+}
+
+function makeUsage(usage: Partial<LanguageModelUsage> = {}): LanguageModelUsage {
   return {
+    inputTokens:        usage.inputTokens,
+    outputTokens:       usage.outputTokens,
+    totalTokens:        usage.totalTokens,
+    inputTokenDetails:  usage.inputTokenDetails ?? {
+      noCacheTokens:    undefined,
+      cacheReadTokens:  undefined,
+      cacheWriteTokens: undefined,
+    },
+    outputTokenDetails: usage.outputTokenDetails ?? {
+      textTokens:       undefined,
+      reasoningTokens:  undefined,
+    },
+  };
+}
+
+// StepResult carries runtime-only fields (callId, performance, toolsContext, …)
+// that this integration never reads. The fixture sets the fields the code under
+// test inspects, validates them against the SDK type, and casts the rest.
+function makeStep(overrides: Partial<StepResult<ToolSet>> = {}): StepResult<ToolSet> {
+  const step: Partial<StepResult<ToolSet>> = {
     content:           [],
     text:              "",
     reasoning:         [],
@@ -36,13 +68,14 @@ function makeStep(overrides: Partial<StepResult<ToolSet>> = {}): StepResult<Tool
     staticToolResults: [],
     dynamicToolResults: [],
     finishReason:      "stop",
-    usage:             { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    usage:             makeUsage(),
     warnings:          undefined,
     request:           {},
-    response:          { messages: [] },
+    response:          { id: "resp-1", timestamp: new Date(0), modelId: "gpt-4o", messages: [] },
     providerMetadata:  undefined,
     ...overrides,
   };
+  return step as unknown as StepResult<ToolSet>;
 }
 
 describe("vercel-ai helpers", () => {
@@ -60,24 +93,21 @@ describe("vercel-ai helpers", () => {
 describe("instrumentGenerateTextOptions()", () => {
   it("is a no-op outside a run context", async () => {
     const userStep = vi.fn();
-    const opts = instrumentGenerateTextOptions({
-      model: FAKE_MODEL as never,
-      onStepFinish: userStep,
-    });
-    await opts.onStepFinish?.(makeStep({ text: "hi", usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } }));
+    const opts = instrumentGenerateTextOptions(genOpts({ onStepEnd: userStep }));
+    await opts.onStepEnd?.(makeStep({ text: "hi", usage: makeUsage({ inputTokens: 10, outputTokens: 2, totalTokens: 12 }) }));
     expect(userStep).toHaveBeenCalledOnce();
   });
 
-  it("emits llm.called + llm.responded on onStepFinish", async () => {
+  it("emits llm.called + llm.responded on onStepEnd", async () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
 
     await dt.run("vercel-agent", { model: "gpt-4o" }, async () => {
-      const opts = instrumentGenerateTextOptions({ model: FAKE_MODEL as never });
-      await opts.onStepFinish?.(makeStep({
+      const opts = instrumentGenerateTextOptions(genOpts());
+      await opts.onStepEnd?.(makeStep({
         text: "Paris",
         finishReason: "stop",
-        usage: { inputTokens: 60, outputTokens: 5, totalTokens: 65 },
+        usage: makeUsage({ inputTokens: 60, outputTokens: 5, totalTokens: 65 }),
       }));
     });
 
@@ -99,10 +129,10 @@ describe("instrumentGenerateTextOptions()", () => {
     const events = captureEvents(dt);
 
     await dt.run("vercel-agent", { model: "gpt-4o", tools: ["weather"] }, async () => {
-      const opts = instrumentGenerateTextOptions({ model: FAKE_MODEL as never });
-      await opts.onStepFinish?.(makeStep({
+      const opts = instrumentGenerateTextOptions(genOpts());
+      await opts.onStepEnd?.(makeStep({
         finishReason: "tool-calls",
-        usage: { inputTokens: 40, outputTokens: 10, totalTokens: 50 },
+        usage: makeUsage({ inputTokens: 40, outputTokens: 10, totalTokens: 50 }),
         toolCalls: [{
           type: "tool-call",
           toolCallId: "tc-1",
@@ -134,10 +164,10 @@ describe("instrumentGenerateTextOptions()", () => {
     const events = captureEvents(dt);
 
     await dt.run("vercel-agent", { model: "gpt-4o", tools: ["weather"] }, async () => {
-      const opts = instrumentGenerateTextOptions({ model: FAKE_MODEL as never });
-      await opts.onStepFinish?.(makeStep({
+      const opts = instrumentGenerateTextOptions(genOpts());
+      await opts.onStepEnd?.(makeStep({
         finishReason: "tool-calls",
-        usage: { inputTokens: 40, outputTokens: 10, totalTokens: 50 },
+        usage: makeUsage({ inputTokens: 40, outputTokens: 10, totalTokens: 50 }),
         toolCalls: [{
           type: "tool-call",
           toolCallId: "tc-err",
@@ -167,10 +197,10 @@ describe("instrumentGenerateTextOptions()", () => {
     const events = captureEvents(dt);
 
     await dt.run("vercel-agent", {}, async () => {
-      const opts = instrumentGenerateTextOptions({ model: FAKE_MODEL as never });
+      const opts = instrumentGenerateTextOptions(genOpts());
       await new Promise(r => setTimeout(r, 5));
-      await opts.onStepFinish?.(makeStep({
-        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      await opts.onStepEnd?.(makeStep({
+        usage: makeUsage({ inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
       }));
     });
 
@@ -179,23 +209,42 @@ describe("instrumentGenerateTextOptions()", () => {
     await dt.shutdown();
   });
 
-  it("chains user onStepFinish after emitting Dunetrace events", async () => {
+  it("chains user onStepEnd after emitting Dunetrace events", async () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
     const userCb = vi.fn();
 
     await dt.run("vercel-agent", {}, async () => {
-      const opts = instrumentGenerateTextOptions({
-        model: FAKE_MODEL as never,
-        onStepFinish: userCb,
-      });
-      await opts.onStepFinish?.(makeStep({
-        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      const opts = instrumentGenerateTextOptions(genOpts({ onStepEnd: userCb }));
+      await opts.onStepEnd?.(makeStep({
+        usage: makeUsage({ inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
       }));
     });
 
     expect(events.some(e => e.event_type === "llm.called")).toBe(true);
     expect(userCb).toHaveBeenCalledOnce();
+    await dt.shutdown();
+  });
+
+  it("chains user onStepStart and measures latency from it", async () => {
+    const dt        = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events    = captureEvents(dt);
+    const userStart = vi.fn();
+
+    await dt.run("vercel-agent", {}, async () => {
+      const opts = instrumentGenerateTextOptions(genOpts({ onStepStart: userStart as never }));
+      // Step boundary: onStepStart fires first (resets the latency clock),
+      // then the provider call elapses, then onStepEnd emits the events.
+      await opts.onStepStart?.({} as never);
+      await new Promise(r => setTimeout(r, 5));
+      await opts.onStepEnd?.(makeStep({
+        usage: makeUsage({ inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
+      }));
+    });
+
+    expect(userStart).toHaveBeenCalledOnce();
+    const llmResponded = events.find(e => e.event_type === "llm.responded");
+    expect(llmResponded!.payload["latency_ms"]).toBeGreaterThan(0);
     await dt.shutdown();
   });
 });
@@ -205,11 +254,11 @@ describe("wrapGenerateText()", () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
 
-    const fakeGenerateText = vi.fn(async (opts: { onStepFinish?: (step: StepResult<ToolSet>) => Promise<void> }) => {
-      await opts.onStepFinish?.(makeStep({
+    const fakeGenerateText = vi.fn(async (opts: { onStepEnd?: (step: StepResult<ToolSet>) => Promise<void> }) => {
+      await opts.onStepEnd?.(makeStep({
         text: "done",
         finishReason: "stop",
-        usage: { inputTokens: 20, outputTokens: 4, totalTokens: 24 },
+        usage: makeUsage({ inputTokens: 20, outputTokens: 4, totalTokens: 24 }),
       }));
       return { text: "done" };
     });
@@ -217,7 +266,7 @@ describe("wrapGenerateText()", () => {
     const wrapped = wrapGenerateText(fakeGenerateText as never);
 
     await dt.run("vercel-agent", {}, async () => {
-      await wrapped({ model: FAKE_MODEL as never });
+      await wrapped(genOpts());
     });
 
     expect(fakeGenerateText).toHaveBeenCalledOnce();
@@ -227,16 +276,16 @@ describe("wrapGenerateText()", () => {
 });
 
 describe("instrumentStreamTextOptions()", () => {
-  it("emits llm events once per step from onStepFinish during streaming", async () => {
+  it("emits llm events once per step from onStepEnd during streaming", async () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
 
     await dt.run("vercel-agent", {}, async () => {
-      const opts = instrumentStreamTextOptions({ model: FAKE_MODEL as never });
-      await opts.onStepFinish?.(makeStep({
+      const opts = instrumentStreamTextOptions(streamOpts());
+      await opts.onStepEnd?.(makeStep({
         text: "streamed answer",
         finishReason: "stop",
-        usage: { inputTokens: 30, outputTokens: 8, totalTokens: 38 },
+        usage: makeUsage({ inputTokens: 30, outputTokens: 8, totalTokens: 38 }),
       }));
     });
 
@@ -244,18 +293,18 @@ describe("instrumentStreamTextOptions()", () => {
     await dt.shutdown();
   });
 
-  it("does not double-emit by also wrapping onFinish", async () => {
+  it("does not double-emit by also wrapping onEnd", async () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
 
     await dt.run("vercel-agent", {}, async () => {
-      const opts = instrumentStreamTextOptions({ model: FAKE_MODEL as never });
-      // The AI SDK fires onStepFinish per step; onFinish fires once at the end.
-      // Only onStepFinish should be instrumented, so onFinish stays undefined here.
-      expect(opts.onFinish).toBeUndefined();
-      await opts.onStepFinish?.(makeStep({
+      const opts = instrumentStreamTextOptions(streamOpts());
+      // The AI SDK fires onStepEnd per step; onEnd fires once at the end.
+      // Only onStepEnd should be instrumented, so onEnd stays undefined here.
+      expect(opts.onEnd).toBeUndefined();
+      await opts.onStepEnd?.(makeStep({
         finishReason: "stop",
-        usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+        usage: makeUsage({ inputTokens: 10, outputTokens: 2, totalTokens: 12 }),
       }));
     });
 
@@ -264,20 +313,17 @@ describe("instrumentStreamTextOptions()", () => {
     await dt.shutdown();
   });
 
-  it("preserves a user-supplied onFinish callback", async () => {
+  it("preserves a user-supplied onEnd callback", async () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     captureEvents(dt);
-    const userOnFinish = vi.fn();
+    const useronEnd = vi.fn();
 
     await dt.run("vercel-agent", {}, async () => {
-      const opts = instrumentStreamTextOptions({
-        model: FAKE_MODEL as never,
-        onFinish: userOnFinish as never,
-      });
-       (opts.onFinish as ((event: unknown) => void) | undefined)?.({});
+      const opts = instrumentStreamTextOptions(streamOpts({ onEnd: useronEnd as never }));
+       (opts.onEnd as ((event: unknown) => void) | undefined)?.({});
     });
 
-    expect(userOnFinish).toHaveBeenCalledOnce();
+    expect(useronEnd).toHaveBeenCalledOnce();
     await dt.shutdown();
   });
 });
@@ -294,10 +340,10 @@ describe("wrapStreamText()", () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
 
-    const fakeStreamText = vi.fn(async (opts: { onStepFinish?: (step: StepResult<ToolSet>) => Promise<void> }) => {
-      await opts.onStepFinish?.(makeStep({
+    const fakeStreamText = vi.fn(async (opts: { onStepEnd?: (step: StepResult<ToolSet>) => Promise<void> }) => {
+      await opts.onStepEnd?.(makeStep({
         finishReason: "stop",
-        usage: { inputTokens: 15, outputTokens: 3, totalTokens: 18 },
+        usage: makeUsage({ inputTokens: 15, outputTokens: 3, totalTokens: 18 }),
         text: "chunk",
       }));
       return { textStream: (async function* () { yield "chunk"; })() };
@@ -320,11 +366,11 @@ describe("traceGenerateText()", () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
 
-    const fakeGenerateText = async (opts: { onStepFinish?: (step: StepResult<ToolSet>) => Promise<void> }) => {
-      await opts.onStepFinish?.(makeStep({
+    const fakeGenerateText = async (opts: { onStepEnd?: (step: StepResult<ToolSet>) => Promise<void> }) => {
+      await opts.onStepEnd?.(makeStep({
         text: "answer",
         finishReason: "stop",
-        usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+        usage: makeUsage({ inputTokens: 10, outputTokens: 2, totalTokens: 12 }),
       }));
       return { text: "answer" };
     };
@@ -341,6 +387,33 @@ describe("traceGenerateText()", () => {
     expect(events[0].event_type).toBe("run.started");
     expect(events.some(e => e.event_type === "run.completed")).toBe(true);
     expect(events.find(e => e.event_type === "run.started")!.agent_id).toBe("my-vercel-agent");
+
+    await dt.shutdown();
+  });
+
+  it("derives a distinct input_hash from an array-form prompt", async () => {
+    const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events = captureEvents(dt);
+
+    const fakeGenerateText = async () => ({ text: "ok" });
+
+    const hashFor = async (content: string): Promise<string> => {
+      await traceGenerateText(
+        dt,
+        "array-prompt-agent",
+        {},
+        fakeGenerateText as never,
+        { model: FAKE_MODEL as never, prompt: [{ role: "user", content }] } as never,
+      );
+      return events.filter(e => e.event_type === "run.started").at(-1)!.payload["input_hash"] as string;
+    };
+
+    const hashA = await hashFor("What is 2+2?");
+    const hashB = await hashFor("What is 9+9?");
+
+    expect(hashA).toBeTruthy();
+    expect(hashB).toBeTruthy();
+    expect(hashA).not.toBe(hashB);
 
     await dt.shutdown();
   });
@@ -371,10 +444,10 @@ describe("traceStreamText()", () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
 
-    const fakeStreamText = async (opts: { onStepFinish?: (step: StepResult<ToolSet>) => Promise<void> }) => {
-      await opts.onStepFinish?.(makeStep({
+    const fakeStreamText = async (opts: { onStepEnd?: (step: StepResult<ToolSet>) => Promise<void> }) => {
+      await opts.onStepEnd?.(makeStep({
         finishReason: "stop",
-        usage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 },
+        usage: makeUsage({ inputTokens: 12, outputTokens: 4, totalTokens: 16 }),
         text: "stream",
       }));
       return {
