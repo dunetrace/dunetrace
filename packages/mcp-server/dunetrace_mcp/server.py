@@ -1323,7 +1323,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.sse:
-        mcp.run(transport="sse", port=args.port)
+        mcp.settings.port = args.port
+        mcp.run(transport="sse")
     else:
         mcp.run(transport="stdio")
 

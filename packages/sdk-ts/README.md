@@ -2,7 +2,7 @@
 
 Runtime observability for AI agents. Detects tool loops, cost spikes, context bloat, and 14 more failure patterns — automatically, on every run.
 
-Zero runtime dependencies. Works with any Node.js AI framework. Node 18+.
+Zero runtime dependencies. Works with any Node.js AI framework. Node 22+.
 
 ## Install
 

@@ -288,7 +288,7 @@ Agent Code
 
 Fork, branch, change, `make test`, PR. For larger changes (new detectors, architecture changes), open an issue first.
 
-Requires Python 3.11+, Node.js 18+, Docker + Docker Compose.
+Requires Python 3.11+, Node.js 22+, Docker + Docker Compose.
 
 ## ⭐ Star this if it saves you debugging time
 
