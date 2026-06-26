@@ -3,7 +3,7 @@
 This guide covers adding Dunetrace monitoring to a TypeScript or JavaScript agent using the `dunetrace` npm package.
 
 > **Using Python?** See [integrate-custom-python-agent.md](./integrate-custom-python-agent.md).
-> **Using LangChain?** See [integrate-langchain-agent.md](./integrate-langchain-agent.md). **Using CrewAI?** See [integrate-crewai-agent.md](./integrate-crewai-agent.md). **Using AutoGen?** See [integrate-autogen-agent.md](./integrate-autogen-agent.md).
+> **Using LangChain?** See [integrate-langchain-agent.md](./integrate-langchain-agent.md). **Using CrewAI?** See [integrate-crewai-agent.md](./integrate-crewai-agent.md). **Using AutoGen?** See [integrate-autogen-agent.md](./integrate-autogen-agent.md). **Using Vercel AI SDK?** See [integrate-vercel-ai.md](./integrate-vercel-ai.md).
 
 ---
 
