@@ -4,7 +4,6 @@ Runtime observability for AI agents. Detects tool loops, cost spikes, context bl
 
 Zero runtime dependencies. Works with any Node.js AI framework. Node 18+.
 
-
 ## Install
 
 ```bash
@@ -147,6 +146,25 @@ OPENAI_API_KEY=sk-… LANGFUSE_PUBLIC_KEY=pk-lf-… LANGFUSE_SECRET_KEY=sk-lf-�
 SCENARIO=tool_loop … npm run example:langfuse:loop
 ```
 
+## Vercel AI SDK integration
+
+Wrap `generateText` / `streamText` from the `ai` package — LLM steps and tool calls are tracked automatically inside `dt.run()`:
+
+```typescript
+import { Dunetrace, wrapGenerateText } from "dunetrace";
+import { generateText } from "ai";
+
+const dt = new Dunetrace();
+const instrumentedGenerateText = wrapGenerateText(generateText);
+
+await dt.run("my-agent", { userInput: prompt, model: "gpt-4o" }, async (run) => {
+  await instrumentedGenerateText({ model, prompt, tools });
+  run.finalAnswer();
+});
+```
+
+See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, Next.js, and `traceGenerateText`. Requires the `ai` package (`npm install ai`).
+
 ## Output modes
 
 | Mode | How to enable | Destination |
@@ -225,5 +243,6 @@ npm test
 ## Links
 
 - [Full integration guide](https://github.com/dunetrace/dunetrace/blob/main/docs/integrate-typescript-agent.md)
+- [Vercel AI SDK guide](https://github.com/dunetrace/dunetrace/blob/main/docs/integrate-vercel-ai.md)
 - [MCP server](https://github.com/dunetrace/dunetrace/blob/main/docs/mcp-server.md) — query agent signals from Claude Code or Cursor
 - [GitHub](https://github.com/dunetrace/dunetrace)

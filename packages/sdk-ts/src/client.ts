@@ -1,15 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { hashContent, agentVersion } from "./hash.js";
 import { DunetraceRun } from "./run.js";
+import { resultLength as _resultLength } from "./util.js";
 import type { AgentEvent, ClientOptions, RunOptions } from "./models.js";
 
 const _runStorage = new AsyncLocalStorage<DunetraceRun>();
-
-function _resultLength(v: unknown): number {
-  if (v == null) return 0;
-  if (typeof v === "string") return v.length;
-  try { return JSON.stringify(v).length; } catch { return 0; }
-}
 
 export class Dunetrace {
   private _ingestUrl:  string | null;
