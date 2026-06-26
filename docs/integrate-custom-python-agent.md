@@ -421,7 +421,7 @@ Alerts fire within ~15 seconds of a run completing.
 
 ## Step 6: Tune Detectors (Optional)
 
-Dunetrace ships 15 built-in detectors with defaults that work for most agents. If your agent legitimately calls the same tool many times (e.g., a search agent), loosen the thresholds in `detectors.yml` on the server:
+Dunetrace ships 17 built-in detectors with defaults that work for most agents. If your agent legitimately calls the same tool many times (e.g., a search agent), loosen the thresholds in `detectors.yml` on the server:
 
 ```yaml
 # detectors.yml

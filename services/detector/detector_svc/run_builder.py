@@ -147,11 +147,16 @@ def build_run_state(events: list[dict]) -> RunState:
     if state.events:
         state.current_step = max(e.step_index for e in state.events)
 
-    # step_durations_ms: gap (ms) from event[i].timestamp to event[i+1].timestamp
-    # Keyed by event[i].step_index. Gives wall-clock cost of each step transition.
+    # step_durations_ms: wall-clock cost of the first gap at each step_index.
+    # First-write-wins so that the initiating event (tool.called, llm.called)
+    # captures the actual operation latency rather than being overwritten by the
+    # near-zero gap between the responding event and the next step's first event.
     for i in range(len(state.events) - 1):
         gap_ms = int((state.events[i + 1].timestamp - state.events[i].timestamp) * 1000)
-        if gap_ms >= 0:  # guard against clock skew
-            state.step_durations_ms[state.events[i].step_index] = gap_ms
+        step_idx = state.events[i].step_index
+        if (
+            gap_ms >= 0 and step_idx not in state.step_durations_ms
+        ):  # guard clock skew + first-write
+            state.step_durations_ms[step_idx] = gap_ms
 
     return state

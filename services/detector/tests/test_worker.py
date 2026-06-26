@@ -299,6 +299,107 @@ class TestDetectorIntegrationViaRunBuilder(unittest.TestCase):
         self.assertGreaterEqual(len(signals), 1)
 
 
+# ── SLOW_STEP end-to-end via run_builder ──────────────────────────────────────
+
+
+def timed_evt(event_type: str, step: int, ts: float, payload: dict = None) -> dict:
+    """Event factory with an explicit timestamp for latency-sensitive tests."""
+    return {
+        "event_type": event_type,
+        "run_id": "run-slow-1",
+        "agent_id": "agent-test",
+        "agent_version": "abc12345",
+        "step_index": step,
+        "timestamp": ts,
+        "payload": payload or {},
+        "parent_run_id": None,
+    }
+
+
+class TestSlowStepViaRunBuilder(unittest.TestCase):
+    """
+    Verify SLOW_STEP fires correctly through build_run_state → run_detectors.
+
+    These tests use real timestamps to exercise the step_durations_ms computation
+    in run_builder, catching regressions in the first-write-wins fix that prevents
+    actual tool/LLM latency from being overwritten by the near-zero post-response gap.
+    """
+
+    def _signals(self, events):
+        from dunetrace.detectors import run_detectors
+
+        return run_detectors(build_run_state(events))
+
+    def test_slow_tool_call_fires(self):
+        t = time.time()
+        events = [
+            timed_evt(
+                "run.started", 0, t, {"tools": ["api"], "model": "gpt-4o", "input_hash": "x"}
+            ),
+            timed_evt("tool.called", 1, t + 1, {"tool_name": "api", "args_hash": "aa"}),
+            timed_evt("tool.responded", 1, t + 20, {"tool_name": "api", "success": True}),
+            timed_evt("run.completed", 1, t + 20.001, {"exit_reason": "final_answer"}),
+        ]
+        types = [s.failure_type for s in self._signals(events)]
+        self.assertIn(FailureType.SLOW_STEP, types)
+
+    def test_fast_tool_call_no_signal(self):
+        t = time.time()
+        events = [
+            timed_evt(
+                "run.started", 0, t, {"tools": ["api"], "model": "gpt-4o", "input_hash": "x"}
+            ),
+            timed_evt("tool.called", 1, t + 1, {"tool_name": "api", "args_hash": "aa"}),
+            timed_evt("tool.responded", 1, t + 5, {"tool_name": "api", "success": True}),
+            timed_evt("run.completed", 1, t + 5.001, {"exit_reason": "final_answer"}),
+        ]
+        types = [s.failure_type for s in self._signals(events)]
+        self.assertNotIn(FailureType.SLOW_STEP, types)
+
+    def test_slow_llm_call_fires(self):
+        t = time.time()
+        events = [
+            timed_evt("run.started", 0, t, {"tools": [], "model": "gpt-4o", "input_hash": "x"}),
+            timed_evt("llm.called", 1, t + 1, {"model": "gpt-4o"}),
+            timed_evt("llm.responded", 1, t + 35, {"finish_reason": "stop", "output_length": 100}),
+            timed_evt("run.completed", 1, t + 35.001, {"exit_reason": "final_answer"}),
+        ]
+        types = [s.failure_type for s in self._signals(events)]
+        self.assertIn(FailureType.SLOW_STEP, types)
+
+    def test_tool_latency_not_overwritten_by_post_response_gap(self):
+        """Regression: tool latency must survive the near-zero tool.responded → run.completed gap."""
+        t = time.time()
+        events = [
+            timed_evt(
+                "run.started", 0, t, {"tools": ["api"], "model": "gpt-4o", "input_hash": "x"}
+            ),
+            timed_evt("tool.called", 1, t + 1, {"tool_name": "api", "args_hash": "aa"}),
+            timed_evt("tool.responded", 1, t + 20, {"tool_name": "api", "success": True}),
+            timed_evt("run.completed", 1, t + 20.001, {"exit_reason": "final_answer"}),
+        ]
+        state = build_run_state(events)
+        self.assertGreater(
+            state.step_durations_ms.get(1, 0),
+            15_000,
+            "step_durations_ms[1] was overwritten — first-write-wins fix regressed",
+        )
+
+    def test_llm_threshold_applied_not_catchall(self):
+        """LLM calls at step 1 should use the 30s threshold, not the 60s catch-all."""
+        t = time.time()
+        # 35s LLM call: above 30s (LLM threshold) but below 60s (catch-all)
+        events = [
+            timed_evt("run.started", 0, t, {"tools": [], "model": "gpt-4o", "input_hash": "x"}),
+            timed_evt("llm.called", 1, t + 1, {"model": "gpt-4o"}),
+            timed_evt("llm.responded", 1, t + 36, {"finish_reason": "stop", "output_length": 50}),
+            timed_evt("run.completed", 1, t + 36.001, {"exit_reason": "final_answer"}),
+        ]
+        types = [s.failure_type for s in self._signals(events)]
+        # Would NOT fire if catch-all 60s was mistakenly applied; fires because 30s LLM threshold is used
+        self.assertIn(FailureType.SLOW_STEP, types)
+
+
 # ── Process run (async, mocked DB) ────────────────────────────────────────────
 
 

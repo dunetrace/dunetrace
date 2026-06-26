@@ -106,8 +106,12 @@ class RunContext:
         finish_reason: str = "stop",
         output_hash: str = "",
         output_length: int = 0,
+        prompt_tokens: int = 0,
     ) -> None:
         # Back-fill the most recent LlmCall with response data.
+        # prompt_tokens is optional — pass it when the count is only known after
+        # the call (e.g. taken from the API response), overriding the estimate
+        # given to llm_called().
         if self.state.llm_calls:
             lc = self.state.llm_calls[-1]
             lc.finish_reason = finish_reason
@@ -115,6 +119,8 @@ class RunContext:
             lc.output_length = output_length
             lc.completion_tokens = completion_tokens or None
             lc.reasoning_tokens = reasoning_tokens or None
+            if prompt_tokens:
+                lc.prompt_tokens = prompt_tokens
             self._cost_usd += compute_run_cost([lc])
         payload: dict = {
             "completion_tokens": completion_tokens,
@@ -123,6 +129,8 @@ class RunContext:
             "output_hash": output_hash,
             "output_length": output_length,
         }
+        if prompt_tokens:
+            payload["prompt_tokens"] = prompt_tokens
         if reasoning_tokens:
             payload["reasoning_tokens"] = reasoning_tokens
         self._emit(EventType.LLM_RESPONDED, payload, advance=False)

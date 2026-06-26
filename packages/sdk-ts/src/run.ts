@@ -30,13 +30,15 @@ export class DunetraceRun {
   }
 
   llmResponded(opts: LlmRespondedOptions = {}): void {
-    this._emit("llm.responded", {
+    const payload: Record<string, unknown> = {
       completion_tokens: opts.completionTokens ?? 0,
       latency_ms:        opts.latencyMs        ?? 0,
       finish_reason:     opts.finishReason      ?? "stop",
       output_length:     opts.outputLength      ?? (opts.outputText?.length ?? 0),
       output_hash:       hashContent(opts.outputText ?? ""),
-    }, false);
+    };
+    if (opts.promptTokens) payload["prompt_tokens"] = opts.promptTokens;
+    this._emit("llm.responded", payload, false);
   }
 
   // ── Tool hooks ─────────────────────────────────────────────────────────────

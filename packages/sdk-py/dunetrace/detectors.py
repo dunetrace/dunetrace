@@ -582,8 +582,14 @@ class SlowStepDetector(BaseDetector):
         # agent event they annotate and must not overwrite its event_type or
         # timestamp in the lookup dicts.
         agent_events = [e for e in state.events if e.event_type is not EventType.EXTERNAL_SIGNAL]
-        step_event_type = {e.step_index: e.event_type.value for e in agent_events}
-        step_timestamp = {e.step_index: e.timestamp for e in agent_events}
+        # First-write-wins: the initiating event (tool.called, llm.called) at each
+        # step determines the threshold, not the responding or completing event.
+        step_event_type: dict[int, str] = {}
+        step_timestamp: dict[int, float] = {}
+        for e in agent_events:
+            if e.step_index not in step_event_type:
+                step_event_type[e.step_index] = e.event_type.value
+                step_timestamp[e.step_index] = e.timestamp
 
         for step_idx, duration_ms in state.step_durations_ms.items():
             event_type = step_event_type.get(step_idx, "")
