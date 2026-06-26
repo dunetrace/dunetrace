@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import time
 import uuid
 
@@ -118,7 +119,7 @@ async def mark_deploy(body: DeployRequest) -> DeployResponse:
 async def create_key(body: KeyCreateRequest) -> KeyCreateResponse:
     """Admin-only endpoint. Requires ADMIN_API_KEY env var to match body.admin_key."""
     admin_key = os.getenv("ADMIN_API_KEY", "")
-    if not admin_key or body.admin_key != admin_key:
+    if not admin_key or not secrets.compare_digest(body.admin_key, admin_key):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
     name = body.company_name or body.customer_id
     key = await create_api_key(

@@ -10,6 +10,7 @@ export class Dunetrace {
   private _ingestUrl:  string | null;
   private _apiKey:     string;
   private _buffer:     AgentEvent[]       = [];
+  private _bufferSize: number;
   private _drainTimer: ReturnType<typeof setInterval> | null = null;
   private _emitJson:   boolean;
 
@@ -18,6 +19,7 @@ export class Dunetrace {
     this._ingestUrl = base + "/v1/ingest";
     this._apiKey    = opts.apiKey ?? "";
     this._emitJson  = opts.emitAsJson ?? false;
+    this._bufferSize = opts.bufferSize ?? 10_000;
 
     const interval = opts.flushIntervalMs ?? 200;
     this._drainTimer = setInterval(() => { this._drain(); }, interval);
@@ -271,6 +273,7 @@ export class Dunetrace {
 
   _emit(event: AgentEvent): void {
     if (this._emitJson) this._writeJsonLine(event);
+    if (this._buffer.length >= this._bufferSize) return;
     this._buffer.push(event);
   }
 
