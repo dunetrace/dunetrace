@@ -128,6 +128,13 @@ CREATE TABLE IF NOT EXISTS custom_detector_results (
 );
 CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
+
+-- Performance indexes for baseline queries (processed_runs) and alert worker queries (failure_signals).
+CREATE INDEX IF NOT EXISTS idx_processed_runs_agent_version
+    ON processed_runs(agent_id, agent_version, processed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_failure_signals_agent_shadow_alerted
+    ON failure_signals(agent_id, shadow, alerted, detected_at DESC);
 """
 
 # Detectors that have graduated out of shadow mode.

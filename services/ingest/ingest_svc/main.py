@@ -98,8 +98,8 @@ def create_app() -> FastAPI:
                                     "SELECT set_config('app.current_agent_id', $1, true)",
                                     agent_id,
                                 )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Failed to set agent context: %s", exc)
             return await call_next(request)
 
         import json as _json
@@ -112,8 +112,8 @@ def create_app() -> FastAPI:
                 api_key = data.get("api_key", "") or ""
                 if api_key:
                     agent_id = await verify_api_key(api_key)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to set agent context: %s", exc)
 
         request.state.agent_id = agent_id
         request.state.company_id = None
@@ -128,8 +128,8 @@ def create_app() -> FastAPI:
                                 "SELECT set_config('app.current_agent_id', $1, true)",
                                 agent_id,
                             )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Failed to set agent context: %s", exc)
         return await call_next(request)
 
     # Registered second = outer = runs FIRST.

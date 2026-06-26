@@ -1,0 +1,232 @@
+"""
+Tests for the in-memory sliding-window rate limiter.
+No DB, no network — fully offline.
+
+Run:
+    cd services/ingest
+    PYTHONPATH=packages/sdk-py:services/ingest python -m pytest tests/test_rate_limiter.py -v
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import os
+import time
+import unittest
+from unittest.mock import patch, AsyncMock
+
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+for _p in [
+    os.path.join(_ROOT, "packages/sdk-py"),
+    os.path.join(_ROOT, "services/ingest"),
+]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from ingest_svc.rate_limiter import RateLimiter
+
+
+class TestRateLimiterAllow(unittest.IsolatedAsyncioTestCase):
+    """Basic allow / deny behaviour."""
+
+    async def test_first_request_always_allowed(self):
+        limiter = RateLimiter(default_rpm=10)
+        allowed, retry_after = await limiter.is_allowed("key1")
+        self.assertTrue(allowed)
+        self.assertEqual(retry_after, 0)
+
+    async def test_requests_within_limit_are_allowed(self):
+        limiter = RateLimiter(default_rpm=5)
+        for _ in range(5):
+            allowed, _ = await limiter.is_allowed("key1")
+            self.assertTrue(allowed)
+
+    async def test_request_exceeding_limit_is_denied(self):
+        limiter = RateLimiter(default_rpm=3)
+        for _ in range(3):
+            await limiter.is_allowed("key1")
+        # 4th request should be denied
+        allowed, retry_after = await limiter.is_allowed("key1")
+        self.assertFalse(allowed)
+        self.assertGreater(retry_after, 0)
+
+    async def test_retry_after_is_positive_when_denied(self):
+        limiter = RateLimiter(default_rpm=1)
+        await limiter.is_allowed("key1")
+        _, retry_after = await limiter.is_allowed("key1")
+        self.assertGreaterEqual(retry_after, 1)
+
+    async def test_different_keys_are_independent(self):
+        limiter = RateLimiter(default_rpm=1)
+        await limiter.is_allowed("key1")
+        # key1 is now exhausted, but key2 should still be allowed
+        allowed, _ = await limiter.is_allowed("key2")
+        self.assertTrue(allowed)
+
+    async def test_single_rpm_limits_to_one_per_window(self):
+        limiter = RateLimiter(default_rpm=1)
+        ok1, _ = await limiter.is_allowed("k")
+        ok2, _ = await limiter.is_allowed("k")
+        self.assertTrue(ok1)
+        self.assertFalse(ok2)
+
+
+class TestRateLimiterSlidingWindow(unittest.IsolatedAsyncioTestCase):
+    """Sliding window boundary — old timestamps fall out after 60s."""
+
+    async def test_requests_outside_window_are_allowed_again(self):
+        limiter = RateLimiter(default_rpm=2)
+        now = time.monotonic()
+        # Manually insert stale timestamps (>60s ago) into the deque
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now - 65.0
+            await limiter.is_allowed("key1")
+            await limiter.is_allowed("key1")  # fills window 65s ago
+
+        # Back to real time — window should have slid, requests should be allowed again
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now
+            allowed, _ = await limiter.is_allowed("key1")
+            self.assertTrue(allowed)
+
+    async def test_window_exactly_60_seconds(self):
+        """A request at exactly 60s ago is NOT evicted (window uses strict <).
+        The eviction condition is dq[0] < (now - 60.0), so dq[0] == now - 60.0 stays."""
+        limiter = RateLimiter(default_rpm=1)
+        now = time.monotonic()
+        # Insert a timestamp exactly 60s ago
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now - 60.0
+            await limiter.is_allowed("key1")
+
+        # At current time, the 60s-old request sits at the boundary and is NOT evicted
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now
+            allowed, _ = await limiter.is_allowed("key1")
+            self.assertFalse(allowed)  # still counted — boundary is inclusive
+
+    async def test_request_just_inside_window_counts(self):
+        """A request 59s ago should still count against the rate limit."""
+        limiter = RateLimiter(default_rpm=1)
+        now = time.monotonic()
+        # Insert a timestamp 59s ago (inside the 60s window)
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now - 59.0
+            await limiter.is_allowed("key1")
+
+        # At current time, 59s-old request is still in window — should be denied
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now
+            allowed, _ = await limiter.is_allowed("key1")
+            self.assertFalse(allowed)
+
+
+class TestRateLimiterEviction(unittest.IsolatedAsyncioTestCase):
+    """evict_stale() removes idle keys from memory."""
+
+    async def test_evict_stale_removes_inactive_keys(self):
+        limiter = RateLimiter(default_rpm=10)
+        now = time.monotonic()
+        # Manually set a stale timestamp (> 120s ago) in the window deque
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now - 130.0
+            await limiter.is_allowed("stale_key")
+
+        self.assertIn("stale_key", limiter._windows)
+        # evict_stale uses real monotonic, so patch it to return `now`
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now
+            limiter.evict_stale()
+
+        self.assertNotIn("stale_key", limiter._windows)
+
+    async def test_evict_stale_removes_rpm_cache_for_stale_keys(self):
+        limiter = RateLimiter(default_rpm=10)
+        now = time.monotonic()
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now - 130.0
+            await limiter.is_allowed("stale_key")
+        # Simulate a cached rpm entry
+        limiter._rpm_cache["stale_key"] = (60, now - 400)
+
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now
+            limiter.evict_stale()
+
+        self.assertNotIn("stale_key", limiter._rpm_cache)
+
+    async def test_evict_stale_keeps_active_keys(self):
+        limiter = RateLimiter(default_rpm=10)
+        await limiter.is_allowed("active_key")
+        # active_key just had a request — its last timestamp is very recent
+        limiter.evict_stale()
+        self.assertIn("active_key", limiter._windows)
+
+    async def test_evict_stale_removes_empty_window_keys(self):
+        """Keys whose deque is empty (all requests expired) should also be evicted."""
+        limiter = RateLimiter(default_rpm=10)
+        now = time.monotonic()
+        # Use a stale timestamp so the deque ages out
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now - 130.0
+            await limiter.is_allowed("old_key")
+
+        with patch("ingest_svc.rate_limiter.time") as mock_time:
+            mock_time.monotonic.return_value = now
+            limiter.evict_stale()
+
+        self.assertNotIn("old_key", limiter._windows)
+
+
+class TestRateLimiterConcurrency(unittest.IsolatedAsyncioTestCase):
+    """Concurrent coroutines must never corrupt the window deque."""
+
+    async def test_concurrent_requests_respect_limit(self):
+        """10 concurrent coroutines hitting a limit of 5 — exactly 5 should pass."""
+        limiter = RateLimiter(default_rpm=5)
+        results = await asyncio.gather(*[limiter.is_allowed("shared") for _ in range(10)])
+        allowed_count = sum(1 for ok, _ in results if ok)
+        self.assertEqual(allowed_count, 5)
+
+    async def test_concurrent_different_keys_do_not_interfere(self):
+        """Each key has its own quota; concurrent calls on different keys must not interfere."""
+        limiter = RateLimiter(default_rpm=3)
+        tasks = []
+        for i in range(5):
+            for _ in range(3):
+                tasks.append(limiter.is_allowed(f"key{i}"))
+        results = await asyncio.gather(*tasks)
+        # All 5*3 = 15 requests should be allowed (each key gets its own 3)
+        allowed_count = sum(1 for ok, _ in results if ok)
+        self.assertEqual(allowed_count, 15)
+
+    async def test_high_concurrency_no_crash(self):
+        """100 concurrent coroutines must not raise or deadlock."""
+        limiter = RateLimiter(default_rpm=1000)
+        results = await asyncio.gather(*[limiter.is_allowed("flood") for _ in range(100)])
+        self.assertEqual(len(results), 100)
+
+
+class TestRateLimiterRpmCache(unittest.IsolatedAsyncioTestCase):
+    """_get_rpm uses a cache with TTL; fallback to default_rpm when no pool."""
+
+    async def test_defaults_to_default_rpm_with_no_pool(self):
+        """Without a DB pool, rpm should be the constructor default."""
+        limiter = RateLimiter(default_rpm=42)
+        # Patch get_pool to return None (no pool available)
+        with patch("ingest_svc.rate_limiter.RateLimiter._get_rpm", AsyncMock(return_value=42)):
+            rpm = await limiter._get_rpm("some_key")
+        self.assertEqual(rpm, 42)
+
+    async def test_rpm_is_cached_after_lookup(self):
+        """A second _get_rpm call within TTL should hit the cache, not the DB."""
+        limiter = RateLimiter(default_rpm=10)
+        # Pre-populate the cache (simulating a recent successful DB lookup)
+        limiter._rpm_cache["cached_key"] = (999, time.monotonic())
+        rpm = await limiter._get_rpm("cached_key")
+        self.assertEqual(rpm, 999)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

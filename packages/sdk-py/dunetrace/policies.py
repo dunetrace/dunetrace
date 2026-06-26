@@ -42,7 +42,21 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, Required, TypedDict
+
+
+class PolicyCondition(TypedDict, total=False):
+    trigger: Required[
+        str
+    ]  # tool_call_count | step_count | cost_usd | error_count | finish_reason | llm_latency_ms | signal
+    operator: str  # gt | gte | lt | lte | eq | neq | contains  (default: gt)
+    value: Any  # threshold value
+
+
+class PolicyAction(TypedDict, total=False):
+    type: Required[Literal["stop", "switch_model", "inject_prompt", "log"]]
+    params: Dict[str, Any]  # e.g. {"model": "gpt-4o-mini"} for switch_model
+
 
 logger = logging.getLogger("dunetrace.policies")
 
@@ -146,8 +160,8 @@ class PolicyViolation(RuntimeError):
 @dataclass
 class Policy:
     name: str
-    condition: Dict[str, Any]  # {trigger, operator, value}
-    action: Dict[str, Any]  # {type, params?}
+    condition: PolicyCondition
+    action: PolicyAction
     agent_id: str = "*"  # "*" matches all agents
     enabled: bool = True
     priority: int = 100

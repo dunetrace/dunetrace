@@ -18,7 +18,9 @@ Environment:
 
 from __future__ import annotations
 
+import json
 import pathlib
+import re
 import textwrap
 from datetime import datetime, timezone
 from typing import Optional
@@ -58,9 +60,18 @@ def _ts(epoch: float | None) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _ago(epoch: float | None) -> str:
-    if epoch is None:
+def _ago(ts: float | str | None) -> str:
+    """Format a timestamp (epoch float or ISO-8601 string) as a relative time."""
+    if ts is None:
         return "—"
+    if isinstance(ts, str):
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            epoch: float = dt.timestamp()
+        except (ValueError, AttributeError):
+            return ts
+    else:
+        epoch = float(ts)
     secs = datetime.now(tz=timezone.utc).timestamp() - epoch
     if secs < 60:
         return f"{int(secs)}s ago"
@@ -273,7 +284,7 @@ def get_run_detail(run_id: str, agent_id: str = "") -> str:
                 detail = p.get("exit_reason", "")
             lines.append(f"  [{e['step_index']:>3}] {ts_rel:>8}  {e['event_type']:<20} {detail}")
         if len(events) > 40:
-            lines.append(f"  … {len(events) - 40} more events")
+            lines.append(f"  [Timeline truncated — showing first 40 of {len(events)} events]")
 
     return "\n".join(lines)
 
@@ -653,6 +664,713 @@ def get_agent_runs(agent_id: str, limit: int = 20) -> str:
 
     page = data.get("page", {})
     lines.append(f"\n{len(runs)} of {page.get('total', len(runs))} runs shown.")
+    return "\n".join(lines)
+
+
+# ── fix tracking tools ───────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def get_fix_status(signal_id: int, agent_id: str = "") -> str:
+    """
+    Check whether a fix applied for a signal reduced recurrence.
+
+    Verdict meanings:
+      verified         — signal has not recurred since the fix was applied
+      likely_fixed     — recurrence dropped significantly but not to zero
+      still_occurring  — signal is still firing at a similar rate
+      insufficient_data — not enough post-fix runs to make a determination
+
+    Args:
+        signal_id: The integer signal ID to check.
+        agent_id:  Agent ID (optional; not required for lookup).
+    """
+    try:
+        data = client.get(f"/v1/signals/{signal_id}/fix-status")
+    except Exception as exc:
+        return f"Error: \1"
+
+    verdict = data.get("verdict", "unknown")
+    verdict_icons = {
+        "verified": "✅",
+        "likely_fixed": "🟡",
+        "still_occurring": "🔴",
+        "insufficient_data": "❓",
+    }
+    icon = verdict_icons.get(verdict, "⚪")
+
+    lines = [
+        f"Fix status for signal #{signal_id}",
+        f"Verdict:  {icon} {verdict.upper().replace('_', ' ')}",
+        "",
+    ]
+
+    runs_before = data.get("runs_before") or data.get("total_runs_before")
+    runs_after = data.get("runs_after") or data.get("total_runs_after")
+    recur_before = data.get("recurrence_before") or data.get("signal_recurrence_before")
+    recur_after = data.get("recurrence_after") or data.get("signal_recurrence_after")
+    runs_evaluated = data.get("runs_evaluated") or data.get("total_runs_evaluated")
+
+    if runs_before is not None:
+        lines.append(
+            f"  Runs before fix:   {runs_before}"
+            + (f"  (recurrence: {recur_before})" if recur_before is not None else "")
+        )
+    if runs_after is not None:
+        lines.append(
+            f"  Runs after fix:    {runs_after}"
+            + (f"  (recurrence: {recur_after})" if recur_after is not None else "")
+        )
+    if runs_evaluated is not None:
+        lines.append(f"  Runs evaluated:    {runs_evaluated}")
+
+    fix_applied_at = data.get("fix_applied_at") or data.get("applied_at")
+    if fix_applied_at:
+        lines.append(f"  Fix applied:       {_ago(fix_applied_at)}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def list_agent_fixes(agent_id: str) -> str:
+    """
+    List all fixes that have been applied for an agent's signals.
+
+    Shows which signals were fixed, how they were applied (clipboard copy or
+    Langfuse apply), the fix type, and whether the fix was verified effective.
+
+    Args:
+        agent_id: The agent ID to query.
+    """
+    try:
+        data = client.get(f"/v1/agents/{agent_id}/fixes")
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    fixes = data if isinstance(data, list) else data.get("fixes", [])
+
+    if not fixes:
+        return f"No fixes recorded for agent '{agent_id}'."
+
+    lines = [
+        f"Fixes for: {agent_id}  ({len(fixes)} total)\n",
+        f"{'SIGNAL':>7}  {'TYPE':<18}  {'VIA':<10}  {'VERDICT':<20}  WHEN",
+        "─" * 75,
+    ]
+    for f in fixes:
+        sig_id = str(f.get("signal_id", "—"))
+        fix_type = (f.get("fix_type") or "—")[:18]
+        via = (f.get("applied_via") or "—")[:10]
+        verdict = (f.get("verdict") or "—")[:20]
+        when = _ago(f.get("applied_at"))
+        lines.append(f"{sig_id:>7}  {fix_type:<18}  {via:<10}  {verdict:<20}  {when}")
+
+    return "\n".join(lines)
+
+
+# ── explain / root cause tools ────────────────────────────────────────────────
+
+
+@mcp.tool()
+def trigger_explain(signal_id: int, agent_id: str = "") -> str:
+    """
+    Trigger LLM-powered root cause analysis for a signal and return a fix
+    suggestion.
+
+    Fetches the Langfuse trace for the signal's run, runs the analysis, and
+    returns a structured explanation with a fix (either a prompt addition or a
+    code/infra change description).
+
+    Note: this makes an LLM call and may take 5–15 seconds.
+
+    Args:
+        signal_id: The integer signal ID to analyze.
+        agent_id:  Agent ID (optional; informational only).
+    """
+    try:
+        result = client.post(f"/v1/signals/{signal_id}/explain", {})
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    fix_type = result.get("fix_type", "unknown")
+    apply_blocked = result.get("apply_blocked", True)
+    prompt_name = result.get("langfuse_prompt_name")
+    prompt_ver = result.get("langfuse_prompt_version")
+
+    fix_type_labels = {
+        "prompt_addition": "Prompt addition (add a sentence to your system prompt)",
+        "code_change": "Code / infra change required",
+        "no_auto_apply": "No auto-apply available for this failure type",
+    }
+
+    lines = [
+        f"Root cause analysis for signal #{signal_id}",
+        "",
+        "Root cause:",
+        f"  {result.get('root_cause', '—')}",
+        "",
+        f"Fix ({fix_type_labels.get(fix_type, fix_type)}):",
+        f"  {result.get('fix_content', '—')}",
+        "",
+    ]
+
+    if not apply_blocked and prompt_name:
+        lines.append("Apply instructions:")
+        lines.append(f"  Prompt name:    {prompt_name}")
+        if prompt_ver is not None:
+            lines.append(f"  Current version: {prompt_ver}")
+        lines.append(
+            "  Use the 'Apply Fix' button in the dashboard, or call the apply-fix API endpoint."
+        )
+    elif apply_blocked:
+        lines.append(
+            "Apply blocked: this failure type requires a code or infra change — "
+            "no Langfuse prompt to patch."
+        )
+
+    return "\n".join(lines)
+
+
+# ── policy tools ──────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def list_policies(agent_id: str = "") -> str:
+    """
+    List runtime policies configured for agents.
+
+    Policies trigger actions (stop, switch_model, inject_prompt, log) when a
+    metric threshold is breached during a live run.
+
+    Args:
+        agent_id: Filter to one agent (optional; lists all agents' policies if omitted).
+    """
+    try:
+        params: dict = {}
+        if agent_id:
+            params["agent_id"] = agent_id
+        data = client.get("/v1/policies", **params)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    policies = data if isinstance(data, list) else data.get("policies", [])
+
+    if not policies:
+        qualifier = f" for agent '{agent_id}'" if agent_id else ""
+        return f"No policies found{qualifier}. Create one with create_policy or via the dashboard."
+
+    lines = [
+        f"Policies ({len(policies)}):\n",
+        f"{'NAME':<25}  {'AGENT':<15}  {'TRIGGER':<12}  {'OP':<4}  {'VALUE':<10}  {'ACTION':<18}  STATUS",
+        "─" * 100,
+    ]
+    for p in policies:
+        cond = p.get("condition") or {}
+        if isinstance(cond, str):
+            try:
+                cond = json.loads(cond)
+            except Exception:
+                cond = {}
+        action = p.get("action") or {}
+        if isinstance(action, str):
+            try:
+                action = json.loads(action)
+            except Exception:
+                action = {}
+
+        metric = cond.get("metric", "—")[:12]
+        op = cond.get("operator", "—")[:4]
+        threshold = str(cond.get("threshold", "—"))[:10]
+        act_type = action.get("type", "—")[:18]
+        enabled = "enabled" if p.get("enabled", True) else "disabled"
+        name = (p.get("name") or "—")[:25]
+        p_agent = (p.get("agent_id") or "*")[:15]
+
+        lines.append(
+            f"{name:<25}  {p_agent:<15}  {metric:<12}  {op:<4}  {threshold:<10}  {act_type:<18}  {enabled}"
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def create_policy(name: str, agent_id: str, condition: str, action: str) -> str:
+    """
+    Create a runtime policy that triggers an action when a metric threshold is
+    crossed during a live agent run.
+
+    Args:
+        name:      Policy name (human-readable label).
+        agent_id:  Agent to apply the policy to (use '*' for all agents).
+        condition: JSON string with keys: metric, operator, threshold.
+                   Example: '{"metric": "cost_usd", "operator": "gt", "threshold": 5.0}'
+                   Metrics: cost_usd, tool_calls, llm_calls, retries, step_count,
+                            duration_s, prompt_tokens, completion_tokens
+                   Operators: gt, gte, lt, lte, eq
+        action:    JSON string with key 'type' and optional params.
+                   Examples:
+                     '{"type": "stop"}'
+                     '{"type": "switch_model", "model": "gpt-4o-mini"}'
+                     '{"type": "inject_prompt", "text": "Stop looping."}'
+                     '{"type": "log"}'
+    """
+    try:
+        cond_parsed = json.loads(condition)
+        act_parsed = json.loads(action)
+    except json.JSONDecodeError as exc:
+        return f"Error: invalid JSON in condition or action: {exc}"
+
+    try:
+        result = client.post(
+            "/v1/policies",
+            {
+                "name": name,
+                "agent_id": agent_id,
+                "condition": cond_parsed,
+                "action": act_parsed,
+            },
+        )
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    policy_id = result.get("id", "—")
+    enabled = "enabled" if result.get("enabled", True) else "disabled"
+
+    lines = [
+        f"Policy created: {name}  (id: {policy_id})",
+        "",
+        f"  Name:       {result.get('name', name)}",
+        f"  Agent:      {result.get('agent_id', agent_id)}",
+        f"  Condition:  metric={cond_parsed.get('metric', '?')}  "
+        f"operator={cond_parsed.get('operator', '?')}  "
+        f"threshold={cond_parsed.get('threshold', '?')}",
+        f"  Action:     {act_parsed.get('type', '?')}",
+        f"  Status:     {enabled}",
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def toggle_policy(policy_id: str, enabled: bool) -> str:
+    """
+    Enable or disable a runtime policy.
+
+    Args:
+        policy_id: The policy ID to toggle.
+        enabled:   True to enable, False to disable.
+    """
+    try:
+        result = client.patch(f"/v1/policies/{policy_id}/toggle", {"enabled": enabled})
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    new_state = "enabled" if result.get("enabled", enabled) else "disabled"
+    name = result.get("name", policy_id)
+    return f"Policy '{name}' ({policy_id}) is now {new_state}."
+
+
+@mcp.tool()
+def delete_policy(policy_id: str) -> str:
+    """
+    Delete a runtime policy.
+
+    Args:
+        policy_id: The policy ID to delete.
+    """
+    try:
+        client.delete(f"/v1/policies/{policy_id}")
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    return f"Policy {policy_id} deleted."
+
+
+# ── custom detector tools ─────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def list_custom_detectors(agent_id: str = "") -> str:
+    """
+    List custom detectors with their status, fire rate, and run counts.
+
+    Status values:
+      shadow  — evaluating silently; results visible via include_shadow but no alerts
+      active  — firing live alerts when triggered
+      paused  — evaluation suspended
+
+    Args:
+        agent_id: Filter to one agent (optional; lists all if omitted).
+    """
+    try:
+        params: dict = {}
+        if agent_id:
+            params["agent_id"] = agent_id
+        data = client.get("/v1/custom-detectors", **params)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    detectors = data if isinstance(data, list) else data.get("detectors", [])
+
+    if not detectors:
+        qualifier = f" for agent '{agent_id}'" if agent_id else ""
+        return f"No custom detectors found{qualifier}. Create one with create_custom_detector."
+
+    status_badge = {"shadow": "[shadow]", "active": "[active]", "paused": "[paused]"}
+
+    lines = [
+        f"Custom detectors ({len(detectors)}):\n",
+        f"{'NAME':<30}  {'STATUS':<9}  {'AGENT':<15}  FIRE RATE  TOTAL RUNS",
+        "─" * 80,
+    ]
+    for d in detectors:
+        name = (d.get("name") or "—")[:30]
+        status = status_badge.get(d.get("status", ""), d.get("status", "—"))
+        d_agent = (d.get("agent_id") or "*")[:15]
+        total = d.get("total_runs") or 0
+        fired = d.get("shadow_fire_count") or 0
+        rate_str = f"{fired}/{total} ({fired * 100 // total}%)" if total > 0 else "—"
+        lines.append(f"{name:<30}  {status:<9}  {d_agent:<15}  {rate_str:<10}  {total}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def create_custom_detector(description: str, agent_id: str = "*") -> str:
+    """
+    Create a custom detector from a plain-English description.
+
+    This tool first translates the description to a structured config using LLM
+    (preview step), then creates the detector in shadow mode so it evaluates
+    without firing alerts. Use activate_custom_detector to go live.
+
+    Args:
+        description: Plain-English description of what to detect.
+                     Example: "Alert when total tool calls exceed 20 in a single run"
+        agent_id:    Agent to apply this detector to ('*' for all agents).
+    """
+    try:
+        preview = client.post(
+            "/v1/custom-detectors/preview",
+            {"description": description, "agent_id": agent_id},
+        )
+    except Exception as exc:
+        return f"Error during preview translation: {exc}"
+
+    if preview.get("requires_content"):
+        return (
+            "This description requires access to raw prompt/response content, "
+            "which is unavailable (everything is hashed at the SDK). "
+            "Rephrase to use structural metrics: tool call counts, latency, "
+            "token usage, step count, retry count, etc."
+        )
+
+    # Derive a name from the description
+    name = re.sub(r"[^a-z0-9]+", "-", description[:50].lower().strip()).strip("-")
+    name = re.sub(r"-+", "-", name)[:40]
+
+    lines = [
+        f'Preview of translated config for: "{description[:60]}"',
+        "",
+    ]
+    conditions = preview.get("conditions") or []
+    metrics = preview.get("metrics") or []
+    if metrics:
+        lines.append(f"  Metrics:    {', '.join(str(m) for m in metrics)}")
+    if conditions:
+        lines.append("  Conditions:")
+        for cond in conditions:
+            if isinstance(cond, dict):
+                lines.append(
+                    f"    {cond.get('metric', '?')} {cond.get('operator', '?')} "
+                    f"{cond.get('threshold', '?')}"
+                )
+            else:
+                lines.append(f"    {cond}")
+    lines.append("")
+
+    try:
+        result = client.post(
+            "/v1/custom-detectors",
+            {
+                "name": name,
+                "description": description,
+                "agent_id": agent_id,
+                "config_json": preview,
+            },
+        )
+    except Exception as exc:
+        return "\n".join(lines) + f"\nError creating detector: {exc}"
+
+    detector_id = result.get("id", "—")
+    lines += [
+        f"Custom detector created in shadow mode: {name}",
+        f"  ID:     {detector_id}",
+        f"  Agent:  {agent_id}",
+        "",
+        "It will evaluate on every matching run but will NOT fire live alerts",
+        'until you activate it with activate_custom_detector("' + str(detector_id) + '").',
+        "Monitor shadow results via list_custom_detectors or the dashboard.",
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def activate_custom_detector(detector_id: str) -> str:
+    """
+    Activate a custom detector so it fires live alerts.
+
+    The detector must currently be in shadow or paused status. Once active,
+    every run that matches will produce a real alert.
+
+    Args:
+        detector_id: The custom detector ID to activate.
+    """
+    try:
+        result = client.patch(f"/v1/custom-detectors/{detector_id}", {"status": "active"})
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    name = result.get("name", detector_id)
+    return (
+        f"Custom detector '{name}' ({detector_id}) activated.\n"
+        "It will now fire live alerts when triggered."
+    )
+
+
+@mcp.tool()
+def pause_custom_detector(detector_id: str) -> str:
+    """
+    Pause a custom detector so it stops evaluating entirely.
+
+    Use this to temporarily disable a detector without deleting it. Resume
+    with activate_custom_detector (to go live) or the dashboard.
+
+    Args:
+        detector_id: The custom detector ID to pause.
+    """
+    try:
+        result = client.patch(f"/v1/custom-detectors/{detector_id}", {"status": "paused"})
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    name = result.get("name", detector_id)
+    return f"Custom detector '{name}' ({detector_id}) paused.\nIt will not evaluate until resumed."
+
+
+@mcp.tool()
+def delete_custom_detector(detector_id: str) -> str:
+    """
+    Delete a custom detector permanently.
+
+    This also deletes all historical evaluation results for this detector.
+    Use pause_custom_detector if you want to temporarily stop evaluation.
+
+    Args:
+        detector_id: The custom detector ID to delete.
+    """
+    try:
+        client.delete(f"/v1/custom-detectors/{detector_id}")
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    return f"Custom detector {detector_id} deleted."
+
+
+# ── issues tool ───────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def list_agent_issues(agent_id: str, status: str = "open") -> str:
+    """
+    List open (or resolved) issues for an agent.
+
+    Issues are aggregated across runs — the same failure type appearing across
+    multiple runs is tracked as a single issue. An issue auto-resolves after 5
+    consecutive clean runs.
+
+    Args:
+        agent_id: The agent ID to query.
+        status:   'open', 'resolved', or 'all' (default: 'open').
+    """
+    try:
+        data = client.get(f"/v1/agents/{agent_id}/issues", status=status)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    issues = data if isinstance(data, list) else data.get("issues", [])
+
+    if not issues:
+        return f"No {status} issues for agent '{agent_id}'."
+
+    lines = [
+        f"Issues for: {agent_id}  (status={status})\n",
+        f"{'FAILURE TYPE':<35}  {'OPENED':<12}  {'LAST SEEN':<12}  {'COUNT':>5}  STATUS",
+        "─" * 85,
+    ]
+    for issue in issues:
+        ft = (issue.get("failure_type") or "—")[:35]
+        opened = _ago(issue.get("opened_at") or issue.get("first_seen"))
+        last_seen = _ago(issue.get("last_seen") or issue.get("updated_at"))
+        count = issue.get("occurrence_count") or issue.get("signal_count") or 0
+        iss_status = issue.get("status", "open")
+        lines.append(f"{ft:<35}  {opened:<12}  {last_seen:<12}  {count:>5}  {iss_status}")
+
+    return "\n".join(lines)
+
+
+# ── failure pattern detail tool ───────────────────────────────────────────────
+
+
+@mcp.tool()
+def get_failure_pattern_detail(agent_id: str, failure_type: str) -> str:
+    """
+    Deep dive into a specific failure type for an agent.
+
+    Returns evidence aggregates, a 14-day trend (with ASCII bar chart), any
+    signals that co-occur with this failure, and the top example runs.
+
+    Args:
+        agent_id:     The agent ID to analyze.
+        failure_type: The detector type, e.g. TOOL_LOOP, COST_SPIKE, CONTEXT_BLOAT.
+    """
+    try:
+        data = client.get(f"/v1/agents/{agent_id}/failure-patterns/{failure_type.upper()}")
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    lines = [f"Failure pattern: {failure_type.upper()} for {agent_id}\n"]
+
+    # Overview
+    total_signals = data.get("total_signals") or data.get("signal_count") or 0
+    affected_runs = data.get("affected_runs") or data.get("run_count") or 0
+    first_seen = data.get("first_seen")
+    last_seen = data.get("last_seen")
+
+    lines.append(f"Occurrences:   {total_signals} signals across {affected_runs} runs")
+    if first_seen:
+        lines.append(f"First seen:    {_ago(first_seen)}")
+    if last_seen:
+        lines.append(f"Last seen:     {_ago(last_seen)}")
+    lines.append("")
+
+    # 14-day trend
+    trend = data.get("daily_trend") or data.get("trend") or []
+    if trend:
+        lines.append("14-day trend:")
+        max_count = max((t.get("count", 0) for t in trend), default=1) or 1
+        for t in trend[-14:]:
+            day = (t.get("day") or t.get("date") or "")[-5:]  # MM-DD
+            count = t.get("count", 0)
+            bar = "█" * int(count / max_count * 20)
+            lines.append(f"  {day}  {bar:<20}  {count}")
+        lines.append("")
+
+    # Step distribution
+    step_dist = data.get("step_distribution") or {}
+    if step_dist:
+        lines.append("Step distribution (where failures occur):")
+        for step, cnt in sorted(step_dist.items(), key=lambda x: int(x[0]))[:10]:
+            bar = "█" * min(int(cnt / max(step_dist.values()) * 20), 20)
+            lines.append(f"  step {step:<4}  {bar:<20}  {cnt}")
+        lines.append("")
+
+    # Co-occurring signals
+    co_signals = data.get("co_occurring_signals") or data.get("co_signals") or []
+    if co_signals:
+        lines.append("Co-occurring signals:")
+        for cs in co_signals[:8]:
+            ft = cs.get("failure_type") or cs.get("type") or "—"
+            cnt = cs.get("count") or cs.get("co_count") or 0
+            lines.append(f"  {ft:<35}  {cnt} times")
+        lines.append("")
+
+    # Top example runs
+    top_runs = data.get("top_runs") or data.get("example_runs") or []
+    if top_runs:
+        lines.append("Top example runs:")
+        lines.append(f"  {'RUN ID':<15}  {'WHEN':<12}  {'STEP':>4}  CONF")
+        for r in top_runs[:8]:
+            run_id = str(r.get("run_id") or "—")[:15]
+            when = _ago(r.get("detected_at") or r.get("started_at"))
+            step = r.get("step_index", "—")
+            conf = r.get("confidence")
+            conf_str = f"{conf:.0%}" if conf is not None else "—"
+            lines.append(f"  {run_id:<15}  {when:<12}  {str(step):>4}  {conf_str}")
+
+    if not (trend or co_signals or top_runs or total_signals):
+        lines.append("No pattern data available for this failure type yet.")
+
+    return "\n".join(lines)
+
+
+# ── run comparison tool ───────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def compare_runs(run_id_1: str, run_id_2: str, agent_id: str = "") -> str:
+    """
+    Compare two runs side by side: duration, step count, token usage, signals,
+    and exit reason.
+
+    Useful for spotting regressions between a good run and a bad one, or
+    comparing runs before and after a deploy.
+
+    Args:
+        run_id_1:  First run UUID.
+        run_id_2:  Second run UUID.
+        agent_id:  Agent ID (optional; informational only).
+    """
+    try:
+        raw1 = client.get(f"/v1/runs/{run_id_1}")
+        raw2 = client.get(f"/v1/runs/{run_id_2}")
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    def _extract(raw: dict) -> dict:
+        r = raw.get("run", raw)
+        sigs = raw.get("signals", [])
+        dur = None
+        if r.get("completed_at") and r.get("started_at"):
+            dur = r["completed_at"] - r["started_at"]
+        return {
+            "run_id": r.get("run_id", "—"),
+            "agent": f"{r.get('agent_id', '—')}  v{r.get('agent_version', '?')}",
+            "started": _ago(r.get("started_at")),
+            "duration": f"{dur:.1f}s" if dur is not None else "—",
+            "steps": str(r.get("step_count", "—")),
+            "tokens": f"{r['total_tokens']:,}" if r.get("total_tokens") else "—",
+            "exit": r.get("exit_reason", "—"),
+            "signals": (
+                ", ".join(f"{s['failure_type']} [{s['severity']}]" for s in sigs) or "none"
+            ),
+        }
+
+    a = _extract(raw1)
+    b = _extract(raw2)
+
+    rows = [
+        ("Run ID", a["run_id"][:24], b["run_id"][:24]),
+        ("Agent", a["agent"][:24], b["agent"][:24]),
+        ("Started", a["started"], b["started"]),
+        ("Duration", a["duration"], b["duration"]),
+        ("Steps", a["steps"], b["steps"]),
+        ("Tokens", a["tokens"], b["tokens"]),
+        ("Exit reason", a["exit"][:24], b["exit"][:24]),
+        ("Signals", a["signals"][:40], b["signals"][:40]),
+    ]
+
+    col_w = 26
+    lines = [
+        "Run comparison\n",
+        f"{'':22}  {'RUN 1':<{col_w}}  {'RUN 2':<{col_w}}",
+        "─" * (22 + col_w * 2 + 4),
+    ]
+    for label, v1, v2 in rows:
+        marker = "  " if v1 == v2 else "!!"
+        lines.append(f"{label:<22}  {v1:<{col_w}}  {v2:<{col_w}}  {marker}")
+
+    lines.append("")
+    lines.append("!! = differs between runs")
     return "\n".join(lines)
 
 

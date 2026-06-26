@@ -11,6 +11,7 @@ export class Dunetrace {
   private _apiKey:     string;
   private _buffer:     AgentEvent[]       = [];
   private _bufferSize: number;
+  private _timeoutMs:  number;
   private _drainTimer: ReturnType<typeof setInterval> | null = null;
   private _emitJson:   boolean;
 
@@ -20,6 +21,7 @@ export class Dunetrace {
     this._apiKey    = opts.apiKey ?? "";
     this._emitJson  = opts.emitAsJson ?? false;
     this._bufferSize = opts.bufferSize ?? 10_000;
+    this._timeoutMs  = opts.timeoutMs  ?? 5_000;
 
     const interval = opts.flushIntervalMs ?? 200;
     this._drainTimer = setInterval(() => { this._drain(); }, interval);
@@ -285,6 +287,8 @@ export class Dunetrace {
 
   private async _ship(batch: AgentEvent[]): Promise<void> {
     if (!this._ingestUrl) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this._timeoutMs);
     try {
       await fetch(this._ingestUrl, {
         method:  "POST",
@@ -297,9 +301,19 @@ export class Dunetrace {
           agent_id: batch[0]?.agent_id ?? "",
           events:   batch,
         }),
+        signal: controller.signal,
       });
     } catch (err) {
-      process.stderr.write(`[dunetrace] Failed to ship ${batch.length} events: ${err}\n`);
+      const isConnRefused = String(err).includes("ECONNREFUSED") || String(err).includes("fetch failed");
+      if (isConnRefused) {
+        process.stderr.write(
+          `[dunetrace] Backend unreachable at ${this._ingestUrl} — is it running? (docker compose up -d)\n`
+        );
+      } else {
+        process.stderr.write(`[dunetrace] Failed to ship ${batch.length} events: ${err}\n`);
+      }
+    } finally {
+      clearTimeout(timer);
     }
   }
 

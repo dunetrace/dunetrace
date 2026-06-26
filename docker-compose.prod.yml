@@ -10,9 +10,6 @@ services:
   detector:
     restart: always
 
-  explainer:
-    restart: always
-
   alerts:
     restart: always
 

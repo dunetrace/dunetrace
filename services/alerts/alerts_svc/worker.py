@@ -289,6 +289,7 @@ async def poll_once() -> tuple[int, int]:
         except Exception as exc:
             logger.error("Failed to reconstruct signal for signal_id=%d: %s", row["id"], exc)
 
+    # TODO: batch this into a single query — currently one DB round-trip per signal
     rate_contexts = await asyncio.gather(
         *[
             fetch_signal_rate_context(row["agent_id"], row["failure_type"])

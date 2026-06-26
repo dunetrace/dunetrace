@@ -50,4 +50,5 @@ export interface ClientOptions {
   flushIntervalMs?: number;
   emitAsJson?:      boolean;
   bufferSize?:      number;
+  timeoutMs?:       number;
 }
