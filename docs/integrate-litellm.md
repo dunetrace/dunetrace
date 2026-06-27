@@ -80,7 +80,7 @@ from openai import OpenAI
 from dunetrace import Dunetrace
 
 client = OpenAI(
-    api_key=os.environ.get("LITELLM_API_KEY", "anything"),
+    api_key=os.environ.get("LITELLM_API_KEY", "no-key""),
     base_url=os.environ.get("LITELLM_BASE_URL", "http://localhost:4000/v1"),
 )
 
