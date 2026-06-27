@@ -31,6 +31,7 @@ from api_svc.routers import (
     failure_patterns,
     policies,
     patterns,
+    replay,
     slack,
     keys,
 )
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(agents.router, dependencies=_auth)
     app.include_router(custom_detectors.router, dependencies=_auth)
     app.include_router(runs.router, dependencies=_auth)
+    app.include_router(replay.router, dependencies=_auth)
     app.include_router(signals.router, dependencies=_auth)
     app.include_router(insights.router, dependencies=_auth)
     app.include_router(issues.router, dependencies=_auth)

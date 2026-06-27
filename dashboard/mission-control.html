@@ -323,6 +323,21 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
 .explain-bullet{width:6px;height:6px;border-radius:50%;background:var(--orange);margin-top:6px;flex-shrink:0}
 .fix-tag{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:11px;background:var(--green-d);border:1px solid rgba(46,184,114,0.2);color:var(--green);padding:4px 10px;border-radius:3px;margin-top:.5rem}
 
+/* Replay simulation panel */
+.replay-card{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem;margin-bottom:1.25rem}
+.replay-title{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk3);letter-spacing:2px;text-transform:uppercase;margin-bottom:.75rem;display:flex;align-items:center;gap:8px}
+.replay-mods{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1rem}
+.replay-mod{display:flex;align-items:center;gap:6px;font-size:12px;padding:5px 10px;border-radius:4px;border:1px solid var(--wire);background:transparent;color:var(--chalk4);cursor:pointer;transition:all .15s;user-select:none}
+.replay-mod:hover{border-color:var(--chalk3);color:var(--chalk2)}
+.replay-mod.active{background:rgba(46,184,114,0.1);border-color:rgba(46,184,114,0.4);color:var(--green)}
+.replay-mod input{margin:0;accent-color:var(--green);cursor:pointer}
+.replay-result{margin-top:1rem;padding-top:1rem;border-top:1px solid var(--wire);font-size:12px}
+.replay-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.replay-badge{font-family:'IBM Plex Mono',monospace;font-size:10px;padding:2px 8px;border-radius:3px;letter-spacing:.5px}
+.rb-resolved{background:rgba(46,184,114,0.15);color:var(--green);border:1px solid rgba(46,184,114,0.3)}
+.rb-unchanged{background:rgba(255,170,0,0.1);color:var(--amber);border:1px solid rgba(255,170,0,0.3)}
+.rb-new{background:rgba(232,65,66,0.1);color:var(--red);border:1px solid rgba(232,65,66,0.3)}
+
 /* Multi-signal boost indicator */
 .boost-indicator{
   display:flex;align-items:center;gap:8px;
@@ -970,6 +985,18 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <a id="langfuse-pr-link" style="display:none;font-size:12px;color:var(--green);text-decoration:none" target="_blank" rel="noopener">View PR ↗</a>
       </div>
       <div id="langfuse-explain-result" style="display:none;margin-top:1rem;font-size:13px;color:var(--chalk2);line-height:1.8;border-top:1px solid var(--wire);padding-top:1rem"></div>
+    </div>
+    <div class="replay-card" id="detail-replay" style="display:none">
+      <div class="replay-title">
+        <span>⟳ Replay simulation</span>
+        <span style="font-size:10px;color:var(--chalk4);font-family:inherit;text-transform:none;letter-spacing:0;font-weight:400">apply a fix hypothesis — see which signals resolve</span>
+      </div>
+      <div class="replay-mods" id="replay-mods-list"></div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="act-btn act-secondary" id="replay-run-btn" onclick="runReplay()" style="font-size:12px;padding:5px 12px">Run simulation</button>
+        <span id="replay-status" style="display:none;font-size:12px;color:var(--chalk3)">simulating…</span>
+      </div>
+      <div class="replay-result" id="replay-result" style="display:none"></div>
     </div>
     <div class="actions-row">
       <button class="act-btn act-secondary" onclick="switchTab('events',document.querySelectorAll('.dtab')[2])">View event log</button>
@@ -2338,6 +2365,9 @@ function renderRunDetail(run, events, signals) {
   // Explanation
   renderExplain(signals);
 
+  // Replay simulation panel
+  initReplayPanel(run.run_id, signals);
+
   // Event log
   renderEventLog(events, run.started_at);
 
@@ -2463,6 +2493,91 @@ function renderExplain(signals) {
 
   _explainSignalId = topSig.id;
   explainRow.style.display = 'flex';
+}
+
+// ── Replay simulation ──────────────────────────────────────────────────────
+
+let _replayRunId = null;
+
+const _REPLAY_MODS = [
+  { type: 'break_tool_loop',   label: 'De-duplicate tool args',    targets: ['TOOL_LOOP','TOOL_THRASHING'] },
+  { type: 'fix_truncation',    label: 'Fix context truncation',     targets: ['LLM_TRUNCATION_LOOP'] },
+  { type: 'fix_tool_failures', label: 'Fix tool failures',          targets: ['RETRY_STORM','CASCADING_TOOL_FAILURE'] },
+  { type: 'reduce_context',    label: 'Compress context (50%)',     targets: ['CONTEXT_BLOAT'] },
+  { type: 'fix_rag_retrieval', label: 'Fix empty retrieval',        targets: ['RAG_EMPTY_RETRIEVAL'] },
+  { type: 'add_final_answer',  label: 'Add terminal answer',        targets: ['GOAL_ABANDONMENT'] },
+];
+
+function initReplayPanel(runId, signals) {
+  const panel = document.getElementById('detail-replay');
+  const result = document.getElementById('replay-result');
+  const status = document.getElementById('replay-status');
+  result.style.display = 'none';
+  result.innerHTML = '';
+  status.style.display = 'none';
+
+  if (!signals.length) {
+    panel.style.display = 'none';
+    return;
+  }
+
+  _replayRunId = runId;
+  const firedTypes = new Set(signals.map(s => s.failure_type));
+
+  const modsHtml = _REPLAY_MODS.map(m => {
+    const relevant = m.targets.some(t => firedTypes.has(t));
+    const checked  = relevant ? 'checked' : '';
+    const active   = relevant ? ' active' : '';
+    return `<label class="replay-mod${active}" data-mod="${esc(m.type)}">
+      <input type="checkbox" ${checked} onchange="this.closest('.replay-mod').classList.toggle('active',this.checked)">
+      ${esc(m.label)}
+    </label>`;
+  }).join('');
+
+  document.getElementById('replay-mods-list').innerHTML = modsHtml;
+  panel.style.display = '';
+}
+
+async function runReplay() {
+  if (!_replayRunId) return;
+  const btn    = document.getElementById('replay-run-btn');
+  const status = document.getElementById('replay-status');
+  const result = document.getElementById('replay-result');
+
+  const mods = [...document.querySelectorAll('#replay-mods-list input:checked')]
+    .map(el => el.closest('[data-mod]').dataset.mod);
+
+  btn.disabled = true;
+  status.style.display = '';
+  result.style.display = 'none';
+  result.innerHTML = '';
+
+  try {
+    const data = await apiPost(`/v1/runs/${encodeURIComponent(_replayRunId)}/replay`, { modifications: mods });
+
+    const resolvedHtml = (data.resolved || []).map(ft =>
+      `<div class="replay-row"><span class="replay-badge rb-resolved">RESOLVED</span><span style="color:var(--chalk2)">${esc(ft)}</span></div>`
+    ).join('');
+    const unchangedHtml = (data.unchanged || []).map(ft =>
+      `<div class="replay-row"><span class="replay-badge rb-unchanged">STILL FIRING</span><span style="color:var(--chalk2)">${esc(ft)}</span></div>`
+    ).join('');
+    const newHtml = (data.new || []).map(ft =>
+      `<div class="replay-row"><span class="replay-badge rb-new">NEW</span><span style="color:var(--chalk2)">${esc(ft)}</span></div>`
+    ).join('');
+
+    const summary = data.resolved?.length
+      ? `<div style="margin-bottom:.75rem;font-size:12px;color:var(--chalk3)">${data.resolved.length} signal${data.resolved.length>1?'s':''} would resolve with these changes.</div>`
+      : `<div style="margin-bottom:.75rem;font-size:12px;color:var(--chalk4)">No signals resolved — try a different combination.</div>`;
+
+    result.innerHTML = summary + resolvedHtml + unchangedHtml + newHtml;
+    result.style.display = '';
+  } catch (e) {
+    result.innerHTML = `<div style="color:var(--red);font-size:12px">Simulation failed: ${esc(String(e))}</div>`;
+    result.style.display = '';
+  } finally {
+    btn.disabled = false;
+    status.style.display = 'none';
+  }
 }
 
 async function explainWithLangfuse() {
@@ -2936,8 +3051,11 @@ function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-// Safe for inline JS string arguments in onclick="fn(${jsVal(x)})" — uses JSON.stringify.
-function jsVal(s) { return JSON.stringify(String(s ?? '')); }
+// Safe for inline JS string arguments in onclick="fn(${jsVal(x)})" — single-quoted so
+// double-quoted HTML attributes don't break. Escapes backslash and single-quote.
+function jsVal(s) {
+  return "'" + String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+}
 
 function copyRunId() {
   if (!_curRunId) return;
@@ -3629,8 +3747,8 @@ function renderAgentComparison() {
     return { agent: a.agent_id, drift, runs24: runs24.length, sigs24: sigs24.length };
   });
 
-  const withData = items.filter(x => x.runs24 > 0);
-  if (!withData.length) { listEl.innerHTML = '<div class="loading">no runs in last 24h</div>'; return; }
+  const withData = items.filter(x => x.runs24 > 0 && x.sigs24 > 0);
+  if (!withData.length) { listEl.innerHTML = '<div class="loading">no agents with signals in last 24h</div>'; return; }
 
   withData.sort((a, b) => (b.drift ?? 0) - (a.drift ?? 0));
   const maxAbs = Math.max(...withData.map(x => Math.abs(x.drift ?? 0)), 50);
