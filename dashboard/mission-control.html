@@ -1741,7 +1741,7 @@ function renderTokens() {
   }
 
   tbody.innerHTML = rows.map(r => `
-    <tr style="cursor:pointer" onclick="toggleTokenRow(this,'${esc(r.agent_id)}')">
+    <tr style="cursor:pointer" onclick="toggleTokenRow(this,${jsVal(r.agent_id)})">
       <td class="mono" style="font-weight:600">${esc(r.agent_id)}</td>
       <td class="mono">${r.run_count} <span style="color:var(--amber)">(${r.wasted_runs})</span></td>
       <td class="mono">${fmtTok(r.total_tok)}</td>
@@ -1899,7 +1899,7 @@ function renderOverview() {
       return c > (best?.cnt||0) ? {id: a.agent_id, cnt: c} : best;
     }, null);
     const topAgentId = topAgent?.id || '';
-    return `<div class="failure-item" onclick="openAgentDetail('${esc(topAgentId)}')">
+    return `<div class="failure-item" onclick="openAgentDetail(${jsVal(topAgentId)})">
       <div class="fi-bar" style="background:${color}"></div>
       <span class="fi-name">${ftLabel(ft)}</span>
       <span class="fi-count">${cnt} signals</span>
@@ -1975,7 +1975,7 @@ function runRow(r) {
   const agentId = r.agent_id || r._agentId || '';
   const riskColor = maxConf >= 0.8 ? 'var(--red)' : maxConf >= 0.5 ? 'var(--amber)' : maxConf > 0 ? 'var(--orange)' : 'var(--green)';
 
-  return `<tr onclick="showDetail('${esc(r.run_id)}','${esc(agentId)}')">
+  return `<tr onclick="showDetail(${jsVal(r.run_id)},${jsVal(agentId)})">
     <td><span class="run-id">${shortId(r.run_id)}</span></td>
     <td>${esc(agentId)}</td>
     <td class="mono">${signals.length}</td>
@@ -1986,7 +1986,7 @@ function runRow(r) {
     <td class="mono">${r.step_count || 0}</td>
     <td class="mono" style="font-size:11px;color:${riskColor}">${signals.length && r.total_tokens ? fmtTok(r.total_tokens) : '—'}</td>
     <td class="mono" style="font-size:11px;color:${riskColor}">${signals.length && r.cost_usd ? fmtUsd(r.cost_usd) : '—'}</td>
-    <td><button class="view-btn" onclick="showDetail('${esc(r.run_id)}','${esc(agentId)}');event.stopPropagation()">View →</button></td>
+    <td><button class="view-btn" onclick="showDetail(${jsVal(r.run_id)},${jsVal(agentId)});event.stopPropagation()">View →</button></td>
   </tr>`;
 }
 
@@ -2041,7 +2041,7 @@ function renderAlerts() {
       const sv = topSev(s);
       const r  = _allRuns.find(x => x.run_id === rid);
       const tk = fmtTok(realTok(r));
-      return `<div class="ag-run-item" onclick="showDetail('${esc(rid)}','${esc(agentId)}')">
+      return `<div class="ag-run-item" onclick="showDetail(${jsVal(rid)},${jsVal(agentId)})">
         <span class="run-id">${shortId(rid)}</span>
         <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
         <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--amber)">~${tk}</span>
@@ -2115,7 +2115,7 @@ function renderAnalytics() {
     ? ptSorted.map(([ft, d]) => {
         const uniqRuns = ftRunMap[ft] ? ftRunMap[ft].size : 0;
         const wasted = wastedTok([...(ftRunMap[ft] || new Set())]);
-        return `<tr style="cursor:pointer" onclick="openPatternDrillDown('${esc(ft)}')">
+        return `<tr style="cursor:pointer" onclick="openPatternDrillDown(${jsVal(ft)})">
           <td>${ftLabel(ft)}</td>
           <td class="mono" title="${d.count} signals across ${uniqRuns} unique run${uniqRuns !== 1 ? 's' : ''}">${d.count} <span style="font-size:10px;color:var(--chalk4)">(${uniqRuns} runs)</span></td>
           <td class="mono">${d.agents.size}</td>
@@ -2933,8 +2933,11 @@ function timeAgo(ts) {
 }
 
 function esc(s) {
-  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+
+// Safe for inline JS string arguments in onclick="fn(${jsVal(x)})" — uses JSON.stringify.
+function jsVal(s) { return JSON.stringify(String(s ?? '')); }
 
 function copyRunId() {
   if (!_curRunId) return;
@@ -3154,7 +3157,7 @@ function renderAgents() {
       return `${k}: ${v.score}/${v.max}  val=${v.value ?? '—'}${base}`;
     }).join('\n') : '';
 
-    return `<div class="agent-card" onclick="openAgentDetail('${esc(a.agent_id)}')" title="Click to filter runs by this agent">
+    return `<div class="agent-card" onclick="openAgentDetail(${jsVal(a.agent_id)})" title="Click to filter runs by this agent">
       <div class="ac-top-bar" style="background:${color}"></div>
       <div class="ac-header">
         <div style="min-width:0">
@@ -3230,7 +3233,7 @@ function renderShadowSection() {
       const runItems = uniqRuns.slice(0, 5).map(rid => {
         const s = sigs.filter(x => x.run_id === rid);
         const c = Math.max(...s.map(x => x.confidence)).toFixed(2);
-        return `<div class="ag-run-item" onclick="showDetail('${esc(rid)}','${esc(agentId)}')">
+        return `<div class="ag-run-item" onclick="showDetail(${jsVal(rid)},${jsVal(agentId)})">
           <span class="run-id">${shortId(rid)}</span>
           <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
           <span style="margin-left:auto">conf ${c}</span>
@@ -3350,7 +3353,7 @@ function _cmpPanel(run, sigs, label, baseRun, baseSigs) {
       }
     </div>
     <div style="margin-top:1rem">
-      <button class="view-btn" onclick="showDetail('${esc(run.run_id)}','${esc(agentId)}');event.stopPropagation()">Open full detail →</button>
+      <button class="view-btn" onclick="showDetail(${jsVal(run.run_id)},${jsVal(agentId)});event.stopPropagation()">Open full detail →</button>
     </div>
   </div>`;
 }
@@ -3949,10 +3952,10 @@ function runSearch(q) {
     if (results.length >= 8) return;
     const agentId = r.agent_id || r._agentId || '';
     if (r.run_id.toLowerCase().includes(lq)) {
-      results.push({ tag: 'RUN', label: shortId(r.run_id) + ' · ' + esc(agentId), action: `showDetail('${esc(r.run_id)}','${esc(agentId)}')` });
+      results.push({ tag: 'RUN', label: shortId(r.run_id) + ' · ' + esc(agentId), action: `showDetail(${jsVal(r.run_id)},${jsVal(agentId)})` });
     } else if (agentId.toLowerCase().includes(lq) && !seenAgents.has(agentId)) {
       seenAgents.add(agentId);
-      results.push({ tag: 'AGENT', label: esc(agentId), action: `openAgentDetail('${esc(agentId)}')` });
+      results.push({ tag: 'AGENT', label: esc(agentId), action: `openAgentDetail(${jsVal(agentId)})` });
     }
   });
 
@@ -4462,7 +4465,7 @@ function renderPatternDrillDown(body, ft, data, agentId) {
   ).join('');
 
   const exampleRuns = (data.example_run_ids || []).slice(0, 3).map(rid =>
-    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail('${esc(rid)}','${esc(agentId)}')">${shortId(rid)}</span>`
+    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail(${jsVal(rid)},${jsVal(agentId)})">${shortId(rid)}</span>`
   ).join('');
 
   body.innerHTML =
@@ -4499,7 +4502,7 @@ function renderPatternDrillDownLocal(body, ft, agentId) {
 
   const uniqRuns   = [...new Set(sigs.map(s => s.run_id))];
   const exampleRuns = uniqRuns.slice(0, 3).map(rid =>
-    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail('${esc(rid)}','${esc(agentId)}')">${shortId(rid)}</span>`
+    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail(${jsVal(rid)},${jsVal(agentId)})">${shortId(rid)}</span>`
   ).join('');
 
   body.innerHTML =
@@ -4610,7 +4613,7 @@ function loadAgentDetailOverview(agentId) {
   const sigsHtml = recentSigs.length
     ? `<div class="table-card"><table class="run-table">
         <thead><tr><th>Failure Type</th><th>Severity</th><th>Confidence</th><th>Run</th><th>Detected</th></tr></thead>
-        <tbody>${recentSigs.map(s => `<tr style="cursor:pointer" onclick="showDetail('${esc(s.run_id)}','${esc(agentId)}')">
+        <tbody>${recentSigs.map(s => `<tr style="cursor:pointer" onclick="showDetail(${jsVal(s.run_id)},${jsVal(agentId)})">
           <td>${ftLabel(s.failure_type)}</td>
           <td><span class="sev-badge sb-${s.severity.toLowerCase()}">${s.severity}</span></td>
           <td class="mono">${s.confidence.toFixed(2)}</td>
@@ -4622,7 +4625,7 @@ function loadAgentDetailOverview(agentId) {
 
   if (body) body.innerHTML =
     `<div class="sec-head" style="margin-bottom:.75rem"><span class="sec-title">Recent signals</span>
-      <button class="filter-btn" onclick="_runsAgentFilter='${esc(agentId)}';nav('runs',document.querySelector('[onclick*=runs]'));const s=document.getElementById('runs-agent');if(s)s.value='${esc(agentId)}';renderRuns()">View all runs →</button>
+      <button class="filter-btn" onclick="_runsAgentFilter=${jsVal(agentId)};nav('runs',document.querySelector('[onclick*=runs]'));const s=document.getElementById('runs-agent');if(s)s.value=${jsVal(agentId)};renderRuns()">View all runs →</button>
     </div>` + sigsHtml;
 }
 
