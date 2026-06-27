@@ -204,6 +204,7 @@ SDK: 307 tests · MCP server: 105 tests — both run fully offline.
 - [AutoGen](../../docs/integrate-autogen-agent.md)
 - [Haystack 2.x](../../docs/integrate-haystack-agent.md)
 - [LlamaIndex](../../docs/integrate-llamaindex.md)
+- [LiteLLM](../../docs/integrate-litellm.md)
 - [All integration guides](../../docs/)
 - [GitHub](https://github.com/dunetrace/dunetrace)
 - [Issues](https://github.com/dunetrace/dunetrace/issues)
