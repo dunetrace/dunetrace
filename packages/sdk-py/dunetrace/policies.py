@@ -42,7 +42,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Required, TypedDict
+from typing import Any, Dict, List, Literal, Optional, Required, TypedDict, cast
 
 
 class PolicyCondition(TypedDict, total=False):
@@ -193,8 +193,8 @@ class Policy:
             id=d.get("id"),
             agent_id=d.get("agent_id", "*"),
             name=d.get("name", ""),
-            condition=dict(d.get("condition") or {}),
-            action=dict(d.get("action") or {}),
+            condition=cast(PolicyCondition, dict(d.get("condition") or {})),
+            action=cast(PolicyAction, dict(d.get("action") or {})),
             enabled=bool(d.get("enabled", True)),
             priority=int(d.get("priority", 100)),
         )

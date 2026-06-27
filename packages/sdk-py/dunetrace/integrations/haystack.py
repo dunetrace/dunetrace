@@ -123,7 +123,7 @@ def _extract_tool_calls(inp: Any, output: Any, exc_type: Any) -> List[tuple]:
     results: List[tuple] = []
 
     # Primary: output tool_messages carry ToolCallResult with origin tool name + args
-    tool_messages = []
+    tool_messages: list = []
     if isinstance(output, dict):
         tool_messages = output.get("tool_messages") or []
     for msg in tool_messages:
@@ -139,7 +139,7 @@ def _extract_tool_calls(inp: Any, output: Any, exc_type: Any) -> List[tuple]:
         return results
 
     # Fallback: use input messages when output is unavailable
-    inp_messages = []
+    inp_messages: list = []
     if isinstance(inp, dict):
         inp_messages = inp.get("messages") or []
     for msg in inp_messages:
@@ -382,7 +382,7 @@ class _DunetraceSpan:
             state.step += 1
 
         elif op == "haystack.component.run":
-            state = self._root_run_state()
+            state = self._root_run_state()  # type: ignore[assignment]
             if not state:
                 return
 

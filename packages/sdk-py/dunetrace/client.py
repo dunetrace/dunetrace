@@ -13,11 +13,12 @@ import logging
 import os
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from threading import Event, Lock, Thread
-from typing import Callable, List, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 
 from dunetrace.buffer import RingBuffer
 from dunetrace.context import _current_run
@@ -30,7 +31,7 @@ from dunetrace.models import (
     Exporter,
     CallableExporter,
 )
-from dunetrace.policies import Policy, PolicyEngine, PolicyViolation
+from dunetrace.policies import Policy, PolicyAction, PolicyCondition, PolicyEngine, PolicyViolation
 from dunetrace.run_context import RunContext
 
 logger = logging.getLogger("dunetrace")
@@ -65,7 +66,7 @@ class Dunetrace:
         buffer_size: int = 10_000,
         flush_interval_ms: int = 200,
         emit_as_json: bool = False,
-        otel_exporter: Optional[object] = None,
+        otel_exporter: Optional[Any] = None,
         exporters: Optional[List[Exporter]] = None,
         policy_secret: str = "",
         debug: bool = False,
@@ -295,8 +296,8 @@ class Dunetrace:
     def add_policy(
         self,
         name: str,
-        condition: dict,
-        action: dict,
+        condition: PolicyCondition,
+        action: PolicyAction,
         *,
         agent_id: str = "*",
         priority: int = 100,
@@ -363,8 +364,8 @@ class Dunetrace:
             base = self._ingest_url.replace("/v1/ingest", "")
             url = (
                 f"{base}/v1/policies"
-                f"?agent_id={urllib.request.quote(agent_id, safe='')}"
-                f"&api_key={urllib.request.quote(self._api_key, safe='')}"
+                f"?agent_id={urllib.parse.quote(agent_id, safe='')}"
+                f"&api_key={urllib.parse.quote(self._api_key, safe='')}"
             )
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=3) as resp:

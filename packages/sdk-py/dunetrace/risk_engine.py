@@ -197,8 +197,8 @@ class RiskEngine:
         calls = [c for c in state.llm_calls if c.prompt_tokens and c.prompt_tokens > 0]
         if len(calls) < 2:
             return 0.0
-        first = calls[0].prompt_tokens
-        last = calls[-1].prompt_tokens
+        first: int = calls[0].prompt_tokens or 0
+        last: int = calls[-1].prompt_tokens or 0
         if first < 10 or last < 100:
             return 0.0
         growth = last / first

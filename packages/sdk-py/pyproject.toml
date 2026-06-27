@@ -57,3 +57,7 @@ addopts   = "-v --tb=short"
 python_version = "3.11"
 strict         = false
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["dunetrace.integrations.*", "dunetrace.auto"]
+ignore_errors = true

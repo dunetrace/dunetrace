@@ -1,4 +1,14 @@
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-json
+        exclude: ^packages/sdk-ts/tsconfig.*\.json$  # tsconfig uses comments
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.11
     hooks:
@@ -21,6 +31,13 @@ repos:
 
   - repo: local
     hooks:
+      - id: sdk-py-mypy
+        name: SDK (Python) mypy
+        language: system
+        entry: python -m mypy packages/sdk-py/dunetrace/ --ignore-missing-imports --no-error-summary --config-file packages/sdk-py/pyproject.toml
+        pass_filenames: false
+        files: ^packages/sdk-py/.*\.py$
+
       - id: ts-typecheck
         name: TypeScript typecheck
         language: system

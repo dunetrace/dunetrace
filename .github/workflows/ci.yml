@@ -30,7 +30,7 @@ jobs:
       - run: pip install -e "packages/sdk-py[dev]"
       - run: python -m pytest packages/sdk-py/tests/ -v
       - run: pip install mypy
-      - run: python -m mypy packages/sdk-py/dunetrace/ --ignore-missing-imports --no-error-summary
+      - run: python -m mypy packages/sdk-py/dunetrace/ --ignore-missing-imports --no-error-summary --config-file packages/sdk-py/pyproject.toml
 
   services:
     name: ${{ matrix.service }}
