@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import dunetrace_mcp.server as srv
 
@@ -498,7 +498,8 @@ class TestGetRunDetail(unittest.TestCase):
         big_run = {**RUN_DETAIL, "events": many_events}
         with patch("dunetrace_mcp.client.get", return_value=big_run):
             out = srv.get_run_detail("run-big")
-        self.assertIn("more events", out)
+        self.assertIn("Timeline truncated", out)
+        self.assertIn("40 of", out)
 
 
 class TestSearchSignals(unittest.TestCase):
@@ -1020,7 +1021,8 @@ class TestMainCLI(unittest.TestCase):
         with patch.object(sys, "argv", ["dunetrace-mcp", "--sse"]):
             with patch.object(srv.mcp, "run") as mock_run:
                 srv.main()
-        mock_run.assert_called_once_with(transport="sse", port=8000)
+        mock_run.assert_called_once_with(transport="sse")
+        assert srv.mcp.settings.port == 8000
 
     def test_sse_with_custom_port(self):
         import sys
@@ -1028,7 +1030,8 @@ class TestMainCLI(unittest.TestCase):
         with patch.object(sys, "argv", ["dunetrace-mcp", "--sse", "--port", "9000"]):
             with patch.object(srv.mcp, "run") as mock_run:
                 srv.main()
-        mock_run.assert_called_once_with(transport="sse", port=9000)
+        mock_run.assert_called_once_with(transport="sse")
+        assert srv.mcp.settings.port == 9000
 
     def test_port_without_sse_still_runs_stdio(self):
         import sys
@@ -1271,6 +1274,404 @@ class TestGetInstrumentationGuideExtra(unittest.TestCase):
     def test_nodejs_alias(self):
         out = srv.get_instrumentation_guide("nodejs")
         self.assertIn("sendEvent", out)
+
+
+class TestClientHelpers(unittest.TestCase):
+    """Tests for the new post / patch / delete helpers in client.py."""
+
+    def _mock_httpx_client(self, method: str, json_data: dict, status_code: int = 200):
+        """Return a context-manager-compatible mock httpx.Client."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = status_code
+        mock_resp.json.return_value = json_data
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_c = MagicMock()
+        mock_c.__enter__ = MagicMock(return_value=mock_c)
+        mock_c.__exit__ = MagicMock(return_value=False)
+        getattr(mock_c, method).return_value = mock_resp
+        return mock_c
+
+    def test_post_returns_json(self):
+        from dunetrace_mcp import client
+
+        mock_c = self._mock_httpx_client("post", {"id": "abc123"})
+        with patch("httpx.Client", return_value=mock_c):
+            result = client.post("/v1/test", {"key": "val"})
+        self.assertEqual(result, {"id": "abc123"})
+        mock_c.post.assert_called_once()
+
+    def test_patch_returns_json(self):
+        from dunetrace_mcp import client
+
+        mock_c = self._mock_httpx_client("patch", {"status": "active"})
+        with patch("httpx.Client", return_value=mock_c):
+            result = client.patch("/v1/test/1", {"status": "active"})
+        self.assertEqual(result, {"status": "active"})
+        mock_c.patch.assert_called_once()
+
+    def test_delete_returns_empty_on_204(self):
+        from dunetrace_mcp import client
+
+        mock_c = self._mock_httpx_client("delete", {}, status_code=204)
+        with patch("httpx.Client", return_value=mock_c):
+            result = client.delete("/v1/test/1")
+        self.assertEqual(result, {})
+
+    def test_delete_returns_json_on_200(self):
+        from dunetrace_mcp import client
+
+        mock_c = self._mock_httpx_client("delete", {"deleted": True}, status_code=200)
+        with patch("httpx.Client", return_value=mock_c):
+            result = client.delete("/v1/test/1")
+        self.assertEqual(result, {"deleted": True})
+
+    def test_post_connect_error_raises_runtime_error(self):
+        import httpx
+        from dunetrace_mcp import client
+
+        mock_c = MagicMock()
+        mock_c.__enter__ = MagicMock(return_value=mock_c)
+        mock_c.__exit__ = MagicMock(return_value=False)
+        mock_c.post.side_effect = httpx.ConnectError("refused")
+
+        with patch("httpx.Client", return_value=mock_c):
+            with self.assertRaises(RuntimeError) as ctx:
+                client.post("/v1/test", {})
+        self.assertIn("unreachable", str(ctx.exception))
+        self.assertIn("docker compose", str(ctx.exception))
+
+    def test_get_connect_error_raises_runtime_error(self):
+        import httpx
+        from dunetrace_mcp import client
+
+        mock_c = MagicMock()
+        mock_c.__enter__ = MagicMock(return_value=mock_c)
+        mock_c.__exit__ = MagicMock(return_value=False)
+        mock_c.get.side_effect = httpx.ConnectError("refused")
+
+        with patch("httpx.Client", return_value=mock_c):
+            with self.assertRaises(RuntimeError) as ctx:
+                client.get("/v1/test")
+        self.assertIn("unreachable", str(ctx.exception))
+
+
+class TestGetFixStatus(unittest.TestCase):
+    """Smoke tests for get_fix_status."""
+
+    FIX_STATUS = {
+        "verdict": "verified",
+        "runs_before": 10,
+        "runs_after": 15,
+        "recurrence_before": 8,
+        "recurrence_after": 0,
+        "runs_evaluated": 25,
+        "fix_applied_at": time.time() - 86400,
+    }
+
+    def test_shows_verdict(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.FIX_STATUS):
+            out = srv.get_fix_status(42)
+        self.assertIn("VERIFIED", out)
+        self.assertIn("signal #42", out)
+
+    def test_shows_recurrence_counts(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.FIX_STATUS):
+            out = srv.get_fix_status(42)
+        self.assertIn("10", out)  # runs_before
+        self.assertIn("15", out)  # runs_after
+        self.assertIn("25", out)  # runs_evaluated
+
+    def test_still_occurring_verdict(self):
+        data = {**self.FIX_STATUS, "verdict": "still_occurring"}
+        with patch("dunetrace_mcp.client.get", return_value=data):
+            out = srv.get_fix_status(42)
+        self.assertIn("STILL OCCURRING", out)
+
+    def test_insufficient_data_verdict(self):
+        data = {**self.FIX_STATUS, "verdict": "insufficient_data"}
+        with patch("dunetrace_mcp.client.get", return_value=data):
+            out = srv.get_fix_status(42)
+        self.assertIn("INSUFFICIENT DATA", out)
+
+    def test_api_error_returns_error(self):
+        with patch(
+            "dunetrace_mcp.client.get", side_effect=RuntimeError("API error 404: not found")
+        ):
+            out = srv.get_fix_status(9999)
+        self.assertIn("Error", str(out))
+
+
+class TestTriggerExplain(unittest.TestCase):
+    """Smoke tests for trigger_explain."""
+
+    EXPLAIN_RESULT = {
+        "signal_id": 42,
+        "source": "langfuse",
+        "root_cause": "The agent repeats web_search with identical args.",
+        "fix_content": "Track all tool calls you've made. Never repeat with identical args.",
+        "fix_type": "prompt_addition",
+        "apply_blocked": False,
+        "langfuse_prompt_name": "research-agent-prompt",
+        "langfuse_prompt_version": 3,
+    }
+
+    def test_shows_root_cause(self):
+        with patch("dunetrace_mcp.client.post", return_value=self.EXPLAIN_RESULT):
+            out = srv.trigger_explain(42)
+        self.assertIn("Root cause", out)
+        self.assertIn("web_search", out)
+
+    def test_shows_fix_content(self):
+        with patch("dunetrace_mcp.client.post", return_value=self.EXPLAIN_RESULT):
+            out = srv.trigger_explain(42)
+        self.assertIn("Fix", out)
+        self.assertIn("Track all tool calls", out)
+
+    def test_shows_apply_instructions_when_not_blocked(self):
+        with patch("dunetrace_mcp.client.post", return_value=self.EXPLAIN_RESULT):
+            out = srv.trigger_explain(42)
+        self.assertIn("Apply instructions", out)
+        self.assertIn("research-agent-prompt", out)
+        self.assertIn("3", out)  # langfuse_prompt_version
+
+    def test_blocked_shows_blocked_message(self):
+        blocked = {**self.EXPLAIN_RESULT, "fix_type": "code_change", "apply_blocked": True}
+        with patch("dunetrace_mcp.client.post", return_value=blocked):
+            out = srv.trigger_explain(42)
+        self.assertIn("Apply blocked", out)
+
+    def test_api_error_returns_error(self):
+        with patch(
+            "dunetrace_mcp.client.post", side_effect=RuntimeError("API error 500: server error")
+        ):
+            out = srv.trigger_explain(42)
+        self.assertIn("Error", str(out))
+
+
+class TestListCustomDetectors(unittest.TestCase):
+    """Smoke tests for list_custom_detectors."""
+
+    DETECTORS = [
+        {
+            "id": "det-1",
+            "name": "high-cost-detector",
+            "description": "Fire when cost_usd > 10",
+            "agent_id": "*",
+            "status": "shadow",
+            "shadow_fire_count": 3,
+            "total_runs": 50,
+            "created_at": time.time() - 86400,
+        },
+        {
+            "id": "det-2",
+            "name": "strict-loop-guard",
+            "description": "Fire when tool_calls > 20",
+            "agent_id": "my-agent",
+            "status": "active",
+            "shadow_fire_count": 10,
+            "total_runs": 20,
+            "created_at": time.time() - 3600,
+        },
+    ]
+
+    def test_shows_detector_names(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.DETECTORS):
+            out = srv.list_custom_detectors()
+        self.assertIn("high-cost-detector", out)
+        self.assertIn("strict-loop-guard", out)
+
+    def test_shows_status(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.DETECTORS):
+            out = srv.list_custom_detectors()
+        self.assertIn("[shadow]", out)
+        self.assertIn("[active]", out)
+
+    def test_shows_fire_rate(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.DETECTORS):
+            out = srv.list_custom_detectors()
+        self.assertIn("3/50", out)  # shadow_fire_count/total_runs
+
+    def test_empty_returns_helpful_message(self):
+        with patch("dunetrace_mcp.client.get", return_value=[]):
+            out = srv.list_custom_detectors()
+        self.assertIn("No custom detectors", out)
+        self.assertIn("create_custom_detector", out)
+
+
+class TestListPolicies(unittest.TestCase):
+    """Smoke tests for list_policies."""
+
+    POLICIES = [
+        {
+            "id": "pol-1",
+            "name": "budget-guard",
+            "agent_id": "my-agent",
+            "condition": {"metric": "cost_usd", "operator": "gt", "threshold": 5.0},
+            "action": {"type": "stop"},
+            "enabled": True,
+        },
+        {
+            "id": "pol-2",
+            "name": "loop-guard",
+            "agent_id": "*",
+            "condition": {"metric": "tool_calls", "operator": "gt", "threshold": 20},
+            "action": {"type": "switch_model", "model": "gpt-4o-mini"},
+            "enabled": False,
+        },
+    ]
+
+    def test_shows_policy_names(self):
+        with patch("dunetrace_mcp.client.get", return_value={"policies": self.POLICIES}):
+            out = srv.list_policies()
+        self.assertIn("budget-guard", out)
+        self.assertIn("loop-guard", out)
+
+    def test_shows_enabled_status(self):
+        with patch("dunetrace_mcp.client.get", return_value={"policies": self.POLICIES}):
+            out = srv.list_policies()
+        self.assertIn("enabled", out)
+        self.assertIn("disabled", out)
+
+    def test_shows_action_type(self):
+        with patch("dunetrace_mcp.client.get", return_value={"policies": self.POLICIES}):
+            out = srv.list_policies()
+        self.assertIn("stop", out)
+        self.assertIn("switch_model", out)
+
+    def test_empty_returns_helpful_message(self):
+        with patch("dunetrace_mcp.client.get", return_value={"policies": []}):
+            out = srv.list_policies()
+        self.assertIn("No policies found", out)
+        self.assertIn("create_policy", out)
+
+
+class TestCompareRuns(unittest.TestCase):
+    """Smoke tests for compare_runs."""
+
+    RUN_A = {
+        "run_id": "run-aaa-111",
+        "agent_id": "my-agent",
+        "agent_version": "v1.0",
+        "started_at": time.time() - 200,
+        "completed_at": time.time() - 190,
+        "exit_reason": "final_answer",
+        "step_count": 5,
+        "total_tokens": 1000,
+        "signals": [],
+        "events": [],
+    }
+    RUN_B = {
+        "run_id": "run-bbb-222",
+        "agent_id": "my-agent",
+        "agent_version": "v1.1",
+        "started_at": time.time() - 100,
+        "completed_at": time.time() - 80,
+        "exit_reason": "error",
+        "step_count": 12,
+        "total_tokens": 8000,
+        "signals": [
+            {
+                "failure_type": "TOOL_LOOP",
+                "severity": "HIGH",
+                "confidence": 0.9,
+                "step_index": 8,
+            }
+        ],
+        "events": [],
+    }
+
+    def _side_effect(self, path, **params):
+        if "aaa" in path:
+            return self.RUN_A
+        return self.RUN_B
+
+    def test_shows_both_run_ids(self):
+        with patch("dunetrace_mcp.client.get", side_effect=self._side_effect):
+            out = srv.compare_runs("run-aaa-111", "run-bbb-222")
+        self.assertIn("run-aaa-111", out)
+        self.assertIn("run-bbb-222", out)
+
+    def test_shows_diff_marker(self):
+        with patch("dunetrace_mcp.client.get", side_effect=self._side_effect):
+            out = srv.compare_runs("run-aaa-111", "run-bbb-222")
+        self.assertIn("!!", out)  # marker for differing rows
+
+    def test_shows_step_counts(self):
+        with patch("dunetrace_mcp.client.get", side_effect=self._side_effect):
+            out = srv.compare_runs("run-aaa-111", "run-bbb-222")
+        self.assertIn("5", out)
+        self.assertIn("12", out)
+
+    def test_shows_signals(self):
+        with patch("dunetrace_mcp.client.get", side_effect=self._side_effect):
+            out = srv.compare_runs("run-aaa-111", "run-bbb-222")
+        self.assertIn("TOOL_LOOP", out)
+
+
+class TestListAgentIssues(unittest.TestCase):
+    """Smoke tests for list_agent_issues."""
+
+    ISSUES = [
+        {
+            "id": "iss-1",
+            "failure_type": "TOOL_LOOP",
+            "status": "open",
+            "occurrence_count": 46,
+            "opened_at": time.time() - 86400 * 5,
+            "last_seen": time.time() - 3600,
+        },
+        {
+            "id": "iss-2",
+            "failure_type": "COST_SPIKE",
+            "status": "open",
+            "occurrence_count": 8,
+            "opened_at": time.time() - 86400 * 2,
+            "last_seen": time.time() - 7200,
+        },
+    ]
+
+    def test_shows_failure_types(self):
+        with patch("dunetrace_mcp.client.get", return_value={"issues": self.ISSUES}):
+            out = srv.list_agent_issues("my-agent")
+        self.assertIn("TOOL_LOOP", out)
+        self.assertIn("COST_SPIKE", out)
+
+    def test_shows_occurrence_count(self):
+        with patch("dunetrace_mcp.client.get", return_value={"issues": self.ISSUES}):
+            out = srv.list_agent_issues("my-agent")
+        self.assertIn("46", out)
+        self.assertIn("8", out)
+
+    def test_empty_returns_message(self):
+        with patch("dunetrace_mcp.client.get", return_value={"issues": []}):
+            out = srv.list_agent_issues("clean-agent")
+        self.assertIn("No open issues", out)
+
+
+class TestAgoISOString(unittest.TestCase):
+    """Ensure _ago handles ISO-8601 strings as well as epoch floats."""
+
+    def test_iso_string_recent(self):
+        from datetime import datetime, timezone, timedelta
+
+        iso = (datetime.now(tz=timezone.utc) - timedelta(minutes=5)).isoformat()
+        out = srv._ago(iso)
+        self.assertIn("m ago", out)
+
+    def test_iso_string_with_z_suffix(self):
+        from datetime import datetime, timezone, timedelta
+
+        iso = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out = srv._ago(iso)
+        self.assertIn("h ago", out)
+
+    def test_float_still_works(self):
+        out = srv._ago(time.time() - 90)
+        self.assertIn("m ago", out)
+
+    def test_none_still_works(self):
+        self.assertEqual(srv._ago(None), "—")
 
 
 if __name__ == "__main__":

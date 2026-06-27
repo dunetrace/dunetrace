@@ -3,7 +3,7 @@
 This guide covers adding Dunetrace monitoring to a TypeScript or JavaScript agent using the `dunetrace` npm package.
 
 > **Using Python?** See [integrate-custom-python-agent.md](./integrate-custom-python-agent.md).
-> **Using LangChain?** See [integrate-langchain-agent.md](./integrate-langchain-agent.md). **Using CrewAI?** See [integrate-crewai-agent.md](./integrate-crewai-agent.md). **Using AutoGen?** See [integrate-autogen-agent.md](./integrate-autogen-agent.md).
+> **Using LangChain?** See [integrate-langchain-agent.md](./integrate-langchain-agent.md). **Using CrewAI?** See [integrate-crewai-agent.md](./integrate-crewai-agent.md). **Using AutoGen?** See [integrate-autogen-agent.md](./integrate-autogen-agent.md). **Using Vercel AI SDK?** See [integrate-vercel-ai.md](./integrate-vercel-ai.md).
 
 ---
 
@@ -15,14 +15,14 @@ The SDK buffers events in-process and ships them to the Dunetrace ingest service
 your TS agent  →  POST /v1/ingest  →  detector  →  dashboard + Slack alerts
 ```
 
-Zero runtime dependencies. Works with any Node 18+ runtime.
+Zero runtime dependencies. Works with any Node 22+ runtime.
 
 ---
 
 ## Prerequisites
 
 - Dunetrace backend running (`docker compose up -d`)
-- Node 18+ (built-in `fetch` and `AsyncLocalStorage` required)
+- Node 22+ (built-in `fetch` and `AsyncLocalStorage` required)
 
 > **Local dev — no API key needed.** The backend accepts requests without authentication when running in dev mode. Skip Step 1 when testing locally.
 

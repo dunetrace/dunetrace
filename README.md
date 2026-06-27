@@ -2,42 +2,31 @@
 
 ![Dunetrace](dunetrace.png)
 
-**Real-time monitoring for production AI agents. Catches failures before your users do.**
+**Real-time failure detection for production AI agents — Slack alert within 15 seconds.**
 
 [![PyPI version](https://img.shields.io/pypi/v/dunetrace.svg)](https://pypi.org/project/dunetrace/)
 [![Python versions](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/dunetrace/)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/dunetrace?period=total&units=INTERNATIONAL_SYSTEM&left_color=grey&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/dunetrace)
 [![CI](https://img.shields.io/github/actions/workflow/status/dunetrace/dunetrace/ci.yml?branch=main&label=CI&logo=github)](https://github.com/dunetrace/dunetrace/actions/workflows/ci.yml)
-[![CodeQL](https://img.shields.io/github/actions/workflow/status/dunetrace/dunetrace/codeql.yml?branch=main&label=CodeQL&logo=github)](https://github.com/dunetrace/dunetrace/actions/workflows/codeql.yml)
 [![GitHub Stars](https://img.shields.io/github/stars/dunetrace/dunetrace?style=flat&logo=github)](https://github.com/dunetrace/dunetrace)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/yxFjATwHW4)
 
----
-
 **If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
+
+![Slack alert](slack-alert.png)
+
+---
 
 ## The problem
 
-AI agents fail in ways that look fine from the outside.
+AI agents fail silently:
 
-Your API returns 200. Your logs are clean. But the agent just called the same tool 12 times in a row, burned $10 in tokens, and gave the user a wrong answer or no answer at all. The user didn't get a response. You didn't get an alert.
+- ✓ API returns 200 &nbsp; ✓ Logs are clean
+- ✗ Agent called the same tool 12 times, burned $10, and gave the user a wrong answer
 
-**Langfuse and similar tools answer "what happened?" after you already know something broke.**
-
-Dunetrace answers a different question: **is something breaking right now?**  and fires a Slack alert within 15 seconds of the run completing.
-
----
-
-## What it does
-
-**Monitor** - watches every run as it completes: tool calls, LLM calls, latency, token usage, retrieval results.
-
-**Detect** - 17 structural detectors run automatically. No LLM, no configuration. Catches tool loops, retry storms, context bloat, runaway cost, slow sessions, goal abandonment, and more. Write your own detectors in plain English — they run in shadow mode and accumulate results before any alert fires.
-
-**Diagnose** - each alert includes a plain-English explanation: what happened, why it matters, and a concrete fix. If you use Langfuse, click **Explain +** to get an LLM root-cause analysis against the actual trace.
-
-**Fix** - one click to apply a prompt fix via Langfuse, or open a GitHub PR with a code change. Fix effectiveness is tracked automatically.
+Langfuse and LangSmith answer "what happened?" — after you already know it broke.
+Dunetrace answers **"is something breaking right now?"** and fires an alert in 15 seconds.
 
 ---
 
@@ -47,47 +36,27 @@ Dunetrace answers a different question: **is something breaking right now?**  an
 |---|---|---|
 | **When it fires** | Within 15s of run completion | You query it after you notice a problem |
 | **What it watches** | Structural failure patterns | Raw trace data |
-| **Alert channel** | Slack / webhook / Dashboard| Dashboard only |
+| **Alert channel** | Slack / webhook / Dashboard | Dashboard only |
 | **Fix path** | One-click prompt apply or GitHub PR | Manual |
-
-Dunetrace is not a replacement for tracing tools, it's the layer that tells you *when to look*.
 
 ---
 
 ## Quick Start
 
-### 1. Start the backend
-
-**Option A — pre-built images (fastest)**
+**1. Start the backend**
 ```bash
 git clone https://github.com/dunetrace/dunetrace
 cd dunetrace && cp .env.example .env
 docker compose -f docker-compose.ghcr.yml up -d
 ```
 
-**Option B — build from source**
+**2. Install the SDK**
 ```bash
-git clone https://github.com/dunetrace/dunetrace
-cd dunetrace && cp .env.example .env && docker compose build && docker compose up -d
+pip install dunetrace                       # Python
+npm install dunetrace                       # Node.js / TypeScript
 ```
 
-### 2. Install the SDK
-
-**Python**
-```bash
-pip install dunetrace
-pip install 'dunetrace[langchain]'          # LangChain / LangGraph
-pip install 'dunetrace[langchain,langfuse]' # + Langfuse deep analysis
-pip install 'dunetrace[haystack]'           # Haystack 2.x
-pip install dunetrace-mcp                   # MCP server for Claude Code / Cursor / Codex
-```
-
-**Node.js / TypeScript**
-```bash
-npm install dunetrace                       # zero runtime dependencies, Node 18+
-```
-
-### 3. Instrument your agent
+**3. Instrument your agent**
 
 **Python**
 ```python
@@ -109,23 +78,15 @@ import { Dunetrace } from "dunetrace";
 import OpenAI from "openai";
 
 const dt     = new Dunetrace();
-const openai = dt.wrapOpenAI(new OpenAI());  // LLM calls tracked automatically
-const search = dt.tool(webSearch);           // tool calls tracked automatically
+const openai = dt.wrapOpenAI(new OpenAI());
 
-await dt.run("my-agent", { model: "gpt-4o", tools: ["search"] }, async (run) => {
-  const response = await openai.chat.completions.create({ model: "gpt-4o", messages });
-  const results  = await search(query);
+await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
+  await openai.chat.completions.create({ model: "gpt-4o", messages });
   run.finalAnswer();
 });
-
-await dt.shutdown();
 ```
 
-
-### Examples
-
-To verify signals fire end-to-end, run the built-in failure scenarios:
-
+**Try the built-in failure scenarios**
 ```bash
 cd packages/sdk-py
 
@@ -134,19 +95,14 @@ SCENARIO=tool_loop python examples/langchain_agent.py   # TOOL_LOOP via LangChai
 SCENARIO=failures python examples/decorator_agent.py    # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
 SCENARIO=tool_loop python examples/langfuse_agent.py    # TOOL_LOOP + Langfuse explain
 ```
-Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
-| | URL |
-|---|---|
-| Dashboard | http://localhost:3000 |
-| API + docs | http://localhost:8002/docs |
-| Ingest (SDK) | http://localhost:8001 |
+Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ---
 
 ## Detectors
 
-17 detectors run on every completed run, no configuration required.
+17 detectors run on every completed run — no configuration, no LLM.
 
 | Signal | What it catches |
 |---|---|
@@ -172,23 +128,13 @@ Each alert includes: what fired, why it matters, a concrete fix, and a rate cont
 
 → [docs/detectors.md](docs/detectors.md)
 
----
-
-## Custom Detectors
-
-Write a detector in plain English. Dunetrace translates your description into a structured condition set, runs it in shadow mode against real traffic, and lets you review the fire rate before any alert fires.
-
-In the dashboard: **Config → Custom detectors → Add detector**.
-
-→ [docs/detectors.md#custom-detectors](docs/detectors.md#custom-detectors)
+**Custom detectors** — write a detector in plain English. Dunetrace translates it to a structured condition set, runs it in shadow mode against real traffic, and lets you review the fire rate before any alert fires. In the dashboard: **Config → Custom detectors → Add detector**.
 
 ---
 
 ## Dashboard
 
 ![Overview](dashboard.png)
-![Agent details](agent_detail.png)
-![Token usage overview](token-usage.png)
 
 Live at **[http://localhost:3000](http://localhost:3000)**. Auto-refreshes every 15s.
 
@@ -200,29 +146,25 @@ Live at **[http://localhost:3000](http://localhost:3000)**. Auto-refreshes every
 
 Slack and generic webhook (PagerDuty, Linear, custom).
 
-![Slack alert](slack-alert.png)
-
 ```bash
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 SLACK_MIN_SEVERITY=LOW   # LOW | MEDIUM | HIGH | CRITICAL
 ```
 
-A weekly digest (Monday 9am UTC) summarises top failure types, most-affected agents, and systemic patterns. Enable with `DIGEST_ENABLED=true`.
+A weekly digest (Monday 9am UTC) summarises top failure types and systemic patterns. Enable with `DIGEST_ENABLED=true`.
 
-→ [docs/alerts.md](docs/alerts.md) for deduplication, multi-run confirmation policy, and user feedback loop.
+→ [docs/alerts.md](docs/alerts.md)
 
 ---
 
 ## Diagnose with Langfuse
 
-Connect Langfuse to get LLM-powered root-cause analysis on any signal.
+Connect Langfuse to get LLM-powered root-cause analysis on any signal. Click **Explain +** on any alert — Dunetrace fetches the full trace, extracts the system prompt, and returns a specific root cause and fix.
 
-Click **Explain +** on any alert in the dashboard. Dunetrace fetches the full trace, extracts the system prompt, and asks an LLM for the specific root cause and fix.
+- **Prompt fixes** → **Apply via Langfuse** creates a new prompt version in one click
+- **Code/infra fixes** → **Open PR on GitHub** creates a draft PR with a unified diff
 
-- **Prompt fixes** (tool loops, goal abandonment, etc.) — **Apply via Langfuse** creates a new prompt version in one click.
-- **Code/infra fixes** (context bloat, slow steps, cost spikes, etc.) — **Open PR on GitHub** creates a draft PR with a LLM-generated unified diff.
-
-Fix effectiveness is tracked: the dashboard shows whether recurrence dropped after a fix was applied.
+Fix effectiveness is tracked automatically.
 
 → [docs/integrate-langfuse.md](docs/integrate-langfuse.md)
 
@@ -245,59 +187,9 @@ dt.add_policy(
 )
 ```
 
-Policies can also be created in the dashboard and are fetched automatically by the SDK (60s TTL).
-
-`inject_prompt` content is validated against known prompt injection patterns at write time — adversarial content is rejected before it reaches the database. Every policy mutation is written to an append-only audit log. In production, set `POLICY_SIGNING_SECRET` on both the server and the SDK client to enable HMAC verification of fetched policies:
-
-```python
-dt = Dunetrace(
-    api_key="dt_live_...",
-    endpoint="https://ingest.dunetrace.com",
-    policy_secret="your-shared-secret",   # must match POLICY_SIGNING_SECRET env var
-)
-```
+Policies can also be created in the dashboard and fetched automatically by the SDK (60s TTL).
 
 → [docs/policies.md](docs/policies.md)
-
----
-
-## Deploy markers
-
-Correlate failure spikes with releases.
-
-```python
-dt.mark_deploy("my-agent", version="v1.4.2", commit="abc1234", env="production")
-```
-
-The dashboard overlays blue dashed lines at each deploy boundary so you can immediately see whether a spike started before or after a release.
-
----
-
-## Custom exporters
-
-Forward every agent event to an external sink in real time — Splunk, Datadog, a webhook, or any custom destination:
-
-```python
-from dunetrace import Dunetrace, CallableExporter
-
-dt = Dunetrace(exporters=[
-    CallableExporter(lambda event: send_to_splunk(event.to_dict())),
-])
-```
-
-Or implement the `Exporter` protocol for full control:
-
-```python
-from dunetrace import Dunetrace, Exporter
-
-class MyExporter:
-    def handle(self, event) -> None:
-        requests.post("https://my-sink.example.com", json=event.to_dict())
-
-dt = Dunetrace(exporters=[MyExporter()])
-```
-
-Multiple exporters can be registered. A failing exporter logs a warning and does not affect others or the agent. The existing `otel_exporter` parameter continues to work alongside `exporters`.
 
 ---
 
@@ -309,7 +201,8 @@ Query agent signals directly from Claude Code, Cursor, or Codex — without leav
 pip install dunetrace-mcp
 ```
 
-Ten tools that cover the full diagnostic workflow:
+<details>
+<summary>10 tools — ask your editor things like "what failed in the last 24 hours?"</summary>
 
 | Tool | What you can ask |
 |---|---|
@@ -323,9 +216,10 @@ Ten tools that cover the full diagnostic workflow:
 | `search_signals` | "Show me all CRITICAL signals in the last 24 hours." |
 | `summarize_agent` | "Give me a one-shot diagnosis of my agent." |
 | `get_agent_token_stats` | "How much is my agent wasting on failed runs?" |
-| `get_instrumentation_guide` | "How do I instrument my LangChain agent?" |
 
-**Claude Code**: already registered in `~/.claude.json` after `pip install dunetrace-mcp`. Restart Claude Code to load.
+</details>
+
+**Claude Code**: registered automatically in `~/.claude.json` after `pip install dunetrace-mcp`. Restart Claude Code to load.
 
 **Cursor**: add `.cursor/mcp.json` to your project root:
 
@@ -342,10 +236,6 @@ Ten tools that cover the full diagnostic workflow:
   }
 }
 ```
-
-**Codex / SSE clients**: `python -c "from dunetrace_mcp.server import mcp; mcp.run(transport='sse')"` (listens on `:8000`).
-
-All MCP responses expose only hashed metadata — no raw prompts, arguments, or model outputs.
 
 → [docs/mcp-server.md](docs/mcp-server.md)
 
@@ -370,11 +260,12 @@ Agent Code
                 └─► Customer API   (runs, signals, explanations → dashboard)
 ```
 
-→ [docs/architecture.md](docs/architecture.md)
-
 ---
 
 ## Integrations
+
+<details>
+<summary>LangChain, CrewAI, AutoGen, Haystack, LlamaIndex, TypeScript, and more</summary>
 
 - [Custom Python agent](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
@@ -390,27 +281,17 @@ Agent Code
 - [Policies](docs/policies.md)
 - [MCP server (Claude Code, Cursor, Codex)](docs/mcp-server.md)
 
----
-
-## Running tests
-
-```bash
-make test
-```
+</details>
 
 ---
-
-## Requirements
-
-- Python 3.11+
-- Node.js 18+ (TypeScript SDK)
-- Docker + Docker Compose
 
 ## Contributing
 
-Fork, branch, change, test, PR. For larger changes (new detectors, architecture changes), open an issue first.
+Fork, branch, change, `make test`, PR. For larger changes (new detectors, architecture changes), open an issue first.
 
-## Star us ⭐
+Requires Python 3.11+, Node.js 22+, Docker + Docker Compose.
+
+## ⭐ Star this if it saves you debugging time
 
 [![Star History Chart](https://api.star-history.com/svg?repos=dunetrace/dunetrace&type=Date)](https://star-history.com/#dunetrace/dunetrace&Date)
 

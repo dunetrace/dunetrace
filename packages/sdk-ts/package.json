@@ -1,6 +1,6 @@
 {
   "name": "dunetrace",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Real-time monitoring for AI agents",
   "author": "Dunetrace <dunetrace@gmail.com>",
   "license": "Apache-2.0",
@@ -17,7 +17,7 @@
     "url": "https://github.com/dunetrace/dunetrace"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -38,16 +38,29 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "example:langfuse": "tsx examples/langfuse_agent.ts",
-    "example:langfuse:loop": "SCENARIO=tool_loop tsx examples/langfuse_agent.ts"
+    "example:langfuse:loop": "SCENARIO=tool_loop tsx examples/langfuse_agent.ts",
+    "example:vercel-ai": "tsx examples/vercel_ai_agent.ts",
+    "example:vercel-ai:loop": "SCENARIO=tool_loop tsx examples/vercel_ai_agent.ts"
+  },
+  "peerDependencies": {
+    "ai": ">=7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.0",
     "@types/dotenv": "^6.1.1",
-    "@types/node": "^20.0.0",
+    "@types/node": "^22.20.0",
+    "ai": "^7.0.2",
     "dotenv": "^17.4.2",
     "langfuse": "^3.38.20",
     "openai": "^6.37.0",
     "tsx": "^4.21.0",
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0"
+    "vitest": "^1.6.0",
+    "zod": "^4.4.3"
   }
 }

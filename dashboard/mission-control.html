@@ -607,6 +607,28 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 .cmp-sig-live{background:var(--red-d);border:1px solid rgba(229,62,62,0.15)}
 .cmp-no-sigs{font-size:11px;color:var(--green);font-family:'IBM Plex Mono',monospace;padding:8px}
 .cmp-placeholder{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4);padding:2rem;text-align:center;background:var(--s1);border:1px solid var(--wire);border-radius:8px}
+
+/* ── D1 Fix verdict badges ── */
+.verdict-badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:700;padding:2px 7px;border-radius:2px;letter-spacing:.5px;display:inline-block;margin-top:5px}
+.verdict-verified{background:rgba(46,184,114,0.12);color:var(--green);border:1px solid rgba(46,184,114,0.3)}
+.verdict-likely{background:var(--amber-d);color:var(--amber);border:1px solid rgba(212,146,10,0.3)}
+.verdict-occurring{background:var(--red-d);color:var(--red);border:1px solid rgba(229,62,62,0.3)}
+.verdict-insufficient{background:var(--s3);color:var(--chalk4);border:1px solid var(--wire)}
+
+/* ── D3 Pattern drill modal ── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:300;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal-box{background:var(--s1);border:1px solid var(--wire2);border-radius:10px;padding:1.5rem;max-width:660px;width:90%;max-height:80vh;overflow-y:auto;position:relative}
+.modal-close{position:absolute;top:1rem;right:1rem;background:none;border:none;color:var(--chalk4);font-size:16px;cursor:pointer;padding:2px 6px;line-height:1}
+.modal-close:hover{color:var(--chalk2)}
+.modal-title{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--orange);letter-spacing:2px;text-transform:uppercase;margin-bottom:1.25rem;padding-right:2rem}
+
+/* ── D4 Issue items ── */
+.issue-item{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--s2);border:1px solid var(--wire);border-radius:6px;margin-bottom:6px}
+.issue-status-badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:700;padding:2px 7px;border-radius:2px;letter-spacing:.5px;flex-shrink:0}
+.is-open{background:var(--red-d);color:var(--red)}
+.is-resolved{background:var(--green-d);color:var(--green)}
+.is-reopened{background:var(--amber-d);color:var(--amber)}
 </style>
 </head>
 <body>
@@ -695,6 +717,21 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- MAIN CONTENT -->
 <div id="main">
+
+<!-- D7 Error banner -->
+<div id="error-banner" style="display:none;background:rgba(229,62,62,0.08);border:1px solid rgba(229,62,62,0.3);border-radius:6px;padding:10px 16px;margin-bottom:1rem;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--red);align-items:center;justify-content:space-between">
+  Failed to load data. Check that the backend is running.
+  <button onclick="document.getElementById('error-banner').style.display='none'" style="background:none;border:none;color:var(--red);cursor:pointer;margin-left:1rem;font-size:14px;line-height:1">✕</button>
+</div>
+
+<!-- D3 Pattern drill-down modal -->
+<div id="pattern-modal" class="modal-overlay" onclick="if(event.target===this)closePatternModal()">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closePatternModal()">✕</button>
+    <div class="modal-title" id="pattern-modal-title">FAILURE PATTERN DETAIL</div>
+    <div id="pattern-modal-body"><div class="loading">loading…</div></div>
+  </div>
+</div>
 
 <!-- ── OVERVIEW PAGE ── -->
 <div id="page-overview" class="page active">
@@ -998,6 +1035,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <button class="gp-btn" data-p="all" onclick="setGlobalPeriod('all')">All</button>
       </div>
       <span style="font-size:11px;color:var(--chalk4)" id="acked-count"></span><button class="filter-btn" onclick="unackAll()" id="unack-btn" style="display:none">restore all</button>
+      <button class="filter-btn" onclick="downloadSignalsCsv()">Download CSV</button>
     </div>
   </div>
   <div id="alerts-container">
@@ -1510,6 +1548,32 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   </div>
 </div>
 
+<!-- ── AGENT DETAIL PAGE (D2/D4) ── -->
+<div id="page-agent-detail" class="page">
+  <div class="back-btn" id="agent-detail-back-btn" onclick="nav('agents',document.querySelector('[onclick*=agents]'))">← back to agents</div>
+  <div class="run-detail-header" id="agent-detail-header">
+    <div class="rdh-left">
+      <div class="rdh-run-id mono" id="agent-detail-id">—</div>
+      <div class="rdh-title" id="agent-detail-title">Agent Overview</div>
+      <div class="rdh-meta" id="agent-detail-meta"></div>
+    </div>
+  </div>
+  <div class="detail-tabs">
+    <div class="dtab active" onclick="switchAgentTab('overview',this)">Overview</div>
+    <div class="dtab" onclick="switchAgentTab('fixes',this)">Fixes</div>
+    <div class="dtab" onclick="switchAgentTab('issues',this)">Issues</div>
+  </div>
+  <div id="adtab-overview" class="dtab-panel active">
+    <div id="agent-detail-overview-body"><div class="loading">loading…</div></div>
+  </div>
+  <div id="adtab-fixes" class="dtab-panel">
+    <div id="agent-detail-fixes-body"><div class="loading">loading…</div></div>
+  </div>
+  <div id="adtab-issues" class="dtab-panel">
+    <div id="agent-detail-issues-body"><div class="loading">loading…</div></div>
+  </div>
+</div>
+
 </div><!-- /main -->
 
 <script>
@@ -1518,7 +1582,7 @@ const API = 'http://localhost:8002';
 const KEY = 'dt_dev_test';
 
 // ── State ────────────────────────────────────────────────────────────────────
-let _agents        = [];   // [{agent_id, run_count, signal_count, critical_count, high_count, failure_types, _runs, _signals, _shadowSignals}]
+let _agents        = [];   // [{agent_id, run_count, signal_count, critical_count, high_count, failure_types, _runs, _signals, _shadowSignals, _openIssues}]
 let _healthScores  = {};   // { agent_id: {score, components, sample_runs} }
 let _tokenStats    = {};   // { agent_id: {windows:{1d,7d,30d}, waste_by_failure_type} }
 let _tokenWindow   = '7d'; // active time-window for token usage page
@@ -1538,12 +1602,21 @@ let _runsSevFilter  = '';                 // #5 sev filter
 let _runsAgentFilter = '';               // #5 agent filter
 let _agentSort      = 'health';           // #8 agent sort
 let _ackedSignals   = new Set(JSON.parse(localStorage.getItem('dt_acked') || '[]'));  // #7 ack
+let fixVerdicts         = {};    // D1: { signalId: verdict }
+let _curAgentDetailId   = null;  // D2/D4: active agent-detail page
+let _issuesLoaded       = false; // D4: lazy-loaded open-issue counts
 
 // ── API helpers ───────────────────────────────────────────────────────────────
 async function apiFetch(path) {
-  const r = await fetch(API + path, { headers: { Authorization: 'Bearer ' + KEY } });
-  if (!r.ok) throw new Error(r.status + ' ' + path);
-  return r.json();
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const r = await fetch(API + path, { headers: { Authorization: 'Bearer ' + KEY }, signal: ctrl.signal });
+    if (!r.ok) throw new Error(r.status + ' ' + path);
+    return r.json();
+  } finally {
+    clearTimeout(tid);
+  }
 }
 
 // ── Data loading ──────────────────────────────────────────────────────────────
@@ -1571,6 +1644,19 @@ async function loadTokenStats() {
     } catch(e) { /* token stats optional */ }
   }));
   renderTokens();
+}
+
+async function loadIssuesCounts() {
+  if (_issuesLoaded) return;
+  _issuesLoaded = true;
+  await Promise.all(_agents.map(async a => {
+    try {
+      const data = await apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/issues');
+      const issues = Array.isArray(data) ? data : (data.issues || []);
+      a._openIssues = issues.filter(i => i.status === 'open' || i.status === 'reopened').length;
+    } catch(e) { a._openIssues = 0; }
+  }));
+  renderAgents();
 }
 
 function onTokenRateInput() {
@@ -1655,7 +1741,7 @@ function renderTokens() {
   }
 
   tbody.innerHTML = rows.map(r => `
-    <tr style="cursor:pointer" onclick="toggleTokenRow(this,'${esc(r.agent_id)}')">
+    <tr style="cursor:pointer" onclick="toggleTokenRow(this,${jsVal(r.agent_id)})">
       <td class="mono" style="font-weight:600">${esc(r.agent_id)}</td>
       <td class="mono">${r.run_count} <span style="color:var(--amber)">(${r.wasted_runs})</span></td>
       <td class="mono">${fmtTok(r.total_tok)}</td>
@@ -1697,7 +1783,9 @@ function toggleTokenRow(tr, agentId) {
 async function loadAll() {
   _healthScoresLoaded = false;
   _tokenStatsLoaded   = false;
+  _issuesLoaded       = false;
   try {
+    hideErrorBanner();
     const agentsData = await apiFetch('/v1/agents?limit=50');
     _agents = agentsData.agents || [];
 
@@ -1739,6 +1827,7 @@ async function loadAll() {
     }
   } catch(e) {
     console.error('loadAll failed:', e);
+    showErrorBanner();
   }
 }
 
@@ -1810,7 +1899,7 @@ function renderOverview() {
       return c > (best?.cnt||0) ? {id: a.agent_id, cnt: c} : best;
     }, null);
     const topAgentId = topAgent?.id || '';
-    return `<div class="failure-item" onclick="openAgentDetail('${esc(topAgentId)}')">
+    return `<div class="failure-item" onclick="openAgentDetail(${jsVal(topAgentId)})">
       <div class="fi-bar" style="background:${color}"></div>
       <span class="fi-name">${ftLabel(ft)}</span>
       <span class="fi-count">${cnt} signals</span>
@@ -1886,7 +1975,7 @@ function runRow(r) {
   const agentId = r.agent_id || r._agentId || '';
   const riskColor = maxConf >= 0.8 ? 'var(--red)' : maxConf >= 0.5 ? 'var(--amber)' : maxConf > 0 ? 'var(--orange)' : 'var(--green)';
 
-  return `<tr onclick="showDetail('${esc(r.run_id)}','${esc(agentId)}')">
+  return `<tr onclick="showDetail(${jsVal(r.run_id)},${jsVal(agentId)})">
     <td><span class="run-id">${shortId(r.run_id)}</span></td>
     <td>${esc(agentId)}</td>
     <td class="mono">${signals.length}</td>
@@ -1897,7 +1986,7 @@ function runRow(r) {
     <td class="mono">${r.step_count || 0}</td>
     <td class="mono" style="font-size:11px;color:${riskColor}">${signals.length && r.total_tokens ? fmtTok(r.total_tokens) : '—'}</td>
     <td class="mono" style="font-size:11px;color:${riskColor}">${signals.length && r.cost_usd ? fmtUsd(r.cost_usd) : '—'}</td>
-    <td><button class="view-btn" onclick="showDetail('${esc(r.run_id)}','${esc(agentId)}');event.stopPropagation()">View →</button></td>
+    <td><button class="view-btn" onclick="showDetail(${jsVal(r.run_id)},${jsVal(agentId)});event.stopPropagation()">View →</button></td>
   </tr>`;
 }
 
@@ -1952,7 +2041,7 @@ function renderAlerts() {
       const sv = topSev(s);
       const r  = _allRuns.find(x => x.run_id === rid);
       const tk = fmtTok(realTok(r));
-      return `<div class="ag-run-item" onclick="showDetail('${esc(rid)}','${esc(agentId)}')">
+      return `<div class="ag-run-item" onclick="showDetail(${jsVal(rid)},${jsVal(agentId)})">
         <span class="run-id">${shortId(rid)}</span>
         <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
         <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--amber)">~${tk}</span>
@@ -2026,7 +2115,7 @@ function renderAnalytics() {
     ? ptSorted.map(([ft, d]) => {
         const uniqRuns = ftRunMap[ft] ? ftRunMap[ft].size : 0;
         const wasted = wastedTok([...(ftRunMap[ft] || new Set())]);
-        return `<tr>
+        return `<tr style="cursor:pointer" onclick="openPatternDrillDown(${jsVal(ft)})">
           <td>${ftLabel(ft)}</td>
           <td class="mono" title="${d.count} signals across ${uniqRuns} unique run${uniqRuns !== 1 ? 's' : ''}">${d.count} <span style="font-size:10px;color:var(--chalk4)">(${uniqRuns} runs)</span></td>
           <td class="mono">${d.agents.size}</td>
@@ -2244,6 +2333,7 @@ function renderRunDetail(run, events, signals) {
 
   // Signal score cards
   renderSignalCards(signals);
+  loadRunVerdicts(signals);
 
   // Explanation
   renderExplain(signals);
@@ -2318,6 +2408,7 @@ function renderSignalCards(signals) {
       <div class="sig-name">${esc(s.failure_type)} <span class="sig-score-val" style="color:${col}">${c.toFixed(2)}</span></div>
       <div class="score-bar-track"><div class="score-bar-fill ${cls}" style="width:${Math.round(c*100)}%"></div></div>
       <div style="font-size:11px;color:var(--chalk4);margin-top:6px">${esc(evid)}</div>
+      <div id="verdict-${s.id}">${verdictBadgeHtml(fixVerdicts[s.id])}</div>
     </div>`;
   }).join('');
 }
@@ -2842,8 +2933,11 @@ function timeAgo(ts) {
 }
 
 function esc(s) {
-  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+
+// Safe for inline JS string arguments in onclick="fn(${jsVal(x)})" — uses JSON.stringify.
+function jsVal(s) { return JSON.stringify(String(s ?? '')); }
 
 function copyRunId() {
   if (!_curRunId) return;
@@ -2860,7 +2954,7 @@ function nav(id, el) {
   if (page) page.classList.add('active');
   if (el)   el.classList.add('active');
   if (id === 'heatmap')  renderHeatmap();
-  if (id === 'agents')   { renderAgents(); loadHealthScores(); }
+  if (id === 'agents')   { renderAgents(); loadHealthScores(); loadIssuesCounts(); }
   if (id === 'tokens')   { renderTokens(); loadTokenStats(); }
   if (id === 'policies') loadAndRenderPolicies();
   if (id === 'keys')     loadAndRenderKeys();
@@ -3063,7 +3157,7 @@ function renderAgents() {
       return `${k}: ${v.score}/${v.max}  val=${v.value ?? '—'}${base}`;
     }).join('\n') : '';
 
-    return `<div class="agent-card" onclick="openAgentDetail('${esc(a.agent_id)}')" title="Click to filter runs by this agent">
+    return `<div class="agent-card" onclick="openAgentDetail(${jsVal(a.agent_id)})" title="Click to filter runs by this agent">
       <div class="ac-top-bar" style="background:${color}"></div>
       <div class="ac-header">
         <div style="min-width:0">
@@ -3097,6 +3191,9 @@ function renderAgents() {
       ${shadowCnt ? `<div style="margin-top:.75rem;display:flex;align-items:center;gap:6px">
         <span class="shadow-badge">SHADOW</span>
         <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4)">${shadowCnt} ungraduated signal${shadowCnt!==1?'s':''}</span>
+      </div>` : ''}
+      ${a._openIssues ? `<div style="margin-top:.5rem;display:flex;align-items:center;gap:6px">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:700;padding:2px 6px;border-radius:2px;background:var(--red-d);color:var(--red)">${a._openIssues} open issue${a._openIssues!==1?'s':''}</span>
       </div>` : ''}
       <div class="ac-last">last seen ${esc(lastSeen)}</div>
     </div>`;
@@ -3136,7 +3233,7 @@ function renderShadowSection() {
       const runItems = uniqRuns.slice(0, 5).map(rid => {
         const s = sigs.filter(x => x.run_id === rid);
         const c = Math.max(...s.map(x => x.confidence)).toFixed(2);
-        return `<div class="ag-run-item" onclick="showDetail('${esc(rid)}','${esc(agentId)}')">
+        return `<div class="ag-run-item" onclick="showDetail(${jsVal(rid)},${jsVal(agentId)})">
           <span class="run-id">${shortId(rid)}</span>
           <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
           <span style="margin-left:auto">conf ${c}</span>
@@ -3256,7 +3353,7 @@ function _cmpPanel(run, sigs, label, baseRun, baseSigs) {
       }
     </div>
     <div style="margin-top:1rem">
-      <button class="view-btn" onclick="showDetail('${esc(run.run_id)}','${esc(agentId)}');event.stopPropagation()">Open full detail →</button>
+      <button class="view-btn" onclick="showDetail(${jsVal(run.run_id)},${jsVal(agentId)});event.stopPropagation()">Open full detail →</button>
     </div>
   </div>`;
 }
@@ -3855,10 +3952,10 @@ function runSearch(q) {
     if (results.length >= 8) return;
     const agentId = r.agent_id || r._agentId || '';
     if (r.run_id.toLowerCase().includes(lq)) {
-      results.push({ tag: 'RUN', label: shortId(r.run_id) + ' · ' + esc(agentId), action: `showDetail('${esc(r.run_id)}','${esc(agentId)}')` });
+      results.push({ tag: 'RUN', label: shortId(r.run_id) + ' · ' + esc(agentId), action: `showDetail(${jsVal(r.run_id)},${jsVal(agentId)})` });
     } else if (agentId.toLowerCase().includes(lq) && !seenAgents.has(agentId)) {
       seenAgents.add(agentId);
-      results.push({ tag: 'AGENT', label: esc(agentId), action: `openAgentDetail('${esc(agentId)}')` });
+      results.push({ tag: 'AGENT', label: esc(agentId), action: `openAgentDetail(${jsVal(agentId)})` });
     }
   });
 
@@ -3958,16 +4055,19 @@ function setAgentSort(key) {
   renderAgents();
 }
 
-// ── Agent drill-down (#1 #9) ───────────────────────────────────────────────────
+// ── Agent drill-down (D2/D4 — opens agent detail page) ────────────────────────
 function openAgentDetail(agentId) {
   if (!agentId) return;
-  // Navigate to runs page filtered to this agent
-  nav('runs', document.querySelector('[onclick*=runs]'));
-  // Pre-set the agent filter and re-render
-  _runsAgentFilter = agentId;
-  const sel = document.getElementById('runs-agent');
-  if (sel) sel.value = agentId;
-  renderRuns();
+  _curAgentDetailId = agentId;
+  nav('agent-detail', null);
+  // Reset tabs to Overview
+  document.querySelectorAll('#page-agent-detail .dtab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('#page-agent-detail .dtab').forEach(t => t.classList.remove('active'));
+  const firstPanel = document.getElementById('adtab-overview');
+  const firstTab   = document.querySelector('#page-agent-detail .dtab');
+  if (firstPanel) firstPanel.classList.add('active');
+  if (firstTab)   firstTab.classList.add('active');
+  loadAgentDetailOverview(agentId);
 }
 
 // ── Deep-link: /runs/<run_id> from Slack "View Run" button ───────────────────
@@ -4226,6 +4326,7 @@ async function loadCustomDetectors() {
       return;
     }
     list.innerHTML = dets.map(d => renderCustomDetectorCard(d)).join('');
+    dets.filter(d => d.status === 'shadow').forEach(d => loadShadowStats(d.id));
   } catch(e) {
     list.innerHTML = '<div style="font-size:12px;color:var(--chalk4)">Failed to load custom detectors.</div>';
   }
@@ -4259,6 +4360,7 @@ function renderCustomDetectorCard(d) {
           <div style="font-size:12px;color:var(--chalk3);margin-bottom:.4rem">${esc(d.description)}</div>
           <div style="font-size:11px;color:var(--chalk4)">Condition: ${conditions}</div>
           ${shadowNote}
+          ${d.status === 'shadow' ? '<span id="cd-shadow-api-' + d.id + '"></span>' : ''}
         </div>
         <div style="display:flex;gap:.4rem;align-items:center;margin-left:1rem;flex-shrink:0">
           ${activateBtn}
@@ -4287,6 +4389,317 @@ async function deleteCustomDetector(id, name) {
   if (!confirm(`Delete custom detector "${name}"?\nThis cannot be undone.`)) return;
   try { await cdDelete(`/v1/custom-detectors/${id}`); await loadCustomDetectors(); }
   catch(e) { alert('Failed to delete: ' + e); }
+}
+
+// ── D1: Fix verdict badge helpers ─────────────────────────────────────────────
+function verdictBadgeHtml(verdict) {
+  if (!verdict) return '';
+  const map = {
+    verified:          { cls: 'verdict-verified',    text: 'verified' },
+    likely_fixed:      { cls: 'verdict-likely',      text: '~ likely fixed' },
+    still_occurring:   { cls: 'verdict-occurring',   text: 'still occurring' },
+    insufficient_data: { cls: 'verdict-insufficient', text: '? insufficient data' },
+  };
+  const v = map[verdict];
+  return v ? `<span class="verdict-badge ${v.cls}">${v.text}</span>` : '';
+}
+
+async function loadRunVerdicts(signals) {
+  if (!signals || !signals.length) return;
+  signals.forEach(async function(s) {
+    if (!s.id) return;
+    try {
+      const data = await apiFetch('/v1/signals/' + s.id + '/fix-status');
+      if (!data || !data.verdict) return;
+      fixVerdicts[s.id] = data.verdict;
+      const el = document.getElementById('verdict-' + s.id);
+      if (el) el.innerHTML = verdictBadgeHtml(data.verdict);
+    } catch(e) {
+      // fix-status is optional — 404 when no fix recorded
+    }
+  });
+}
+
+// ── D3: Failure pattern drill-down ────────────────────────────────────────────
+function openPatternDrillDown(ft) {
+  const modal = document.getElementById('pattern-modal');
+  const title = document.getElementById('pattern-modal-title');
+  const body  = document.getElementById('pattern-modal-body');
+  if (!modal) return;
+  title.textContent = ft.replace(/_/g, ' ');
+  body.innerHTML = '<div class="loading">loading…</div>';
+  modal.classList.add('open');
+
+  // Pick the agent with the most occurrences of this failure type
+  const agentCounts = {};
+  _allSigs.filter(s => s.failure_type === ft).forEach(s => {
+    agentCounts[s.agent_id] = (agentCounts[s.agent_id] || 0) + 1;
+  });
+  const topEntry = Object.entries(agentCounts).sort((a, b) => b[1] - a[1])[0];
+  if (!topEntry) { body.innerHTML = '<div class="loading">no data</div>'; return; }
+  const topAgent = topEntry[0];
+
+  apiFetch('/v1/agents/' + encodeURIComponent(topAgent) + '/failure-patterns/' + encodeURIComponent(ft))
+    .then(data => renderPatternDrillDown(body, ft, data, topAgent))
+    .catch(() => renderPatternDrillDownLocal(body, ft, topAgent));
+}
+
+function renderPatternDrillDown(body, ft, data, agentId) {
+  const trend  = data.daily_counts || [];
+  const maxTrnd = Math.max(...trend, 1);
+  const trendBars = trend.slice(-14).map(v => {
+    const h  = v === 0 ? 2 : Math.max(4, Math.round(v / maxTrnd * 52));
+    const bg = v === 0 ? 'var(--s2)' : v >= 3 ? 'rgba(229,62,62,0.4)' : 'rgba(212,146,10,0.4)';
+    return `<div style="flex:1;height:${h}px;background:${bg};border-radius:2px 2px 0 0;min-width:0"></div>`;
+  }).join('');
+
+  const tools = (data.top_tools || []).map(t =>
+    `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">
+      <span class="mono" style="color:var(--orange);flex:1">${esc(t.tool || t.name || '')}</span>
+      <span class="mono" style="color:var(--chalk4)">${t.count || 0}x</span>
+    </div>`
+  ).join('') || '<div style="font-size:11px;color:var(--chalk4)">no tool data</div>';
+
+  const coSigs = (data.co_occurring_signals || []).map(c =>
+    `<span class="sev-badge" style="background:var(--s3);color:var(--chalk3);margin-right:4px;margin-bottom:4px">${esc(c)}</span>`
+  ).join('');
+
+  const exampleRuns = (data.example_run_ids || []).slice(0, 3).map(rid =>
+    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail(${jsVal(rid)},${jsVal(agentId)})">${shortId(rid)}</span>`
+  ).join('');
+
+  body.innerHTML =
+    `<div style="margin-bottom:1rem">
+      <div class="chart-title mono" style="margin-bottom:.5rem">14-DAY TREND</div>
+      <div style="display:flex;align-items:flex-end;gap:2px;height:56px">${trendBars}</div>
+    </div>
+    <div style="margin-bottom:1rem">
+      <div class="chart-title mono" style="margin-bottom:.5rem">TOP TOOLS INVOLVED</div>
+      ${tools}
+    </div>
+    ${coSigs ? `<div style="margin-bottom:1rem"><div class="chart-title mono" style="margin-bottom:.5rem">CO-OCCURRING SIGNALS</div><div style="display:flex;flex-wrap:wrap">${coSigs}</div></div>` : ''}
+    ${exampleRuns ? `<div><div class="chart-title mono" style="margin-bottom:.5rem">EXAMPLE RUNS</div><div>${exampleRuns}</div></div>` : ''}
+    <div style="margin-top:.75rem;font-size:11px;color:var(--chalk4)">agent: ${esc(agentId)}</div>`;
+}
+
+function renderPatternDrillDownLocal(body, ft, agentId) {
+  const sigs = _allSigs.filter(s => s.failure_type === ft);
+  const now  = Date.now() / 1000;
+  const days = Array(14).fill(0);
+  sigs.forEach(s => {
+    const age = now - s.detected_at;
+    if (age >= 0 && age < 14 * 86400) {
+      const idx = 13 - Math.floor(age / 86400);
+      if (idx >= 0 && idx < 14) days[idx]++;
+    }
+  });
+  const maxD = Math.max(...days, 1);
+  const trendBars = days.map(v => {
+    const h  = v === 0 ? 2 : Math.max(4, Math.round(v / maxD * 52));
+    const bg = v === 0 ? 'var(--s2)' : 'rgba(212,146,10,0.4)';
+    return `<div style="flex:1;height:${h}px;background:${bg};border-radius:2px 2px 0 0;min-width:0"></div>`;
+  }).join('');
+
+  const uniqRuns   = [...new Set(sigs.map(s => s.run_id))];
+  const exampleRuns = uniqRuns.slice(0, 3).map(rid =>
+    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail(${jsVal(rid)},${jsVal(agentId)})">${shortId(rid)}</span>`
+  ).join('');
+
+  body.innerHTML =
+    `<div style="margin-bottom:1rem">
+      <div class="chart-title mono" style="margin-bottom:.5rem">14-DAY TREND</div>
+      <div style="display:flex;align-items:flex-end;gap:2px;height:56px">${trendBars}</div>
+    </div>
+    <div style="font-size:12px;color:var(--chalk3);margin-bottom:1rem">
+      ${sigs.length} total signals · ${uniqRuns.length} affected run${uniqRuns.length !== 1 ? 's' : ''}
+    </div>
+    ${exampleRuns ? `<div><div class="chart-title mono" style="margin-bottom:.5rem">EXAMPLE RUNS</div><div>${exampleRuns}</div></div>` : ''}
+    <div style="margin-top:.75rem;font-size:11px;color:var(--chalk4)">Detailed breakdown endpoint not available — showing local data</div>`;
+}
+
+function closePatternModal() {
+  const modal = document.getElementById('pattern-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+// ── D5: Custom detector shadow stats ──────────────────────────────────────────
+async function loadShadowStats(id) {
+  const el = document.getElementById('cd-shadow-api-' + id);
+  if (!el) return;
+  try {
+    const data = await apiFetch('/v1/custom-detectors/' + id + '/shadow-stats');
+    if (!data) return;
+    const total = data.total_runs || 0;
+    const fires = data.fire_count || 0;
+    const pct   = total > 0 ? ((fires / total) * 100).toFixed(1) : '0.0';
+    if (total > 0) {
+      el.innerHTML = ` &nbsp;·&nbsp; <span style="color:var(--chalk2)">Would fire on ${fires} of ${total} runs (${pct}%)</span>`;
+    }
+  } catch(e) {
+    // shadow-stats is optional
+  }
+}
+
+// ── D6: Signal CSV export ──────────────────────────────────────────────────────
+function downloadSignalsCsv() {
+  const rows = [['Signal ID','Agent','Run ID','Failure Type','Severity','Confidence','Detected At']];
+  filteredSigs().forEach(s => {
+    rows.push([
+      s.id,
+      s.agent_id || '',
+      s.run_id   || '',
+      s.failure_type || '',
+      s.severity     || '',
+      s.confidence != null ? s.confidence.toFixed(3) : '',
+      s.detected_at ? new Date(s.detected_at * 1000).toISOString() : '',
+    ]);
+  });
+  const csv  = rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'signals-' + _globalPeriod + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── D7: Error banner helpers ───────────────────────────────────────────────────
+function showErrorBanner() {
+  const el = document.getElementById('error-banner');
+  if (el) el.style.display = 'flex';
+}
+
+function hideErrorBanner() {
+  const el = document.getElementById('error-banner');
+  if (el) el.style.display = 'none';
+}
+
+// ── D2/D4: Agent detail page ───────────────────────────────────────────────────
+function switchAgentTab(id, el) {
+  document.querySelectorAll('#page-agent-detail .dtab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('#page-agent-detail .dtab').forEach(t => t.classList.remove('active'));
+  const panel = document.getElementById('adtab-' + id);
+  if (panel) panel.classList.add('active');
+  el.classList.add('active');
+  if (id === 'fixes')  loadAgentFixes(_curAgentDetailId);
+  if (id === 'issues') loadAgentIssues(_curAgentDetailId);
+}
+
+function loadAgentDetailOverview(agentId) {
+  const a    = _agents.find(x => x.agent_id === agentId);
+  const hdr  = document.getElementById('agent-detail-id');
+  const ttl  = document.getElementById('agent-detail-title');
+  const meta = document.getElementById('agent-detail-meta');
+  const body = document.getElementById('agent-detail-overview-body');
+  if (hdr) hdr.textContent = agentId;
+  if (ttl) ttl.textContent = 'Agent: ' + agentId;
+  if (!a) { if (body) body.innerHTML = '<div class="loading">agent not found</div>'; return; }
+
+  const totalRuns = a.run_count || (a._runs ? a._runs.length : 0);
+  const failRuns  = a._runs ? a._runs.filter(r => r.has_signals).length : 0;
+  const failRate  = totalRuns ? Math.round(failRuns / totalRuns * 100) : 0;
+  const lastSeen  = a.last_seen ? timeAgo(a.last_seen) : '—';
+  const sigs      = a._signals || [];
+  const critical  = sigs.filter(s => s.severity === 'CRITICAL').length;
+  const high      = sigs.filter(s => s.severity === 'HIGH').length;
+
+  if (meta) meta.innerHTML = [
+    ['Runs', totalRuns], ['Fail rate', failRate + '%'], ['Signals', sigs.length],
+    ['Critical', critical], ['High', high], ['Last seen', lastSeen],
+  ].map(([k, v]) => `<div class="rdh-meta-item">${k} <span>${esc(String(v))}</span></div>`).join('');
+
+  const recentSigs = sigs.slice().sort((a, b) => b.detected_at - a.detected_at).slice(0, 15);
+  const sigsHtml = recentSigs.length
+    ? `<div class="table-card"><table class="run-table">
+        <thead><tr><th>Failure Type</th><th>Severity</th><th>Confidence</th><th>Run</th><th>Detected</th></tr></thead>
+        <tbody>${recentSigs.map(s => `<tr style="cursor:pointer" onclick="showDetail(${jsVal(s.run_id)},${jsVal(agentId)})">
+          <td>${ftLabel(s.failure_type)}</td>
+          <td><span class="sev-badge sb-${s.severity.toLowerCase()}">${s.severity}</span></td>
+          <td class="mono">${s.confidence.toFixed(2)}</td>
+          <td><span class="run-id">${shortId(s.run_id)}</span></td>
+          <td class="mono" style="font-size:11px;color:var(--chalk4)">${timeAgo(s.detected_at)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`
+    : '<div class="loading">no signals yet</div>';
+
+  if (body) body.innerHTML =
+    `<div class="sec-head" style="margin-bottom:.75rem"><span class="sec-title">Recent signals</span>
+      <button class="filter-btn" onclick="_runsAgentFilter=${jsVal(agentId)};nav('runs',document.querySelector('[onclick*=runs]'));const s=document.getElementById('runs-agent');if(s)s.value=${jsVal(agentId)};renderRuns()">View all runs →</button>
+    </div>` + sigsHtml;
+}
+
+async function loadAgentFixes(agentId) {
+  const body = document.getElementById('agent-detail-fixes-body');
+  if (!body) return;
+  body.innerHTML = '<div class="loading">loading…</div>';
+  try {
+    const data  = await apiFetch('/v1/agents/' + encodeURIComponent(agentId) + '/fixes');
+    const fixes = Array.isArray(data) ? data : (data.fixes || []);
+    if (!fixes.length) {
+      body.innerHTML = '<div class="loading">No fixes applied yet.</div>';
+      return;
+    }
+    body.innerHTML = `<div class="table-card"><table class="run-table">
+      <thead><tr><th>Signal ID</th><th>Failure Type</th><th>Applied Via</th><th>Verdict</th><th>Applied At</th></tr></thead>
+      <tbody>${fixes.map(f => {
+        const ago = f.applied_at
+          ? timeAgo(typeof f.applied_at === 'string' ? new Date(f.applied_at).getTime() / 1000 : f.applied_at)
+          : '—';
+        return `<tr>
+          <td class="mono" style="font-size:11px">${esc(String(f.signal_id || '—'))}</td>
+          <td>${f.failure_type ? ftLabel(f.failure_type) : '—'}</td>
+          <td class="mono" style="font-size:11px;color:var(--chalk3)">${esc(f.applied_via || '—')}</td>
+          <td>${verdictBadgeHtml(f.verdict) || '<span style="color:var(--chalk4);font-size:11px">pending</span>'}</td>
+          <td class="mono" style="font-size:11px;color:var(--chalk4)">${esc(ago)}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+  } catch(e) {
+    body.innerHTML = '<div class="loading">Failed to load fixes.</div>';
+  }
+}
+
+async function loadAgentIssues(agentId) {
+  const body = document.getElementById('agent-detail-issues-body');
+  if (!body) return;
+  body.innerHTML = '<div class="loading">loading…</div>';
+  try {
+    const data   = await apiFetch('/v1/agents/' + encodeURIComponent(agentId) + '/issues');
+    const issues = Array.isArray(data) ? data : (data.issues || []);
+    if (!issues.length) {
+      body.innerHTML = '<div class="loading">No issues found.</div>';
+      return;
+    }
+    const open     = issues.filter(i => i.status === 'open');
+    const reopened = issues.filter(i => i.status === 'reopened');
+    const resolved = issues.filter(i => i.status === 'resolved');
+
+    function issueBlock(label, list, cls) {
+      if (!list.length) return '';
+      return `<div style="margin-bottom:1.25rem">
+        <div class="sec-head" style="margin-bottom:.75rem"><span class="sec-title">${label} (${list.length})</span></div>
+        ${list.map(i => {
+          const tsToAge = ts => ts ? timeAgo(typeof ts === 'string' ? new Date(ts).getTime() / 1000 : ts) : '—';
+          return `<div class="issue-item">
+            <span class="issue-status-badge ${cls}">${i.status.toUpperCase()}</span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:500;color:var(--chalk2)">${ftLabel(i.failure_type)}</div>
+              <div class="mono" style="font-size:10px;color:var(--chalk4)">first ${tsToAge(i.first_seen)} · last ${tsToAge(i.last_seen)}</div>
+            </div>
+            <span class="mono" style="font-size:11px;color:var(--chalk4);flex-shrink:0">${i.occurrence_count || 0} occurrences</span>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }
+
+    const html = issueBlock('Open', open, 'is-open') +
+                 issueBlock('Reopened', reopened, 'is-reopened') +
+                 issueBlock('Resolved', resolved, 'is-resolved');
+    body.innerHTML = html || '<div class="loading">No issues found.</div>';
+  } catch(e) {
+    body.innerHTML = '<div class="loading">Failed to load issues.</div>';
+  }
 }
 
 </script>

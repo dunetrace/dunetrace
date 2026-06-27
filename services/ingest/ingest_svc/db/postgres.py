@@ -233,7 +233,7 @@ async def prune_old_events(retention_days: int = 90) -> int:
                 end_month = month % 12 + 1
                 partition_end = date(end_year, end_month, 1)
                 if partition_end <= cutoff:
-                    await conn.execute(f"DROP TABLE IF EXISTS {name}")
+                    await conn.execute(f'DROP TABLE IF EXISTS "{name}"')
                     logger.info(
                         "Pruned event partition %s (data before %s)",
                         name,

@@ -49,4 +49,6 @@ export interface ClientOptions {
   apiKey?:          string;
   flushIntervalMs?: number;
   emitAsJson?:      boolean;
+  bufferSize?:      number;
+  timeoutMs?:       number;
 }

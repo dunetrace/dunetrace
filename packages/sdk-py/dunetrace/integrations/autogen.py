@@ -191,7 +191,7 @@ class DunetraceModelClient(ChatCompletionClient):  # type: ignore[misc]
 
     @classmethod
     def load_component(cls, model: Any) -> Any:
-        return cls._inner.load_component(model)
+        return cls._inner.load_component(model)  # type: ignore[misc]
 
 
 class DunetraceAutoGenObserver:

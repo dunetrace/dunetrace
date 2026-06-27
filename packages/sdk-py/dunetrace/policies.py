@@ -42,7 +42,21 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, Required, TypedDict, cast
+
+
+class PolicyCondition(TypedDict, total=False):
+    trigger: Required[
+        str
+    ]  # tool_call_count | step_count | cost_usd | error_count | finish_reason | llm_latency_ms | signal
+    operator: str  # gt | gte | lt | lte | eq | neq | contains  (default: gt)
+    value: Any  # threshold value
+
+
+class PolicyAction(TypedDict, total=False):
+    type: Required[Literal["stop", "switch_model", "inject_prompt", "log"]]
+    params: Dict[str, Any]  # e.g. {"model": "gpt-4o-mini"} for switch_model
+
 
 logger = logging.getLogger("dunetrace.policies")
 
@@ -146,8 +160,8 @@ class PolicyViolation(RuntimeError):
 @dataclass
 class Policy:
     name: str
-    condition: Dict[str, Any]  # {trigger, operator, value}
-    action: Dict[str, Any]  # {type, params?}
+    condition: PolicyCondition
+    action: PolicyAction
     agent_id: str = "*"  # "*" matches all agents
     enabled: bool = True
     priority: int = 100
@@ -179,8 +193,8 @@ class Policy:
             id=d.get("id"),
             agent_id=d.get("agent_id", "*"),
             name=d.get("name", ""),
-            condition=dict(d.get("condition") or {}),
-            action=dict(d.get("action") or {}),
+            condition=cast(PolicyCondition, dict(d.get("condition") or {})),
+            action=cast(PolicyAction, dict(d.get("action") or {})),
             enabled=bool(d.get("enabled", True)),
             priority=int(d.get("priority", 100)),
         )
@@ -279,7 +293,9 @@ class PolicyEngine:
         self._fetch_times[agent_id] = time.monotonic()
 
     def needs_fetch(self, agent_id: str) -> bool:
-        last = self._fetch_times.get(agent_id, 0.0)
+        last = self._fetch_times.get(agent_id)
+        if last is None:
+            return True
         return (time.monotonic() - last) > self._FETCH_TTL
 
     def __len__(self) -> int:

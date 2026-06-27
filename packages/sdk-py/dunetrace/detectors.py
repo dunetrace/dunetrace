@@ -481,8 +481,8 @@ class ContextBloatDetector(BaseDetector):
         if len(calls_with_tokens) < self.MIN_CALLS:
             return None
 
-        first_tokens = calls_with_tokens[0].prompt_tokens
-        last_tokens = calls_with_tokens[-1].prompt_tokens
+        first_tokens: int = calls_with_tokens[0].prompt_tokens or 0
+        last_tokens: int = calls_with_tokens[-1].prompt_tokens or 0
 
         if first_tokens < 10:
             return None

@@ -1,20 +1,17 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { hashContent, agentVersion } from "./hash.js";
 import { DunetraceRun } from "./run.js";
+import { resultLength as _resultLength } from "./util.js";
 import type { AgentEvent, ClientOptions, RunOptions } from "./models.js";
 
 const _runStorage = new AsyncLocalStorage<DunetraceRun>();
-
-function _resultLength(v: unknown): number {
-  if (v == null) return 0;
-  if (typeof v === "string") return v.length;
-  try { return JSON.stringify(v).length; } catch { return 0; }
-}
 
 export class Dunetrace {
   private _ingestUrl:  string | null;
   private _apiKey:     string;
   private _buffer:     AgentEvent[]       = [];
+  private _bufferSize: number;
+  private _timeoutMs:  number;
   private _drainTimer: ReturnType<typeof setInterval> | null = null;
   private _emitJson:   boolean;
 
@@ -23,6 +20,8 @@ export class Dunetrace {
     this._ingestUrl = base + "/v1/ingest";
     this._apiKey    = opts.apiKey ?? "";
     this._emitJson  = opts.emitAsJson ?? false;
+    this._bufferSize = opts.bufferSize ?? 10_000;
+    this._timeoutMs  = opts.timeoutMs  ?? 5_000;
 
     const interval = opts.flushIntervalMs ?? 200;
     this._drainTimer = setInterval(() => { this._drain(); }, interval);
@@ -276,6 +275,7 @@ export class Dunetrace {
 
   _emit(event: AgentEvent): void {
     if (this._emitJson) this._writeJsonLine(event);
+    if (this._buffer.length >= this._bufferSize) return;
     this._buffer.push(event);
   }
 
@@ -287,6 +287,8 @@ export class Dunetrace {
 
   private async _ship(batch: AgentEvent[]): Promise<void> {
     if (!this._ingestUrl) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this._timeoutMs);
     try {
       await fetch(this._ingestUrl, {
         method:  "POST",
@@ -299,9 +301,19 @@ export class Dunetrace {
           agent_id: batch[0]?.agent_id ?? "",
           events:   batch,
         }),
+        signal: controller.signal,
       });
     } catch (err) {
-      process.stderr.write(`[dunetrace] Failed to ship ${batch.length} events: ${err}\n`);
+      const isConnRefused = String(err).includes("ECONNREFUSED") || String(err).includes("fetch failed");
+      if (isConnRefused) {
+        process.stderr.write(
+          `[dunetrace] Backend unreachable at ${this._ingestUrl} — is it running? (docker compose up -d)\n`
+        );
+      } else {
+        process.stderr.write(`[dunetrace] Failed to ship ${batch.length} events: ${err}\n`);
+      }
+    } finally {
+      clearTimeout(timer);
     }
   }
 

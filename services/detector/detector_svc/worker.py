@@ -146,8 +146,8 @@ async def process_run(
         )
         _apply_hard_override(signals, risk)
         _apply_cooccurrence_boost(signals)
-    except Exception as exc:
-        logger.error("Run processing failed. run_id=%s err=%s", run_id, exc)
+    except Exception:
+        logger.exception("Run processing failed. run_id=%s", run_id)
         await mark_run_processed(run_id, agent_id, agent_version, trigger, 0)
         return 0
 

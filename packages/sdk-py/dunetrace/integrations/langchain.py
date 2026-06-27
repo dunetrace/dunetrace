@@ -198,7 +198,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 last = msgs[-1] if msgs else None
                 if isinstance(last, (list, tuple)):
                     user_input = str(last[1]) if len(last) > 1 else ""
-                elif hasattr(last, "content"):
+                elif last is not None and hasattr(last, "content"):
                     user_input = str(last.content)
 
             from dunetrace.models import EventType

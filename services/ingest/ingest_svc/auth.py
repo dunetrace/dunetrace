@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import secrets
+
 from fastapi import Request
 
 from ingest_svc.config import settings
@@ -14,4 +16,4 @@ def is_trusted(request: Request) -> bool:
     if not settings.INTERNAL_TOKEN:
         return False
     token = request.headers.get("x-internal-token", "")
-    return token == settings.INTERNAL_TOKEN
+    return secrets.compare_digest(token, settings.INTERNAL_TOKEN)

@@ -14,7 +14,7 @@ The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](
 - *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
 - *"Walk me through run `abc123` step by step."*
 
-All data is read-only. Only hashed metadata is exposed - no raw prompts, tool arguments, or model outputs ever leave your process.
+Signal data is read-only. Only hashed metadata is exposed — no raw prompts, tool arguments, or model outputs ever leave your process. Write operations (create/update/delete) are available for policies and custom detectors.
 
 ---
 
@@ -461,6 +461,197 @@ Aliases accepted: `lc`, `lc-graph`, `lc_graph`, `langgraph`, `ts`, `js`, `javasc
 
 ---
 
+### `get_fix_status`
+
+Check whether a fix applied for a signal reduced recurrence.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `signal_id` | int | required | The signal ID to check |
+| `agent_id` | string | — | Optional agent ID |
+
+Verdict values: `verified`, `likely_fixed`, `still_occurring`, `insufficient_data`.
+
+---
+
+### `list_agent_fixes`
+
+List all fixes that have been applied for an agent's signals, with type, delivery method, and verdict.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | required | Agent ID |
+
+---
+
+### `trigger_explain`
+
+Trigger LLM-powered root cause analysis for a signal. Fetches the Langfuse trace, runs analysis, and returns a structured fix (prompt addition or code change).
+
+**Note:** Makes an LLM call — may take 5–15 seconds.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `signal_id` | int | required | Signal ID to analyze |
+| `agent_id` | string | — | Optional agent ID |
+
+---
+
+### `list_policies`
+
+List runtime policies configured for agents. Policies trigger actions (stop, switch_model, inject_prompt, log) when a metric threshold is crossed during a live run.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | — | Filter to one agent (optional) |
+
+---
+
+### `create_policy`
+
+Create a runtime policy.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `name` | string | required | Policy label |
+| `agent_id` | string | required | Target agent (`*` for all) |
+| `condition` | string | required | JSON: `{"metric": "cost_usd", "operator": "gt", "threshold": 5.0}` |
+| `action` | string | required | JSON: `{"type": "stop"}` or `{"type": "switch_model", "model": "gpt-4o-mini"}` |
+
+---
+
+### `toggle_policy`
+
+Enable or disable a runtime policy.
+
+**Arguments:** `policy_id` (string), `enabled` (bool)
+
+---
+
+### `delete_policy`
+
+Delete a runtime policy.
+
+**Arguments:** `policy_id` (string)
+
+---
+
+### `list_custom_detectors`
+
+List custom detectors with status, fire rate, and run counts.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | — | Filter to one agent (optional) |
+
+---
+
+### `create_custom_detector`
+
+Create a custom detector from a plain-English description. Translates the description to a structured config via LLM, then creates the detector in shadow mode.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `description` | string | required | Plain-English description, e.g. "Alert when tool calls exceed 20 in a run" |
+| `agent_id` | string | `*` | Target agent |
+
+---
+
+### `activate_custom_detector`
+
+Activate a custom detector so it fires live alerts.
+
+**Arguments:** `detector_id` (string)
+
+---
+
+### `pause_custom_detector`
+
+Pause a custom detector so it stops evaluating.
+
+**Arguments:** `detector_id` (string)
+
+---
+
+### `delete_custom_detector`
+
+Delete a custom detector permanently (also deletes historical results).
+
+**Arguments:** `detector_id` (string)
+
+---
+
+### `list_agent_issues`
+
+List open or resolved issues for an agent. Issues are aggregated across runs — the same failure type appearing in multiple runs is tracked as a single issue, and auto-resolves after 5 consecutive clean runs.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | required | Agent ID |
+| `status` | string | `open` | `open`, `resolved`, or `all` |
+
+---
+
+### `get_failure_pattern_detail`
+
+Deep dive into a specific failure type: evidence aggregates, a 14-day trend with ASCII bar chart, co-occurring signals, and top example runs.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | required | Agent ID |
+| `failure_type` | string | required | Detector name, e.g. `TOOL_LOOP` |
+
+---
+
+### `compare_runs`
+
+Compare two runs side by side — duration, step count, token usage, signals detected, and exit reason. Useful for spotting regressions between a good run and a bad one.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `run_id_1` | string | required | First run UUID |
+| `run_id_2` | string | required | Second run UUID |
+| `agent_id` | string | — | Optional agent ID |
+
+**Example output:**
+```
+Run comparison
+
+                       RUN 1                      RUN 2
+──────────────────────────────────────────────────────────────────────────
+Run ID                 run-aaa-111                run-bbb-222
+Agent                  my-agent  v1.0             my-agent  v1.1
+Duration               10.0s                      20.0s                  !!
+Steps                  5                          12                     !!
+Tokens                 1,000                      8,000                  !!
+Exit reason            final_answer               error                  !!
+Signals                none                       TOOL_LOOP [HIGH]       !!
+
+!! = differs between runs
+```
+
+---
+
 ## Typical workflows
 
 ### Triage an alert
@@ -533,7 +724,7 @@ cd packages/mcp-server
 python -m pytest tests/ -v
 ```
 
-83 tests, all offline — no running stack required.
+154 tests, all offline — no running stack required.
 
 ---
 
@@ -545,9 +736,9 @@ python -m pytest tests/ -v
 dunetrace_mcp/
   __init__.py
   client.py      # thin httpx wrapper around the Customer API
-  server.py      # FastMCP server with 11 tools + 6 doc resources
+  server.py      # FastMCP server with 26 tools + 6 doc resources
 tests/
-  test_tools.py  # 83 unit tests (all offline)
+  test_tools.py  # 154 unit tests (all offline)
 pyproject.toml
 README.md
 ```
