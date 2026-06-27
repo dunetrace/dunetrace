@@ -2,12 +2,14 @@
 
 ![Dunetrace](dunetrace.png)
 
-**Real-time failure detection for production AI agents — Slack alert within 15 seconds.**
+**Real-time failure detection for production AI agents - Slack alert within 15 seconds.**
 
 [![PyPI version](https://img.shields.io/pypi/v/dunetrace.svg)](https://pypi.org/project/dunetrace/)
 [![Python versions](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/dunetrace/)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/dunetrace?period=total&units=INTERNATIONAL_SYSTEM&left_color=grey&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/dunetrace)
+[![npm version](https://img.shields.io/npm/v/dunetrace.svg)](https://www.npmjs.com/package/dunetrace)
 [![CI](https://img.shields.io/github/actions/workflow/status/dunetrace/dunetrace/ci.yml?branch=main&label=CI&logo=github)](https://github.com/dunetrace/dunetrace/actions/workflows/ci.yml)
+[![CodeQL](https://img.shields.io/github/actions/workflow/status/dunetrace/dunetrace/codeql.yml?branch=main&label=CodeQL&logo=github)](https://github.com/dunetrace/dunetrace/actions/workflows/codeql.yml)
 [![GitHub Stars](https://img.shields.io/github/stars/dunetrace/dunetrace?style=flat&logo=github)](https://github.com/dunetrace/dunetrace)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/yxFjATwHW4)
@@ -274,7 +276,6 @@ Agent Code
 - [Haystack 2.x](docs/integrate-haystack-agent.md)
 - [Hermes Agent (Nous Research)](docs/integrate-hermes-agent.md)
 - [LlamaIndex](docs/integrate-llamaindex.md)
-- [LiteLLM](docs/integrate-litellm.md)
 - [TypeScript / JavaScript](docs/integrate-typescript-agent.md)
 - [Langdock](docs/integrate-langdock.md)
 - [Langfuse](docs/integrate-langfuse.md)
@@ -289,7 +290,7 @@ Agent Code
 
 Fork, branch, change, `make test`, PR. For larger changes (new detectors, architecture changes), open an issue first.
 
-Requires Python 3.11+, Node.js 22+, Docker + Docker Compose.
+Requires Python 3.11+, Node.js 18+, Docker + Docker Compose.
 
 ## ⭐ Star this if it saves you debugging time
 

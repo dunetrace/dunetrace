@@ -67,7 +67,8 @@ def chat_with_dify(query: str, user_id: str) -> str:
         run.llm_called("dify-workflow")
         t0 = time.monotonic()
         res = dify_client.chat_messages(req, timeout=60.0)
-        usage = getattr(res, "metadata", None) and getattr(res.metadata, "usage", None)
+        metadata = getattr(res, "metadata", None)
+        usage = getattr(metadata, "usage", None) if metadata is not None else None
         run.llm_responded(
             finish_reason="stop",
             output_length=len(res.answer or ""),
@@ -76,7 +77,7 @@ def chat_with_dify(query: str, user_id: str) -> str:
             prompt_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
         )
         run.final_answer()  # marks the run output as the final answer
-        return res.answer
+        return res.answer or ""
 ```
 
 ---
@@ -113,7 +114,8 @@ def run_dify_agent(query: str, user_id: str) -> str:
         run.llm_called("dify-workflow")
         t0 = time.monotonic()
         res = dify_client.chat_messages(req, timeout=60.0)
-        usage = getattr(res, "metadata", None) and getattr(res.metadata, "usage", None)
+        metadata = getattr(res, "metadata", None)
+        usage = getattr(metadata, "usage", None) if metadata is not None else None
         run.llm_responded(
             finish_reason="stop",
             output_length=len(res.answer or ""),
@@ -122,7 +124,7 @@ def run_dify_agent(query: str, user_id: str) -> str:
             prompt_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
         )
         run.final_answer()  # marks the run output as the final answer
-        return res.answer
+        return res.answer or ""
 
 if __name__ == "__main__":
     answer = run_dify_agent("What is the capital of France?", str(uuid.uuid4()))
@@ -152,7 +154,7 @@ When tracking Dify agents as a single API call, the following Dunetrace detector
 |---|---|
 | `SLOW_STEP` | Fires if the Dify API takes too long to respond (e.g., due to an internal Dify tool loop or slow LLM). |
 | `EMPTY_LLM_RESPONSE` | Detects if Dify returns an empty answer, which often indicates an internal workflow failure. |
-| `FIRST_STEP_FAILURE` | Triggers if the Dify API request fails entirely (e.g., timeout, 500 error, or invalid credentials). |
+| `FIRST_STEP_FAILURE` | Fires if Dify returns an error response or empty output within the first two steps of the run. Network timeouts or HTTP errors cause `RUN_ERRORED` (not this detector) — handle them with a try/except around `dify_client.chat_messages()`. |
 
 If you manually instrument Dify's internal tool executions using `dt.run()` in streaming mode, detectors like `TOOL_LOOP`, `RETRY_STORM`, and `CASCADING_TOOL_FAILURE` become highly relevant for catching infinite tool loops on the Dify server.
 
