@@ -281,9 +281,7 @@ class TestLLMSpans(unittest.TestCase):
         self.assertEqual(responded.payload["prompt_tokens"], 7)
         self.assertEqual(responded.payload["completion_tokens"], 3)
         self.assertEqual(responded.payload["output_length"], len("answer text"))
-        self.assertEqual(
-            responded.payload["output_hash"], hash_content("answer text")
-        )
+        self.assertEqual(responded.payload["output_hash"], hash_content("answer text"))
 
     def test_response_span_tool_calls_finish_reason(self):
         proc, emitted = _make_processor()
@@ -324,9 +322,7 @@ class TestLLMSpans(unittest.TestCase):
         proc.on_span_end(span)
         responded = next(e for e in emitted if e.event_type == EventType.LLM_RESPONDED)
         self.assertEqual(responded.payload["output_length"], len("structured answer"))
-        self.assertEqual(
-            responded.payload["output_hash"], hash_content("structured answer")
-        )
+        self.assertEqual(responded.payload["output_hash"], hash_content("structured answer"))
 
     def test_llm_error_emits_error_finish_reason(self):
         proc, emitted = _make_processor()
@@ -381,9 +377,7 @@ class TestLLMSpans(unittest.TestCase):
         self.assertEqual(len(llm_called), 1)
         self.assertEqual(len(llm_responded), 1)
         responded = llm_responded[0]
-        self.assertEqual(
-            responded.payload["output_hash"], hash_content("from generation")
-        )
+        self.assertEqual(responded.payload["output_hash"], hash_content("from generation"))
 
     def test_response_span_emitted_after_generation_when_handoff_intervenes(self):
         """Mixed API backends in one trace: generation then handoff then response."""
@@ -412,9 +406,7 @@ class TestLLMSpans(unittest.TestCase):
         llm_responded = [e for e in emitted if e.event_type == EventType.LLM_RESPONDED]
         self.assertEqual(len(llm_called), 2)
         self.assertEqual(len(llm_responded), 2)
-        self.assertEqual(
-            llm_responded[-1].payload["output_hash"], hash_content("responses answer")
-        )
+        self.assertEqual(llm_responded[-1].payload["output_hash"], hash_content("responses answer"))
 
 
 # ── Tool spans ───────────────────────────────────────────────────────────────
@@ -474,7 +466,9 @@ class TestToolSpans(unittest.TestCase):
         proc.on_span_start(b)
         proc.on_span_end(a)
         proc.on_span_end(b)
-        called = {e.payload["tool_name"]: e for e in emitted if e.event_type == EventType.TOOL_CALLED}
+        called = {
+            e.payload["tool_name"]: e for e in emitted if e.event_type == EventType.TOOL_CALLED
+        }
         # span a got step 1, span b got step 2; responded must match starts.
         ends = [e for e in emitted if e.event_type == EventType.TOOL_RESPONDED]
         self.assertEqual(ends[0].step_index, 1)  # span a
@@ -639,7 +633,9 @@ class TestStalePruning(unittest.TestCase):
         proc.on_trace_start(_FakeTrace(trace_id="new", metadata={"input": "q2"}))
 
         self.assertNotIn(EventType.RUN_ERRORED, _types(emitted))
-        self.assertNotIn(EventType.RUN_COMPLETED, [e.event_type for e in emitted if e.run_id == "old"])
+        self.assertNotIn(
+            EventType.RUN_COMPLETED, [e.event_type for e in emitted if e.run_id == "old"]
+        )
         with proc._lock:
             self.assertNotIn("old", proc._runs)
         self.assertIn("old", proc._stale_pruned)
@@ -650,9 +646,7 @@ class TestStalePruning(unittest.TestCase):
         proc, emitted = _make_processor()
         proc.on_trace_start(_FakeTrace(trace_id="idle", metadata={"input": "q"}))
         with proc._lock:
-            proc._runs["idle"].last_activity_time = (
-                time.time() - oa_mod._STALE_RUN_SECS - 1
-            )
+            proc._runs["idle"].last_activity_time = time.time() - oa_mod._STALE_RUN_SECS - 1
         proc.on_trace_start(_FakeTrace(trace_id="new", metadata={"input": "q2"}))
         self.assertIn("idle", proc._stale_pruned)
 

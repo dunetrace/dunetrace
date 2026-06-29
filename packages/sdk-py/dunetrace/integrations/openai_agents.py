@@ -594,9 +594,7 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
             model = getattr(response, "model", None)
         return str(model) if model else self._model
 
-    def _span_usage(
-        self, span_data: Any
-    ) -> "tuple[Optional[int], Optional[int], Optional[int]]":
+    def _span_usage(self, span_data: Any) -> "tuple[Optional[int], Optional[int], Optional[int]]":
         """Pull token counts from a generation span's usage dict or a response
         span's nested usage object. Returns (prompt, completion, reasoning)."""
         usage = getattr(span_data, "usage", None)
@@ -633,7 +631,9 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
 
     @staticmethod
     def _tool_name(span_data: Any) -> str:
-        return str(getattr(span_data, "name", None) or getattr(span_data, "server", None) or "unknown")
+        return str(
+            getattr(span_data, "name", None) or getattr(span_data, "server", None) or "unknown"
+        )
 
     @staticmethod
     def _error_str(error: Any) -> str:
