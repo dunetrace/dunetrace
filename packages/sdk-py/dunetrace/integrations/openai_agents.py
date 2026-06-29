@@ -56,6 +56,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger("dunetrace.openai_agents")
 
 _registered: Dict[tuple[int, str], "DunetraceTracingProcessor"] = {}
+# Guards _registered: add_dunetrace_processor can be called from multiple
+# threads, and the lookup/reuse/create/insert sequence must be atomic so two
+# callers don't both see an empty registry and register duplicate processors.
+_registered_lock = Lock()
 
 
 _STALE_RUN_SECS = 1800  # traces not finished after 30 min are pruned
@@ -128,10 +132,11 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
         self._lock: Lock = Lock()
         self._runs: Dict[str, _RunCtx] = {}  # trace_id → ctx
         self._last_run_id: Optional[str] = None
-        # trace_id → run_id for traces evicted by the stale sweep (memory only —
-        # no terminal event is emitted). If such a trace resumes we resurrect it
-        # under the same run_id rather than dropping its remaining events.
-        self._stale_pruned: Dict[str, str] = {}
+        # trace_id → _RunCtx for traces evicted by the stale sweep (memory only —
+        # no terminal event is emitted). If such a trace resumes we resurrect the
+        # saved context, preserving its run_id and accumulated counters/error
+        # state so completion summaries stay accurate, rather than starting fresh.
+        self._stale_pruned: Dict[str, _RunCtx] = {}
 
     @property
     def last_run_id(self) -> Optional[str]:
@@ -162,9 +167,13 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
 
     def _ensure_run_started(self, ctx: _RunCtx) -> None:
         """Emit ``run.started`` once we know the user input (or at trace end)."""
-        if ctx.run_started:
-            return
-        ctx.run_started = True
+        # Atomic check-and-set: span and trace callbacks can race here, and a
+        # non-atomic flag would let both pass the guard and emit a duplicate
+        # run.started. Hold the lock for the transition only; emit outside it.
+        with self._lock:
+            if ctx.run_started:
+                return
+            ctx.run_started = True
 
         from dunetrace.models import EventType
 
@@ -351,7 +360,14 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                     to_agent = str(getattr(span_data, "to_agent", None) or "unknown")
                     emit_handoff = (from_agent, to_agent, step)
 
-            self._ensure_run_started(ctx)
+            # Only start the run for spans that actually emit an event. Spans
+            # like mcp_tools (list-tools) carry no input and emit nothing, so
+            # starting the run on them would fire an early run.started with
+            # incomplete input. The first emitted LLM span still drives the
+            # input fallback above before this runs; a run with no emitting
+            # spans is started lazily at trace end via _finish_run.
+            if emit_llm is not None or emit_tool is not None or emit_handoff is not None:
+                self._ensure_run_started(ctx)
 
             from dunetrace.models import EventType
 
@@ -685,28 +701,37 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                     _STALE_RUN_SECS,
                 )
                 evicted.append((trace_id, self._runs.pop(trace_id)))
-                self._stale_pruned[trace_id] = ctx.run_id
+                self._stale_pruned[trace_id] = ctx
                 if len(self._stale_pruned) > 1024:
                     self._stale_pruned.pop(next(iter(self._stale_pruned)))
         for _trace_id, ctx in evicted:
             self._reset_ctx_token(ctx)
 
     def _resurrect_locked(self, trace_id: str) -> Optional[_RunCtx]:
-        """Rebuild a context for a trace that resumed after being stale-pruned.
+        """Restore the saved context for a trace that resumed after stale-prune.
 
-        Caller must hold ``self._lock``. The earlier (already-emitted) steps are
-        gone, but new activity is captured under the original run_id. ``run_started``
-        is preset so we don't emit a duplicate ``run.started``.
+        Caller must hold ``self._lock``. The saved ``_RunCtx`` keeps its run_id
+        and accumulated counters (step/tool counts, error state) so the
+        completion summary continues from where it left off. ``run_started`` is
+        already set on the saved ctx, so no duplicate ``run.started`` is emitted.
+        Transient per-span bookkeeping is cleared: the spans that were in flight
+        at prune time are gone, and the ctx_token belonged to a context that the
+        sweep already reset.
         """
-        run_id = self._stale_pruned.pop(trace_id, None)
-        if run_id is None:
+        ctx = self._stale_pruned.pop(trace_id, None)
+        if ctx is None:
             return None
         logger.warning(
             "Dunetrace: trace %s resumed after stale-prune; resurrecting run %s",
             trace_id,
-            run_id,
+            ctx.run_id,
         )
-        ctx = _RunCtx(run_id=run_id, run_started=True)
+        ctx.run_started = True
+        ctx.open_spans = 0
+        ctx.span_starts.clear()
+        ctx.span_steps.clear()
+        ctx.span_kinds.clear()
+        ctx.ctx_token = None
         self._runs[trace_id] = ctx
         return ctx
 
@@ -906,31 +931,32 @@ def add_dunetrace_processor(
             "openai-agents is not installed. Run: pip install 'dunetrace[openai-agents]'"
         )
     key = (id(client), agent_id)
-    existing = _registered.get(key)
-    if existing is not None:
-        logger.warning(
-            "Dunetrace: add_dunetrace_processor already registered for agent_id=%r",
-            agent_id,
+    with _registered_lock:
+        existing = _registered.get(key)
+        if existing is not None:
+            logger.warning(
+                "Dunetrace: add_dunetrace_processor already registered for agent_id=%r",
+                agent_id,
+            )
+            return existing
+        if _registered:
+            # The Agents SDK trace provider is process-global: every registered
+            # processor receives *every* trace. A second Dunetrace processor would
+            # re-emit each run under a second agent_id (duplicate, mis-attributed
+            # events). Refuse to register it and reuse the first one instead.
+            owner = next(iter(_registered.values()))
+            logger.warning(
+                "Dunetrace: a Dunetrace processor for agent_id=%r is already "
+                "registered; Agents SDK tracing is process-global, so it handles "
+                "all traces. Ignoring registration for agent_id=%r — use a single "
+                "processor per process.",
+                owner._agent_id,
+                agent_id,
+            )
+            return owner
+        processor = DunetraceTracingProcessor(
+            client, agent_id=agent_id, system_prompt=system_prompt, model=model, tools=tools
         )
-        return existing
-    if _registered:
-        # The Agents SDK trace provider is process-global: every registered
-        # processor receives *every* trace. A second Dunetrace processor would
-        # re-emit each run under a second agent_id (duplicate, mis-attributed
-        # events). Refuse to register it and reuse the first one instead.
-        owner = next(iter(_registered.values()))
-        logger.warning(
-            "Dunetrace: a Dunetrace processor for agent_id=%r is already "
-            "registered; Agents SDK tracing is process-global, so it handles "
-            "all traces. Ignoring registration for agent_id=%r — use a single "
-            "processor per process.",
-            owner._agent_id,
-            agent_id,
-        )
-        return owner
-    processor = DunetraceTracingProcessor(
-        client, agent_id=agent_id, system_prompt=system_prompt, model=model, tools=tools
-    )
-    _registered[key] = processor
-    add_trace_processor(processor)
-    return processor
+        _registered[key] = processor
+        add_trace_processor(processor)
+        return processor

@@ -460,19 +460,30 @@ class TestToolSpans(unittest.TestCase):
         proc, emitted = _make_processor()
         proc.on_trace_start(_FakeTrace(metadata={"input": "q"}))
         # Interleave two tool spans so steps would diverge without span_steps.
-        a = _FakeSpan("a", "trace_1", _FunctionData())
-        b = _FakeSpan("b", "trace_1", _FunctionData())
+        # Distinct tool names so the called/responded maps don't collapse and we
+        # can assert each pair shares its step index directly.
+        a = _FakeSpan("a", "trace_1", _FunctionData(name="tool_a"))
+        b = _FakeSpan("b", "trace_1", _FunctionData(name="tool_b"))
         proc.on_span_start(a)
         proc.on_span_start(b)
         proc.on_span_end(a)
         proc.on_span_end(b)
         called = {
-            e.payload["tool_name"]: e for e in emitted if e.event_type == EventType.TOOL_CALLED
+            e.payload["tool_name"]: e.step_index
+            for e in emitted
+            if e.event_type == EventType.TOOL_CALLED
         }
-        # span a got step 1, span b got step 2; responded must match starts.
-        ends = [e for e in emitted if e.event_type == EventType.TOOL_RESPONDED]
-        self.assertEqual(ends[0].step_index, 1)  # span a
-        self.assertEqual(ends[1].step_index, 2)  # span b
+        responded = {
+            e.payload["tool_name"]: e.step_index
+            for e in emitted
+            if e.event_type == EventType.TOOL_RESPONDED
+        }
+        # Each tool's responded step must match its own called step.
+        self.assertEqual(responded["tool_a"], called["tool_a"])
+        self.assertEqual(responded["tool_b"], called["tool_b"])
+        # span a started first (step 1), span b second (step 2).
+        self.assertEqual(called["tool_a"], 1)
+        self.assertEqual(called["tool_b"], 2)
 
     def test_tool_responded_includes_latency_ms(self):
         proc, emitted = _make_processor()

@@ -7,6 +7,7 @@ whole agent with no changes to the agent definition.
 
 Install:
     pip install 'dunetrace[openai-agents]'
+    pip install python-dotenv  # optional, only for loading a .env file
 
 Run:
     OPENAI_API_KEY=sk-... python examples/openai_agents_agent.py
@@ -21,9 +22,13 @@ import os
 import time
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+    load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+except ImportError:
+    # python-dotenv is optional; fall back to the ambient environment.
+    pass
 
 from agents import Agent, Runner, function_tool
 
