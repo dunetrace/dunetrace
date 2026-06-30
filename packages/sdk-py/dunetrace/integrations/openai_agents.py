@@ -205,8 +205,16 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
 
         self._ensure_run_started(ctx)
 
-        if ctx.had_error:
-            error_hash = hash_content(ctx.last_error or "span_error")
+        # Snapshot under the lock: had_error/last_error can be written lock-held
+        # from a racing _emit_llm_responded (payload-level LLM failure).
+        with self._lock:
+            had_error = ctx.had_error
+            last_error = ctx.last_error
+            total_steps = ctx.step
+            tool_call_count = ctx.tool_call_count
+
+        if had_error:
+            error_hash = hash_content(last_error or "span_error")
             self._safe_emit(
                 EventType.RUN_ERRORED,
                 ctx,
@@ -221,8 +229,8 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                 ctx,
                 {
                     "exit_reason": "final_answer",
-                    "total_steps": ctx.step,
-                    "tool_call_count": ctx.tool_call_count,
+                    "total_steps": total_steps,
+                    "tool_call_count": tool_call_count,
                 },
             )
         self._last_run_id = ctx.run_id
@@ -259,6 +267,17 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
             existing = _current_run.get(None)
             if existing is None or existing.run_id == ctx.run_id:
                 ctx.ctx_token = _current_run.set(run_ctx)
+            else:
+                # Another trace's RunContext is installed in this task's
+                # ContextVar. If that run is still active we must not clobber it
+                # (interleaved traces in one task). But if it is gone — finished,
+                # or stale-pruned in another task where _reset_ctx_token could not
+                # reach this task's ContextVar — it is a leftover that would
+                # otherwise block instrumentation for every future trace here.
+                with self._lock:
+                    existing_active = existing.run_id in self._runs
+                if not existing_active:
+                    ctx.ctx_token = _current_run.set(run_ctx)
 
             if ctx.input_text:
                 self._ensure_run_started(ctx)
@@ -505,7 +524,13 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                     )
                     self._client.flush()
             elif emit_handoff_err is not None:
-                if step is not None:
+                if step is None:
+                    logger.warning(
+                        "Dunetrace: skipping handoff tool.responded for span %s "
+                        "(no matching start)",
+                        span_id,
+                    )
+                else:
                     tool_name, err_str = emit_handoff_err
                     self._safe_emit(
                         EventType.TOOL_RESPONDED,
@@ -520,7 +545,13 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                     )
                     self._client.flush()
             elif emit_handoff_ok is not None:
-                if step is not None:
+                if step is None:
+                    logger.warning(
+                        "Dunetrace: skipping handoff tool.responded for span %s "
+                        "(no matching start)",
+                        span_id,
+                    )
+                else:
                     tool_name, _ = emit_handoff_ok
                     self._safe_emit(
                         EventType.TOOL_RESPONDED,
@@ -580,9 +611,14 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
         output_text = _span_output_text(span_data)
         finish_reason = _span_finish_reason(span_data, output_text)
         if finish_reason == "error":
-            ctx.had_error = True
-            if not ctx.last_error:
-                ctx.last_error = "llm_response_failed"
+            # Payload-level failure (span.error is None but the response failed).
+            # _finish_run reads had_error/last_error under self._lock to decide
+            # RUN_COMPLETED vs RUN_ERRORED, so write them under the lock too —
+            # otherwise on_trace_end can race and record a failed run as completed.
+            with self._lock:
+                ctx.had_error = True
+                if not ctx.last_error:
+                    ctx.last_error = "llm_response_failed"
         prompt_tokens, completion_tokens, reasoning_tokens = self._span_usage(span_data)
 
         payload: Dict[str, Any] = {
@@ -712,8 +748,11 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
 
         Caller must hold ``self._lock``. The saved ``_RunCtx`` keeps its run_id
         and accumulated counters (step/tool counts, error state) so the
-        completion summary continues from where it left off. ``run_started`` is
-        already set on the saved ctx, so no duplicate ``run.started`` is emitted.
+        completion summary continues from where it left off. The saved
+        ``run_started`` flag is preserved as-is: if the run already emitted
+        ``run.started`` it stays True (no duplicate); if it was pruned before
+        starting (e.g. trace-start without input and no emitting spans) it stays
+        False so ``_finish_run`` or the next emitting span can still start it.
         Transient per-span bookkeeping is cleared: the spans that were in flight
         at prune time are gone, and the ctx_token belonged to a context that the
         sweep already reset.
@@ -726,7 +765,6 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
             trace_id,
             ctx.run_id,
         )
-        ctx.run_started = True
         ctx.open_spans = 0
         ctx.span_starts.clear()
         ctx.span_steps.clear()
@@ -943,20 +981,23 @@ def add_dunetrace_processor(
             # The Agents SDK trace provider is process-global: every registered
             # processor receives *every* trace. A second Dunetrace processor would
             # re-emit each run under a second agent_id (duplicate, mis-attributed
-            # events). Refuse to register it and reuse the first one instead.
+            # events). Returning the existing processor for a *different* agent_id
+            # would silently attribute this caller's traces to the wrong agent and
+            # hand back the wrong run_ids, so fail loudly instead.
             owner = next(iter(_registered.values()))
-            logger.warning(
-                "Dunetrace: a Dunetrace processor for agent_id=%r is already "
-                "registered; Agents SDK tracing is process-global, so it handles "
-                "all traces. Ignoring registration for agent_id=%r — use a single "
-                "processor per process.",
-                owner._agent_id,
-                agent_id,
+            raise RuntimeError(
+                f"Dunetrace: a processor for agent_id={owner._agent_id!r} is "
+                f"already registered. Agents SDK tracing is process-global (one "
+                f"processor handles all traces), so registering a second one for "
+                f"agent_id={agent_id!r} would duplicate and mis-attribute events. "
+                f"Use a single processor per process."
             )
-            return owner
         processor = DunetraceTracingProcessor(
             client, agent_id=agent_id, system_prompt=system_prompt, model=model, tools=tools
         )
-        _registered[key] = processor
+        # Cache only after the SDK accepts the processor: if add_trace_processor
+        # raises, a cached entry would make later calls return an unregistered
+        # instance that never receives traces.
         add_trace_processor(processor)
+        _registered[key] = processor
         return processor
