@@ -748,8 +748,11 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
 
         Caller must hold ``self._lock``. The saved ``_RunCtx`` keeps its run_id
         and accumulated counters (step/tool counts, error state) so the
-        completion summary continues from where it left off. ``run_started`` is
-        already set on the saved ctx, so no duplicate ``run.started`` is emitted.
+        completion summary continues from where it left off. The saved
+        ``run_started`` flag is preserved as-is: if the run already emitted
+        ``run.started`` it stays True (no duplicate); if it was pruned before
+        starting (e.g. trace-start without input and no emitting spans) it stays
+        False so ``_finish_run`` or the next emitting span can still start it.
         Transient per-span bookkeeping is cleared: the spans that were in flight
         at prune time are gone, and the ctx_token belonged to a context that the
         sweep already reset.
@@ -762,7 +765,6 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
             trace_id,
             ctx.run_id,
         )
-        ctx.run_started = True
         ctx.open_spans = 0
         ctx.span_starts.clear()
         ctx.span_steps.clear()
@@ -993,6 +995,9 @@ def add_dunetrace_processor(
         processor = DunetraceTracingProcessor(
             client, agent_id=agent_id, system_prompt=system_prompt, model=model, tools=tools
         )
-        _registered[key] = processor
+        # Cache only after the SDK accepts the processor: if add_trace_processor
+        # raises, a cached entry would make later calls return an unregistered
+        # instance that never receives traces.
         add_trace_processor(processor)
+        _registered[key] = processor
         return processor
