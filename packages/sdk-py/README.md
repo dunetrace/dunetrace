@@ -202,6 +202,7 @@ SDK: 307 tests · MCP server: 105 tests — both run fully offline.
 - [Hermes Agent (Nous Research)](../../docs/integrate-hermes-agent.md)
 - [CrewAI](../../docs/integrate-crewai-agent.md)
 - [AutoGen](../../docs/integrate-autogen-agent.md)
+- [OpenAI Agents SDK](../../docs/integrate-openai-agents.md)
 - [Haystack 2.x](../../docs/integrate-haystack-agent.md)
 - [LlamaIndex](../../docs/integrate-llamaindex.md)
 - [LiteLLM](../../docs/integrate-litellm.md)
