@@ -595,13 +595,14 @@ class TestRegistration(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(len(_stub_agents.registered), 1)
 
-    def test_second_agent_reuses_first_processor(self):
+    def test_second_agent_raises(self):
         # Agents SDK tracing is process-global: a second processor would re-emit
-        # every trace under a second agent_id, so registration is refused.
+        # every trace under a second agent_id. Returning the first processor for a
+        # different agent_id would silently mis-attribute traces, so it raises.
         client = MagicMock()
-        first = add_dunetrace_processor(client, agent_id="a", model="gpt-4o")
-        second = add_dunetrace_processor(client, agent_id="b", model="gpt-4o")
-        self.assertIs(first, second)
+        add_dunetrace_processor(client, agent_id="a", model="gpt-4o")
+        with self.assertRaises(RuntimeError):
+            add_dunetrace_processor(client, agent_id="b", model="gpt-4o")
         self.assertEqual(len(_stub_agents.registered), 1)
 
 
