@@ -428,12 +428,6 @@ async def open_pr(
     if signal is None:
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
 
-    if signal["failure_type"] not in _CODE_CHANGE_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail="PR creation is only available for code-change signal types.",
-        )
-
     from api_svc.github_client import create_fix_pr
 
     try:

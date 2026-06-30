@@ -105,7 +105,10 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/config", include_in_schema=False)
     async def config():
-        return {"langfuse_configured": settings.langfuse_configured}
+        return {
+            "langfuse_configured": settings.langfuse_configured,
+            "github_configured": settings.github_configured,
+        }
 
     return app
 
