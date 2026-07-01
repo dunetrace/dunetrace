@@ -7,31 +7,39 @@ against the old implementation.
 
 Requires the real `langchain` extra (langchain-core + langgraph) — unlike
 test_langchain.py, this suite is not runnable against a bare stub since it
-exercises real LangGraph tool-calling control flow.
+exercises real LangGraph tool-calling control flow. Skipped entirely (not
+failed) when that extra isn't installed — install with
+`pip install -e "packages/sdk-py[dev,langchain]"` to run it.
 """
 
 from __future__ import annotations
 
 import unittest
 
-import pytest
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage
-from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
-
 from dunetrace.integrations.langchain import DunetraceCallbackHandler
 from dunetrace.models import EventType
 from dunetrace.policies import Policy, PolicyEngine, PolicyViolation
 
+try:
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool
+    from langgraph.prebuilt import create_react_agent
 
-class _ToolCallingFakeModel(FakeMessagesListChatModel):
-    """FakeMessagesListChatModel.bind_tools() raises NotImplementedError by
-    default; create_react_agent requires it. We script exact tool_calls on
-    each scripted AIMessage instead of relying on real tool-schema binding."""
+    _HAS_LANGCHAIN_EXTRA = True
+except ImportError:
+    _HAS_LANGCHAIN_EXTRA = False
 
-    def bind_tools(self, tools, **kwargs):
-        return self
+
+if _HAS_LANGCHAIN_EXTRA:
+
+    class _ToolCallingFakeModel(FakeMessagesListChatModel):
+        """FakeMessagesListChatModel.bind_tools() raises NotImplementedError by
+        default; create_react_agent requires it. We script exact tool_calls on
+        each scripted AIMessage instead of relying on real tool-schema binding."""
+
+        def bind_tools(self, tools, **kwargs):
+            return self
 
 
 class _FakeClient:
@@ -74,6 +82,7 @@ def _stop_policy(value: int = 3) -> Policy:
 # ── End-to-end: real LangGraph agent, real tool-calling control flow ───────────
 
 
+@unittest.skipUnless(_HAS_LANGCHAIN_EXTRA, "requires the langchain/langgraph extra")
 class TestPolicyStopsRealAgentRun(unittest.TestCase):
     def setUp(self):
         self.call_count = 0
@@ -102,7 +111,7 @@ class TestPolicyStopsRealAgentRun(unittest.TestCase):
         agent = self._build_agent()
         handler, client = _make_handler(policies=[_stop_policy(value=3)])
 
-        with pytest.raises(PolicyViolation):
+        with self.assertRaises(PolicyViolation):
             agent.invoke({"messages": [("human", "go")]}, config={"callbacks": [handler]})
 
     def test_stop_policy_prevents_the_overlimit_tool_call_from_running(self):
@@ -111,7 +120,7 @@ class TestPolicyStopsRealAgentRun(unittest.TestCase):
         agent = self._build_agent()
         handler, client = _make_handler(policies=[_stop_policy(value=3)])
 
-        with pytest.raises(PolicyViolation):
+        with self.assertRaises(PolicyViolation):
             agent.invoke({"messages": [("human", "go")]}, config={"callbacks": [handler]})
 
         self.assertEqual(self.call_count, 3)
@@ -137,7 +146,7 @@ class TestPolicyStopsRealAgentRun(unittest.TestCase):
         agent = self._build_agent()
         handler, client = _make_handler(policies=[_stop_policy(value=3)])
 
-        with pytest.raises(PolicyViolation):
+        with self.assertRaises(PolicyViolation):
             agent.invoke({"messages": [("human", "go")]}, config={"callbacks": [handler]})
 
         errored = next(e for e in client.emitted if e.event_type == EventType.RUN_ERRORED)
@@ -148,7 +157,7 @@ class TestPolicyStopsRealAgentRun(unittest.TestCase):
         agent = self._build_agent()
         handler, client = _make_handler(policies=[_stop_policy(value=3)])
 
-        with pytest.raises(PolicyViolation):
+        with self.assertRaises(PolicyViolation):
             agent.invoke({"messages": [("human", "go")]}, config={"callbacks": [handler]})
 
         self.assertNotIn(EventType.RUN_COMPLETED, [e.event_type for e in client.emitted])
@@ -159,7 +168,7 @@ class TestPolicyStopsRealAgentRun(unittest.TestCase):
         agent = self._build_agent()
         handler, client = _make_handler(policies=[_stop_policy(value=3)])
 
-        with pytest.raises(PolicyViolation):
+        with self.assertRaises(PolicyViolation):
             agent.invoke({"messages": [("human", "go")]}, config={"callbacks": [handler]})
 
         tool_called_events = [e for e in client.emitted if e.event_type == EventType.TOOL_CALLED]
