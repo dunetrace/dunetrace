@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from threading import Event, Lock, Thread
-from typing import Any, Callable, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from dunetrace.buffer import RingBuffer
 from dunetrace.context import _current_run
@@ -104,6 +104,18 @@ class Dunetrace:
             otel_exporter is not None,
             len(self._exporters),
         )
+
+    def _auth_headers(self) -> Dict[str, str]:
+        """Authorization header for gateway-fronted deployments (e.g. the
+        Dunetrace Cloud gateway's tenancy middleware, which resolves the
+        calling org from ``Authorization: Bearer <api_key>`` and nothing
+        else — it never inspects the request body).
+
+        Self-hosted ingest_svc (no gateway in front) still also accepts
+        ``api_key`` in the request body/query string, so callers keep
+        sending both for backward compatibility; this header is additive.
+        """
+        return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -367,7 +379,9 @@ class Dunetrace:
                 f"?agent_id={urllib.parse.quote(agent_id, safe='')}"
                 f"&api_key={urllib.parse.quote(self._api_key, safe='')}"
             )
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            req = urllib.request.Request(
+                url, headers={"Accept": "application/json", **self._auth_headers()}
+            )
             with urllib.request.urlopen(req, timeout=3) as resp:
                 import json as _json
 
@@ -639,7 +653,7 @@ class Dunetrace:
         base = self._ingest_url.replace("/v1/ingest", "")
         payload = json.dumps(
             {
-                "api_key": self._api_key,
+                "api_key": self._api_key,  # self-hosted ingest_svc compat; see _auth_headers
                 "agent_id": agent_id,
                 "version": version,
                 "meta": meta,
@@ -648,7 +662,7 @@ class Dunetrace:
         req = urllib.request.Request(
             base + "/v1/deploy",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **self._auth_headers()},
             method="POST",
         )
         try:
@@ -750,7 +764,7 @@ class Dunetrace:
     def _ship(self, batch: List[AgentEvent]) -> None:
         payload = json.dumps(
             {
-                "api_key": self._api_key,
+                "api_key": self._api_key,  # self-hosted ingest_svc compat; see _auth_headers
                 "agent_id": batch[0].agent_id if batch else "",
                 "events": [e.to_dict() for e in batch],
             }
@@ -762,6 +776,7 @@ class Dunetrace:
             headers={
                 "Content-Type": "application/json",
                 "X-Dunetrace-Agent": batch[0].agent_id if batch else "",
+                **self._auth_headers(),
             },
             method="POST",
         )
