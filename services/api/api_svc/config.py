@@ -33,6 +33,13 @@ class Settings:
     )
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     AUTH_MODE: str = os.getenv("AUTH_MODE", "dev")
+
+    # Trusted-upstream bypass — mirrors ingest_svc's INTERNAL_TOKEN. When set, requests
+    # carrying a matching x-internal-token header skip this service's own api_keys
+    # lookup and take customer identity from x-customer-id instead. Empty by default
+    # so self-hosted/dev deployments are unaffected.
+    INTERNAL_TOKEN: str = os.getenv("INTERNAL_TOKEN", "")
+
     PAGE_SIZE_DEFAULT: int = int(os.getenv("PAGE_SIZE_DEFAULT", "50"))
     PAGE_SIZE_MAX: int = int(os.getenv("PAGE_SIZE_MAX", "500"))
 
