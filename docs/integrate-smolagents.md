@@ -70,12 +70,19 @@ def dunetrace_callback(step_log, agent=None, **kwargs):
             active_run.tool_called(tool_call.name, tool_call.arguments)
             
             # Emit tool responded event if observation is available
-            if hasattr(step_log, 'observations'):
-                success = "Error" not in str(step_log.observations)
+            obs = getattr(step_log, 'observations', None)
+            if obs is not None:
+                success = "Error" not in str(obs)
                 active_run.tool_responded(
                     tool_call.name, 
                     success=success, 
-                    output_length=len(str(step_log.observations))
+                    output_length=len(str(obs))
+                )
+            else:
+                active_run.tool_responded(
+                    tool_call.name,
+                    success=False,
+                    error="No observation available"
                 )
 
 # 3. Create your agent normally, passing the callback
@@ -97,7 +104,6 @@ with dt.run(
     active_run = run
     try:
         result = agent.run("What is the capital of France and what is its population?")
-        run.final_answer()
         print("Agent Result:", result)
     finally:
         # Clean up
