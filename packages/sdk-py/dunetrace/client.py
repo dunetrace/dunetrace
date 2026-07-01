@@ -36,6 +36,22 @@ from dunetrace.run_context import RunContext
 
 logger = logging.getLogger("dunetrace")
 
+# Importing dunetrace.__version__ here would be circular (dunetrace/__init__.py
+# imports Dunetrace from this module) — read it the same way __init__.py does.
+try:
+    from importlib.metadata import PackageNotFoundError as _PkgNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    _SDK_VERSION = _pkg_version("dunetrace")
+except _PkgNotFoundError:
+    _SDK_VERSION = "0.0.0"  # running from source without installing
+
+# Every outbound request identifies itself. Without this, urllib's default
+# "Python-urllib/x.y" User-Agent gets fingerprinted and blocked (HTTP 403) by
+# Cloudflare's bot protection in front of app.dunetrace.com — confirmed via a
+# direct request with that exact UA string returning Cloudflare error 1010.
+USER_AGENT = f"dunetrace-sdk-py/{_SDK_VERSION}"
+
 
 class Dunetrace:
     """
@@ -367,7 +383,9 @@ class Dunetrace:
                 f"?agent_id={urllib.parse.quote(agent_id, safe='')}"
                 f"&api_key={urllib.parse.quote(self._api_key, safe='')}"
             )
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            req = urllib.request.Request(
+                url, headers={"Accept": "application/json", "User-Agent": USER_AGENT}
+            )
             with urllib.request.urlopen(req, timeout=3) as resp:
                 import json as _json
 
@@ -648,7 +666,7 @@ class Dunetrace:
         req = urllib.request.Request(
             base + "/v1/deploy",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
             method="POST",
         )
         try:
@@ -762,6 +780,7 @@ class Dunetrace:
             headers={
                 "Content-Type": "application/json",
                 "X-Dunetrace-Agent": batch[0].agent_id if batch else "",
+                "User-Agent": USER_AGENT,
             },
             method="POST",
         )
