@@ -257,6 +257,75 @@ class TestConfig(unittest.TestCase):
         settings.AUTH_MODE = original
 
 
+class TestTrustedAuth(unittest.IsolatedAsyncioTestCase):
+    """require_customer's trusted-upstream bypass (INTERNAL_TOKEN + x-internal-token)."""
+
+    def setUp(self):
+        self._original_token = settings.INTERNAL_TOKEN
+
+    def tearDown(self):
+        settings.INTERNAL_TOKEN = self._original_token
+
+    @staticmethod
+    def _request(headers: dict):
+        req = MagicMock()
+        req.headers = headers
+        return req
+
+    def test_is_trusted_false_when_no_internal_token_configured(self):
+        from api_svc.auth import is_trusted
+
+        settings.INTERNAL_TOKEN = ""
+        req = self._request({"x-internal-token": "anything"})
+        self.assertFalse(is_trusted(req))
+
+    def test_is_trusted_false_on_mismatched_token(self):
+        from api_svc.auth import is_trusted
+
+        settings.INTERNAL_TOKEN = "secret"
+        req = self._request({"x-internal-token": "wrong"})
+        self.assertFalse(is_trusted(req))
+
+    def test_is_trusted_true_on_matching_token(self):
+        from api_svc.auth import is_trusted
+
+        settings.INTERNAL_TOKEN = "secret"
+        req = self._request({"x-internal-token": "secret"})
+        self.assertTrue(is_trusted(req))
+
+    async def test_require_customer_trusted_path_returns_header_customer_id(self):
+        from api_svc.auth import require_customer
+
+        settings.INTERNAL_TOKEN = "secret"
+        req = self._request({"x-internal-token": "secret", "x-customer-id": "org_123"})
+        result = await require_customer(req, authorization=None)
+        self.assertEqual(result, "org_123")
+
+    async def test_require_customer_trusted_path_without_customer_id_is_401(self):
+        from fastapi import HTTPException
+
+        from api_svc.auth import require_customer
+
+        settings.INTERNAL_TOKEN = "secret"
+        req = self._request({"x-internal-token": "secret"})
+        with self.assertRaises(HTTPException) as ctx:
+            await require_customer(req, authorization=None)
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    async def test_require_customer_untrusted_request_falls_back_to_dev_mode(self):
+        from api_svc.auth import require_customer
+
+        settings.INTERNAL_TOKEN = ""
+        original_auth_mode = settings.AUTH_MODE
+        settings.AUTH_MODE = "dev"
+        try:
+            req = self._request({})
+            result = await require_customer(req, authorization=None)
+            self.assertEqual(result, "dev_customer")
+        finally:
+            settings.AUTH_MODE = original_auth_mode
+
+
 # ── Async DB layer unit tests ──────────────────────────────────────────────────
 
 
