@@ -107,6 +107,7 @@ class RunContext:
         output_hash: str = "",
         output_length: int = 0,
         prompt_tokens: int = 0,
+        error: Optional[str] = None,
     ) -> None:
         # Back-fill the most recent LlmCall with response data.
         # prompt_tokens is optional — pass it when the count is only known after
@@ -133,6 +134,8 @@ class RunContext:
             payload["prompt_tokens"] = prompt_tokens
         if reasoning_tokens:
             payload["reasoning_tokens"] = reasoning_tokens
+        if error:
+            payload["error_hash"] = hash_content(error)
         self._emit(EventType.LLM_RESPONDED, payload, advance=False)
 
     # ── Tool hooks ────────────────────────────────────────────────────────────
