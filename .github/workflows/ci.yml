@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e "packages/sdk-py[dev]"
+      - run: pip install -e "packages/sdk-py[dev,langchain]"
       - run: python -m pytest packages/sdk-py/tests/ -v
       - run: pip install mypy
       - run: python -m mypy packages/sdk-py/dunetrace/ --ignore-missing-imports --no-error-summary --config-file packages/sdk-py/pyproject.toml
