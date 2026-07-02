@@ -45,8 +45,12 @@ def mock_db(monkeypatch):
     monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.check_db", AsyncMock(return_value="ok"))
     monkeypatch.setattr("ingest_svc.db.postgres.insert_events", AsyncMock(return_value=1))
+    # Patched where routers/ingest.py actually looks it up — see the identical
+    # comment in tests/test_ingest.py's mock_db fixture. Return value matches
+    # the agent_id _record_a_full_run() below uses for every event.
     monkeypatch.setattr(
-        "ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value="agent-123")
+        "ingest_svc.routers.ingest.verify_api_key",
+        AsyncMock(return_value="schema-compat-agent"),
     )
 
 

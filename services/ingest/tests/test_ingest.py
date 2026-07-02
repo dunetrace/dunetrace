@@ -33,8 +33,13 @@ def mock_db(monkeypatch):
     monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.check_db", AsyncMock(return_value="ok"))
     monkeypatch.setattr("ingest_svc.db.postgres.insert_events", AsyncMock(return_value=1))
+    # Patched where routers/ingest.py actually looks it up (`from ingest_svc.db
+    # import verify_api_key` binds a local name there) — patching
+    # ingest_svc.db.postgres.verify_api_key instead is a no-op, since that
+    # module-level binding was already copied before this fixture runs.
+    # Return value matches make_batch()'s default agent_id below.
     monkeypatch.setattr(
-        "ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value="agent-123")
+        "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value="agent-xyz")
     )
 
 
@@ -229,18 +234,49 @@ class TestValidation:
 
 class TestAuth:
     async def test_invalid_key_returns_401(self, client, monkeypatch):
-        monkeypatch.setattr("ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+        )
         r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_bad"))
         assert r.status_code == 401
 
     async def test_401_has_detail(self, client, monkeypatch):
-        monkeypatch.setattr("ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+        )
         r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_bad"))
         assert "detail" in r.json()
 
     async def test_valid_key_accepted(self, client):
-        # mock_db fixture patches verify_api_key to return "agent-123"
+        # mock_db fixture patches verify_api_key to return "agent-xyz",
+        # matching make_batch()'s default agent_id
         r = await client.post("/v1/ingest", json=make_batch())
+        assert r.status_code == 202
+
+    async def test_key_cannot_impersonate_a_different_agent_id(self, client):
+        # mock_db resolves this key to "agent-xyz" — a batch claiming to be
+        # any other agent must be rejected, not silently accepted with the
+        # attacker-supplied identity.
+        r = await client.post("/v1/ingest", json=make_batch(agent_id="someone-elses-agent"))
+        assert r.status_code == 403
+
+    async def test_key_cannot_impersonate_via_a_single_events_agent_id(self, client):
+        # Batch-level agent_id matches, but one event inside the batch claims
+        # a different agent — must still be rejected, not just checked at the
+        # batch level.
+        events = [make_event(), make_event(agent_id="someone-elses-agent")]
+        r = await client.post("/v1/ingest", json=make_batch(events=events))
+        assert r.status_code == 403
+
+    async def test_dev_mode_key_is_exempt_from_agent_id_match(self, client, monkeypatch):
+        # DEV_AGENT_SENTINEL ("dev") is a wildcard dev-mode identity, not a
+        # real per-agent key — local/self-hosted dev usage must keep working
+        # without every request needing to claim agent_id="dev".
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.verify_api_key",
+            AsyncMock(return_value="dev"),
+        )
+        r = await client.post("/v1/ingest", json=make_batch(agent_id="any-agent-at-all"))
         assert r.status_code == 202
 
 
@@ -253,9 +289,10 @@ class TestAuth:
 # dunetrace-cloud now), so any request that ran the DB check would 401
 # regardless of key validity. See ingest_svc/auth.py::is_trusted.
 #
-# api_key is deliberately NOT "dt_dev_*" in these tests so the real (unmocked)
-# verify_api_key naturally returns None — proving the trusted path bypasses
-# the DB check rather than happening to pass it.
+# mock_db's default verify_api_key mock unconditionally returns "agent-xyz"
+# regardless of the api_key passed in, so "still enforces" tests below must
+# explicitly override it to return None to simulate a bad/unresolvable key —
+# they can no longer rely on an unmocked lookup naturally failing.
 
 
 class TestTrustedGateway:
@@ -271,12 +308,18 @@ class TestTrustedGateway:
 
     async def test_missing_trusted_header_still_enforces_api_keys_check(self, client, monkeypatch):
         monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+        )
 
         r = await client.post("/v1/ingest", json=make_batch(api_key="not-a-dev-key"))
         assert r.status_code == 401
 
     async def test_wrong_trusted_token_still_enforces_api_keys_check(self, client, monkeypatch):
         monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+        )
 
         r = await client.post(
             "/v1/ingest",
@@ -285,9 +328,13 @@ class TestTrustedGateway:
         )
         assert r.status_code == 401
 
-    async def test_empty_internal_token_setting_never_trusts(self, client):
+    async def test_empty_internal_token_setting_never_trusts(self, client, monkeypatch):
         # INTERNAL_TOKEN unset (dev default "") — is_trusted() must return
         # False even if a client sends an empty x-internal-token header.
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+        )
+
         r = await client.post(
             "/v1/ingest",
             json=make_batch(api_key="not-a-dev-key"),
@@ -309,6 +356,9 @@ class TestTrustedGateway:
         self, client, monkeypatch
     ):
         monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+        )
 
         r = await client.post(
             "/v1/deploy",

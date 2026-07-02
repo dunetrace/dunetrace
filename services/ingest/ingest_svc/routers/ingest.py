@@ -20,6 +20,7 @@ from ingest_svc.db import (
     create_api_key,
     fetch_policies,
 )
+from ingest_svc.db.postgres import DEV_AGENT_SENTINEL
 from ingest_svc.schemas import (
     IngestRequest,
     IngestResponse,
@@ -45,14 +46,31 @@ async def ingest(
     background_tasks: BackgroundTasks,
 ) -> IngestResponse:
     # Auth — trusted gateway requests (x-internal-token, already org-scoped by
-    # dunetrace-cloud's tenancy middleware) skip the OSS-only api_keys check.
+    # dunetrace-cloud's tenancy middleware) skip the OSS-only api_keys check
+    # and trust body.agent_id as-is: org-scoped keys aren't 1:1 with a single
+    # agent_id, so there's nothing to cross-check it against here.
     # See ingest_svc/auth.py::is_trusted and GET /v1/policies below.
+    #
+    # Self-hosted (untrusted) keys ARE 1:1 with one agent_id (see api_keys
+    # schema), so a valid key must actually match the agent_id it's claiming
+    # to submit events for — otherwise any valid key could impersonate any
+    # other agent by just setting a different agent_id in the body/events.
+    # DEV_AGENT_SENTINEL is exempt: it's a wildcard dev-mode identity, not a
+    # real per-agent key, so there's nothing meaningful to match it against.
     if not is_trusted(request):
-        agent_id = await verify_api_key(body.api_key)
-        if agent_id is None:
+        resolved_agent_id = await verify_api_key(body.api_key)
+        if resolved_agent_id is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or inactive API key",
+            )
+        if resolved_agent_id != DEV_AGENT_SENTINEL and (
+            body.agent_id != resolved_agent_id
+            or any(e.agent_id != resolved_agent_id for e in body.events)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="API key is not authorized for the given agent_id",
             )
 
     # Accept immediately — 202 before any DB work
