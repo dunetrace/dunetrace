@@ -1,0 +1,142 @@
+"""
+Cross-package schema conformance test.
+
+Builds a real ingest payload using the actual SDK client (packages/sdk-py)
+and sends it through the real FastAPI /v1/ingest endpoint, so it validates
+against the real ingest_svc Pydantic model (ingest_svc.schemas.IngestRequest).
+Only the DB layer is mocked — nothing about request parsing/validation is.
+
+This is the regression test called out in PR #4: a payload/schema mismatch
+between the SDK and ingest_svc reached production because nothing exercised
+both sides together. Every event type the SDK's EventType enum can produce
+must be accepted here.
+
+Run:
+    cd services/ingest
+    pytest tests/test_sdk_schema_compat.py -v
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+from httpx import AsyncClient, ASGITransport
+from unittest.mock import AsyncMock
+
+# Make the SDK importable without installing it — same trick conftest.py in
+# packages/sdk-py uses for `dunetrace`, just from the other side of the repo.
+_SDK_PY = os.path.join(os.path.dirname(__file__), "..", "..", "..", "packages", "sdk-py")
+sys.path.insert(0, os.path.abspath(_SDK_PY))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from dunetrace.client import DunetraceClient  # noqa: E402
+from dunetrace.models import EventType  # noqa: E402
+
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+def mock_db(monkeypatch):
+    monkeypatch.setattr("ingest_svc.db.postgres._pool", object())
+    monkeypatch.setattr("ingest_svc.db.postgres.init_pool", AsyncMock())
+    monkeypatch.setattr("ingest_svc.db.postgres.close_pool", AsyncMock())
+    monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema", AsyncMock())
+    monkeypatch.setattr("ingest_svc.db.postgres.check_db", AsyncMock(return_value="ok"))
+    monkeypatch.setattr("ingest_svc.db.postgres.insert_events", AsyncMock(return_value=1))
+    monkeypatch.setattr(
+        "ingest_svc.db.postgres.verify_api_key", AsyncMock(return_value="agent-123")
+    )
+
+
+@pytest.fixture
+async def client(mock_db):
+    from ingest_svc.main import create_app
+
+    application = create_app()
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as c:
+        yield c
+
+
+def _record_a_full_run() -> list:
+    """Drive the real SDK through every kind of event it can emit — including
+    a run that errors out, since run.errored only fires on an exception — and
+    return the exact AgentEvent batch it would have shipped to /v1/ingest."""
+    emitted = []
+    sdk_client = DunetraceClient(api_key="dt_dev_test")
+    sdk_client._ship = lambda batch: emitted.extend(batch)
+
+    sdk_client.add_policy(
+        name="tool-call-log",
+        condition={"trigger": "tool_call_count", "operator": "gt", "value": 0},
+        action={"type": "log"},
+    )
+
+    with sdk_client.run("schema-compat-agent", user_input="hi", model="gpt-4o") as run:
+        run.llm_called("gpt-4o", prompt_tokens=10)
+        run.llm_responded(completion_tokens=5, output_length=20)
+        run.tool_called("search", {"query": "x"})
+        run.tool_responded("search", success=True, output_length=5)  # triggers the policy above
+        run.retrieval_called("docs")
+        run.retrieval_responded("docs", result_count=3, top_score=0.9)
+        run.external_signal("rate_limit", source="openai")
+        run.final_answer()
+
+    try:
+        with sdk_client.run("schema-compat-agent", user_input="hi", model="gpt-4o"):
+            raise ValueError("boom")
+    except ValueError:
+        pass
+
+    sdk_client.shutdown(timeout=2)
+    return emitted
+
+
+def _build_ingest_payload(events: list) -> dict:
+    """Same shape DunetraceClient._ship() sends over the wire."""
+    return {
+        "api_key": "dt_dev_test",
+        "agent_id": events[0].agent_id if events else "",
+        "events": [e.to_dict() for e in events],
+    }
+
+
+class TestSdkPayloadValidatesAgainstRealSchema:
+    async def test_full_run_payload_is_accepted(self, client):
+        events = _record_a_full_run()
+        payload = _build_ingest_payload(events)
+
+        r = await client.post("/v1/ingest", json=payload)
+
+        assert r.status_code == 202, r.text
+        assert r.json()["accepted"] == len(events)
+
+    async def test_every_sdk_event_type_is_individually_accepted(self, client):
+        """Every member of the SDK's EventType enum must be a value ingest_svc
+        accepts — this is what would have caught policy.triggered being
+        missing from ingest_svc's VALID_EVENT_TYPES."""
+        events = _record_a_full_run()
+        seen_types = {e.event_type.value for e in events}
+
+        # Sanity: the recorded run actually exercised every event type the
+        # SDK can produce, otherwise this test isn't testing what it claims.
+        assert seen_types == {t.value for t in EventType}
+
+        for event in events:
+            r = await client.post(
+                "/v1/ingest",
+                json=_build_ingest_payload([event]),
+            )
+            assert r.status_code == 202, f"{event.event_type.value} rejected: {r.text}"
+
+    async def test_policy_triggered_event_is_accepted(self, client):
+        events = _record_a_full_run()
+        policy_events = [e for e in events if e.event_type == EventType.POLICY_TRIGGERED]
+        assert policy_events, "test setup didn't actually trigger a policy"
+
+        r = await client.post("/v1/ingest", json=_build_ingest_payload(policy_events))
+        assert r.status_code == 202, r.text
