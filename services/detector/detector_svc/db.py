@@ -34,6 +34,10 @@ async def init_pool() -> None:
         min_size=1,
         max_size=5,
         command_timeout=15,
+        # See ingest_svc/db/postgres.py::init_pool for why this is required —
+        # DATABASE_URL is Supabase's transaction-mode PgBouncer pooler, which
+        # is incompatible with asyncpg's default prepared-statement cache.
+        statement_cache_size=0,
     )
     logger.info("DB pool ready")
 
