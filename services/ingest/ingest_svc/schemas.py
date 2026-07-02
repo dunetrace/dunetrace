@@ -19,6 +19,7 @@ VALID_EVENT_TYPES = {
     "retrieval.called",
     "retrieval.responded",
     "external.signal",
+    "policy.triggered",
 }
 
 
