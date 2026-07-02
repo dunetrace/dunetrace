@@ -36,6 +36,14 @@ async def init_pool() -> None:
         min_size=2,
         max_size=10,
         command_timeout=10,
+        # DATABASE_URL points at Supabase's transaction-mode PgBouncer pooler
+        # (port 6543). PgBouncer in that mode doesn't preserve server-side
+        # prepared statements across pooled connections, so asyncpg's default
+        # client-side statement cache goes stale mid-connection and every
+        # query fails with "prepared statement ... does not exist". Disabling
+        # it forces the extended query protocol without server-side PREPARE,
+        # which is what PgBouncer transaction pooling actually supports.
+        statement_cache_size=0,
     )
     logger.info("DB pool ready")
 
