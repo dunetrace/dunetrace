@@ -244,6 +244,89 @@ class TestAuth:
         assert r.status_code == 202
 
 
+# ── Trusted gateway (dunetrace-cloud) ───────────────────────────────────────────
+#
+# dunetrace-cloud's tenancy middleware validates the caller against its own
+# org_api_keys table, then proxies here with x-internal-token set. These
+# routes must accept that trust signal and skip the OSS-only api_keys lookup
+# entirely — that table has no rows in production (org auth lives in
+# dunetrace-cloud now), so any request that ran the DB check would 401
+# regardless of key validity. See ingest_svc/auth.py::is_trusted.
+#
+# api_key is deliberately NOT "dt_dev_*" in these tests so the real (unmocked)
+# verify_api_key naturally returns None — proving the trusted path bypasses
+# the DB check rather than happening to pass it.
+
+
+class TestTrustedGateway:
+    async def test_trusted_header_bypasses_api_keys_check(self, client, monkeypatch):
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+
+        r = await client.post(
+            "/v1/ingest",
+            json=make_batch(api_key="not-a-dev-key"),
+            headers={"x-internal-token": "shared-secret"},
+        )
+        assert r.status_code == 202
+
+    async def test_missing_trusted_header_still_enforces_api_keys_check(self, client, monkeypatch):
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+
+        r = await client.post("/v1/ingest", json=make_batch(api_key="not-a-dev-key"))
+        assert r.status_code == 401
+
+    async def test_wrong_trusted_token_still_enforces_api_keys_check(self, client, monkeypatch):
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+
+        r = await client.post(
+            "/v1/ingest",
+            json=make_batch(api_key="not-a-dev-key"),
+            headers={"x-internal-token": "wrong-token"},
+        )
+        assert r.status_code == 401
+
+    async def test_empty_internal_token_setting_never_trusts(self, client):
+        # INTERNAL_TOKEN unset (dev default "") — is_trusted() must return
+        # False even if a client sends an empty x-internal-token header.
+        r = await client.post(
+            "/v1/ingest",
+            json=make_batch(api_key="not-a-dev-key"),
+            headers={"x-internal-token": ""},
+        )
+        assert r.status_code == 401
+
+    async def test_deploy_trusted_header_bypasses_api_keys_check(self, client, monkeypatch):
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+
+        r = await client.post(
+            "/v1/deploy",
+            json={"api_key": "not-a-dev-key", "agent_id": "agent-xyz", "version": "v1.0.0"},
+            headers={"x-internal-token": "shared-secret"},
+        )
+        assert r.status_code == 202
+
+    async def test_deploy_missing_trusted_header_still_enforces_api_keys_check(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+
+        r = await client.post(
+            "/v1/deploy",
+            json={"api_key": "not-a-dev-key", "agent_id": "agent-xyz", "version": "v1.0.0"},
+        )
+        assert r.status_code == 401
+
+    async def test_deploy_trusted_response_uses_body_agent_id(self, client, monkeypatch):
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+
+        r = await client.post(
+            "/v1/deploy",
+            json={"api_key": "not-a-dev-key", "agent_id": "trusted-agent", "version": "v1.0.0"},
+            headers={"x-internal-token": "shared-secret"},
+        )
+        assert r.json()["agent_id"] == "trusted-agent"
+
+
 # ── Health ─────────────────────────────────────────────────────────────────────
 
 

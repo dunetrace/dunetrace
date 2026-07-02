@@ -40,16 +40,20 @@ router = APIRouter()
     summary="Ingest a batch of agent events",
 )
 async def ingest(
+    request: Request,
     body: IngestRequest,
     background_tasks: BackgroundTasks,
 ) -> IngestResponse:
-    # Auth
-    agent_id = await verify_api_key(body.api_key)
-    if agent_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or inactive API key",
-        )
+    # Auth — trusted gateway requests (x-internal-token, already org-scoped by
+    # dunetrace-cloud's tenancy middleware) skip the OSS-only api_keys check.
+    # See ingest_svc/auth.py::is_trusted and GET /v1/policies below.
+    if not is_trusted(request):
+        agent_id = await verify_api_key(body.api_key)
+        if agent_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or inactive API key",
+            )
 
     # Accept immediately — 202 before any DB work
     batch_id = str(uuid.uuid4())
@@ -92,13 +96,17 @@ async def get_policies(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Record a deploy marker for an agent",
 )
-async def mark_deploy(body: DeployRequest) -> DeployResponse:
-    agent_id = await verify_api_key(body.api_key)
-    if agent_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or inactive API key",
-        )
+async def mark_deploy(request: Request, body: DeployRequest) -> DeployResponse:
+    # Auth — same trusted-gateway bypass as POST /v1/ingest.
+    if is_trusted(request):
+        agent_id = body.agent_id
+    else:
+        agent_id = await verify_api_key(body.api_key)
+        if agent_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or inactive API key",
+            )
     row_id = await insert_deploy_event(agent_id, body.version, body.meta)
     logger.info("Deploy marked. agent_id=%s version=%s id=%d", agent_id, body.version, row_id)
     return DeployResponse(
