@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_run_id  ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_agent   ON events(agent_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_type    ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_agent_run ON events(agent_id, run_id);
 
 CREATE TABLE IF NOT EXISTS failure_signals (
     id             BIGSERIAL PRIMARY KEY,

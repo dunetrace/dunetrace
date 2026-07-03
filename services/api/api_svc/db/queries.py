@@ -210,24 +210,39 @@ async def list_agents(customer_id: str, offset: int, limit: int) -> tuple[list, 
 
         rows = await conn.fetch(
             """
+            WITH event_agg AS (
+                SELECT
+                    agent_id,
+                    MAX(received_at)          AS last_seen,
+                    COUNT(DISTINCT run_id)    AS run_count
+                FROM events
+                WHERE ($1 = 'dev_customer' OR agent_id IN (
+                    SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
+                ))
+                GROUP BY agent_id
+            ),
+            signal_agg AS (
+                SELECT
+                    agent_id,
+                    COUNT(*) FILTER (WHERE shadow = FALSE)                          AS signal_count,
+                    COUNT(*) FILTER (WHERE shadow = FALSE AND severity = 'CRITICAL') AS critical_count,
+                    COUNT(*) FILTER (WHERE shadow = FALSE AND severity = 'HIGH')     AS high_count
+                FROM failure_signals
+                WHERE ($1 = 'dev_customer' OR agent_id IN (
+                    SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
+                ))
+                GROUP BY agent_id
+            )
             SELECT
                 e.agent_id,
-                MAX(e.received_at)                                          AS last_seen,
-                COUNT(DISTINCT e.run_id)                                    AS run_count,
-                COUNT(DISTINCT s.id) FILTER (WHERE s.shadow = FALSE)        AS signal_count,
-                COUNT(DISTINCT s.id) FILTER (
-                    WHERE s.shadow = FALSE AND s.severity = 'CRITICAL'
-                )                                                            AS critical_count,
-                COUNT(DISTINCT s.id) FILTER (
-                    WHERE s.shadow = FALSE AND s.severity = 'HIGH'
-                )                                                            AS high_count
-            FROM events e
-            LEFT JOIN failure_signals s ON s.agent_id = e.agent_id
-            WHERE ($1 = 'dev_customer' OR e.agent_id IN (
-                SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
-            ))
-            GROUP BY e.agent_id
-            ORDER BY MAX(e.received_at) DESC
+                e.last_seen,
+                e.run_count,
+                COALESCE(s.signal_count, 0)   AS signal_count,
+                COALESCE(s.critical_count, 0) AS critical_count,
+                COALESCE(s.high_count, 0)     AS high_count
+            FROM event_agg e
+            LEFT JOIN signal_agg s ON s.agent_id = e.agent_id
+            ORDER BY e.last_seen DESC
             LIMIT $2 OFFSET $3
             """,
             customer_id,
