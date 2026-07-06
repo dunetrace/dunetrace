@@ -246,7 +246,7 @@ class DurableRetryEmitter(BatchingEmitter):
         self._lock = Lock()
         self._next_retry_at = 0.0  # monotonic time; 0 == due immediately
         self._evicted_since_warning = 0
-        self._last_eviction_warning = 0.0
+        self._last_eviction_warning: Optional[float] = None
 
         self._db_ok = self._init_db()
 
@@ -328,7 +328,12 @@ class DurableRetryEmitter(BatchingEmitter):
         if evicted:
             self._evicted_since_warning += evicted
             now = time.monotonic()
-            if now - self._last_eviction_warning >= 60:
+            # time.monotonic()'s epoch is unspecified (often time-since-boot on
+            # Linux) — comparing against a 0.0 sentinel for "never warned yet"
+            # silently skips the first warning on a freshly booted machine
+            # where monotonic() itself is still under 60. None is unambiguous
+            # regardless of the clock's starting point.
+            if self._last_eviction_warning is None or now - self._last_eviction_warning >= 60:
                 logger.warning(
                     "DurableRetryEmitter: evicted %d oldest batch(es) from the disk queue "
                     "at %s (over the %d-event / %d-byte cap) — this is silent data loss "

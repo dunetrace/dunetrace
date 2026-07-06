@@ -234,12 +234,8 @@ class TestBoundedQueueEviction(_TempQueueTestCase):
         self.assertEqual(self._row_count(), 1)  # r1 evicted, only r2 (the newest) survives
 
     def test_eviction_logs_warning(self):
-        # Mocks logger.warning directly rather than using assertLogs — this
-        # doesn't depend on the "dunetrace" logger's propagation/handler
-        # state, which is what made this test CI-flaky (assertLogs failed to
-        # observe the record in a fresh environment where some dependency's
-        # own import-time logging setup put the logger in a state assertLogs
-        # didn't see through, even though the warning genuinely fired).
+        # Mocks logger.warning directly rather than using assertLogs so the
+        # assertion doesn't depend on logger propagation/handler state.
         inner = _AlwaysFails()
         emitter = DurableRetryEmitter(inner, queue_path=self.queue_path, max_queue_events=1)
         emitter.ship([_event(run_id="r1")])
@@ -247,6 +243,23 @@ class TestBoundedQueueEviction(_TempQueueTestCase):
             emitter.ship([_event(run_id="r2")])
         mock_warning.assert_called_once()
         self.assertIn("evicted", mock_warning.call_args[0][0])
+
+    def test_eviction_warning_fires_when_monotonic_clock_starts_near_zero(self):
+        # Regression for a real CI-only failure: _last_eviction_warning used
+        # to be seeded to 0.0 and compared as `now - last >= 60`. time.monotonic()'s
+        # epoch is unspecified (often time-since-boot on Linux), so on a freshly
+        # booted CI runner `now` itself can be under 60, silently suppressing the
+        # very first eviction warning — while passing on any dev machine whose
+        # uptime is already well past 60s. Pinning time.monotonic() low reproduces
+        # that environment regardless of the host's actual uptime.
+        with patch("time.monotonic", return_value=5.0):
+            inner = _AlwaysFails()
+            emitter = DurableRetryEmitter(inner, queue_path=self.queue_path, max_queue_events=1)
+            emitter.ship([_event(run_id="r1")])
+            with patch("dunetrace.emitters.logger.warning") as mock_warning:
+                emitter.ship([_event(run_id="r2")])
+            mock_warning.assert_called_once()
+            self.assertIn("evicted", mock_warning.call_args[0][0])
 
     def test_eviction_warning_rate_limited_to_once_per_minute(self):
         inner = _AlwaysFails()

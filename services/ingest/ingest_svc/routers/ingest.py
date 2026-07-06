@@ -81,9 +81,7 @@ async def ingest(
     batch_id = str(uuid.uuid4())
     n = len(body.events)
 
-    logger.info(
-        "Accepted. batch_id=%s org_id=%s agent_id=%s events=%d", batch_id, org_id, body.agent_id, n
-    )
+    logger.info("Accepted. batch_id=%s agent_id=%s events=%d", batch_id, body.agent_id, n)
 
     # Persist after response is sent
     background_tasks.add_task(_persist, body.events, batch_id, org_id)
@@ -120,8 +118,7 @@ async def mark_deploy(request: Request, body: DeployRequest) -> DeployResponse:
     org_id = await _resolve_org_id(request, body.api_key)
     row_id = await insert_deploy_event(body.agent_id, body.version, body.meta, org_id)
     logger.info(
-        "Deploy marked. org_id=%s agent_id=%s version=%s id=%d",
-        org_id,
+        "Deploy marked. agent_id=%s version=%s id=%d",
         body.agent_id,
         body.version,
         row_id,
