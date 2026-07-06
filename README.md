@@ -279,6 +279,7 @@ Agent Code
 - [Custom Python agent](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
 - [CrewAI](docs/integrate-crewai-agent.md)
+- [Pydantic AI](docs/integrate-pydantic-ai.md)
 - [AutoGen (Microsoft)](docs/integrate-autogen-agent.md)
 - [OpenAI Agents SDK](docs/integrate-openai-agents.md)
 - [Haystack 2.x](docs/integrate-haystack-agent.md)

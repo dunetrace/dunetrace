@@ -201,6 +201,7 @@ SDK: 307 tests · MCP server: 105 tests — both run fully offline.
 - [LangChain / LangGraph](../../docs/integrate-langchain-agent.md)
 - [Hermes Agent (Nous Research)](../../docs/integrate-hermes-agent.md)
 - [CrewAI](../../docs/integrate-crewai-agent.md)
+- [Pydantic AI](../../docs/integrate-pydantic-ai.md)
 - [AutoGen](../../docs/integrate-autogen-agent.md)
 - [OpenAI Agents SDK](../../docs/integrate-openai-agents.md)
 - [Haystack 2.x](../../docs/integrate-haystack-agent.md)
