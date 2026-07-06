@@ -4,6 +4,7 @@ GET  /v1/policies — returns runtime policies for the SDK to enforce.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import secrets
@@ -31,6 +32,11 @@ from ingest_svc.schemas import (
 
 logger = logging.getLogger("dunetrace.ingest")
 router = APIRouter()
+
+
+def _safe_id(value: str) -> str:
+    """Return a short, non-reversible token for logging correlation."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 async def _resolve_org_id(request: Request, api_key: str) -> str:
@@ -82,7 +88,11 @@ async def ingest(
     n = len(body.events)
 
     logger.info(
-        "Accepted. batch_id=%s org_id=%s agent_id=%s events=%d", batch_id, org_id, body.agent_id, n
+        "Accepted. batch_id=%s org_id=%s agent_id=%s events=%d",
+        batch_id,
+        _safe_id(org_id),
+        body.agent_id,
+        n,
     )
 
     # Persist after response is sent
@@ -121,7 +131,7 @@ async def mark_deploy(request: Request, body: DeployRequest) -> DeployResponse:
     row_id = await insert_deploy_event(body.agent_id, body.version, body.meta, org_id)
     logger.info(
         "Deploy marked. org_id=%s agent_id=%s version=%s id=%d",
-        org_id,
+        _safe_id(org_id),
         body.agent_id,
         body.version,
         row_id,
