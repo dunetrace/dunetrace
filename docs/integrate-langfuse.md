@@ -1,15 +1,16 @@
 # Integrating Langfuse with Dunetrace
 
-Connect Langfuse to get LLM-powered root-cause analysis on any Dunetrace signal. When a failure fires, click **Explain with Langfuse ↗** in the dashboard — Dunetrace fetches the full trace, extracts the system prompt, and returns a specific root cause and fix.
+Root-cause analysis (click **Explain +** on any alert) is native — Dunetrace analyzes the run's own stored events, no Langfuse required. Connecting Langfuse adds one thing on top: a one-click **Apply** button that pushes a prompt fix straight to a Langfuse-managed prompt, instead of just showing you a diff to copy in yourself.
 
 ---
 
 ## What you get
 
-- **Root-cause analysis** — plain-English explanation of what went wrong in a specific run, using the actual trace inputs/outputs
-- **Prompt fixes** — one sentence to append to the system prompt; applied via Langfuse in one click
-- **Code/infra fixes** — for structural failures (CONTEXT_BLOAT, SLOW_STEP, etc.), opens a draft GitHub PR with a unified diff
+- **Root-cause analysis** — works with or without Langfuse connected; see [docs/migrations/native-root-cause-v0.6.0.md](migrations/native-root-cause-v0.6.0.md) for how fixes are classified
+- **One-click prompt apply** — for fixes that just need a sentence added to the system prompt, publish a new Langfuse prompt version directly from the dashboard instead of copy/pasting
 - **Fix tracking** — the dashboard shows whether recurrence dropped after a fix was applied
+
+Structural fixes (tool loops, retry storms, runaway step counts) don't need Langfuse at all — Dunetrace applies those as a runtime policy directly. Code/infra fixes are always a diff you apply yourself; there's no GitHub PR integration yet (tracked in `BACKLOG.md`).
 
 ---
 

@@ -234,12 +234,19 @@ class TestBoundedQueueEviction(_TempQueueTestCase):
         self.assertEqual(self._row_count(), 1)  # r1 evicted, only r2 (the newest) survives
 
     def test_eviction_logs_warning(self):
+        # Mocks logger.warning directly rather than using assertLogs — this
+        # doesn't depend on the "dunetrace" logger's propagation/handler
+        # state, which is what made this test CI-flaky (assertLogs failed to
+        # observe the record in a fresh environment where some dependency's
+        # own import-time logging setup put the logger in a state assertLogs
+        # didn't see through, even though the warning genuinely fired).
         inner = _AlwaysFails()
         emitter = DurableRetryEmitter(inner, queue_path=self.queue_path, max_queue_events=1)
         emitter.ship([_event(run_id="r1")])
-        with self.assertLogs("dunetrace", level="WARNING") as cm:
+        with patch("dunetrace.emitters.logger.warning") as mock_warning:
             emitter.ship([_event(run_id="r2")])
-        self.assertTrue(any("evicted" in msg for msg in cm.output))
+        mock_warning.assert_called_once()
+        self.assertIn("evicted", mock_warning.call_args[0][0])
 
     def test_eviction_warning_rate_limited_to_once_per_minute(self):
         inner = _AlwaysFails()

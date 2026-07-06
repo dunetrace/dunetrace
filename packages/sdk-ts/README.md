@@ -114,37 +114,9 @@ function myHelper() {
 dt.markDeploy("my-agent", "v1.4.2", { env: "production", commit: "abc1234" });
 ```
 
-## Langfuse integration
+## Langfuse integration (optional)
 
-Correlate a Dunetrace run with a Langfuse trace using a shared UUID — jump straight from a detected signal to the full Langfuse trace.
-
-```typescript
-import { randomUUID } from "node:crypto";
-import { Langfuse } from "langfuse";
-
-const langfuse = new Langfuse({ publicKey: "pk-lf-…", secretKey: "sk-lf-…" });
-const sharedId = randomUUID();
-
-const trace = langfuse.trace({ id: sharedId, name: "my-agent" });
-
-await dt.run("my-agent", { runId: sharedId, model: "gpt-4o" }, async (run) => {
-  // run.runId === sharedId === Langfuse trace ID
-  run.finalAnswer();
-});
-
-await langfuse.flushAsync();
-```
-
-See the full example: `examples/langfuse_agent.ts`
-
-```bash
-# Happy path
-OPENAI_API_KEY=sk-… LANGFUSE_PUBLIC_KEY=pk-lf-… LANGFUSE_SECRET_KEY=sk-lf-… \
-  npm run example:langfuse
-
-# Tool loop — triggers TOOL_LOOP signal + LLM root cause analysis
-SCENARIO=tool_loop … npm run example:langfuse:loop
-```
+Pass a shared UUID as `runId` so a Dunetrace run and a Langfuse trace share one ID — jump straight from a detected signal to the full Langfuse trace, and push fixes to a Langfuse-managed prompt in one click. Root-cause analysis itself doesn't require this — it's native. Full example: [examples/langfuse_agent.ts](examples/langfuse_agent.ts) · [docs/integrate-langfuse.md](../../docs/integrate-langfuse.md).
 
 ## Vercel AI SDK integration
 
@@ -239,7 +211,7 @@ Dashboard → `http://localhost:3000` · Ingest → `http://localhost:8001`
 npm test
 ```
 
-67 tests, all offline — no running stack required.
+101 tests, all offline — no running stack required.
 
 ## Links
 

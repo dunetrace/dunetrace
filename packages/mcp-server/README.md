@@ -1,115 +1,23 @@
 # Dunetrace MCP Server
 
-Query agent signals, run details, and health scores directly from Claude Code, Cursor, Codex, or any MCP-compatible client - without leaving your editor.
+Query agent signals, run details, and health scores directly from Claude Code, Cursor, Codex, or any MCP-compatible client — without leaving your editor. Read-only for signals/runs; write operations (create/update/delete) are available for policies and custom detectors.
 
----
-
-## What it is
-
-The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](https://modelcontextprotocol.io). Your editor (or any LLM) can call it as a tool and ask things like:
-
-- *"Is my `research-agent` healthy?"*
-- *"What failed in the last 24 hours?"*
-- *"Show me signal #42 — what happened and how do I fix it?"*
-- *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
-- *"Walk me through run `abc123` step by step."*
-
-Signal data is read-only, sourced from the Customer API over your existing Dunetrace deployment. Write operations (create/update/delete) are available for policies and custom detectors.
-
----
-
-## Prerequisites
-
-- Dunetrace backend running (`docker compose up -d`)
-- Python 3.11+
-- The Customer API accessible at `http://localhost:8002` (or set `DUNETRACE_API_URL`)
-
----
-
-## Install
+Setup (install, client config for Claude Code / Cursor / Codex, environment variables) is covered in **[docs/mcp-server.md](../../docs/mcp-server.md)** — the quick version:
 
 ```bash
 pip install dunetrace-mcp
 ```
 
-Or install from source (for development):
-
-```bash
-cd packages/mcp-server
-pip install -e .
-```
-
----
-
-## Client setup
-
-### Claude Code
-
-Add to `~/.claude.json`:
-
 ```json
 {
   "mcpServers": {
     "dunetrace": {
       "command": "dunetrace-mcp",
-      "env": {
-        "DUNETRACE_API_URL": "http://localhost:8002",
-        "DUNETRACE_API_KEY": "dt_dev_test"
-      }
+      "env": { "DUNETRACE_API_URL": "http://localhost:8002", "DUNETRACE_API_KEY": "dt_dev_test" }
     }
   }
 }
 ```
-
-Restart Claude Code. The `dunetrace` server will appear in the MCP tools list.
-
-### Cursor
-
-Create `.cursor/mcp.json` in your project root (or global `~/.cursor/mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "dunetrace": {
-      "command": "dunetrace-mcp",
-      "env": {
-        "DUNETRACE_API_URL": "http://localhost:8002",
-        "DUNETRACE_API_KEY": "dt_dev_test"
-      }
-    }
-  }
-}
-```
-
-### Codex / SSE clients
-
-Run the server in SSE mode (listens on `:8000` by default):
-
-```bash
-dunetrace-mcp --sse
-dunetrace-mcp --sse --port 9000   # custom port
-```
-
-Point your client's tool endpoint at `http://localhost:8000/sse`.
-
-### Manual test (stdio)
-
-```bash
-dunetrace-mcp
-```
-
-The server speaks MCP over stdin/stdout. You can pipe JSON-RPC messages manually or use the MCP Inspector.
-
----
-
-## Environment variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `DUNETRACE_API_URL` | `http://localhost:8002` | Customer API base URL |
-| `DUNETRACE_API_KEY` | `dt_dev_test` | Bearer token (auth header) |
-
-For production, set `DUNETRACE_API_KEY` to your real API key.
 
 ---
 
@@ -488,7 +396,7 @@ List all fixes that have been applied for an agent's signals, with type, deliver
 
 ### `trigger_explain`
 
-Trigger LLM-powered root cause analysis for a signal. Fetches the Langfuse trace, runs analysis, and returns a structured fix (prompt addition or code change).
+Trigger root-cause analysis for a signal, built natively from the run's own stored events — no Langfuse required. Returns a `fix_category`: `dunetrace_native` (a runtime policy Dunetrace can apply directly) or `customer_code` (a prompt/code diff you apply yourself, or push to a connected external store like Langfuse).
 
 **Note:** Makes an LLM call — may take 5–15 seconds.
 

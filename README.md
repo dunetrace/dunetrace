@@ -39,7 +39,7 @@ Dunetrace answers **"is something breaking right now?"** and fires an alert in 1
 | **When it fires** | Within 15s of run completion | You query it after you notice a problem |
 | **What it watches** | Structural failure patterns | Raw trace data |
 | **Alert channel** | Slack / webhook / Dashboard | Dashboard only |
-| **Fix path** | One-click prompt apply or GitHub PR | Manual |
+| **Fix path** | Auto-apply a policy, or one-click push to a connected prompt store | Manual |
 
 ---
 
@@ -96,7 +96,7 @@ cd packages/sdk-py
 python examples/basic_agent.py                          # No LLM calls
 SCENARIO=tool_loop python examples/langchain_agent.py   # TOOL_LOOP via LangChain
 SCENARIO=failures python examples/decorator_agent.py    # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
-SCENARIO=tool_loop python examples/langfuse_agent.py    # TOOL_LOOP + Langfuse explain
+SCENARIO=tool_loop python examples/langfuse_agent.py    # TOOL_LOOP + Langfuse trace correlation
 ```
 
 Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
@@ -160,16 +160,16 @@ A weekly digest (Monday 9am UTC) summarises top failure types and systemic patte
 
 ---
 
-## Diagnose with Langfuse
+## Diagnose & fix
 
-Connect Langfuse to get LLM-powered root-cause analysis on any signal. Click **Explain +** on any alert — Dunetrace fetches the full trace, extracts the system prompt, and returns a specific root cause and fix.
+Root-cause analysis is native — no third-party tracer required. Click **Explain +** on any alert and Dunetrace analyzes the run's own stored events and returns a specific cause and fix. Every fix is one of two kinds:
 
-- **Prompt fixes** → **Apply via Langfuse** creates a new prompt version in one click
-- **Code/infra fixes** → **Open PR on GitHub** creates a draft PR with a unified diff
+- **Policy fixes** (tool loops, retry storms, runaway step counts) → Dunetrace applies a runtime guardrail directly, no code change needed
+- **Prompt / code fixes** → a diff you copy in, or push in one click to a connected prompt store (Langfuse today)
 
 Fix effectiveness is tracked automatically.
 
-→ [docs/integrate-langfuse.md](docs/integrate-langfuse.md)
+→ [docs/migrations/native-root-cause-v0.6.0.md](docs/migrations/native-root-cause-v0.6.0.md) · connect Langfuse: [docs/integrate-langfuse.md](docs/integrate-langfuse.md)
 
 ---
 

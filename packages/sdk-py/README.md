@@ -47,12 +47,14 @@ def my_agent(question: str) -> str:
 **Or with `@dt.agent` + auto-instrumentation:**
 
 ```python
-dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests globally
+dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests, langchain, crewai
 
 @dt.agent(model="gpt-4o")      # agent_id inherited from init()
 def run_agent(query: str) -> str:
     return openai_client.chat.completions.create(...).choices[0].message.content
 ```
+
+LangChain/LangGraph and CrewAI agents need zero manual callback wiring — see [docs/integrations/auto-instrumentation.md](../../docs/integrations/auto-instrumentation.md) for how agent attribution is resolved.
 
 **FastAPI / Flask** — one line each, see [docs/integrate-custom-python-agent.md](../../docs/integrate-custom-python-agent.md).
 
@@ -194,7 +196,7 @@ python -m unittest discover -s tests -v          # SDK tests (no network require
 cd ../mcp-server && python -m pytest tests/ -v   # MCP server tests (no network required)
 ```
 
-SDK: 307 tests · MCP server: 105 tests — both run fully offline.
+SDK: 620 tests · MCP server: 154 tests — both run fully offline.
 
 ## Links
 
