@@ -40,7 +40,7 @@ jobs:
       matrix:
         include:
           - service: ingest
-            pythonpath: packages/sdk-py:services/ingest
+            pythonpath: packages/sdk-py:packages/schemas-py:services/ingest
             requirements: services/ingest/requirements.txt
             extra: httpx pytest-asyncio
           - service: detector
