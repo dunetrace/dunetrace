@@ -130,7 +130,6 @@ class DunetraceCrewCallback:
 
     def _after_llm(self, ctx: "LLMCallHookContext") -> None:
         from dunetrace.context import _current_run
-        from dunetrace.models import hash_content
 
         run = _current_run.get(None)
         if run is None:
@@ -141,7 +140,7 @@ class DunetraceCrewCallback:
         output_text = ctx.response or ""
         run.llm_responded(
             latency_ms=latency,
-            output_hash=hash_content(output_text),
+            output=output_text,
             output_length=len(output_text),
             finish_reason="stop",
         )

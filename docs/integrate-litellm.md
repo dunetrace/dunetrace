@@ -15,7 +15,7 @@ Dunetrace patches the OpenAI Python client's `chat.completions.create()` method.
 | Agent returns a final answer | `RUN_COMPLETED` |
 | Agent raises an exception | `RUN_ERRORED` |
 
-Dunetrace records model names, token counts, latency, finish reason, and output length. Raw prompts and completions are hashed in-process before any network call.
+Dunetrace records model names, token counts, latency, finish reason, output length, and the raw prompt/completion text.
 
 > **Note:** This zero-instrumentation path uses LiteLLM's OpenAI-compatible proxy. If you call the direct `litellm.completion()` Python function instead of the OpenAI client, wrap the agent with `dt.run()` and emit `run.llm_called()` / `run.llm_responded()` manually.
 
@@ -100,7 +100,7 @@ def answer(question: str) -> str:
 print(answer("What is the capital of France?"))
 ```
 
-No manual event calls are needed. The OpenAI client call is patched before it reaches LiteLLM, and Dunetrace hashes the prompt/output metadata locally.
+No manual event calls are needed. The OpenAI client call is patched before it reaches LiteLLM, and Dunetrace captures the prompt/output metadata locally.
 
 ---
 

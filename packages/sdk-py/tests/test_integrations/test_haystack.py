@@ -263,22 +263,22 @@ class TestTracerPipelineSpan(unittest.TestCase):
         errored = [e for e in emitted if e.event_type == EventType.RUN_ERRORED]
         self.assertEqual(len(errored), 1)
 
-    def test_run_errored_has_error_hash(self):
+    def test_run_errored_has_error(self):
         tracer, emitted = _make_tracer()
         with self.assertRaises(ValueError):
             with tracer.trace("haystack.pipeline.run", tags={}):
                 raise ValueError("bad input")
         errored = [e for e in emitted if e.event_type == EventType.RUN_ERRORED][0]
-        self.assertIn("error_hash", errored.payload)
+        self.assertEqual(errored.payload["error"], "bad input")
 
-    def test_input_hash_in_run_started(self):
+    def test_input_text_in_run_started(self):
         tracer, emitted = _make_tracer()
         with tracer.trace(
             "haystack.pipeline.run", tags={"haystack.pipeline.input_data": {"query": "hello"}}
         ):
             pass
         started = [e for e in emitted if e.event_type == EventType.RUN_STARTED][0]
-        self.assertIn("input_hash", started.payload)
+        self.assertIn("input_text", started.payload)
 
     def test_nested_pipeline_reuses_outer_run(self):
         """Nested haystack.pipeline.run must not emit a second RUN_STARTED."""

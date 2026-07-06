@@ -98,7 +98,6 @@ class DunetraceModelClient(ChatCompletionClient):  # type: ignore[misc]
         cancellation_token: Optional[Any] = None,
     ) -> "CreateResult":
         from dunetrace.context import _current_run
-        from dunetrace.models import hash_content
 
         run = _current_run.get(None)
         model = self._model_name()
@@ -125,7 +124,7 @@ class DunetraceModelClient(ChatCompletionClient):  # type: ignore[misc]
                     completion_tokens=usage.completion_tokens if usage else 0,
                     latency_ms=latency,
                     finish_reason=str(result.finish_reason),
-                    output_hash=hash_content(output_text),
+                    output=output_text,
                     output_length=len(output_text),
                 )
             return result

@@ -50,11 +50,11 @@ Dunetrace hooks into Hermes's plugin system without modifying agent code. Each `
 
 | Hermes hook | Dunetrace event | What it captures |
 |---|---|---|
-| `pre_llm_call` | `run.started` | User message hash, model |
+| `pre_llm_call` | `run.started` | User message text, model |
 | `pre_api_request` | `llm.called` | Model name, approximate input tokens |
 | `post_api_request` | `llm.responded` | Actual token counts, latency, finish reason |
-| `pre_tool_call` | `tool.called` | Tool name, args hash (never raw args) |
-| `post_tool_call` | `tool.responded` | Success/failure, output length, latency, error hash |
+| `pre_tool_call` | `tool.called` | Tool name, raw args |
+| `post_tool_call` | `tool.responded` | Success/failure, output length, latency, raw error |
 | `on_session_end` | `run.completed` / `run.errored` | Total duration, interrupted flag |
 
 The Hermes `turn_id` is used as the Dunetrace `run_id`. One user message = one run, regardless of how many LLM calls or tool calls happen within it.
@@ -149,13 +149,13 @@ Available scenarios: `happy`, `tool_loop`, `retry`, `abandon`, `edge`, `real`, `
 
 ---
 
-## Privacy
+## Data Handling
 
-All content fields are hashed before transmission — raw tool arguments, user messages, and LLM outputs never leave your process.
+Content fields are sent to the backend as-is.
 
 | Field | Transmitted as |
 |---|---|
-| User message | `input_hash` (SHA-256) |
-| Tool arguments | `args_hash` (SHA-256 of `str(args)`) |
-| Error messages | `error_hash` (SHA-256) |
+| User message | `input_text` |
+| Tool arguments | `args` (`str(args)`) |
+| Error messages | `error` |
 | Token counts, latency | plain numbers |

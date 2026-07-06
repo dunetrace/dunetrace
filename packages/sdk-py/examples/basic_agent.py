@@ -117,7 +117,7 @@ def rag_empty_run(user_input: str) -> None:
         run.llm_called("gpt-4o", prompt_tokens=150)
         run.llm_responded(finish_reason="tool_calls")
 
-        run.retrieval_called("product-docs", query_hash="abc123")
+        run.retrieval_called("product-docs", query=user_input)
         run.retrieval_responded("product-docs", result_count=0, latency_ms=45)
 
         # Agent answers from memory despite empty retrieval

@@ -14,7 +14,7 @@ The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](
 - *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
 - *"Walk me through run `019e2314-6b7` step by step."*
 
-All data is read-only. Only hashed metadata is exposed — no raw prompts, tool arguments, or model outputs ever leave your process.
+All data is read-only, sourced from the Customer API over your existing Dunetrace deployment.
 
 ---
 
@@ -164,12 +164,12 @@ Failure breakdown:
 Most recent signals:
   🟠 TOOL_LOOP  conf=90%  5d ago  run=019e2314…
      The agent called `web_search` 6 times in steps 2–7 with identical
-     arguments every time (same args_hash across all calls). It is not
-     tracking which queries it has already tried.
+     arguments every time. It is not tracking which queries it has
+     already tried.
      Impact: Looping agents burn tokens and cost money without producing
      value. A 5-step loop at typical gpt-4o pricing costs roughly
      $0.15–$0.30 — with nothing to show for it.
-     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
+     Fix: Deduplicate `web_search` calls — identical arguments seen 6×
 
   🟠 TOOL_LOOP  conf=90%  5d ago  run=019e230c…
      [same pattern — web_search called 6× with identical args]
@@ -316,8 +316,8 @@ Detected:  5d ago
 
 What happened:
   The agent called `web_search` 6 times in steps 2–7 with identical
-  arguments every time (same args_hash across all calls). It is not
-  tracking which queries it has already tried.
+  arguments every time. It is not tracking which queries it has
+  already tried.
 
 Why it matters:
   Looping agents burn tokens and cost money without producing value.
@@ -332,10 +332,10 @@ Evidence:
   args_identical: True
   first_step: 2
   last_step: 7
-  args_hashes: ['ffa8f58f', 'ffa8f58f', 'ffa8f58f', 'ffa8f58f', ...]
+  args: ['{"query": "LLM agent failure modes"}', '{"query": "LLM agent failure modes"}', ...]
 
 Suggested fixes:
-  1. Deduplicate `web_search` calls — identical args hash seen 6×
+  1. Deduplicate `web_search` calls — identical arguments seen 6×
      ```python
      seen_queries = set()
      def web_search(query):
@@ -349,8 +349,6 @@ Suggested fixes:
       If a search returned no useful results, reformulate
       the query before trying again."
 ```
-
-> **Privacy note:** `args_hashes` contains SHA-256 hashes of the original tool arguments — raw arguments never leave your agent process.
 
 ---
 
@@ -412,7 +410,7 @@ Exit:     run.completed
 Signals (1):
   🟠 TOOL_LOOP  [HIGH]  conf=90%  step=7
      Tool loop detected: `web_search` called 6× in steps 2–7
-     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
+     Fix: Deduplicate `web_search` calls — identical arguments seen 6×
 
 Event timeline:
   [  0]  +0.0s  run.started
@@ -608,16 +606,15 @@ Claude: [calls get_instrumentation_guide("langchain")]
 
 ---
 
-## Privacy
+## Data Handling
 
-All data served by the MCP tools comes from the Dunetrace Customer API, which stores only hashed or structural metadata:
+All data served by the MCP tools comes from the Dunetrace Customer API:
 
-- Tool arguments → SHA-256 hash (shown as `args_hashes`)
-- LLM prompts and outputs → SHA-256 hash (never stored)
+- Tool arguments, LLM prompts and outputs → stored and returned as-is (shown as `args`, `output`, etc. in evidence)
 - Token counts, latency, step counts → stored as plain numbers
 - Run and signal metadata → stored as plain text
 
-The `evidence` dict in signal responses contains the hashed fingerprints the detector used — not the original content.
+The `evidence` dict in signal responses contains the actual content the detector used, not a hash of it.
 
 ---
 

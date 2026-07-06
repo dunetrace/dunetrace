@@ -116,12 +116,12 @@ with dt.run(
 ## What Is and Isn't Captured
 
 **Captured automatically via the callback:**
-- Every tool call: name, success/failure, output length
+- Every tool call: name, raw arguments, success/failure, output length
 - Run-level: total steps, latency, exit reason
 
-**Not captured (privacy — hashed in-process):**
-- Exact tool arguments and textual observations (Dunetrace hashes these automatically when tracking)
-- Inner reasoning text / code snippets of the agent step
+**Not captured by the example callback above:**
+- Textual tool observations — `tool_responded()` only takes `output_length`, not the raw output text itself. Pass it through your own event if you need it.
+- Inner reasoning text / code snippets of the agent step — the callback above doesn't read `step_log.model_output` / `step_log.code_action`; add that yourself if you want it captured.
 
 **Not captured by default:**
 - Individual `LLM_CALLED` / `LLM_RESPONDED` token usage metrics. If you need precise token metrics, you can manually emit those in the callback by inspecting `step_log.llm_calls` (if populated by your chosen model engine) and calling `run.llm_called(...)` and `run.llm_responded(...)`.

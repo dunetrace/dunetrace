@@ -425,8 +425,8 @@ class TestRetryStormExplanation(unittest.TestCase):
                 "first_fail_step": 2,
                 "step_indices": [2, 3, 4, 5],
                 "args_identical": False,
-                "error_hashes": ["e1", "e1", "e1", "e1"],
-                "failure_reason_hash": "e1",
+                "errors": ["e1", "e1", "e1", "e1"],
+                "failure_reason": "e1",
                 "reason_identical": True,
             },
         )
@@ -752,7 +752,7 @@ class TestTemplateEdgeCases(unittest.TestCase):
                 "first_step": 0,
                 "last_step": 4,
                 "step_indices": [0, 1, 2, 3, 4],
-                "args_hashes": ["a"] * 5,
+                "args": ["a"] * 5,
                 "args_identical": True,
                 "args_similar": True,
                 "success_rate": None,  # edge case

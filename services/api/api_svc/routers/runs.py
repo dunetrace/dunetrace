@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.config import settings
 from api_svc.db.queries import list_runs, get_run_detail
 from api_svc.schemas import (
@@ -36,9 +36,9 @@ async def get_runs(
     has_signals: Optional[bool] = Query(
         None, description="Filter to runs that do (true) or don't (false) have signals"
     ),
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> RunListResponse:
-    rows, total = await list_runs(agent_id, offset, limit, has_signals)
+    rows, total = await list_runs(org_id, agent_id, offset, limit, has_signals)
 
     runs = [
         RunSummary(
@@ -70,9 +70,9 @@ async def get_runs(
 async def get_run(
     run_id: str,
     include_shadow: bool = False,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> RunDetail:
-    data = await get_run_detail(run_id, include_shadow=include_shadow)
+    data = await get_run_detail(org_id, run_id, include_shadow=include_shadow)
     if not data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Run {run_id!r} not found"

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { hashContent, agentVersion } from "./hash.js";
+import { agentVersion } from "./hash.js";
 import { DunetraceRun } from "./run.js";
 import { resultLength as _resultLength } from "./util.js";
 import type { AgentEvent, ClientOptions, RunOptions } from "./models.js";
@@ -51,7 +51,7 @@ export class Dunetrace {
       step_index:    0,
       timestamp:     Date.now() / 1000,
       payload: {
-        input_hash:   opts.userInput ? hashContent(opts.userInput) : "",
+        input_text:   opts.userInput ?? "",
         model,
         tools,
       },
@@ -71,7 +71,7 @@ export class Dunetrace {
         timestamp:     Date.now() / 1000,
         payload: {
           error_type: (err instanceof Error) ? err.name : "Error",
-          error_hash: hashContent(String(err)),
+          error:      String(err),
           step_index: run.currentStep(),
         },
       });

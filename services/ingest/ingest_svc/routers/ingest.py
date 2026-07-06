@@ -14,13 +14,12 @@ from fastapi import APIRouter, HTTPException, Query, Request, status, Background
 
 from ingest_svc.auth import is_trusted
 from ingest_svc.db import (
-    insert_events,
+    get_event_store,
     insert_deploy_event,
     verify_api_key,
     create_api_key,
     fetch_policies,
 )
-from ingest_svc.db.postgres import DEV_AGENT_SENTINEL
 from ingest_svc.schemas import (
     IngestRequest,
     IngestResponse,
@@ -34,6 +33,37 @@ logger = logging.getLogger("dunetrace.ingest")
 router = APIRouter()
 
 
+async def _resolve_org_id(request: Request, api_key: str) -> str:
+    """Resolve the org_id for this request. Raises 401 if it can't be resolved.
+
+    Trusted path: dunetrace-cloud's gateway has already authenticated the caller
+    and forwards its org identity via a header — no api_keys lookup here.
+    x-org-id is the current header name; x-customer-id is accepted as a fallback
+    for callers running an older cloud gateway build (pre-v0.5.0 naming).
+
+    Untrusted path (self-hosted): resolves org_id from the OSS api_keys table.
+    Keys are org-scoped, not agent-scoped — a valid key may submit events for
+    any agent_id under its org, discovered on first ingest. See
+    docs/migrations/multi-tenancy-v0.5.0.md.
+    """
+    if is_trusted(request):
+        org_id = request.headers.get("x-org-id") or request.headers.get("x-customer-id", "")
+        if not org_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Trusted request missing x-org-id",
+            )
+        return org_id
+
+    org_id = await verify_api_key(api_key)
+    if org_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or inactive API key",
+        )
+    return org_id
+
+
 @router.post(
     "/v1/ingest",
     response_model=IngestResponse,
@@ -45,42 +75,18 @@ async def ingest(
     body: IngestRequest,
     background_tasks: BackgroundTasks,
 ) -> IngestResponse:
-    # Auth — trusted gateway requests (x-internal-token, already org-scoped by
-    # dunetrace-cloud's tenancy middleware) skip the OSS-only api_keys check
-    # and trust body.agent_id as-is: org-scoped keys aren't 1:1 with a single
-    # agent_id, so there's nothing to cross-check it against here.
-    # See ingest_svc/auth.py::is_trusted and GET /v1/policies below.
-    #
-    # Self-hosted (untrusted) keys ARE 1:1 with one agent_id (see api_keys
-    # schema), so a valid key must actually match the agent_id it's claiming
-    # to submit events for — otherwise any valid key could impersonate any
-    # other agent by just setting a different agent_id in the body/events.
-    # DEV_AGENT_SENTINEL is exempt: it's a wildcard dev-mode identity, not a
-    # real per-agent key, so there's nothing meaningful to match it against.
-    if not is_trusted(request):
-        resolved_agent_id = await verify_api_key(body.api_key)
-        if resolved_agent_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or inactive API key",
-            )
-        if resolved_agent_id != DEV_AGENT_SENTINEL and (
-            body.agent_id != resolved_agent_id
-            or any(e.agent_id != resolved_agent_id for e in body.events)
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="API key is not authorized for the given agent_id",
-            )
+    org_id = await _resolve_org_id(request, body.api_key)
 
     # Accept immediately — 202 before any DB work
     batch_id = str(uuid.uuid4())
     n = len(body.events)
 
-    logger.info("Accepted. batch_id=%s agent_id=%s events=%d", batch_id, body.agent_id, n)
+    logger.info(
+        "Accepted. batch_id=%s org_id=%s agent_id=%s events=%d", batch_id, org_id, body.agent_id, n
+    )
 
     # Persist after response is sent
-    background_tasks.add_task(_persist, body.events, batch_id, body.agent_id)
+    background_tasks.add_task(_persist, body.events, batch_id, org_id)
 
     return IngestResponse(accepted=n, batch_id=batch_id)
 
@@ -98,13 +104,9 @@ async def get_policies(
     """
     Called by the SDK at run start to retrieve active policies.
     Authenticates via api_key query param — same key used for event ingestion.
-    Trusted internal requests (from auth service) skip DB validation.
     """
-    if not is_trusted(request):
-        resolved = await verify_api_key(api_key)
-        if resolved is None:
-            raise HTTPException(status_code=401, detail="Invalid API key")
-    policies = await fetch_policies(agent_id)
+    org_id = await _resolve_org_id(request, api_key)
+    policies = await fetch_policies(agent_id, org_id)
     return {"policies": policies}
 
 
@@ -115,21 +117,18 @@ async def get_policies(
     summary="Record a deploy marker for an agent",
 )
 async def mark_deploy(request: Request, body: DeployRequest) -> DeployResponse:
-    # Auth — same trusted-gateway bypass as POST /v1/ingest.
-    if is_trusted(request):
-        agent_id = body.agent_id
-    else:
-        agent_id = await verify_api_key(body.api_key)
-        if agent_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or inactive API key",
-            )
-    row_id = await insert_deploy_event(agent_id, body.version, body.meta)
-    logger.info("Deploy marked. agent_id=%s version=%s id=%d", agent_id, body.version, row_id)
+    org_id = await _resolve_org_id(request, body.api_key)
+    row_id = await insert_deploy_event(body.agent_id, body.version, body.meta, org_id)
+    logger.info(
+        "Deploy marked. org_id=%s agent_id=%s version=%s id=%d",
+        org_id,
+        body.agent_id,
+        body.version,
+        row_id,
+    )
     return DeployResponse(
         id=row_id,
-        agent_id=agent_id,
+        agent_id=body.agent_id,
         version=body.version,
         deployed_at=time.time(),
     )
@@ -139,7 +138,7 @@ async def mark_deploy(request: Request, body: DeployRequest) -> DeployResponse:
     "/v1/keys",
     response_model=KeyCreateResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Generate a new API key for an agent",
+    summary="Generate a new org-scoped API key",
     include_in_schema=False,
 )
 async def create_key(body: KeyCreateRequest) -> KeyCreateResponse:
@@ -147,25 +146,17 @@ async def create_key(body: KeyCreateRequest) -> KeyCreateResponse:
     admin_key = os.getenv("ADMIN_API_KEY", "")
     if not admin_key or not secrets.compare_digest(body.admin_key, admin_key):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
-    name = body.company_name or body.customer_id
-    key = await create_api_key(
-        body.agent_id, body.customer_id, company_name=name, rate_limit_rpm=body.rate_limit_rpm
-    )
+    name = body.org_name or body.org_id
+    key = await create_api_key(body.org_id, org_name=name, rate_limit_rpm=body.rate_limit_rpm)
     logger.info(
-        "API key created. agent_id=%s customer_id=%s company=%s rpm=%d",
-        body.agent_id,
-        body.customer_id,
-        name,
-        body.rate_limit_rpm,
+        "API key created. org_id=%s org_name=%s rpm=%d", body.org_id, name, body.rate_limit_rpm
     )
-    return KeyCreateResponse(
-        key=key, agent_id=body.agent_id, customer_id=body.customer_id, company_name=name
-    )
+    return KeyCreateResponse(key=key, org_id=body.org_id, org_name=name)
 
 
-async def _persist(events: list, batch_id: str, agent_id: str) -> None:
+async def _persist(events: list, batch_id: str, org_id: str) -> None:
     try:
-        inserted = await insert_events(events, batch_id)
+        inserted = await get_event_store().insert_events(events, batch_id, org_id)
         if inserted == len(events):
             logger.debug("Persisted. batch_id=%s inserted=%d", batch_id, inserted)
         else:

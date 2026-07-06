@@ -244,11 +244,17 @@ pip install dunetrace-mcp
 
 ---
 
-## Privacy
+## Data handling
 
-No raw content ever leaves your agent process. Every prompt, tool argument, and model output is SHA-256 hashed before transmission.
+Prompts, tool arguments, and model outputs are sent to the backend over TLS and
+stored there — content-aware detectors (prompt injection in retrieved documents,
+tool argument fabrication, silent failures) need to see what the agent actually
+said and did. Trust is handled the way any SaaS handles it: encryption in
+transit and at rest, SOC2, no training on customer data. If you need an
+air-gapped deployment, self-host — same code, same detectors, your
+infrastructure.
 
-→ [docs/architecture.md](docs/architecture.md)
+→ [docs/architecture.md](docs/architecture.md) · upgrading a self-hosted install? see [docs/migrations/multi-tenancy-v0.5.0.md](docs/migrations/multi-tenancy-v0.5.0.md)
 
 ---
 
@@ -256,7 +262,7 @@ No raw content ever leaves your agent process. Every prompt, tool argument, and 
 
 ```
 Agent Code
-  └─► Dunetrace SDK        (hashes content → ingest events)
+  └─► Dunetrace SDK        (raw content → ingest events)
         └─► Ingest API      (POST /v1/ingest → Postgres)
                 ├─► Detector       (poll → 17 detectors → signals)
                 ├─► Alerts         (poll → explain → Slack / webhook)

@@ -9,7 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.config import settings
 from api_svc.db.queries import (
     get_signal_by_id,
@@ -17,7 +17,9 @@ from api_svc.db.queries import (
     export_signals,
     record_fix,
     get_signal_fix_status,
+    get_run_detail,
 )
+from api_svc.fix_classification import build_suggested_policy, classify_fix
 from api_svc.schemas import SignalDetail, SignalListResponse, Page
 
 logger = logging.getLogger("dunetrace.api.signals")
@@ -25,12 +27,14 @@ logger = logging.getLogger("dunetrace.api.signals")
 router = APIRouter(tags=["Signals"])
 
 # Detectors where the right fix is a code/infra change, not a system prompt addition.
+# Applies only to customer_code signals — CASCADING_TOOL_FAILURE was here before
+# fix_classification.classify_fix() existed; it's now dunetrace_native (a policy
+# fixes it directly), so this set no longer needs to cover it.
 _CODE_CHANGE_TYPES = frozenset(
     {
         "CONTEXT_BLOAT",
         "RAG_EMPTY_RETRIEVAL",
         "SLOW_STEP",
-        "CASCADING_TOOL_FAILURE",
         "LLM_TRUNCATION_LOOP",
         "FIRST_STEP_FAILURE",
         "COST_SPIKE",
@@ -80,7 +84,7 @@ async def get_signals(
     include_shadow: bool = Query(
         False, description="Include shadow signals (stored but not alerted) in results"
     ),
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> SignalListResponse:
     if severity and severity.upper() not in _VALID_SEVERITIES:
         raise HTTPException(
@@ -93,7 +97,7 @@ async def get_signals(
             detail=f"Invalid failure_type {failure_type!r}. Valid: {sorted(_VALID_FAILURE_TYPES)}",
         )
     rows, total = await list_signals(
-        agent_id, offset, limit, severity, failure_type, include_shadow
+        org_id, agent_id, offset, limit, severity, failure_type, include_shadow
     )
 
     def _ts(v):
@@ -135,7 +139,7 @@ async def export_signals_endpoint(
     from_: Optional[str] = Query(None, alias="from", description="ISO-8601 start datetime (UTC)"),
     to_: Optional[str] = Query(None, alias="to", description="ISO-8601 end datetime (UTC)"),
     include_shadow: bool = Query(False),
-    customer_id: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> StreamingResponse:
     if severity and severity.upper() not in _VALID_SEVERITIES:
         raise HTTPException(
@@ -164,6 +168,7 @@ async def export_signals_endpoint(
         raise HTTPException(422, f"Invalid datetime: {exc}")
 
     gen = export_signals(
+        org_id,
         agent_id,
         severity=severity,
         failure_type=failure_type,
@@ -214,22 +219,20 @@ class ExplainRequest(BaseModel):
 
 @router.post(
     "/v1/signals/{signal_id}/explain",
-    summary="Explain a signal using Langfuse trace data",
+    summary="Explain a signal using Dunetrace's own native event data",
     response_model=Dict[str, Any],
 )
 async def explain_signal(
     signal_id: int,
     body: ExplainRequest = ExplainRequest(),
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> Dict[str, Any]:
-    if not settings.langfuse_configured:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Langfuse is not configured. "
-                "Add LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY to your .env."
-            ),
-        )
+    """Root-cause analysis is native — no Langfuse required. If Langfuse IS
+    configured, a trace fetch is still attempted, but only as a best-effort
+    side lookup for langfuse_prompt_name/version (so apply-fix keeps working
+    for customer_code signals on Langfuse-managed prompts); a missing or
+    unreachable Langfuse trace never blocks this endpoint.
+    """
     if not (settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY):
         raise HTTPException(
             status_code=503,
@@ -238,49 +241,63 @@ async def explain_signal(
             ),
         )
 
-    signal = await get_signal_by_id(signal_id)
+    signal = await get_signal_by_id(org_id, signal_id)
     if signal is None:
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
 
-    from api_svc.langfuse_client import (
-        fetch_langfuse_trace,
-        build_explain_prompt,
-        _detect_langfuse_prompt,
-    )
-    import time as _time
+    from api_svc.native_explain import build_native_explain_prompt
 
-    trace_lookup_id = body.langfuse_trace_id or signal["run_id"]
-    # Only retry on 404 for fresh signals — Langfuse ingests asynchronously so a
-    # trace flushed seconds ago may not be queryable yet. For anything older than
-    # 5 minutes the trace is either there or not; retrying just adds 18s of latency.
-    signal_age_s = _time.time() - (signal.get("detected_at") or 0)
-    max_retries = 3 if signal_age_s < 300 else 0
+    run_detail = await get_run_detail(org_id, signal["run_id"], include_shadow=True)
+    events = run_detail["events"] if run_detail else []
+    source = "native" if events else "signal_only"
+    user_prompt = await build_native_explain_prompt(signal, events)
 
-    trace = {}
-    source = "signal_only"
-    try:
-        trace = await fetch_langfuse_trace(trace_lookup_id, max_retries=max_retries)
-        source = "langfuse"
-    except LookupError:
-        logger.info(
-            "Trace %s not in Langfuse; falling back to signal-only analysis",
-            trace_lookup_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    except Exception as exc:
-        logger.warning("Langfuse fetch failed for run %s: %s", signal["run_id"], exc)
-        # Non-fatal: degrade to signal-only rather than failing the whole request
+    # Best-effort Langfuse prompt-name detection — independent of the prompt
+    # built above, and never fatal. Only runs when Langfuse is actually
+    # configured; a customer with no Langfuse connected pays no latency for it.
+    prompt_name, prompt_version = None, None
+    if settings.langfuse_configured:
+        import time as _time
+
+        from api_svc.langfuse_client import _detect_langfuse_prompt, fetch_langfuse_trace
+
+        trace_lookup_id = body.langfuse_trace_id or signal["run_id"]
+        signal_age_s = _time.time() - (signal.get("detected_at") or 0)
+        max_retries = 3 if signal_age_s < 300 else 0
+        try:
+            trace = await fetch_langfuse_trace(trace_lookup_id, max_retries=max_retries)
+            prompt_name, prompt_version = _detect_langfuse_prompt(trace.get("observations", []))
+        except LookupError:
+            logger.info("Trace %s not in Langfuse; no managed prompt to detect", trace_lookup_id)
+        except Exception as exc:
+            logger.warning(
+                "Langfuse prompt-name lookup failed for run %s: %s", signal["run_id"], exc
+            )
+            # Non-fatal: apply-fix to a managed prompt just won't be offered
 
     failure_type = signal["failure_type"]
-    user_prompt = await build_explain_prompt(signal, trace)
-    prompt_name, prompt_version = _detect_langfuse_prompt(trace.get("observations", []))
 
     try:
         llm_result = await _call_llm(user_prompt, failure_type)
     except Exception as exc:
         logger.warning("LLM explain call failed: %s", exc)
         raise HTTPException(status_code=502, detail="Analysis unavailable. Try again.")
+
+    fix_category = classify_fix(signal)
+
+    if fix_category == "dunetrace_native":
+        suggested_policy = build_suggested_policy(signal)
+        return {
+            "signal_id": signal_id,
+            "source": source,
+            "root_cause": llm_result["root_cause"],
+            "fix_category": fix_category,
+            "suggested_policy": suggested_policy,
+            "fix_type": "policy",
+            "apply_blocked": False,  # a Policy is Dunetrace's own config — always directly applicable
+            "langfuse_prompt_name": prompt_name,
+            "langfuse_prompt_version": prompt_version,
+        }
 
     if failure_type in _CODE_CHANGE_TYPES:
         fix_type = "code_change"
@@ -289,12 +306,18 @@ async def explain_signal(
     else:
         fix_type = "prompt_addition"
 
-    apply_blocked = fix_type != "prompt_addition"
+    from api_svc.prompt_stores import get_connected_prompt_store
+
+    # prompt_addition fixes touch the customer's system prompt — Dunetrace can
+    # only push that change somewhere (a connected external store) or hand
+    # back a diff; it never has direct write access, unlike a Policy.
+    apply_blocked = fix_type != "prompt_addition" or get_connected_prompt_store() is None
 
     return {
         "signal_id": signal_id,
         "source": source,
         "root_cause": llm_result["root_cause"],
+        "fix_category": fix_category,
         "fix_content": llm_result["fix_content"],
         "fix_patch": llm_result["fix_patch"],
         "fix_type": fix_type,
@@ -318,12 +341,14 @@ class ApplyFixRequest(BaseModel):
 async def apply_fix(
     signal_id: int,
     body: ApplyFixRequest,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> Dict[str, Any]:
-    if not settings.langfuse_configured:
-        raise HTTPException(status_code=503, detail="Langfuse is not configured.")
-
-    signal = await get_signal_by_id(signal_id)
+    """Pushes a customer_code fix (system prompt edit) to whichever external
+    prompt store is connected — Langfuse today, others in future (see
+    prompt_stores.py). Not for dunetrace_native fixes — those are applied by
+    POSTing the explain response's suggested_policy to POST /v1/policies
+    directly; there's no external store involved."""
+    signal = await get_signal_by_id(org_id, signal_id)
     if signal is None:
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
 
@@ -337,21 +362,32 @@ async def apply_fix(
             ),
         )
 
-    from api_svc.langfuse_client import apply_langfuse_fix
+    from api_svc.prompt_stores import get_connected_prompt_store
+
+    store = get_connected_prompt_store()
+    if store is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No external prompt store connected. Connect Langfuse "
+                "(LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY) or copy the fix manually."
+            ),
+        )
 
     try:
-        result = await apply_langfuse_fix(body.langfuse_prompt_name, body.fix_content)
+        result = await store.push_fix(body.langfuse_prompt_name, body.fix_content)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
-        logger.warning("apply_langfuse_fix failed: %s", exc)
-        raise HTTPException(status_code=502, detail="Could not apply fix via Langfuse.")
+        logger.warning("push_fix failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Could not apply fix via the connected store.")
 
     fix_id = None
     try:
         fix_id = await record_fix(
+            org_id=org_id,
             signal_id=signal_id,
             run_id=signal["run_id"],
             fix_content=body.fix_content,
@@ -381,16 +417,17 @@ async def apply_fix(
 async def record_copy(
     signal_id: int,
     body: ApplyFixRequest,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> Dict[str, Any]:
     """Thin endpoint so clipboard-path fixes are also tracked in the fixes table."""
-    signal = await get_signal_by_id(signal_id)
+    signal = await get_signal_by_id(org_id, signal_id)
     if signal is None:
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
 
     fix_id = None
     try:
         fix_id = await record_fix(
+            org_id=org_id,
             signal_id=signal_id,
             run_id=signal["run_id"],
             fix_content=body.fix_content,
@@ -416,7 +453,7 @@ class OpenPRRequest(BaseModel):
 async def open_pr(
     signal_id: int,
     body: OpenPRRequest,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> Dict[str, Any]:
     if not settings.github_configured:
         raise HTTPException(
@@ -424,7 +461,7 @@ async def open_pr(
             detail="GitHub not configured. Add GITHUB_TOKEN and GITHUB_REPO to .env.",
         )
 
-    signal = await get_signal_by_id(signal_id)
+    signal = await get_signal_by_id(org_id, signal_id)
     if signal is None:
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
 
@@ -450,6 +487,7 @@ async def open_pr(
 
     try:
         await record_fix(
+            org_id=org_id,
             signal_id=signal_id,
             run_id=signal["run_id"],
             fix_content=body.fix_content,
@@ -469,14 +507,15 @@ async def open_pr(
 )
 async def fix_status(
     signal_id: int,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> Dict[str, Any]:
-    signal = await get_signal_by_id(signal_id)
+    signal = await get_signal_by_id(org_id, signal_id)
     if signal is None:
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
 
     try:
         status = await get_signal_fix_status(
+            org_id=org_id,
             agent_id=signal["agent_id"],
             failure_type=signal["failure_type"],
             signal_id=signal_id,

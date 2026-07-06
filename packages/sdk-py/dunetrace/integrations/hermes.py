@@ -29,7 +29,7 @@ Hook → Dunetrace event mapping:
     pre_llm_call      → run.started   (once per turn, before first LLM call)
     pre_api_request   → llm.called    (every LLM API call)
     post_api_request  → llm.responded (with actual token counts and latency)
-    pre_tool_call     → tool.called   (args are hashed inside _safe_emit)
+    pre_tool_call     → tool.called
     post_tool_call    → tool.responded
     on_session_end    → run.completed / run.errored
 
@@ -46,7 +46,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from dunetrace.models import AgentEvent, EventType, agent_version as calc_version, hash_content
+from dunetrace.models import AgentEvent, EventType, agent_version as calc_version
 
 if TYPE_CHECKING:
     from dunetrace import Dunetrace
@@ -139,7 +139,7 @@ class DunetraceHermesPlugin:
             ctx,
             step=0,
             payload={
-                "input_hash": hash_content(user_message) if user_message else "",
+                "input_text": user_message,
                 "model": model,
             },
         )
@@ -223,7 +223,7 @@ class DunetraceHermesPlugin:
             step=step,
             payload={
                 "tool_name": tool_name,
-                "args_hash": hash_content(args_str) if args_str else "",
+                "args": args_str,
             },
         )
 
@@ -253,7 +253,7 @@ class DunetraceHermesPlugin:
             "latency_ms": duration_ms or None,
         }
         if not ok and error_message:
-            payload["error_hash"] = hash_content(error_message)
+            payload["error"] = error_message
 
         self._safe_emit(EventType.TOOL_RESPONDED, ctx, payload=payload)
 

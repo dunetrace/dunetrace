@@ -17,7 +17,6 @@ from dunetrace.models import (
     RetrievalResult,
     RunState,
     ToolCall,
-    hash_content,
 )
 import logging
 from dunetrace.policies import PolicyViolation, build_metrics, compute_run_cost
@@ -37,7 +36,7 @@ class RunContext:
         agent_id: str,
         agent_version: str,
         available_tools: list,
-        input_text_hash: str,
+        input_text: str,
         parent_run_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> None:
@@ -54,7 +53,7 @@ class RunContext:
             agent_id=agent_id,
             agent_version=agent_version,
             available_tools=available_tools,
-            input_text_hash=input_text_hash,
+            input_text=input_text,
         )
 
         # Policy enforcement state
@@ -104,7 +103,7 @@ class RunContext:
         reasoning_tokens: int = 0,
         latency_ms: int = 0,
         finish_reason: str = "stop",
-        output_hash: str = "",
+        output: str = "",
         output_length: int = 0,
         prompt_tokens: int = 0,
         error: Optional[str] = None,
@@ -127,7 +126,7 @@ class RunContext:
             "completion_tokens": completion_tokens,
             "latency_ms": latency_ms,
             "finish_reason": finish_reason,
-            "output_hash": output_hash,
+            "output": output,
             "output_length": output_length,
         }
         if prompt_tokens:
@@ -135,17 +134,17 @@ class RunContext:
         if reasoning_tokens:
             payload["reasoning_tokens"] = reasoning_tokens
         if error:
-            payload["error_hash"] = hash_content(error)
+            payload["error"] = error
         self._emit(EventType.LLM_RESPONDED, payload, advance=False)
 
     # ── Tool hooks ────────────────────────────────────────────────────────────
 
     def tool_called(self, tool_name: str, args: Optional[Dict[str, Any]] = None) -> None:
-        args_hash = hash_content(str(args or {}))
+        args_repr = str(args or {})
         self.state.tool_calls.append(
             ToolCall(
                 tool_name=tool_name,
-                args_hash=args_hash,
+                args=args_repr,
                 step_index=self.step,
                 timestamp=time.time(),
             )
@@ -154,7 +153,7 @@ class RunContext:
             EventType.TOOL_CALLED,
             {
                 "tool_name": tool_name,
-                "args_hash": args_hash,
+                "args": args_repr,
             },
         )
 
@@ -166,14 +165,14 @@ class RunContext:
         latency_ms: int = 0,
         error: Optional[str] = None,
     ) -> None:
-        error_hash = hash_content(error) if (not success and error) else None
-        # Back-fill success and error_hash on the most recent matching ToolCall.
+        error_text = error if (not success and error) else None
+        # Back-fill success and error on the most recent matching ToolCall.
         # _error_count increments only when a ToolCall is actually found and back-filled
         # so the running total stays in sync with the full-scan baseline in build_metrics.
         for tc in reversed(self.state.tool_calls):
             if tc.tool_name == tool_name and tc.success is None:
                 tc.success = success
-                tc.error_hash = error_hash
+                tc.error = error_text
                 if not success:
                     self._error_count += 1
                 break
@@ -183,18 +182,18 @@ class RunContext:
             "output_length": output_length,
             "latency_ms": latency_ms,
         }
-        if error_hash:
-            payload["error_hash"] = error_hash
+        if error_text:
+            payload["error"] = error_text
         self._emit(EventType.TOOL_RESPONDED, payload, advance=False)
 
     # ── Retrieval hooks (RAG) ─────────────────────────────────────────────────
 
-    def retrieval_called(self, index_name: str, query_hash: str = "") -> None:
+    def retrieval_called(self, index_name: str, query: str = "") -> None:
         self._emit(
             EventType.RETRIEVAL_CALLED,
             {
                 "index_name": index_name,
-                "query_hash": query_hash,
+                "query": query,
             },
         )
 

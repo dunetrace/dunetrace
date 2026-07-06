@@ -6,7 +6,7 @@ This guide covers adding Dunetrace monitoring to a LlamaIndex query engine or RA
 
 ## How It Works
 
-LlamaIndex query engines return a response object that includes `source_nodes`. Those source nodes are `NodeWithScore` values, so Dunetrace can record both the number of retrieved nodes and the highest retrieval score without sending raw document text.
+LlamaIndex query engines return a response object that includes `source_nodes`. Those source nodes are `NodeWithScore` values, so Dunetrace can record both the number of retrieved nodes and the highest retrieval score.
 
 | LlamaIndex step | Dunetrace event |
 |---|---|
@@ -16,7 +16,7 @@ LlamaIndex query engines return a response object that includes `source_nodes`. 
 | Agent returns an answer | `RUN_COMPLETED` |
 | Any unhandled exception | `RUN_ERRORED` |
 
-Dunetrace only receives structural metadata such as model name, latency, retrieval count, and top score. Hash the query before passing it as `query_hash`; do not send raw prompts, retrieved documents, or generated answers.
+Dunetrace records structural metadata such as model name, latency, retrieval count, and top score, plus the raw query text passed to `retrieval_called(query=...)`. Retrieved document content and the generated answer are not captured by this integration (see "What Is and Isn't Captured" below) — add it yourself if you need it.
 
 ---
 
@@ -68,14 +68,9 @@ atexit.register(dt.shutdown)
 Use `@dt.trace` on the agent entry point, then emit `retrieval_called()` before the query and `retrieval_responded()` after the response returns.
 
 ```python
-import hashlib
 import time
 
 from dunetrace import get_current_run
-
-
-def query_hash(query: str) -> str:
-    return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
 
 def source_nodes(response) -> list:
@@ -93,7 +88,7 @@ def answer_question(question: str) -> str:
     index_name = "llamaindex-vector-store"
 
     if run:
-        run.retrieval_called(index_name=index_name, query_hash=query_hash(question))
+        run.retrieval_called(index_name=index_name, query=question)
 
     started = time.perf_counter()
     response = query_engine.query(question)
@@ -119,16 +114,11 @@ def answer_question(question: str) -> str:
 
 ```python
 import atexit
-import hashlib
 import os
 import time
 
 from dunetrace import Dunetrace, get_current_run
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
-
-
-def query_hash(query: str) -> str:
-    return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
 
 def source_nodes(response) -> list:
@@ -157,7 +147,7 @@ def answer_question(question: str) -> str:
     index_name = "llamaindex-vector-store"
 
     if run:
-        run.retrieval_called(index_name=index_name, query_hash=query_hash(question))
+        run.retrieval_called(index_name=index_name, query=question)
 
     started = time.perf_counter()
     response = query_engine.query(question)
@@ -191,7 +181,7 @@ async def answer_question_async(question: str) -> str:
     index_name = "llamaindex-vector-store"
 
     if run:
-        run.retrieval_called(index_name=index_name, query_hash=query_hash(question))
+        run.retrieval_called(index_name=index_name, query=question)
 
     started = time.perf_counter()
     response = await query_engine.aquery(question)
@@ -233,13 +223,13 @@ If the query engine returns no nodes, pass `result_count=0`. If your retriever d
 
 **Captured:**
 - Run boundaries and total latency
+- Raw query text (passed explicitly to `retrieval_called(query=...)`)
 - Retrieval result count
 - Top retrieval score when LlamaIndex provides one
 - Retrieval latency
 - Model and tool names declared in `@dt.trace`
 
-**Not captured:**
-- Raw user queries
+**Not captured by this integration (not wired up, not a privacy restriction):**
 - Retrieved document text
 - LlamaIndex response text
 - Node metadata or embeddings

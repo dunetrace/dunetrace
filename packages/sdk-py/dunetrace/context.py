@@ -16,6 +16,15 @@ if TYPE_CHECKING:
 
 _current_run: ContextVar[Optional["RunContext"]] = ContextVar("dunetrace_current_run", default=None)
 
+# Set to True while a framework-level integration (LangChain, CrewAI, ...) is
+# driving a call that may itself pass through an SDK-level auto-instrumentation
+# patch (openai/anthropic/httpx/requests) further down the call stack. Those
+# patches check this flag and skip emitting their own event when it's set —
+# the framework-level integration already emits an equivalent, richer event
+# for the same logical call — so a single LangChain LLM call backed by
+# ChatOpenAI doesn't get counted twice.
+_in_framework_call: ContextVar[bool] = ContextVar("dunetrace_in_framework_call", default=False)
+
 
 def get_current_run() -> "Optional[RunContext]":
     """

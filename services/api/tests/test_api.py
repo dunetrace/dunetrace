@@ -258,7 +258,7 @@ class TestConfig(unittest.TestCase):
 
 
 class TestTrustedAuth(unittest.IsolatedAsyncioTestCase):
-    """require_customer's trusted-upstream bypass (INTERNAL_TOKEN + x-internal-token)."""
+    """require_org's trusted-upstream bypass (INTERNAL_TOKEN + x-internal-token)."""
 
     def setUp(self):
         self._original_token = settings.INTERNAL_TOKEN
@@ -293,35 +293,43 @@ class TestTrustedAuth(unittest.IsolatedAsyncioTestCase):
         req = self._request({"x-internal-token": "secret"})
         self.assertTrue(is_trusted(req))
 
-    async def test_require_customer_trusted_path_returns_header_customer_id(self):
-        from api_svc.auth import require_customer
+    async def test_require_org_trusted_path_returns_header_org_id(self):
+        from api_svc.auth import require_org
+
+        settings.INTERNAL_TOKEN = "secret"
+        req = self._request({"x-internal-token": "secret", "x-org-id": "org_123"})
+        result = await require_org(req, authorization=None)
+        self.assertEqual(result, "org_123")
+
+    async def test_require_org_trusted_path_accepts_legacy_customer_id_fallback(self):
+        from api_svc.auth import require_org
 
         settings.INTERNAL_TOKEN = "secret"
         req = self._request({"x-internal-token": "secret", "x-customer-id": "org_123"})
-        result = await require_customer(req, authorization=None)
+        result = await require_org(req, authorization=None)
         self.assertEqual(result, "org_123")
 
-    async def test_require_customer_trusted_path_without_customer_id_is_401(self):
+    async def test_require_org_trusted_path_without_org_id_is_401(self):
         from fastapi import HTTPException
 
-        from api_svc.auth import require_customer
+        from api_svc.auth import require_org
 
         settings.INTERNAL_TOKEN = "secret"
         req = self._request({"x-internal-token": "secret"})
         with self.assertRaises(HTTPException) as ctx:
-            await require_customer(req, authorization=None)
+            await require_org(req, authorization=None)
         self.assertEqual(ctx.exception.status_code, 401)
 
-    async def test_require_customer_untrusted_request_falls_back_to_dev_mode(self):
-        from api_svc.auth import require_customer
+    async def test_require_org_untrusted_request_falls_back_to_dev_mode(self):
+        from api_svc.auth import require_org
 
         settings.INTERNAL_TOKEN = ""
         original_auth_mode = settings.AUTH_MODE
         settings.AUTH_MODE = "dev"
         try:
             req = self._request({})
-            result = await require_customer(req, authorization=None)
-            self.assertEqual(result, "dev_customer")
+            result = await require_org(req, authorization=None)
+            self.assertEqual(result, "default")
         finally:
             settings.AUTH_MODE = original_auth_mode
 
@@ -330,11 +338,11 @@ class TestTrustedAuth(unittest.IsolatedAsyncioTestCase):
 
 
 class TestDbLayer(unittest.IsolatedAsyncioTestCase):
-    async def test_verify_api_key_dev_mode_returns_dev_customer(self):
+    async def test_verify_api_key_dev_mode_returns_default_org(self):
         from api_svc.db.queries import verify_api_key
 
         result = await verify_api_key("any_key_at_all")
-        self.assertEqual(result, "dev_customer")
+        self.assertEqual(result, "default")
 
     async def test_check_db_no_pool_returns_no_pool(self):
         import api_svc.db.queries as q
@@ -360,7 +368,7 @@ class TestDbLayer(unittest.IsolatedAsyncioTestCase):
 
         original_pool = q._pool
         q._pool = None
-        rows, total = await q.list_runs("agent-x", 0, 20)
+        rows, total = await q.list_runs("org-1", "agent-x", 0, 20)
         self.assertEqual(rows, [])
         self.assertEqual(total, 0)
         q._pool = original_pool
@@ -370,7 +378,7 @@ class TestDbLayer(unittest.IsolatedAsyncioTestCase):
 
         original_pool = q._pool
         q._pool = None
-        result = await q.get_run_detail("run-xyz")
+        result = await q.get_run_detail("org-1", "run-xyz")
         self.assertIsNone(result)
         q._pool = original_pool
 
@@ -379,7 +387,7 @@ class TestDbLayer(unittest.IsolatedAsyncioTestCase):
 
         original_pool = q._pool
         q._pool = None
-        rows, total = await q.list_signals("agent-x", 0, 20)
+        rows, total = await q.list_signals("org-1", "agent-x", 0, 20)
         self.assertEqual(rows, [])
         self.assertEqual(total, 0)
         q._pool = original_pool

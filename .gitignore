@@ -81,3 +81,6 @@ node_modules/
 # npm
 *.tgz
 .npm/
+
+# Local scratch notes — not part of the tracked repo
+BACKLOG.md

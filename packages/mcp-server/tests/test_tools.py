@@ -62,7 +62,7 @@ SIGNAL_LIST = {
                 "first_step": 2,
                 "last_step": 7,
                 "args_identical": True,
-                "args_hashes": ["aabbccdd"] * 6,
+                "args": ["aabbccdd"] * 6,
             },
             "alerted": True,
             "shadow": False,
@@ -573,7 +573,7 @@ class TestGetSignalDetail(unittest.TestCase):
 
     def test_shows_full_evidence(self):
         out = srv.get_signal_detail(42, "my-agent")
-        self.assertIn("Evidence (hashed/structural data):", out)
+        self.assertIn("Evidence:", out)
         self.assertIn("args_identical", out)
 
     def test_shows_suggested_fixes(self):
@@ -614,7 +614,7 @@ class TestGetSignalDetail(unittest.TestCase):
     def test_evidence_list_truncated(self):
         big_evidence = {
             **SIGNAL_LIST["signals"][0]["evidence"],
-            "args_hashes": ["x"] * 20,
+            "args": ["x"] * 20,
         }
         sig = {**SIGNAL_LIST["signals"][0], "evidence": big_evidence}
         with patch(

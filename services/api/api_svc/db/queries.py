@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS fixes (
     langfuse_version      INTEGER,
     applied_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- org_id is nullable here: this table is also created by ingest_svc, which owns the
+-- org_id backfill + NOT NULL migration (services/ingest/ingest_svc/db/postgres.py).
+-- Whichever service starts first creates the base table; the other's ALTER ... ADD
+-- COLUMN IF NOT EXISTS / backfill is a no-op or idempotent catch-up.
+ALTER TABLE fixes ADD COLUMN IF NOT EXISTS org_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_fixes_signal_id ON fixes(signal_id);
 CREATE INDEX IF NOT EXISTS idx_fixes_run_id    ON fixes(run_id, applied_at DESC);
 """
@@ -60,6 +65,8 @@ CREATE TABLE IF NOT EXISTS policies (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- See fixes.org_id comment above — same cross-service "whichever wins" ownership.
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS org_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
 """
 
@@ -75,6 +82,18 @@ CREATE TABLE IF NOT EXISTS policy_audit_log (
     after       JSONB,
     changed_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'policy_audit_log' AND column_name = 'customer_id'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'policy_audit_log' AND column_name = 'org_id'
+    ) THEN
+        ALTER TABLE policy_audit_log RENAME COLUMN customer_id TO org_id;
+    END IF;
+END $$;
+ALTER TABLE policy_audit_log ADD COLUMN IF NOT EXISTS org_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_policy_audit_policy_id  ON policy_audit_log(policy_id);
 CREATE INDEX IF NOT EXISTS idx_policy_audit_changed_at ON policy_audit_log(changed_at DESC);
 """
@@ -91,16 +110,41 @@ CREATE TABLE IF NOT EXISTS agent_detector_overrides (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (agent_id, failure_type)
 );
+-- Widen the key to (org_id, agent_id, failure_type) — agent_id is not guaranteed
+-- unique across orgs, so the 2-key PK could let one org's FP-marking silence another
+-- org's identically-named agent's detector. Same fix as alerts_svc's alert_dedup.
+ALTER TABLE agent_detector_overrides ADD COLUMN IF NOT EXISTS org_id TEXT;
+UPDATE agent_detector_overrides SET org_id = 'default' WHERE org_id IS NULL;
+ALTER TABLE agent_detector_overrides ALTER COLUMN org_id SET NOT NULL;
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'agent_detector_overrides_pkey'
+    ) THEN
+        ALTER TABLE agent_detector_overrides DROP CONSTRAINT agent_detector_overrides_pkey;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'ado_org_agent_failure_type_key'
+    ) THEN
+        ALTER TABLE agent_detector_overrides ADD CONSTRAINT ado_org_agent_failure_type_key
+            PRIMARY KEY (org_id, agent_id, failure_type);
+    END IF;
+END $$;
 """
 
 _KEYS_DDL = """
-CREATE TABLE IF NOT EXISTS companies (
+-- organizations/org_id replace companies/customer_id (see
+-- services/ingest/ingest_svc/db/postgres.py for the rename migration that owns
+-- this transition). This DDL only needs to land the NEW shape idempotently —
+-- whichever of ingest_svc/api_svc starts first creates it.
+CREATE TABLE IF NOT EXISTS organizations (
     id          TEXT PRIMARY KEY,
     name        TEXT        NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+INSERT INTO organizations (id, name) VALUES ('default', 'Default Organization')
+    ON CONFLICT (id) DO NOTHING;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS id BIGSERIAL;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE SET NULL;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS org_id TEXT;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_rpm INTEGER NOT NULL DEFAULT 600;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_id ON api_keys(id);
 """
@@ -117,6 +161,9 @@ CREATE TABLE IF NOT EXISTS custom_detectors (
     total_runs        INTEGER      NOT NULL DEFAULT 0,
     shadow_fire_count INTEGER      NOT NULL DEFAULT 0
 );
+-- org_id ownership: see detector_svc/db.py, which also creates this table and
+-- owns the org_id backfill + NOT NULL migration for it.
+ALTER TABLE custom_detectors ADD COLUMN IF NOT EXISTS org_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_custom_detectors_agent ON custom_detectors(agent_id, status);
 
 CREATE TABLE IF NOT EXISTS custom_detector_results (
@@ -127,6 +174,7 @@ CREATE TABLE IF NOT EXISTS custom_detector_results (
     fired        BOOLEAN      NOT NULL,
     evaluated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+ALTER TABLE custom_detector_results ADD COLUMN IF NOT EXISTS org_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
 """
@@ -176,36 +224,34 @@ async def check_db() -> str:
 
 
 async def verify_api_key(key: str) -> Optional[str]:
-    """Returns customer_id if valid, None otherwise. Dev mode accepts anything."""
+    """Returns org_id if valid, None otherwise. Dev mode accepts anything."""
     if settings.is_dev:
-        return "dev_customer"
+        return "default"
     if not _pool:
         return None
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT customer_id FROM api_keys WHERE key = $1 AND active = TRUE",
+            "SELECT org_id FROM api_keys WHERE key = $1 AND active = TRUE",
             key,
         )
-    return row["customer_id"] if row else None
+    return row["org_id"] if row else None
 
 
 # ── Agents ────────────────────────────────────────────────────────────────────
 
 
-async def list_agents(customer_id: str, offset: int, limit: int) -> tuple[list, int]:
-    """Returns (rows, total_count). Each row has: agent_id, last_seen, run_count, signal_count, critical_count, high_count."""
+async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
+    """Returns (rows, total_count). Each row has: agent_id, last_seen, run_count, signal_count, critical_count, high_count.
+
+    Agents are discovered dynamically from events.org_id — an org-scoped key isn't
+    1:1 with a single agent_id, so there's no api_keys join here at all."""
     if not _pool:
         return [], 0
 
     async with _pool.acquire() as conn:
         total = await conn.fetchval(
-            """
-            SELECT COUNT(DISTINCT agent_id) FROM events
-            WHERE ($1 = 'dev_customer' OR agent_id IN (
-                SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
-            ))
-            """,
-            customer_id,
+            "SELECT COUNT(DISTINCT agent_id) FROM events WHERE org_id = $1",
+            org_id,
         )
 
         rows = await conn.fetch(
@@ -216,9 +262,7 @@ async def list_agents(customer_id: str, offset: int, limit: int) -> tuple[list, 
                     MAX(received_at)          AS last_seen,
                     COUNT(DISTINCT run_id)    AS run_count
                 FROM events
-                WHERE ($1 = 'dev_customer' OR agent_id IN (
-                    SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
-                ))
+                WHERE org_id = $1
                 GROUP BY agent_id
             ),
             signal_agg AS (
@@ -228,9 +272,7 @@ async def list_agents(customer_id: str, offset: int, limit: int) -> tuple[list, 
                     COUNT(*) FILTER (WHERE shadow = FALSE AND severity = 'CRITICAL') AS critical_count,
                     COUNT(*) FILTER (WHERE shadow = FALSE AND severity = 'HIGH')     AS high_count
                 FROM failure_signals
-                WHERE ($1 = 'dev_customer' OR agent_id IN (
-                    SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
-                ))
+                WHERE org_id = $1
                 GROUP BY agent_id
             )
             SELECT
@@ -245,7 +287,7 @@ async def list_agents(customer_id: str, offset: int, limit: int) -> tuple[list, 
             ORDER BY e.last_seen DESC
             LIMIT $2 OFFSET $3
             """,
-            customer_id,
+            org_id,
             limit,
             offset,
         )
@@ -256,7 +298,7 @@ async def list_agents(customer_id: str, offset: int, limit: int) -> tuple[list, 
 # ── Failure type breakdown ────────────────────────────────────────────────────
 
 
-async def agent_failure_type_counts(customer_id: str) -> dict:
+async def agent_failure_type_counts(org_id: str) -> dict:
     """Live signal counts per agent broken down by failure type: { agent_id: { "TOOL_LOOP": 3, ... } }."""
     if not _pool:
         return {}
@@ -269,12 +311,10 @@ async def agent_failure_type_counts(customer_id: str) -> dict:
             SELECT agent_id, failure_type, COUNT(*) AS cnt
             FROM failure_signals
             WHERE shadow = FALSE
-              AND ($1 = 'dev_customer' OR agent_id IN (
-                  SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
-              ))
+              AND org_id = $1
             GROUP BY agent_id, failure_type
             """,
-            customer_id,
+            org_id,
         )
 
     result: dict = defaultdict(dict)
@@ -286,7 +326,7 @@ async def agent_failure_type_counts(customer_id: str) -> dict:
 # ── Sparklines ────────────────────────────────────────────────────────────────
 
 
-async def agent_signal_sparklines(customer_id: str) -> dict:
+async def agent_signal_sparklines(org_id: str) -> dict:
     """7-day daily live signal counts per agent, oldest→newest: { agent_id: [day-6, ..., today] }."""
     if not _pool:
         return {}
@@ -304,13 +344,11 @@ async def agent_signal_sparklines(customer_id: str) -> dict:
             FROM failure_signals
             WHERE shadow = FALSE
               AND detected_at >= NOW() - INTERVAL '7 days'
-              AND ($1 = 'dev_customer' OR agent_id IN (
-                  SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
-              ))
+              AND org_id = $1
             GROUP BY agent_id, day
             ORDER BY agent_id, day
             """,
-            customer_id,
+            org_id,
         )
 
     # Build map: agent_id → {date: count}
@@ -334,12 +372,13 @@ async def agent_signal_sparklines(customer_id: str) -> dict:
 
 
 async def list_runs(
+    org_id: str,
     agent_id: str,
     offset: int,
     limit: int,
     has_signals: Optional[bool] = None,
 ) -> tuple[list, int]:
-    """List runs for an agent. Optionally filter to only runs with signals."""
+    """List runs for an agent within org_id. Optionally filter to only runs with signals."""
     if not _pool:
         return [], 0
 
@@ -353,64 +392,71 @@ async def list_runs(
         total = await conn.fetchval(
             f"""
             SELECT COUNT(*) FROM processed_runs pr
-            WHERE pr.agent_id = $1
+            WHERE pr.org_id = $1 AND pr.agent_id = $2
             {signal_filter}
             """,
+            org_id,
             agent_id,
         )
 
         rows = await conn.fetch(
             f"""
+            WITH page AS (
+                SELECT pr.run_id, pr.agent_id, pr.agent_version,
+                       pr.trigger AS exit_reason, pr.processed_at
+                FROM processed_runs pr
+                WHERE pr.org_id = $1 AND pr.agent_id = $2
+                {signal_filter}
+                ORDER BY pr.processed_at DESC
+                LIMIT $3 OFFSET $4
+            ),
+            run_events AS (
+                -- Single pass over events for just this page's runs, instead of
+                -- re-scanning events per-row (was 6 correlated subqueries/row).
+                SELECT
+                    e.run_id,
+                    MIN(e.timestamp) FILTER (WHERE e.event_type = 'run.started') AS started_at,
+                    MIN(e.timestamp) FILTER (
+                        WHERE e.event_type IN ('run.completed', 'run.errored')
+                    )                                                            AS completed_at,
+                    MAX(e.step_index)                                           AS step_count,
+                    SUM(
+                        CASE WHEN e.event_type IN ('llm.called', 'llm.responded')
+                             THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
+                             ELSE 0 END
+                    )                                                            AS prompt_tokens,
+                    SUM(
+                        CASE WHEN e.event_type = 'llm.responded'
+                                  AND e.payload->>'completion_tokens' IS NOT NULL
+                             THEN COALESCE((e.payload->>'completion_tokens')::integer, 0)
+                             ELSE 0 END
+                    )                                                            AS completion_tokens,
+                    (ARRAY_AGG(e.payload->>'model')
+                        FILTER (WHERE e.event_type = 'llm.called'
+                                       AND e.payload->>'model' IS NOT NULL))[1]  AS model
+                FROM events e
+                WHERE e.run_id IN (SELECT run_id FROM page)
+                GROUP BY e.run_id
+            ),
+            run_signals AS (
+                SELECT s.run_id, COUNT(*) AS signal_count
+                FROM failure_signals s
+                WHERE s.run_id IN (SELECT run_id FROM page) AND s.shadow = FALSE
+                GROUP BY s.run_id
+            )
             SELECT
-                pr.run_id,
-                pr.agent_id,
-                pr.agent_version,
-                pr.trigger                                              AS exit_reason,
-                pr.processed_at,
-                -- started_at from SDK timestamp on run.started event
-                (SELECT e.timestamp FROM events e
-                 WHERE e.run_id = pr.run_id AND e.event_type = 'run.started'
-                 LIMIT 1) AS started_at,
-                -- completed_at from SDK timestamp on terminal event
-                (SELECT e.timestamp FROM events e
-                 WHERE e.run_id = pr.run_id AND e.event_type IN ('run.completed', 'run.errored')
-                 LIMIT 1) AS completed_at,
-                -- step_count
-                (SELECT MAX(e.step_index) FROM events e WHERE e.run_id = pr.run_id) AS step_count,
-                -- total tokens: prompt_tokens from llm.called (direct SDK) or llm.responded (LangChain)
-                -- plus completion_tokens always from llm.responded — sum both to cover all SDK paths
-                (SELECT SUM(
-                    COALESCE((e.payload->>'prompt_tokens')::integer, 0) +
-                    COALESCE((e.payload->>'completion_tokens')::integer, 0)
-                 ) FROM events e
-                 WHERE e.run_id = pr.run_id
-                   AND e.event_type IN ('llm.called', 'llm.responded')
-                )                                                       AS total_tokens,
-                -- prompt tokens only (for cost split) — covers both SDK paths
-                (SELECT SUM(COALESCE((e.payload->>'prompt_tokens')::integer, 0))
-                 FROM events e
-                 WHERE e.run_id = pr.run_id
-                   AND e.event_type IN ('llm.called', 'llm.responded')
-                )                                                       AS prompt_tokens,
-                -- completion tokens only — always in llm.responded
-                (SELECT SUM(COALESCE((e.payload->>'completion_tokens')::integer, 0))
-                 FROM events e
-                 WHERE e.run_id = pr.run_id AND e.event_type = 'llm.responded'
-                   AND e.payload->>'completion_tokens' IS NOT NULL
-                )                                                       AS completion_tokens,
-                -- model from first llm.called event
-                (SELECT e.payload->>'model' FROM events e
-                 WHERE e.run_id = pr.run_id AND e.event_type = 'llm.called'
-                 LIMIT 1)                                               AS model,
-                -- live signal count
-                (SELECT COUNT(*) FROM failure_signals s
-                 WHERE s.run_id = pr.run_id AND s.shadow = FALSE)      AS signal_count
-            FROM processed_runs pr
-            WHERE pr.agent_id = $1
-            {signal_filter}
-            ORDER BY pr.processed_at DESC
-            LIMIT $2 OFFSET $3
+                p.run_id, p.agent_id, p.agent_version, p.exit_reason, p.processed_at,
+                re.started_at, re.completed_at, re.step_count,
+                (COALESCE(re.prompt_tokens, 0) + COALESCE(re.completion_tokens, 0))
+                    AS total_tokens,
+                re.prompt_tokens, re.completion_tokens, re.model,
+                COALESCE(rs.signal_count, 0) AS signal_count
+            FROM page p
+            LEFT JOIN run_events  re ON re.run_id = p.run_id
+            LEFT JOIN run_signals rs ON rs.run_id = p.run_id
+            ORDER BY p.processed_at DESC
             """,
+            org_id,
             agent_id,
             limit,
             offset,
@@ -430,8 +476,9 @@ async def list_runs(
     return results, total or 0
 
 
-async def get_run_detail(run_id: str, include_shadow: bool = False) -> Optional[dict]:
-    """Full run detail: metadata + events + signals with explanations."""
+async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False) -> Optional[dict]:
+    """Full run detail: metadata + events + signals with explanations.
+    Returns None if the run doesn't exist OR belongs to a different org."""
     if not _pool:
         return None
 
@@ -439,8 +486,10 @@ async def get_run_detail(run_id: str, include_shadow: bool = False) -> Optional[
 
     async with _pool.acquire() as conn:
         pr = await conn.fetchrow(
-            "SELECT run_id, agent_id, agent_version, trigger, processed_at FROM processed_runs WHERE run_id = $1",
+            "SELECT run_id, agent_id, agent_version, trigger, processed_at "
+            "FROM processed_runs WHERE run_id = $1 AND org_id = $2",
             run_id,
+            org_id,
         )
         if not pr:
             return None
@@ -581,8 +630,8 @@ async def get_run_detail(run_id: str, include_shadow: bool = False) -> Optional[
 # ── Signals ───────────────────────────────────────────────────────────────────
 
 
-async def get_signal_by_id(signal_id: int) -> Optional[dict]:
-    """Fetch a single signal row by primary key. Returns None if not found."""
+async def get_signal_by_id(org_id: str, signal_id: int) -> Optional[dict]:
+    """Fetch a single signal row by primary key. Returns None if not found or owned by a different org."""
     if not _pool:
         return None
 
@@ -595,9 +644,10 @@ async def get_signal_by_id(signal_id: int) -> Optional[dict]:
                    step_index, confidence, detected_at, evidence, alerted, shadow,
                    COALESCE(co_signal_count, 0) AS co_signal_count
             FROM failure_signals
-            WHERE id = $1
+            WHERE id = $1 AND org_id = $2
             """,
             signal_id,
+            org_id,
         )
 
     if row is None:
@@ -654,6 +704,7 @@ async def get_signal_by_id(signal_id: int) -> Optional[dict]:
 
 
 async def list_signals(
+    org_id: str,
     agent_id: str,
     offset: int,
     limit: int,
@@ -667,10 +718,10 @@ async def list_signals(
 
     import json
 
-    where = ["agent_id = $1"]
+    where = ["org_id = $1", "agent_id = $2"]
     if not include_shadow:
         where.append("shadow = FALSE")
-    params: list = [agent_id]
+    params: list = [org_id, agent_id]
 
     if severity:
         params.append(severity.upper())
@@ -762,6 +813,7 @@ async def list_signals(
 
 
 async def export_signals(
+    org_id: str,
     agent_id: str,
     severity: Optional[str] = None,
     failure_type: Optional[str] = None,
@@ -785,8 +837,8 @@ async def export_signals(
 
     import json
 
-    where = ["agent_id = $1"]
-    params: list = [agent_id]
+    where = ["org_id = $1", "agent_id = $2"]
+    params: list = [org_id, agent_id]
 
     if not include_shadow:
         where.append("shadow = FALSE")
@@ -875,19 +927,23 @@ async def export_signals(
 # ── Insights ───────────────────────────────────────────────────────────────────
 
 
-async def agent_input_hash_patterns(agent_id: str) -> list:
-    """Input hashes that consistently produce specific failure types. Only hashes seen ≥2 times so a single bad run doesn't dominate. Returns: [{input_hash, failure_type, triggered_count, total_runs, rate}]."""
+async def agent_input_hash_patterns(org_id: str, agent_id: str) -> list:
+    """Input texts that consistently produce specific failure types, grouped by an
+    MD5 digest of the raw input (computed here, not transmitted) so identical inputs
+    dedupe without the response carrying raw text. Only hashes seen ≥2 times so a
+    single bad run doesn't dominate. Returns: [{input_hash, failure_type, triggered_count, total_runs, rate}]."""
     if not _pool:
         return []
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
             WITH run_inputs AS (
-                SELECT e.run_id, e.payload->>'input_hash' AS input_hash
+                SELECT e.run_id, md5(e.payload->>'input_text') AS input_hash
                 FROM events e
-                WHERE e.agent_id = $1
+                WHERE e.org_id = $1
+                  AND e.agent_id = $2
                   AND e.event_type = 'run.started'
-                  AND e.payload->>'input_hash' IS NOT NULL
+                  AND e.payload->>'input_text' IS NOT NULL
             ),
             hash_totals AS (
                 SELECT input_hash, COUNT(DISTINCT run_id) AS total_runs
@@ -900,7 +956,7 @@ async def agent_input_hash_patterns(agent_id: str) -> list:
                        COUNT(DISTINCT fs.run_id) AS triggered_count
                 FROM run_inputs ri
                 JOIN failure_signals fs ON fs.run_id = ri.run_id
-                WHERE fs.shadow = FALSE AND fs.agent_id = $1
+                WHERE fs.shadow = FALSE AND fs.org_id = $1 AND fs.agent_id = $2
                 GROUP BY ri.input_hash, fs.failure_type
             )
             SELECT
@@ -914,12 +970,13 @@ async def agent_input_hash_patterns(agent_id: str) -> list:
             ORDER BY rate DESC, triggered_count DESC
             LIMIT 20
             """,
+            org_id,
             agent_id,
         )
     return [dict(r) for r in rows]
 
 
-async def agent_signal_recurrence(agent_id: str) -> list:
+async def agent_signal_recurrence(org_id: str, agent_id: str) -> list:
     """Signal counts by failure_type × agent_version × day for the last 30 days. Returns: [{failure_type, agent_version, day (ISO str), count}]."""
     if not _pool:
         return []
@@ -932,19 +989,21 @@ async def agent_signal_recurrence(agent_id: str) -> list:
                 DATE_TRUNC('day', detected_at AT TIME ZONE 'UTC')::date AS day,
                 COUNT(*) AS count
             FROM failure_signals
-            WHERE agent_id = $1
+            WHERE org_id = $1
+              AND agent_id = $2
               AND shadow = FALSE
               AND detected_at >= NOW() - INTERVAL '30 days'
             GROUP BY failure_type, agent_version, day
             ORDER BY day DESC, failure_type, agent_version
             LIMIT 300
             """,
+            org_id,
             agent_id,
         )
     return [{**dict(r), "day": str(r["day"])} for r in rows]
 
 
-async def agent_version_stats(agent_id: str) -> list:
+async def agent_version_stats(org_id: str, agent_id: str) -> list:
     """Signal rate per version (runs_with_signals / total_runs), newest first. Returns: [{agent_version, run_count, runs_with_signals, signal_count, signal_rate, first_seen, last_seen}]."""
     if not _pool:
         return []
@@ -971,12 +1030,14 @@ async def agent_version_stats(agent_id: str) -> list:
                 MAX(pr.processed_at) AS last_seen
             FROM processed_runs pr
             LEFT JOIN failure_signals fs
-                ON fs.run_id = pr.run_id AND fs.agent_id = pr.agent_id AND fs.shadow = FALSE
-            WHERE pr.agent_id = $1
+                ON fs.run_id = pr.run_id AND fs.org_id = pr.org_id
+                AND fs.agent_id = pr.agent_id AND fs.shadow = FALSE
+            WHERE pr.org_id = $1 AND pr.agent_id = $2
             GROUP BY pr.agent_version
             ORDER BY MAX(pr.processed_at) DESC
             LIMIT 10
             """,
+            org_id,
             agent_id,
         )
     return [
@@ -993,7 +1054,7 @@ async def agent_version_stats(agent_id: str) -> list:
     ]
 
 
-async def agent_time_to_first_tool(agent_id: str) -> dict:
+async def agent_time_to_first_tool(org_id: str, agent_id: str) -> dict:
     """Steps before the first tool call — overall P25/P50/P75 plus a 14-day daily trend. Returns: {p25, p50, p75, avg_steps, runs_with_tool, total_runs, daily_trend}."""
     if not _pool:
         return {
@@ -1011,7 +1072,7 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
             WITH first_tool AS (
                 SELECT run_id, MIN(step_index) AS first_tool_step
                 FROM events
-                WHERE agent_id = $1 AND event_type = 'tool.called'
+                WHERE org_id = $1 AND agent_id = $2 AND event_type = 'tool.called'
                 GROUP BY run_id
             )
             SELECT
@@ -1023,8 +1084,9 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
                 ROUND(AVG(ft.first_tool_step), 1)                                     AS avg_steps
             FROM processed_runs pr
             LEFT JOIN first_tool ft ON ft.run_id = pr.run_id
-            WHERE pr.agent_id = $1
+            WHERE pr.org_id = $1 AND pr.agent_id = $2
             """,
+            org_id,
             agent_id,
         )
         daily = await conn.fetch(
@@ -1032,7 +1094,7 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
             WITH first_tool AS (
                 SELECT run_id, MIN(step_index) AS first_tool_step
                 FROM events
-                WHERE agent_id = $1 AND event_type = 'tool.called'
+                WHERE org_id = $1 AND agent_id = $2 AND event_type = 'tool.called'
                 GROUP BY run_id
             )
             SELECT
@@ -1042,11 +1104,12 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
                 ROUND(AVG(ft.first_tool_step), 1) AS avg_first_tool_step
             FROM processed_runs pr
             LEFT JOIN first_tool ft ON ft.run_id = pr.run_id
-            WHERE pr.agent_id = $1
+            WHERE pr.org_id = $1 AND pr.agent_id = $2
               AND pr.processed_at >= NOW() - INTERVAL '14 days'
             GROUP BY day
             ORDER BY day
             """,
+            org_id,
             agent_id,
         )
     return {
@@ -1072,7 +1135,7 @@ async def agent_time_to_first_tool(agent_id: str) -> dict:
     }
 
 
-async def agent_hourly_pattern(agent_id: str) -> list:
+async def agent_hourly_pattern(org_id: str, agent_id: str) -> list:
     """Signal rate by UTC hour of day over the last 30 days. Sparse — only hours with ≥1 run are returned; the UI fills gaps. Returns: [{hour_of_day, run_count, signal_count, signal_rate}]."""
     if not _pool:
         return []
@@ -1090,12 +1153,14 @@ async def agent_hourly_pattern(agent_id: str) -> list:
                 )                                                           AS signal_rate
             FROM processed_runs pr
             LEFT JOIN failure_signals fs
-                ON fs.run_id = pr.run_id AND fs.agent_id = pr.agent_id AND fs.shadow = FALSE
-            WHERE pr.agent_id = $1
+                ON fs.run_id = pr.run_id AND fs.org_id = pr.org_id
+                AND fs.agent_id = pr.agent_id AND fs.shadow = FALSE
+            WHERE pr.org_id = $1 AND pr.agent_id = $2
               AND pr.processed_at >= NOW() - INTERVAL '30 days'
             GROUP BY hour_of_day
             ORDER BY hour_of_day
             """,
+            org_id,
             agent_id,
         )
     return [
@@ -1109,7 +1174,7 @@ async def agent_hourly_pattern(agent_id: str) -> list:
     ]
 
 
-async def list_issues(agent_id: str, status: Optional[str] = None) -> list:
+async def list_issues(org_id: str, agent_id: str, status: Optional[str] = None) -> list:
     """Return persistent issues for an agent, ordered: open → reopened → resolved, then by last_seen desc."""
     if not _pool:
         return []
@@ -1119,8 +1184,8 @@ async def list_issues(agent_id: str, status: Optional[str] = None) -> list:
             return None
         return v.timestamp() if hasattr(v, "timestamp") else float(v)
 
-    where = "WHERE agent_id = $1"
-    params: list = [agent_id]
+    where = "WHERE org_id = $1 AND agent_id = $2"
+    params: list = [org_id, agent_id]
     if status:
         params.append(status.lower())
         where += f" AND status = ${len(params)}"
@@ -1155,7 +1220,7 @@ async def list_issues(agent_id: str, status: Optional[str] = None) -> list:
     ]
 
 
-async def agent_failure_rates(agent_id: str) -> list:
+async def agent_failure_rates(org_id: str, agent_id: str) -> list:
     """Daily failure rate per failure_type over 30 days — affected_runs / total_runs.
     Returns: [{failure_type, day (ISO str), total_runs, affected_runs, rate}]."""
     if not _pool:
@@ -1168,7 +1233,7 @@ async def agent_failure_rates(agent_id: str) -> list:
                     DATE_TRUNC('day', processed_at AT TIME ZONE 'UTC')::date AS day,
                     COUNT(DISTINCT run_id) AS total_runs
                 FROM processed_runs
-                WHERE agent_id = $1
+                WHERE org_id = $1 AND agent_id = $2
                   AND processed_at >= NOW() - INTERVAL '30 days'
                 GROUP BY day
             ),
@@ -1180,9 +1245,10 @@ async def agent_failure_rates(agent_id: str) -> list:
                 FROM processed_runs pr
                 JOIN failure_signals fs
                     ON fs.run_id    = pr.run_id
+                    AND fs.org_id   = pr.org_id
                     AND fs.agent_id = pr.agent_id
                     AND fs.shadow   = FALSE
-                WHERE pr.agent_id = $1
+                WHERE pr.org_id = $1 AND pr.agent_id = $2
                   AND pr.processed_at >= NOW() - INTERVAL '30 days'
                 GROUP BY day, fs.failure_type
             )
@@ -1197,6 +1263,7 @@ async def agent_failure_rates(agent_id: str) -> list:
             ORDER BY pdt.day DESC, pdt.affected_runs DESC
             LIMIT 300
             """,
+            org_id,
             agent_id,
         )
     return [
@@ -1211,7 +1278,7 @@ async def agent_failure_rates(agent_id: str) -> list:
     ]
 
 
-async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -> list:
+async def agent_systemic_patterns(org_id: str, agent_id: str, rate_threshold: float = 0.10) -> list:
     """Failure types firing on >= rate_threshold of runs in the last 7 days.
     Returns: [{failure_type, total_runs, affected_runs, rate, first_seen, last_seen, is_systemic}].
     """
@@ -1229,7 +1296,7 @@ async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -
             WITH total AS (
                 SELECT COUNT(DISTINCT run_id) AS total_runs
                 FROM processed_runs
-                WHERE agent_id = $1
+                WHERE org_id = $1 AND agent_id = $2
                   AND processed_at >= NOW() - INTERVAL '7 days'
             )
             SELECT
@@ -1244,16 +1311,18 @@ async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -
                 MIN(fs.detected_at)                 AS first_seen,
                 MAX(fs.detected_at)                 AS last_seen
             FROM failure_signals fs
-            WHERE fs.agent_id = $1
+            WHERE fs.org_id  = $1
+              AND fs.agent_id = $2
               AND fs.shadow   = FALSE
               AND fs.run_id IN (
                   SELECT run_id FROM processed_runs
-                  WHERE agent_id = $1
+                  WHERE org_id = $1 AND agent_id = $2
                     AND processed_at >= NOW() - INTERVAL '7 days'
               )
             GROUP BY fs.failure_type
             ORDER BY affected_runs DESC
             """,
+            org_id,
             agent_id,
         )
     return [
@@ -1270,7 +1339,7 @@ async def agent_systemic_patterns(agent_id: str, rate_threshold: float = 0.10) -
     ]
 
 
-async def agent_deploy_events(agent_id: str) -> list:
+async def agent_deploy_events(org_id: str, agent_id: str) -> list:
     """Deploy markers for an agent over the last 90 days.
     Returns: [{id, version, deployed_at (unix float), meta}]."""
     import json as _json
@@ -1282,10 +1351,11 @@ async def agent_deploy_events(agent_id: str) -> list:
             """
             SELECT id, version, deployed_at, meta
             FROM deploy_events
-            WHERE agent_id = $1
+            WHERE org_id = $1 AND agent_id = $2
               AND deployed_at >= NOW() - INTERVAL '90 days'
             ORDER BY deployed_at ASC
             """,
+            org_id,
             agent_id,
         )
 
@@ -1312,7 +1382,7 @@ async def agent_deploy_events(agent_id: str) -> list:
     ]
 
 
-async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
+async def agent_failure_pattern(org_id: str, agent_id: str, failure_type: str) -> dict:
     """
     Cross-run deep-dive for one failure type.
 
@@ -1339,16 +1409,19 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
                 COUNT(*) FILTER (WHERE severity = 'MEDIUM')     AS medium_count,
                 COUNT(*) FILTER (WHERE severity = 'LOW')        AS low_count
             FROM failure_signals
-            WHERE agent_id    = $1
-              AND failure_type = $2
+            WHERE org_id      = $1
+              AND agent_id    = $2
+              AND failure_type = $3
               AND shadow       = FALSE
             """,
+            org_id,
             agent_id,
             failure_type,
         )
 
         total_row = await conn.fetchrow(
-            "SELECT COUNT(DISTINCT run_id) AS total FROM processed_runs WHERE agent_id = $1",
+            "SELECT COUNT(DISTINCT run_id) AS total FROM processed_runs WHERE org_id = $1 AND agent_id = $2",
+            org_id,
             agent_id,
         )
 
@@ -1361,10 +1434,12 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY step_index) AS p75,
                 ROUND(AVG(step_index)::numeric, 1)                        AS avg_step
             FROM failure_signals
-            WHERE agent_id    = $1
-              AND failure_type = $2
+            WHERE org_id      = $1
+              AND agent_id    = $2
+              AND failure_type = $3
               AND shadow       = FALSE
             """,
+            org_id,
             agent_id,
             failure_type,
         )
@@ -1407,8 +1482,9 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
 
                 COUNT(*) AS sample_count
             FROM failure_signals
-            WHERE agent_id    = $1
-              AND failure_type = $2
+            WHERE org_id      = $1
+              AND agent_id    = $2
+              AND failure_type = $3
               AND shadow       = FALSE
             GROUP BY
                 evidence->>'tool',
@@ -1416,6 +1492,7 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
             ORDER BY sample_count DESC
             LIMIT 10
             """,
+            org_id,
             agent_id,
             failure_type,
         )
@@ -1435,8 +1512,9 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
                     DATE_TRUNC('day', detected_at AT TIME ZONE 'UTC')::date AS day,
                     COUNT(DISTINCT run_id) AS affected_runs
                 FROM failure_signals
-                WHERE agent_id    = $1
-                  AND failure_type = $2
+                WHERE org_id      = $1
+                  AND agent_id    = $2
+                  AND failure_type = $3
                   AND shadow       = FALSE
                   AND detected_at >= NOW() - INTERVAL '14 days'
                 GROUP BY 1
@@ -1446,7 +1524,8 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
                     DATE_TRUNC('day', processed_at AT TIME ZONE 'UTC')::date AS day,
                     COUNT(DISTINCT run_id) AS total_runs
                 FROM processed_runs
-                WHERE agent_id    = $1
+                WHERE org_id      = $1
+                  AND agent_id    = $2
                   AND processed_at >= NOW() - INTERVAL '14 days'
                 GROUP BY 1
             )
@@ -1462,6 +1541,7 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
             LEFT JOIN daily_total    dt ON dt.day = d.day
             ORDER BY d.day
             """,
+            org_id,
             agent_id,
             failure_type,
         )
@@ -1472,8 +1552,9 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
             WITH affected AS (
                 SELECT DISTINCT run_id
                 FROM failure_signals
-                WHERE agent_id    = $1
-                  AND failure_type = $2
+                WHERE org_id      = $1
+                  AND agent_id    = $2
+                  AND failure_type = $3
                   AND shadow       = FALSE
                   AND detected_at >= NOW() - INTERVAL '30 days'
             )
@@ -1485,13 +1566,15 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
                 ROUND(COUNT(DISTINCT fs.run_id)::numeric / NULLIF((SELECT COUNT(*) FROM affected), 0), 3) AS co_rate
             FROM affected a
             JOIN failure_signals fs ON fs.run_id = a.run_id
-            WHERE fs.agent_id    = $1
-              AND fs.failure_type != $2
+            WHERE fs.org_id      = $1
+              AND fs.agent_id    = $2
+              AND fs.failure_type != $3
               AND fs.shadow       = FALSE
             GROUP BY fs.failure_type
             ORDER BY co_rate DESC
             LIMIT 8
             """,
+            org_id,
             agent_id,
             failure_type,
         )
@@ -1507,12 +1590,14 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
                 detected_at,
                 evidence
             FROM failure_signals
-            WHERE agent_id    = $1
-              AND failure_type = $2
+            WHERE org_id      = $1
+              AND agent_id    = $2
+              AND failure_type = $3
               AND shadow       = FALSE
             ORDER BY confidence DESC, detected_at DESC
             LIMIT 5
             """,
+            org_id,
             agent_id,
             failure_type,
         )
@@ -1577,6 +1662,7 @@ async def agent_failure_pattern(agent_id: str, failure_type: str) -> dict:
 
 
 async def record_fix(
+    org_id: str,
     signal_id: int,
     run_id: str,
     fix_content: str,
@@ -1591,8 +1677,8 @@ async def record_fix(
         row = await conn.fetchrow(
             """
             INSERT INTO fixes (run_id, signal_id, fix_content, applied_via,
-                               langfuse_prompt_name, langfuse_version)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                               langfuse_prompt_name, langfuse_version, org_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING id
             """,
             run_id,
@@ -1601,11 +1687,13 @@ async def record_fix(
             applied_via,
             langfuse_prompt_name,
             langfuse_version,
+            org_id,
         )
     return int(row["id"]) if row else None
 
 
 async def get_signal_fix_status(
+    org_id: str,
     agent_id: str,
     failure_type: str,
     signal_id: int,
@@ -1623,10 +1711,11 @@ async def get_signal_fix_status(
         fix_row = await conn.fetchrow(
             """
             SELECT applied_at, langfuse_prompt_name, langfuse_version, applied_via
-            FROM fixes WHERE signal_id = $1
+            FROM fixes WHERE signal_id = $1 AND org_id = $2
             ORDER BY applied_at ASC LIMIT 1
             """,
             signal_id,
+            org_id,
         )
         if not fix_row:
             return {"fix_applied": False}
@@ -1636,16 +1725,18 @@ async def get_signal_fix_status(
         runs_after = await conn.fetchval(
             """
             SELECT COUNT(DISTINCT run_id) FROM events
-            WHERE agent_id = $1 AND received_at > $2
+            WHERE org_id = $1 AND agent_id = $2 AND received_at > $3
             """,
+            org_id,
             agent_id,
             applied_at,
         )
         recurrences = await conn.fetchval(
             """
             SELECT COUNT(*) FROM failure_signals
-            WHERE agent_id = $1 AND failure_type = $2 AND detected_at > $3
+            WHERE org_id = $1 AND agent_id = $2 AND failure_type = $3 AND detected_at > $4
             """,
+            org_id,
             agent_id,
             failure_type,
             applied_at,
@@ -1737,7 +1828,7 @@ def _sign_policy(
 async def log_policy_audit(
     policy_id: Optional[int],
     action: str,
-    customer_id: str,
+    org_id: str,
     before: Optional[dict],
     after: Optional[dict],
 ) -> None:
@@ -1746,40 +1837,47 @@ async def log_policy_audit(
     async with _pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO policy_audit_log (policy_id, action, customer_id, before, after)
+            INSERT INTO policy_audit_log (policy_id, action, org_id, before, after)
             VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
             """,
             policy_id,
             action,
-            customer_id,
+            org_id,
             _json_mod.dumps(before) if before is not None else None,
             _json_mod.dumps(after) if after is not None else None,
         )
 
 
-async def list_policies(agent_id: Optional[str] = None) -> list:
+async def list_policies(org_id: str, agent_id: Optional[str] = None) -> list:
     if not _pool:
         return []
     async with _pool.acquire() as conn:
         if agent_id:
             rows = await conn.fetch(
-                "SELECT * FROM policies WHERE agent_id = $1 OR agent_id = '*' ORDER BY priority, id",
+                "SELECT * FROM policies WHERE org_id = $1 AND (agent_id = $2 OR agent_id = '*') "
+                "ORDER BY priority, id",
+                org_id,
                 agent_id,
             )
         else:
-            rows = await conn.fetch("SELECT * FROM policies ORDER BY priority, id")
+            rows = await conn.fetch(
+                "SELECT * FROM policies WHERE org_id = $1 ORDER BY priority, id", org_id
+            )
     return [_policy_row(r) for r in rows]
 
 
-async def get_policy_by_id(policy_id: int) -> Optional[dict]:
+async def get_policy_by_id(org_id: str, policy_id: int) -> Optional[dict]:
     if not _pool:
         return None
     async with _pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM policies WHERE id = $1", policy_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM policies WHERE id = $1 AND org_id = $2", policy_id, org_id
+        )
     return _policy_row(row) if row else None
 
 
 async def create_policy(
+    org_id: str,
     name: str,
     agent_id: str,
     condition: dict,
@@ -1794,8 +1892,8 @@ async def create_policy(
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
-                INSERT INTO policies (name, agent_id, condition, action, priority, enabled)
-                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+                INSERT INTO policies (name, agent_id, condition, action, priority, enabled, org_id)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
                 RETURNING *
                 """,
                 name,
@@ -1804,7 +1902,12 @@ async def create_policy(
                 _json_mod.dumps(action),
                 priority,
                 enabled,
+                org_id,
             )
+            # Signature is over policy identity/behavior fields only — org_id is a
+            # tenancy filter, not part of the policy's cryptographic identity, and
+            # must stay out of the canonical string so existing signed policies
+            # (and the SDK's _verify_policy_signature) don't need to be re-signed.
             sig = _sign_policy(
                 row["id"],
                 agent_id,
@@ -1823,7 +1926,7 @@ async def create_policy(
     return _policy_row(row)
 
 
-async def update_policy(policy_id: int, fields: dict) -> dict:
+async def update_policy(org_id: str, policy_id: int, fields: dict) -> dict:
     if not _pool:
         raise RuntimeError("DB pool not available")
 
@@ -1844,17 +1947,20 @@ async def update_policy(policy_id: int, fields: dict) -> dict:
         set_parts.append(f"{key} = ${len(params)}{cast}")
 
     if not set_parts:
-        return await get_policy_by_id(policy_id)  # type: ignore[return-value]
+        return await get_policy_by_id(org_id, policy_id)  # type: ignore[return-value]
 
     params.append(policy_id)
+    params.append(org_id)
     async with _pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
                 f"UPDATE policies SET {', '.join(set_parts)}, updated_at = NOW() "
-                f"WHERE id = ${len(params)} RETURNING *",
+                f"WHERE id = ${len(params) - 1} AND org_id = ${len(params)} RETURNING *",
                 *params,
             )
-            # Recompute signature over the full updated record.
+            if row is None:
+                return None  # type: ignore[return-value]
+            # Recompute signature over the full updated record (org_id excluded — see create_policy).
             cond = row["condition"]
             act = row["action"]
             if isinstance(cond, str):
@@ -1879,17 +1985,17 @@ async def update_policy(policy_id: int, fields: dict) -> dict:
     return _policy_row(row)
 
 
-async def delete_policy(policy_id: int) -> None:
+async def delete_policy(org_id: str, policy_id: int) -> None:
     if not _pool:
         return
     async with _pool.acquire() as conn:
-        await conn.execute("DELETE FROM policies WHERE id = $1", policy_id)
+        await conn.execute("DELETE FROM policies WHERE id = $1 AND org_id = $2", policy_id, org_id)
 
 
 # ── Agent Health Score ────────────────────────────────────────────────────────
 
 
-async def get_agent_health_score(agent_id: str) -> dict:
+async def get_agent_health_score(org_id: str, agent_id: str) -> dict:
     """
     Composite 0–100 health score for an agent based on the last 30 days.
 
@@ -1911,20 +2017,20 @@ async def get_agent_health_score(agent_id: str) -> dict:
             WITH runs_30d AS (
                 SELECT DISTINCT run_id
                 FROM processed_runs
-                WHERE agent_id = $1
+                WHERE org_id = $1 AND agent_id = $2
                   AND processed_at >= NOW() - INTERVAL '30 days'
             ),
             signal_runs AS (
                 SELECT DISTINCT run_id
                 FROM failure_signals
-                WHERE agent_id = $1
+                WHERE org_id = $1 AND agent_id = $2
                   AND shadow = FALSE
                   AND detected_at >= NOW() - INTERVAL '30 days'
             ),
             loop_runs AS (
                 SELECT DISTINCT run_id
                 FROM failure_signals
-                WHERE agent_id = $1
+                WHERE org_id = $1 AND agent_id = $2
                   AND shadow = FALSE
                   AND detected_at >= NOW() - INTERVAL '30 days'
                   AND failure_type IN (
@@ -1938,7 +2044,7 @@ async def get_agent_health_score(agent_id: str) -> dict:
                     AVG((payload->>'prompt_tokens')::float)                                        AS avg_prompt_tokens,
                     COUNT(*)                                                                        AS token_sample
                 FROM events
-                WHERE agent_id = $1
+                WHERE org_id = $1 AND agent_id = $2
                   AND event_type IN ('llm.called', 'llm.responded')
                   AND payload->>'prompt_tokens' IS NOT NULL
                   AND received_at >= NOW() - INTERVAL '30 days'
@@ -1948,7 +2054,7 @@ async def get_agent_health_score(agent_id: str) -> dict:
                     AVG((payload->>'latency_ms')::float)                                           AS avg_latency_ms,
                     COUNT(*)                                                                        AS latency_sample
                 FROM events
-                WHERE agent_id = $1
+                WHERE org_id = $1 AND agent_id = $2
                   AND event_type = 'llm.responded'
                   AND payload->>'latency_ms' IS NOT NULL
                   AND received_at >= NOW() - INTERVAL '30 days'
@@ -1964,7 +2070,7 @@ async def get_agent_health_score(agent_id: str) -> dict:
                 FROM (
                     SELECT run_id, AVG((payload->>'prompt_tokens')::float) AS avg_tokens
                     FROM events
-                    WHERE agent_id = $1
+                    WHERE org_id = $1 AND agent_id = $2
                       AND event_type IN ('llm.called', 'llm.responded')
                       AND payload->>'prompt_tokens' IS NOT NULL
                       AND received_at >= NOW() - INTERVAL '90 days'
@@ -1980,7 +2086,7 @@ async def get_agent_health_score(agent_id: str) -> dict:
                 FROM (
                     SELECT run_id, AVG((payload->>'latency_ms')::float) AS avg_latency
                     FROM events
-                    WHERE agent_id = $1
+                    WHERE org_id = $1 AND agent_id = $2
                       AND event_type = 'llm.responded'
                       AND payload->>'latency_ms' IS NOT NULL
                       AND received_at >= NOW() - INTERVAL '90 days'
@@ -1999,6 +2105,7 @@ async def get_agent_health_score(agent_id: str) -> dict:
                 (SELECT p75_latency_ms     FROM latency_baseline)    AS p75_latency_ms,
                 (SELECT baseline_sample    FROM latency_baseline)    AS latency_baseline_sample
             """,
+            org_id,
             agent_id,
         )
 
@@ -2110,7 +2217,7 @@ async def get_agent_health_score(agent_id: str) -> dict:
 # ── Cost stats ────────────────────────────────────────────────────────────────
 
 
-async def agent_cost_stats(agent_id: str) -> dict:
+async def agent_cost_stats(org_id: str, agent_id: str) -> dict:
     """
     Estimated API cost for an agent over the last 30 days.
 
@@ -2139,11 +2246,12 @@ async def agent_cost_stats(agent_id: str) -> dict:
                    MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
                    SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens
             FROM events
-            WHERE agent_id = $1
+            WHERE org_id = $1 AND agent_id = $2
               AND event_type IN ('llm.called', 'llm.responded')
               AND received_at >= NOW() - INTERVAL '30 days'
             GROUP BY run_id
             """,
+            org_id,
             agent_id,
         )
 
@@ -2153,12 +2261,13 @@ async def agent_cost_stats(agent_id: str) -> dict:
             SELECT run_id,
                    SUM(COALESCE((payload->>'completion_tokens')::int, 0)) AS completion_tokens
             FROM events
-            WHERE agent_id = $1
+            WHERE org_id = $1 AND agent_id = $2
               AND event_type = 'llm.responded'
               AND payload->>'completion_tokens' IS NOT NULL
               AND received_at >= NOW() - INTERVAL '30 days'
             GROUP BY run_id
             """,
+            org_id,
             agent_id,
         )
 
@@ -2167,10 +2276,11 @@ async def agent_cost_stats(agent_id: str) -> dict:
             """
             SELECT run_id, failure_type
             FROM failure_signals
-            WHERE agent_id = $1
+            WHERE org_id = $1 AND agent_id = $2
               AND shadow = FALSE
               AND detected_at >= NOW() - INTERVAL '30 days'
             """,
+            org_id,
             agent_id,
         )
 
@@ -2221,7 +2331,7 @@ async def agent_cost_stats(agent_id: str) -> dict:
     }
 
 
-async def agent_token_stats(agent_id: str) -> dict:
+async def agent_token_stats(org_id: str, agent_id: str) -> dict:
     """
     Per-window token usage and waste stats for 1d / 7d / 30d.
 
@@ -2253,11 +2363,12 @@ async def agent_token_stats(agent_id: str) -> dict:
                     THEN COALESCE((payload->>'reasoning_tokens')::int, 0) ELSE 0 END) AS reasoning_tokens,
                 MIN(received_at) AS run_start
             FROM events
-            WHERE agent_id = $1
+            WHERE org_id = $1 AND agent_id = $2
               AND event_type IN ('llm.called', 'llm.responded')
               AND received_at >= NOW() - INTERVAL '30 days'
             GROUP BY run_id
             """,
+            org_id,
             agent_id,
         )
 
@@ -2265,10 +2376,11 @@ async def agent_token_stats(agent_id: str) -> dict:
             """
             SELECT run_id, failure_type
             FROM failure_signals
-            WHERE agent_id = $1
+            WHERE org_id = $1 AND agent_id = $2
               AND shadow = FALSE
               AND detected_at >= NOW() - INTERVAL '30 days'
             """,
+            org_id,
             agent_id,
         )
 
@@ -2353,7 +2465,7 @@ async def agent_token_stats(agent_id: str) -> dict:
 # ── Deploy regression check ────────────────────────────────────────────────────
 
 
-async def deploy_regression_check(agent_id: str) -> list:
+async def deploy_regression_check(org_id: str, agent_id: str) -> list:
     """
     For each deploy event in the last 7 days, compare overall signal rates in the
     2-hour window before vs after the deploy.
@@ -2371,7 +2483,7 @@ async def deploy_regression_check(agent_id: str) -> list:
             WITH deploys AS (
                 SELECT id, version, deployed_at
                 FROM deploy_events
-                WHERE agent_id = $1
+                WHERE org_id = $1 AND agent_id = $2
                   AND deployed_at >= NOW() - INTERVAL '7 days'
                 ORDER BY deployed_at DESC
                 LIMIT 10
@@ -2388,14 +2500,14 @@ async def deploy_regression_check(agent_id: str) -> list:
                     END           AS window
                 FROM deploys d
                 JOIN processed_runs pr
-                    ON pr.agent_id = $1
+                    ON pr.org_id = $1 AND pr.agent_id = $2
                     AND pr.processed_at >= d.deployed_at - INTERVAL '2 hours'
                     AND pr.processed_at <= d.deployed_at + INTERVAL '2 hours'
             ),
             signal_flags AS (
                 SELECT DISTINCT run_id
                 FROM failure_signals
-                WHERE agent_id = $1 AND shadow = FALSE
+                WHERE org_id = $1 AND agent_id = $2 AND shadow = FALSE
             )
             SELECT
                 rw.deploy_id,
@@ -2409,6 +2521,7 @@ async def deploy_regression_check(agent_id: str) -> list:
             GROUP BY rw.deploy_id, rw.version, rw.deployed_at, rw.window
             ORDER BY rw.deployed_at DESC, rw.window
             """,
+            org_id,
             agent_id,
         )
 
@@ -2458,7 +2571,7 @@ async def deploy_regression_check(agent_id: str) -> list:
 # ── Agent fixes list ───────────────────────────────────────────────────────────
 
 
-async def list_agent_fixes(agent_id: str) -> list:
+async def list_agent_fixes(org_id: str, agent_id: str) -> list:
     """
     All fixes applied to signals for this agent, with recurrence status computed inline.
 
@@ -2488,24 +2601,26 @@ async def list_agent_fixes(agent_id: str) -> list:
                 (
                     SELECT COUNT(DISTINCT e.run_id)
                     FROM events e
-                    WHERE e.agent_id = $1
+                    WHERE e.org_id = $1 AND e.agent_id = $2
                       AND e.received_at > f.applied_at
                 ) AS runs_after,
                 -- Recurrences of the same failure type after fix
                 (
                     SELECT COUNT(*)
                     FROM failure_signals fs2
-                    WHERE fs2.agent_id   = $1
+                    WHERE fs2.org_id     = $1
+                      AND fs2.agent_id   = $2
                       AND fs2.failure_type = fs.failure_type
                       AND fs2.detected_at  > f.applied_at
                       AND fs2.shadow       = FALSE
                 ) AS recurrences_after
             FROM fixes f
             JOIN failure_signals fs ON fs.id = f.signal_id
-            WHERE fs.agent_id = $1
+            WHERE fs.org_id = $1 AND fs.agent_id = $2
             ORDER BY f.applied_at DESC
             LIMIT 100
             """,
+            org_id,
             agent_id,
         )
 
@@ -2551,10 +2666,10 @@ async def list_agent_fixes(agent_id: str) -> list:
 # ── User impact ────────────────────────────────────────────────────────────────
 
 
-async def agent_user_impact(agent_id: str) -> list:
+async def agent_user_impact(org_id: str, agent_id: str) -> list:
     """
-    Unique users (proxied by input_hash from run.started) affected per failure type
-    over the last 30 days.
+    Unique users (proxied by an MD5 digest of input_text from run.started, computed
+    here rather than transmitted) affected per failure type over the last 30 days.
 
     Returns: [{failure_type, affected_users, total_users, user_impact_rate}]
     """
@@ -2567,11 +2682,12 @@ async def agent_user_impact(agent_id: str) -> list:
             WITH run_inputs AS (
                 SELECT
                     e.run_id,
-                    e.payload->>'input_hash' AS input_hash
+                    md5(e.payload->>'input_text') AS input_hash
                 FROM events e
-                WHERE e.agent_id    = $1
+                WHERE e.org_id      = $1
+                  AND e.agent_id    = $2
                   AND e.event_type  = 'run.started'
-                  AND e.payload->>'input_hash' IS NOT NULL
+                  AND e.payload->>'input_text' IS NOT NULL
                   AND e.received_at >= NOW() - INTERVAL '30 days'
             ),
             total_users AS (
@@ -2583,7 +2699,8 @@ async def agent_user_impact(agent_id: str) -> list:
                     COUNT(DISTINCT ri.input_hash) AS affected_users
                 FROM failure_signals fs
                 JOIN run_inputs ri ON ri.run_id = fs.run_id
-                WHERE fs.agent_id   = $1
+                WHERE fs.org_id     = $1
+                  AND fs.agent_id   = $2
                   AND fs.shadow     = FALSE
                   AND fs.detected_at >= NOW() - INTERVAL '30 days'
                 GROUP BY fs.failure_type
@@ -2597,6 +2714,7 @@ async def agent_user_impact(agent_id: str) -> list:
             CROSS JOIN total_users tu
             ORDER BY a.affected_users DESC
             """,
+            org_id,
             agent_id,
         )
 
@@ -2622,7 +2740,7 @@ def _is_trending_up(daily_counts: list) -> bool:
     return recent > earlier * 1.3
 
 
-async def cross_run_patterns(customer_id: str) -> list:
+async def cross_run_patterns(org_id: str) -> list:
     """
     Per (agent_id × failure_type) 7-day signal frequency. Only live signals (shadow=FALSE).
     Returns a list of agent dicts, each containing detector rows with daily buckets and summary stats.
@@ -2649,13 +2767,11 @@ async def cross_run_patterns(customer_id: str) -> list:
             FROM failure_signals
             WHERE shadow = FALSE
               AND detected_at >= NOW() - INTERVAL '7 days'
-              AND ($1 = 'dev_customer' OR agent_id IN (
-                  SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
-              ))
+              AND org_id = $1
             GROUP BY agent_id, failure_type, DATE_TRUNC('day', detected_at AT TIME ZONE 'UTC')::date
             ORDER BY agent_id, failure_type, day
             """,
-            customer_id,
+            org_id,
         )
 
         run_rows = await conn.fetch(
@@ -2663,12 +2779,10 @@ async def cross_run_patterns(customer_id: str) -> list:
             SELECT agent_id, COUNT(DISTINCT run_id) AS total_runs
             FROM processed_runs
             WHERE processed_at >= NOW() - INTERVAL '7 days'
-              AND ($1 = 'dev_customer' OR agent_id IN (
-                  SELECT agent_id FROM api_keys WHERE customer_id = $1 AND active = TRUE
-              ))
+              AND org_id = $1
             GROUP BY agent_id
             """,
-            customer_id,
+            org_id,
         )
 
     # agent_id → total runs in period
@@ -2730,19 +2844,22 @@ async def cross_run_patterns(customer_id: str) -> list:
 # ── User feedback (Slack buttons) ──────────────────────────────────────────────
 
 
-async def mark_signal_resolved(signal_id: int) -> bool:
+async def mark_signal_resolved(org_id: str, signal_id: int) -> bool:
     """Set resolved_at=NOW() on the signal. Returns True if the row was found."""
     if not _pool:
         return False
     async with _pool.acquire() as conn:
         result = await conn.execute(
-            "UPDATE failure_signals SET resolved_at = NOW() WHERE id = $1 AND resolved_at IS NULL",
+            "UPDATE failure_signals SET resolved_at = NOW() "
+            "WHERE id = $1 AND org_id = $2 AND resolved_at IS NULL",
             signal_id,
+            org_id,
         )
     return result.split()[-1] != "0"
 
 
 async def record_false_positive(
+    org_id: str,
     signal_id: int,
     agent_id: str,
     failure_type: str,
@@ -2755,22 +2872,23 @@ async def record_false_positive(
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO agent_detector_overrides (agent_id, failure_type, fp_count, confidence_floor, silenced)
-            VALUES ($1, $2, 1, 0.1, FALSE)
-            ON CONFLICT (agent_id, failure_type) DO UPDATE
+            INSERT INTO agent_detector_overrides (org_id, agent_id, failure_type, fp_count, confidence_floor, silenced)
+            VALUES ($1, $2, $3, 1, 0.1, FALSE)
+            ON CONFLICT (org_id, agent_id, failure_type) DO UPDATE
               SET fp_count         = agent_detector_overrides.fp_count + 1,
                   confidence_floor = LEAST(1.0, agent_detector_overrides.confidence_floor + 0.1),
                   silenced         = (agent_detector_overrides.fp_count + 1) >= 3,
                   updated_at       = NOW()
-            RETURNING agent_id, failure_type, fp_count, confidence_floor, silenced
+            RETURNING org_id, agent_id, failure_type, fp_count, confidence_floor, silenced
             """,
+            org_id,
             agent_id,
             failure_type,
         )
     return dict(row) if row else {}
 
 
-async def reset_detector_override(agent_id: str, failure_type: str) -> bool:
+async def reset_detector_override(org_id: str, agent_id: str, failure_type: str) -> bool:
     """Reset false-positive suppression for a detector on an agent."""
     if not _pool:
         return False
@@ -2779,20 +2897,22 @@ async def reset_detector_override(agent_id: str, failure_type: str) -> bool:
             """
             UPDATE agent_detector_overrides
             SET fp_count=0, confidence_floor=0.0, silenced=FALSE, updated_at=NOW()
-            WHERE agent_id=$1 AND failure_type=$2
+            WHERE org_id=$1 AND agent_id=$2 AND failure_type=$3
             """,
+            org_id,
             agent_id,
             failure_type,
         )
     return result.split()[-1] != "0"
 
 
-async def get_detector_override(agent_id: str, failure_type: str) -> Optional[dict]:
+async def get_detector_override(org_id: str, agent_id: str, failure_type: str) -> Optional[dict]:
     if not _pool:
         return None
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM agent_detector_overrides WHERE agent_id=$1 AND failure_type=$2",
+            "SELECT * FROM agent_detector_overrides WHERE org_id=$1 AND agent_id=$2 AND failure_type=$3",
+            org_id,
             agent_id,
             failure_type,
         )
@@ -2810,11 +2930,11 @@ def _mask_key(key: str) -> str:
 
 
 async def list_api_keys(
-    agent_id: Optional[str] = None,
-    customer_id: Optional[str] = None,
+    org_id: Optional[str] = None,
     active_only: bool = True,
     limit: int = 100,
 ) -> list:
+    """List API keys. org_id scopes to one org's own keys; omit only for admin/dev tooling."""
     if not _pool:
         return []
     conditions = []
@@ -2822,21 +2942,18 @@ async def list_api_keys(
     if active_only:
         params.append(True)
         conditions.append(f"k.active = ${len(params)}")
-    if agent_id:
-        params.append(agent_id)
-        conditions.append(f"k.agent_id = ${len(params)}")
-    if customer_id:
-        params.append(customer_id)
-        conditions.append(f"k.customer_id = ${len(params)}")
+    if org_id:
+        params.append(org_id)
+        conditions.append(f"k.org_id = ${len(params)}")
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT k.id, k.key, k.agent_id, k.customer_id, k.active,
-                   k.rate_limit_rpm, k.created_at, c.name AS company_name
+            SELECT k.id, k.org_id, k.active,
+                   k.rate_limit_rpm, k.created_at, o.name AS org_name
             FROM api_keys k
-            LEFT JOIN companies c ON c.id = k.company_id
+            LEFT JOIN organizations o ON o.id = k.org_id
             {where}
             ORDER BY k.id DESC
             LIMIT ${len(params)}
@@ -2846,10 +2963,8 @@ async def list_api_keys(
     return [
         {
             "id": r["id"],
-            "key_prefix": _mask_key(r["key"]),
-            "agent_id": r["agent_id"],
-            "customer_id": r["customer_id"],
-            "company_name": r["company_name"],
+            "org_id": r["org_id"],
+            "org_name": r["org_name"],
             "active": r["active"],
             "rate_limit_rpm": r["rate_limit_rpm"],
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -2859,54 +2974,54 @@ async def list_api_keys(
 
 
 async def create_api_key(
-    agent_id: str,
-    customer_id: str,
-    company_name: Optional[str] = None,
+    org_id: str,
+    org_name: Optional[str] = None,
     rate_limit_rpm: int = 600,
 ) -> dict:
+    """Create an org-scoped API key. Not tied to a single agent_id — an org can
+    have many agents, discovered dynamically on first ingest."""
     import secrets as _sec
 
     key = "dt_" + _sec.token_urlsafe(32)
-    name = company_name or customer_id
+    name = org_name or org_id
     if not _pool:
         raise RuntimeError("DB pool not ready")
     async with _pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
-                "INSERT INTO companies (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
-                customer_id,
+                "INSERT INTO organizations (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
+                org_id,
                 name,
             )
             row = await conn.fetchrow(
                 """
-                INSERT INTO api_keys (key, agent_id, customer_id, company_id, rate_limit_rpm)
-                VALUES ($1, $2, $3, $3, $4)
+                INSERT INTO api_keys (key, org_id, rate_limit_rpm)
+                VALUES ($1, $2, $3)
                 RETURNING id, created_at
                 """,
                 key,
-                agent_id,
-                customer_id,
+                org_id,
                 rate_limit_rpm,
             )
     return {
         "id": row["id"],
         "key": key,
         "key_prefix": _mask_key(key),
-        "agent_id": agent_id,
-        "customer_id": customer_id,
-        "company_name": name,
+        "org_id": org_id,
+        "org_name": name,
         "rate_limit_rpm": rate_limit_rpm,
         "created_at": row["created_at"].isoformat(),
     }
 
 
-async def revoke_api_key(key_id: int) -> bool:
+async def revoke_api_key(org_id: str, key_id: int) -> bool:
     if not _pool:
         return False
     async with _pool.acquire() as conn:
         result = await conn.execute(
-            "UPDATE api_keys SET active = FALSE WHERE id = $1 AND active = TRUE",
+            "UPDATE api_keys SET active = FALSE WHERE id = $1 AND org_id = $2 AND active = TRUE",
             key_id,
+            org_id,
         )
     return result.split()[-1] != "0"
 
@@ -2930,67 +3045,81 @@ def _custom_detector_row(r) -> dict:
     }
 
 
-async def list_custom_detectors(agent_id: Optional[str] = None) -> list[dict]:
+async def list_custom_detectors(org_id: str, agent_id: Optional[str] = None) -> list[dict]:
     if not _pool:
         return []
     async with _pool.acquire() as conn:
         if agent_id:
             rows = await conn.fetch(
-                "SELECT * FROM custom_detectors WHERE agent_id = $1 OR agent_id = '*' ORDER BY created_at DESC",
+                "SELECT * FROM custom_detectors WHERE org_id = $1 AND (agent_id = $2 OR agent_id = '*') "
+                "ORDER BY created_at DESC",
+                org_id,
                 agent_id,
             )
         else:
-            rows = await conn.fetch("SELECT * FROM custom_detectors ORDER BY created_at DESC")
+            rows = await conn.fetch(
+                "SELECT * FROM custom_detectors WHERE org_id = $1 ORDER BY created_at DESC", org_id
+            )
     return [_custom_detector_row(r) for r in rows]
 
 
-async def get_custom_detector(detector_id: int) -> Optional[dict]:
+async def get_custom_detector(org_id: str, detector_id: int) -> Optional[dict]:
     if not _pool:
         return None
     async with _pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM custom_detectors WHERE id = $1", detector_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM custom_detectors WHERE id = $1 AND org_id = $2", detector_id, org_id
+        )
     return _custom_detector_row(row) if row else None
 
 
-async def create_custom_detector(agent_id: str, name: str, description: str, config: dict) -> dict:
+async def create_custom_detector(
+    org_id: str, agent_id: str, name: str, description: str, config: dict
+) -> dict:
     if not _pool:
         raise RuntimeError("DB pool not initialized")
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO custom_detectors (agent_id, name, description, config_json, status)
-            VALUES ($1, $2, $3, $4::jsonb, 'shadow')
+            INSERT INTO custom_detectors (agent_id, name, description, config_json, status, org_id)
+            VALUES ($1, $2, $3, $4::jsonb, 'shadow', $5)
             RETURNING *
             """,
             agent_id,
             name,
             description,
             _json_mod.dumps(config),
+            org_id,
         )
     return _custom_detector_row(row)
 
 
-async def update_custom_detector_status(detector_id: int, status: str) -> Optional[dict]:
+async def update_custom_detector_status(
+    org_id: str, detector_id: int, status: str
+) -> Optional[dict]:
     if not _pool:
         raise RuntimeError("DB pool not initialized")
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            "UPDATE custom_detectors SET status = $2 WHERE id = $1 RETURNING *",
+            "UPDATE custom_detectors SET status = $3 WHERE id = $1 AND org_id = $2 RETURNING *",
             detector_id,
+            org_id,
             status,
         )
     return _custom_detector_row(row) if row else None
 
 
-async def delete_custom_detector(detector_id: int) -> bool:
+async def delete_custom_detector(org_id: str, detector_id: int) -> bool:
     if not _pool:
         raise RuntimeError("DB pool not initialized")
     async with _pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM custom_detectors WHERE id = $1", detector_id)
+        result = await conn.execute(
+            "DELETE FROM custom_detectors WHERE id = $1 AND org_id = $2", detector_id, org_id
+        )
     return result.split()[-1] != "0"
 
 
-async def get_custom_detector_shadow_stats(detector_id: int) -> dict:
+async def get_custom_detector_shadow_stats(org_id: str, detector_id: int) -> dict:
     """Return shadow evaluation stats: total runs evaluated and sample firing runs."""
     if not _pool:
         return {"total_runs": 0, "fire_count": 0, "fire_rate": 0.0, "sample_runs": []}
@@ -3001,19 +3130,21 @@ async def get_custom_detector_shadow_stats(detector_id: int) -> dict:
                 COUNT(*)                                   AS total_runs,
                 COUNT(*) FILTER (WHERE fired = TRUE)       AS fire_count
             FROM custom_detector_results
-            WHERE detector_id = $1
+            WHERE detector_id = $1 AND org_id = $2
             """,
             detector_id,
+            org_id,
         )
         samples = await conn.fetch(
             """
             SELECT run_id, agent_id, evaluated_at
             FROM custom_detector_results
-            WHERE detector_id = $1 AND fired = TRUE
+            WHERE detector_id = $1 AND org_id = $2 AND fired = TRUE
             ORDER BY evaluated_at DESC
             LIMIT 5
             """,
             detector_id,
+            org_id,
         )
     total = stats["total_runs"] or 0
     fires = stats["fire_count"] or 0

@@ -543,7 +543,7 @@ class TestToolSpan:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=2,
-                payload={"tool_name": "web_search", "args_hash": "abc123"},
+                payload={"tool_name": "web_search", "args": "abc123"},
             )
         )
         dt_otel.handle(
@@ -577,7 +577,7 @@ class TestToolSpan:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=2,
-                payload={"tool_name": "calculator", "args_hash": "abc123"},
+                payload={"tool_name": "calculator", "args": "abc123"},
             )
         )
         dt_otel.handle(
@@ -600,7 +600,7 @@ class TestToolSpan:
         tool_span = next(s for s in spans if s.name == "tool_call")
         assert tool_span.attributes["dunetrace.tool_name"] == "calculator"
 
-    def test_tool_span_has_args_hash(self):
+    def test_tool_span_has_args(self):
         provider, mem = _make_provider()
         dt_otel = DunetraceOTelExporter(provider)
         run_id = str(uuid.uuid4())
@@ -611,7 +611,7 @@ class TestToolSpan:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=2,
-                payload={"tool_name": "search", "args_hash": "deadbeef"},
+                payload={"tool_name": "search", "args": "deadbeef"},
             )
         )
         dt_otel.handle(
@@ -632,7 +632,7 @@ class TestToolSpan:
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
-        assert tool_span.attributes["dunetrace.args_hash"] == "deadbeef"
+        assert tool_span.attributes["dunetrace.args"] == "deadbeef"
 
     def test_tool_success_sets_ok_status(self):
         provider, mem = _make_provider()
@@ -645,7 +645,7 @@ class TestToolSpan:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=2,
-                payload={"tool_name": "search", "args_hash": "x"},
+                payload={"tool_name": "search", "args": "x"},
             )
         )
         dt_otel.handle(
@@ -679,7 +679,7 @@ class TestToolSpan:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=2,
-                payload={"tool_name": "search", "args_hash": "x"},
+                payload={"tool_name": "search", "args": "x"},
             )
         )
         dt_otel.handle(
@@ -687,7 +687,7 @@ class TestToolSpan:
                 EventType.TOOL_RESPONDED,
                 run_id,
                 step_index=2,
-                payload={"success": False, "error_hash": "err123"},
+                payload={"success": False, "error": "err123"},
             )
         )
         dt_otel.handle(
@@ -702,7 +702,7 @@ class TestToolSpan:
         tool_span = next(s for s in spans if s.name == "tool_call")
         assert tool_span.status.status_code == StatusCode.ERROR
 
-    def test_tool_failure_records_error_hash(self):
+    def test_tool_failure_records_error(self):
         provider, mem = _make_provider()
         dt_otel = DunetraceOTelExporter(provider)
         run_id = str(uuid.uuid4())
@@ -713,7 +713,7 @@ class TestToolSpan:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=2,
-                payload={"tool_name": "search", "args_hash": "x"},
+                payload={"tool_name": "search", "args": "x"},
             )
         )
         dt_otel.handle(
@@ -721,7 +721,7 @@ class TestToolSpan:
                 EventType.TOOL_RESPONDED,
                 run_id,
                 step_index=2,
-                payload={"success": False, "error_hash": "abc999"},
+                payload={"success": False, "error": "abc999"},
             )
         )
         dt_otel.handle(
@@ -734,7 +734,7 @@ class TestToolSpan:
 
         spans = mem.get_finished_spans()
         tool_span = next(s for s in spans if s.name == "tool_call")
-        assert tool_span.attributes["dunetrace.error_hash"] == "abc999"
+        assert tool_span.attributes["dunetrace.error"] == "abc999"
 
     def test_tool_span_has_success_attribute(self):
         provider, mem = _make_provider()
@@ -747,7 +747,7 @@ class TestToolSpan:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=2,
-                payload={"tool_name": "search", "args_hash": "x"},
+                payload={"tool_name": "search", "args": "x"},
             )
         )
         dt_otel.handle(
@@ -787,7 +787,7 @@ class TestRetrievalSpan:
                 EventType.RETRIEVAL_CALLED,
                 run_id,
                 step_index=1,
-                payload={"index_name": "docs", "query_hash": "qh1"},
+                payload={"index_name": "docs", "query": "qh1"},
             )
         )
         dt_otel.handle(
@@ -821,7 +821,7 @@ class TestRetrievalSpan:
                 EventType.RETRIEVAL_CALLED,
                 run_id,
                 step_index=1,
-                payload={"index_name": "knowledge-base", "query_hash": "qh1"},
+                payload={"index_name": "knowledge-base", "query": "qh1"},
             )
         )
         dt_otel.handle(
@@ -855,7 +855,7 @@ class TestRetrievalSpan:
                 EventType.RETRIEVAL_CALLED,
                 run_id,
                 step_index=1,
-                payload={"index_name": "docs", "query_hash": "qh1"},
+                payload={"index_name": "docs", "query": "qh1"},
             )
         )
         dt_otel.handle(
@@ -889,7 +889,7 @@ class TestRetrievalSpan:
                 EventType.RETRIEVAL_CALLED,
                 run_id,
                 step_index=1,
-                payload={"index_name": "docs", "query_hash": "qh1"},
+                payload={"index_name": "docs", "query": "qh1"},
             )
         )
         dt_otel.handle(
@@ -923,7 +923,7 @@ class TestRetrievalSpan:
                 EventType.RETRIEVAL_CALLED,
                 run_id,
                 step_index=1,
-                payload={"index_name": "docs", "query_hash": "qh1"},
+                payload={"index_name": "docs", "query": "qh1"},
             )
         )
         dt_otel.handle(
@@ -968,7 +968,7 @@ class TestOrphanedChildSpan:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=2,
-                payload={"tool_name": "search", "args_hash": "x"},
+                payload={"tool_name": "search", "args": "x"},
             )
         )
         dt_otel.handle(
@@ -1006,7 +1006,7 @@ class TestOrphanedChildSpan:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=1,
-                payload={"tool_name": "search", "args_hash": "x"},
+                payload={"tool_name": "search", "args": "x"},
             )
         )
         # Run ends without TOOL_RESPONDED
@@ -1114,13 +1114,13 @@ class TestSignalAnnotation:
             agent_version="1.0",
             available_tools=["search"],
         )
-        args_hash = "aaaa1111"
+        args_val = "aaaa1111"
         # 5 calls total — 3 of "search" (triggers loop) + 2 fillers within the window
         tools = ["other", "search", "search", "other2", "search"]
         for i, tool in enumerate(tools):
-            h = args_hash if tool == "search" else f"filler{i}"
+            h = args_val if tool == "search" else f"filler{i}"
             state.tool_calls.append(
-                ToolCall(tool_name=tool, step_index=i, args_hash=h, timestamp=time.time())
+                ToolCall(tool_name=tool, step_index=i, args=h, timestamp=time.time())
             )
         return state
 
@@ -1229,7 +1229,7 @@ class TestExternalSignal:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=1,
-                payload={"tool_name": "api", "args_hash": "x"},
+                payload={"tool_name": "api", "args": "x"},
             )
         )
         dt_otel.handle(
@@ -1391,7 +1391,7 @@ class TestConcurrentRuns:
             _event(
                 EventType.TOOL_CALLED,
                 ghost_id,
-                payload={"tool_name": "x", "args_hash": "y"},
+                payload={"tool_name": "x", "args": "y"},
             )
         )
         dt_otel.handle(
@@ -1465,7 +1465,7 @@ class TestSpanHierarchy:
                 EventType.TOOL_CALLED,
                 run_id,
                 step_index=2,
-                payload={"tool_name": "search", "args_hash": "x"},
+                payload={"tool_name": "search", "args": "x"},
             )
         )
         dt_otel.handle(

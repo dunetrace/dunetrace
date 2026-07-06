@@ -34,7 +34,7 @@ def evt(event_type: str, step_index: int = 1, payload: dict = None, **kw) -> dic
 
 
 def tool_evt(tool_name: str, step: int) -> dict:
-    return evt("tool.called", step, {"tool_name": tool_name, "args_hash": "aa"})
+    return evt("tool.called", step, {"tool_name": tool_name, "args": "aa"})
 
 
 def retrieval_evt(index: str, count: int, score: float = None, step: int = 1) -> dict:
@@ -54,7 +54,7 @@ def run_started(tools: list = None, step: int = 0) -> dict:
         "run.started",
         step,
         {
-            "input_hash": "abc123",
+            "input_text": "abc123",
             "model": "gpt-4o",
             "tools": ["web_search", "calculator"] if tools is None else tools,
         },
@@ -334,9 +334,9 @@ class TestSlowStepViaRunBuilder(unittest.TestCase):
         t = time.time()
         events = [
             timed_evt(
-                "run.started", 0, t, {"tools": ["api"], "model": "gpt-4o", "input_hash": "x"}
+                "run.started", 0, t, {"tools": ["api"], "model": "gpt-4o", "input_text": "x"}
             ),
-            timed_evt("tool.called", 1, t + 1, {"tool_name": "api", "args_hash": "aa"}),
+            timed_evt("tool.called", 1, t + 1, {"tool_name": "api", "args": "aa"}),
             timed_evt("tool.responded", 1, t + 20, {"tool_name": "api", "success": True}),
             timed_evt("run.completed", 1, t + 20.001, {"exit_reason": "final_answer"}),
         ]
@@ -347,9 +347,9 @@ class TestSlowStepViaRunBuilder(unittest.TestCase):
         t = time.time()
         events = [
             timed_evt(
-                "run.started", 0, t, {"tools": ["api"], "model": "gpt-4o", "input_hash": "x"}
+                "run.started", 0, t, {"tools": ["api"], "model": "gpt-4o", "input_text": "x"}
             ),
-            timed_evt("tool.called", 1, t + 1, {"tool_name": "api", "args_hash": "aa"}),
+            timed_evt("tool.called", 1, t + 1, {"tool_name": "api", "args": "aa"}),
             timed_evt("tool.responded", 1, t + 5, {"tool_name": "api", "success": True}),
             timed_evt("run.completed", 1, t + 5.001, {"exit_reason": "final_answer"}),
         ]
@@ -359,7 +359,7 @@ class TestSlowStepViaRunBuilder(unittest.TestCase):
     def test_slow_llm_call_fires(self):
         t = time.time()
         events = [
-            timed_evt("run.started", 0, t, {"tools": [], "model": "gpt-4o", "input_hash": "x"}),
+            timed_evt("run.started", 0, t, {"tools": [], "model": "gpt-4o", "input_text": "x"}),
             timed_evt("llm.called", 1, t + 1, {"model": "gpt-4o"}),
             timed_evt("llm.responded", 1, t + 35, {"finish_reason": "stop", "output_length": 100}),
             timed_evt("run.completed", 1, t + 35.001, {"exit_reason": "final_answer"}),
@@ -372,9 +372,9 @@ class TestSlowStepViaRunBuilder(unittest.TestCase):
         t = time.time()
         events = [
             timed_evt(
-                "run.started", 0, t, {"tools": ["api"], "model": "gpt-4o", "input_hash": "x"}
+                "run.started", 0, t, {"tools": ["api"], "model": "gpt-4o", "input_text": "x"}
             ),
-            timed_evt("tool.called", 1, t + 1, {"tool_name": "api", "args_hash": "aa"}),
+            timed_evt("tool.called", 1, t + 1, {"tool_name": "api", "args": "aa"}),
             timed_evt("tool.responded", 1, t + 20, {"tool_name": "api", "success": True}),
             timed_evt("run.completed", 1, t + 20.001, {"exit_reason": "final_answer"}),
         ]
@@ -390,7 +390,7 @@ class TestSlowStepViaRunBuilder(unittest.TestCase):
         t = time.time()
         # 35s LLM call: above 30s (LLM threshold) but below 60s (catch-all)
         events = [
-            timed_evt("run.started", 0, t, {"tools": [], "model": "gpt-4o", "input_hash": "x"}),
+            timed_evt("run.started", 0, t, {"tools": [], "model": "gpt-4o", "input_text": "x"}),
             timed_evt("llm.called", 1, t + 1, {"model": "gpt-4o"}),
             timed_evt("llm.responded", 1, t + 36, {"finish_reason": "stop", "output_length": 50}),
             timed_evt("run.completed", 1, t + 36.001, {"exit_reason": "final_answer"}),
@@ -418,7 +418,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         written_signals = []
         written_shadow = []
 
-        async def mock_write(signals, shadow):
+        async def mock_write(signals, shadow, org_id):
             written_signals.extend(signals)
             written_shadow.append(shadow)
             return len(signals)
@@ -430,7 +430,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         ):
             from detector_svc.worker import process_run
 
-            count = await process_run("run-test-1", "agent-test", "abc1", "completed")
+            count = await process_run("run-test-1", "agent-test", "abc1", "completed", "org-1")
 
         self.assertGreater(count, 0)
         self.assertIn(FailureType.TOOL_LOOP, [s.failure_type for s in written_signals])
@@ -445,7 +445,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
 
         captured_shadow = []
 
-        async def mock_write(signals, shadow):
+        async def mock_write(signals, shadow, org_id):
             captured_shadow.append(shadow)
             return len(signals)
 
@@ -457,7 +457,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         ):  # empty = all shadow
             from detector_svc.worker import process_run
 
-            await process_run("run-1", "agent-1", "v1", "completed")
+            await process_run("run-1", "agent-1", "v1", "completed", "org-1")
 
         self.assertTrue(
             all(s is True for s in captured_shadow),
@@ -479,7 +479,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         ):
             from detector_svc.worker import process_run
 
-            await process_run("run-1", "agent-1", "v1", "completed")
+            await process_run("run-1", "agent-1", "v1", "completed", "org-1")
 
         mark_mock.assert_called_once()
 
@@ -492,7 +492,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         ):
             from detector_svc.worker import process_run
 
-            count = await process_run("run-empty", "a", "v", "completed")
+            count = await process_run("run-empty", "a", "v", "completed", "org-1")
 
         self.assertEqual(count, 0)
         mark_mock.assert_called_once()
@@ -504,6 +504,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
                 "agent_id": "a1",
                 "agent_version": "v1",
                 "trigger": "completed",
+                "org_id": "org-1",
             }
         ]
         stalled = [
@@ -512,6 +513,7 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
                 "agent_id": "a1",
                 "agent_version": "v1",
                 "trigger": "stalled",
+                "org_id": "org-1",
             }
         ]
 

@@ -23,30 +23,32 @@ def is_trusted(request: Request) -> bool:
     return secrets.compare_digest(token, settings.INTERNAL_TOKEN)
 
 
-async def require_customer(
+async def require_org(
     request: Request,
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> str:
-    """FastAPI dependency that resolves the caller's customer_id. Raises 401 if invalid.
+    """FastAPI dependency that resolves the caller's org_id. Raises 401 if invalid.
 
     Trusted path: an upstream auth layer has already validated the caller and forwards
-    identity via x-internal-token + x-customer-id headers — no DB lookup here.
+    identity via x-internal-token + x-org-id headers (x-customer-id accepted as a
+    legacy fallback) — no DB lookup here.
 
     Direct path (self-hosted / dev): validates the Authorization header against this
     service's own api_keys table, as before. In dev mode (AUTH_MODE=dev), auth is
-    skipped entirely. Header format: "Bearer dt_live_..." or just the key.
+    skipped entirely and the caller is scoped to the 'default' org. Header format:
+    "Bearer dt_live_..." or just the key.
     """
     if is_trusted(request):
-        customer_id = request.headers.get("x-customer-id", "")
-        if not customer_id:
+        org_id = request.headers.get("x-org-id") or request.headers.get("x-customer-id", "")
+        if not org_id:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Trusted request missing x-customer-id",
+                detail="Trusted request missing x-org-id",
             )
-        return customer_id
+        return org_id
 
     if settings.is_dev:
-        return "dev_customer"
+        return "default"
 
     if not authorization:
         raise HTTPException(
@@ -58,11 +60,11 @@ async def require_customer(
     parts = authorization.strip().split()
     api_key = parts[-1] if parts else authorization
 
-    customer_id = await verify_api_key(api_key)
-    if customer_id is None:
+    org_id = await verify_api_key(api_key)
+    if org_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or inactive API key",
         )
 
-    return customer_id
+    return org_id

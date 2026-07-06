@@ -2,6 +2,8 @@
 
 This guide covers adding Dunetrace monitoring to a LangChain or LangGraph agent already running in production. The integration is a single callback — no changes to your agent logic.
 
+> **Looking for `dt.auto_instrument()` instead?** It patches `BaseChatModel`/`BaseTool` for you so you don't need to construct `DunetraceCallbackHandler` yourself — but it requires wrapping the top-level call in `with dt.run(agent_id=...):` to correlate correctly. See [auto-instrumentation.md](./integrations/auto-instrumentation.md) for why, and for the full agent_id resolution order.
+
 ---
 
 ## How It Works
@@ -286,18 +288,12 @@ Stale runs (invocations that never completed after 30 minutes) are pruned automa
 ## What Is and Isn't Captured
 
 **Captured automatically:**
-- Every LLM call: model name, token counts (prompt + completion), latency, finish reason
-- Every tool call: tool name, success/failure, output length
+- Every LLM call: model name, token counts (prompt + completion), latency, finish reason, raw prompt/completion text
+- Every tool call: tool name, success/failure, output length, raw arguments and output
 - Tool errors handled by the framework (`handle_tool_error=True` / `handle_tool_errors=True`) — reported as `success=False` in `TOOL_RESPONDED`, enabling RETRY_STORM and CASCADING_TOOL_FAILURE detection on real failures
-- Every retriever call: index name, result count, top similarity score
-- Run-level: total steps, tool call count, exit reason
-
-**Not captured (privacy — hashed in-process):**
-- User input text
-- LLM prompts and completions
-- Tool arguments and outputs
-- Error messages
-- Retrieval queries
+- Every retriever call: index name, result count, top similarity score, raw query
+- Run-level: total steps, tool call count, exit reason, raw user input text
+- Error messages, raw text
 
 **Not captured (LangChain limitation):**
 - Intermediate chain inputs/outputs for sub-chains (only root chain boundary is tracked as run start/end)

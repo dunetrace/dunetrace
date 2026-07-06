@@ -16,7 +16,13 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ingest_svc.otel import otlp_to_events, _classify, _val, _trace_to_uuid
+from ingest_svc.otel import (
+    otlp_to_events,
+    protobuf_to_resource_spans,
+    _classify,
+    _val,
+    _trace_to_uuid,
+)
 
 # ── _val ──────────────────────────────────────────────────────────────────────
 
@@ -261,3 +267,119 @@ def test_multiple_traces_in_one_batch():
     assert "agent-a" in agent_ids
     assert "agent-b" in agent_ids
     assert len(run_ids) == 2
+
+
+# ── protobuf_to_resource_spans (D11) ────────────────────────────────────────────
+
+
+def _protobuf_export_request(agent_id="proto-agent", span_name="root"):
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+        ExportTraceServiceRequest,
+    )
+    from opentelemetry.proto.common.v1.common_pb2 import AnyValue
+
+    req = ExportTraceServiceRequest()
+    rs = req.resource_spans.add()
+    rs.resource.attributes.add(key="service.name", value=AnyValue(string_value=agent_id))
+    ss = rs.scope_spans.add()
+    span = ss.spans.add()
+    span.trace_id = bytes.fromhex("4bf92f3577b34da6a3ce929d0e0e4736")
+    span.span_id = bytes.fromhex("00f067aa0ba902b7")
+    span.name = span_name
+    span.start_time_unix_nano = 1_000_000_000_000
+    span.end_time_unix_nano = 2_000_000_000_000
+    return req
+
+
+def test_protobuf_to_resource_spans_matches_json_shape():
+    req = _protobuf_export_request()
+    resource_spans = protobuf_to_resource_spans(req.SerializeToString())
+
+    assert len(resource_spans) == 1
+    rs = resource_spans[0]
+    assert rs["resource"]["attributes"][0] == {
+        "key": "service.name",
+        "value": {"stringValue": "proto-agent"},
+    }
+    span = rs["scopeSpans"][0]["spans"][0]
+    assert span["startTimeUnixNano"] == "1000000000000"
+    assert span["endTimeUnixNano"] == "2000000000000"
+
+
+def test_protobuf_trace_id_decoded_to_hex_not_base64():
+    """MessageToDict base64-encodes bytes fields by default — traceId/spanId
+    must be corrected to plain hex, matching the OTLP JSON convention and
+    what _trace_to_uuid()/the rest of this module already expect."""
+    req = _protobuf_export_request()
+    resource_spans = protobuf_to_resource_spans(req.SerializeToString())
+    span = resource_spans[0]["scopeSpans"][0]["spans"][0]
+    assert span["traceId"] == "4bf92f3577b34da6a3ce929d0e0e4736"
+    assert span["spanId"] == "00f067aa0ba902b7"
+
+
+def test_protobuf_output_produces_valid_dunetrace_events():
+    """End-to-end: a protobuf-sourced resourceSpans list must produce the
+    same event shape as the equivalent JSON input."""
+    req = _protobuf_export_request(agent_id="proto-agent")
+    resource_spans = protobuf_to_resource_spans(req.SerializeToString())
+    events = otlp_to_events(resource_spans)
+
+    assert any(e["event_type"] == "run.started" for e in events)
+    assert any(e["event_type"] == "run.completed" for e in events)
+    assert all(e["agent_id"] == "proto-agent" for e in events)
+
+
+def test_protobuf_malformed_bytes_raises():
+    with pytest.raises(Exception):
+        protobuf_to_resource_spans(b"\xff\xff\xff not a real protobuf message at all")
+
+
+# ── Per-resource / per-trace error isolation (D11) ──────────────────────────────
+
+
+def test_malformed_resource_span_does_not_affect_others():
+    """One resourceSpan with an unexpected structure must not prevent a
+    sibling, well-formed resourceSpan in the same batch from producing
+    events — see otlp_to_events()'s docstring."""
+    good_root = _span("aaaa", "", "root", 1_000_000_000_000, 2_000_000_000_000)
+    good_resource = _make_resource_span(
+        "4bf92f3577b34da6a3ce929d0e0e4736", [good_root], service_name="good-agent"
+    )
+    # "resource" is a string instead of a dict — .get("attributes", []) on
+    # a str raises AttributeError inside the mapper's resource-attrs step.
+    bad_resource = {"resource": "not-a-dict", "scopeSpans": [{"spans": [good_root]}]}
+
+    events = otlp_to_events([bad_resource, good_resource])
+
+    assert any(e["agent_id"] == "good-agent" for e in events)
+    assert any(e["event_type"] == "run.started" for e in events)
+
+
+def test_malformed_trace_does_not_affect_other_traces():
+    """One trace whose spans are unprocessable must not prevent a sibling
+    trace in the same batch from producing events."""
+    good_root = _span("aaaa", "", "root", 1_000_000_000_000, 2_000_000_000_000)
+    good_resource = _make_resource_span("4bf92f3577b34da6a3ce929d0e0e4736", [good_root])
+
+    # A span whose startTimeUnixNano can't be coerced to int — raises inside
+    # the chronological sort in _events_for_trace(). Distinct traceId from
+    # the good span above — _span() hardcodes traceId, so it must be
+    # overridden here, otherwise both spans land in the same trace bucket
+    # (otlp_to_events groups by traceId, not by which resourceSpan a span
+    # came from) and this test would poison the "good" trace instead of
+    # proving isolation between two separate ones.
+    bad_span = _span("bbbb", "", "root", "not-a-number", 2_000_000_000_000)
+    bad_span["traceId"] = "11112222" * 4
+    bad_resource = _make_resource_span(bad_span["traceId"], [bad_span])
+
+    events = otlp_to_events([bad_resource, good_resource])
+
+    run_ids = {e["run_id"] for e in events}
+    assert len(run_ids) == 1  # only the good trace survived
+    assert any(e["event_type"] == "run.started" for e in events)
+
+
+def test_all_malformed_returns_empty_list_not_raise():
+    bad_resource = {"resource": "not-a-dict", "scopeSpans": "also-not-a-list"}
+    events = otlp_to_events([bad_resource])
+    assert events == []

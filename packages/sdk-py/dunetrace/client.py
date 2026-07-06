@@ -13,7 +13,6 @@ import logging
 import os
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
@@ -23,10 +22,14 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from dunetrace.buffer import RingBuffer
 from dunetrace.context import _current_run
 from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
+from dunetrace.emitters import (
+    USER_AGENT,
+    BatchingEmitter,
+    HttpBatchingEmitter,
+)
 from dunetrace.models import (
     AgentEvent,
     EventType,
-    hash_content,
     agent_version,
     Exporter,
     CallableExporter,
@@ -35,22 +38,6 @@ from dunetrace.policies import Policy, PolicyAction, PolicyCondition, PolicyEngi
 from dunetrace.run_context import RunContext
 
 logger = logging.getLogger("dunetrace")
-
-# Importing dunetrace.__version__ here would be circular (dunetrace/__init__.py
-# imports Dunetrace from this module) — read it the same way __init__.py does.
-try:
-    from importlib.metadata import PackageNotFoundError as _PkgNotFoundError
-    from importlib.metadata import version as _pkg_version
-
-    _SDK_VERSION = _pkg_version("dunetrace")
-except _PkgNotFoundError:
-    _SDK_VERSION = "0.0.0"  # running from source without installing
-
-# Every outbound request identifies itself. Without this, urllib's default
-# "Python-urllib/x.y" User-Agent gets fingerprinted and blocked (HTTP 403) by
-# Cloudflare's bot protection in front of app.dunetrace.com — confirmed via a
-# direct request with that exact UA string returning Cloudflare error 1010.
-USER_AGENT = f"dunetrace-sdk-py/{_SDK_VERSION}"
 
 
 class Dunetrace:
@@ -85,11 +72,21 @@ class Dunetrace:
         otel_exporter: Optional[Any] = None,
         exporters: Optional[List[Exporter]] = None,
         policy_secret: str = "",
+        emitter: Optional[BatchingEmitter] = None,
         debug: bool = False,
     ) -> None:
-        _endpoint = endpoint or os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8001")
+        # is not None, not `endpoint or ...` — an explicit endpoint="" is taken
+        # literally rather than silently falling back. To disable HTTP shipping,
+        # pass emitter=NoopBatchingEmitter() (see dunetrace.emitters); that's the
+        # one supported way to opt out, not a magic endpoint value.
+        _endpoint = (
+            endpoint
+            if endpoint is not None
+            else os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8001")
+        )
         self._ingest_url = _endpoint.rstrip("/") + "/v1/ingest"
         self._api_key = api_key or os.environ.get("DUNETRACE_API_KEY", "")
+        self._emitter: BatchingEmitter = emitter or HttpBatchingEmitter(_endpoint, self._api_key)
         self._policy_secret = policy_secret
         self._buffer = RingBuffer[AgentEvent](maxsize=buffer_size)
         self._stop_evt = Event()
@@ -114,8 +111,8 @@ class Dunetrace:
         )
         self._drain_thread.start()
         logger.debug(
-            "Dunetrace started. endpoint=%s emit_as_json=%s otel=%s exporters=%d",
-            endpoint,
+            "Dunetrace started. emitter=%s emit_as_json=%s otel=%s exporters=%d",
+            type(self._emitter).__name__,
             emit_as_json,
             otel_exporter is not None,
             len(self._exporters),
@@ -159,12 +156,14 @@ class Dunetrace:
             agent_id=agent_id,
             agent_version=version,
             available_tools=tools,
-            input_text_hash=hash_content(user_input) if user_input else "",
+            input_text=user_input,
             parent_run_id=parent_run_id,
         )
 
-        # Run injection check on raw input before it is hashed and discarded.
-        # Evidence (matched pattern names + count) is safe to transmit — no raw text.
+        # In-process content inspection: the injection detector runs here, against
+        # raw user_input, before the run.started event is built. Only the match
+        # evidence (pattern names + count) needs to reach this point — the check
+        # itself never needs the event pipeline to see raw text to do its job.
         _injection_evidence = None
         if user_input:
             _sig = PROMPT_INJECTION_DETECTOR.check_input(user_input, ctx.state)
@@ -172,7 +171,7 @@ class Dunetrace:
                 _injection_evidence = _sig.evidence
 
         payload: dict = {
-            "input_hash": hash_content(user_input) if user_input else "",
+            "input_text": user_input,
             "model": model,
             "tools": tools,
         }
@@ -230,7 +229,7 @@ class Dunetrace:
                     step_index=ctx.step,
                     payload={
                         "error_type": "PolicyViolation",
-                        "error_hash": hash_content(str(exc)),
+                        "error": str(exc),
                         "exit_reason": "policy_violation",
                         "policy_name": exc.policy_name,
                         "step_index": ctx.step,
@@ -252,7 +251,7 @@ class Dunetrace:
                     step_index=ctx.step,
                     payload={
                         "error_type": type(exc).__name__,
-                        "error_hash": hash_content(str(exc)),
+                        "error": str(exc),
                         "step_index": ctx.step,
                     },
                 )
@@ -287,13 +286,20 @@ class Dunetrace:
 
         :param agent_id:   Default label for runs started by ``@dt.agent()``
                            when no explicit ``agent_id`` argument is given.
+                           Also used as the fallback ``default_agent_id`` for
+                           ``langchain``/``crewai`` auto-instrumentation — see
+                           ``docs/integrations/auto-instrumentation.md`` for
+                           the full agent_id resolution order.
         :param frameworks: Subset of frameworks to patch. ``None`` patches all
-                           installed ones (openai, anthropic, httpx, requests).
+                           installed ones (openai, anthropic, httpx, requests,
+                           langchain, crewai).
         """
         self._default_agent_id = agent_id or os.environ.get("DUNETRACE_AGENT_ID", "")
         from dunetrace.auto import auto_instrument as _auto_instrument
 
-        _auto_instrument(frameworks=frameworks)
+        _auto_instrument(
+            frameworks=frameworks, client=self, default_agent_id=self._default_agent_id or None
+        )
         logger.debug("Dunetrace.init() agent_id=%r frameworks=%r", agent_id, frameworks)
         return self
 
@@ -303,23 +309,35 @@ class Dunetrace:
         inside any ``dt.run()`` context are tracked automatically — no manual
         ``run.llm_called()`` / ``run.llm_responded()`` needed.
 
-        Supported frameworks: ``"openai"``, ``"anthropic"``.
+        Supported frameworks: ``"openai"``, ``"anthropic"``, ``"httpx"``,
+        ``"requests"``, ``"langchain"`` (covers LangGraph), ``"crewai"``.
         Uninstalled frameworks are silently skipped.
+
+        ``langchain`` specifically requires the top-level call to be wrapped
+        in ``dt.run(...)`` too — unlike the other frameworks here, it can only
+        attach to an already-open run, never open its own. See
+        ``docs/integrations/auto-instrumentation.md``. ``crewai`` and the rest
+        don't have this requirement; wrapping in ``dt.run()`` is optional for
+        them (it only changes which agent_id the run gets attributed to).
 
         :param frameworks: Subset to patch. ``None`` patches all installed ones.
 
         Usage::
 
             dt = Dunetrace(api_key="dt_live_...")
-            dt.auto_instrument()   # patch openai + anthropic if installed
+            dt.auto_instrument()   # patch all installed supported frameworks
 
             with dt.run("my-agent", user_input=query) as run:
                 # openai/anthropic calls are now tracked automatically
                 response = openai_client.chat.completions.create(...)
+                # a LangChain/LangGraph agent.invoke() here would be tracked
+                # too, correlated into this same run
         """
         from dunetrace.auto import auto_instrument as _auto_instrument
 
-        _auto_instrument(frameworks=frameworks)
+        _auto_instrument(
+            frameworks=frameworks, client=self, default_agent_id=self._default_agent_id or None
+        )
 
     def add_policy(
         self,
@@ -552,8 +570,7 @@ class Dunetrace:
         function. No-op when called outside a ``dt.run()`` context (the function
         still runs, it just isn't tracked).
 
-        Tool arguments are serialized and SHA-256 hashed before transmission —
-        raw values never leave the process.
+        Tool arguments are serialized and transmitted as-is.
 
         Usage::
 
@@ -748,7 +765,6 @@ class Dunetrace:
 
         Fields: ts (RFC3339), level ("info"), logger ("dunetrace"), event_type and agent_id
         as Loki stream labels, run_id/step_index/payload as structured fields.
-        payload contains hashes only — never raw content.
         """
         ts = datetime.datetime.utcfromtimestamp(event.timestamp).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         line = {
@@ -774,8 +790,7 @@ class Dunetrace:
         while not self._stop_evt.is_set():
             batch = self._buffer.drain(100)
             if batch:
-                if self._ingest_url:
-                    self._ship(batch)
+                self._ship(batch)
             else:
                 # Wait until either flush() signals us, shutdown() fires, or the
                 # interval expires. This lets flush() wake the thread immediately.
@@ -783,45 +798,16 @@ class Dunetrace:
                 self._flush_gate.clear()
 
         remaining = self._buffer.drain_all()
-        if remaining and self._ingest_url:
+        if remaining:
             self._ship(remaining)
 
-    def _ship(self, batch: List[AgentEvent]) -> None:
-        payload = json.dumps(
-            {
-                "api_key": self._api_key,  # self-hosted ingest_svc compat; see _auth_headers
-                "agent_id": batch[0].agent_id if batch else "",
-                "events": [e.to_dict() for e in batch],
-            }
-        ).encode()
-
-        req = urllib.request.Request(
-            self._ingest_url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "X-Dunetrace-Agent": batch[0].agent_id if batch else "",
-                "User-Agent": USER_AGENT,
-                **self._auth_headers(),
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                logger.debug("Shipped %d events. status=%d", len(batch), resp.status)
-        except urllib.error.URLError as exc:
-            if "Connection refused" in str(exc):
-                logger.warning(
-                    "DuneTrace backend not reachable at %s — is it running?\n"
-                    "  Start it with: docker compose up -d\n"
-                    "  %d events dropped.",
-                    self._ingest_url,
-                    len(batch),
-                )
-            else:
-                logger.warning("Failed to ship %d events: %s", len(batch), exc)
-        except Exception as exc:
-            logger.warning("Failed to ship %d events: %s", len(batch), exc)
+    def _ship(self, batch: List[AgentEvent]) -> bool:
+        """Delegates to the configured BatchingEmitter (see dunetrace.emitters).
+        Defaults to HttpBatchingEmitter — same POST-to-ingest-API behavior as
+        before this was made pluggable. Never raises; returns the emitter's
+        success/failure so a future durable-retry layer can react to it.
+        """
+        return self._emitter.ship(batch)
 
 
 # Backwards-compatible alias

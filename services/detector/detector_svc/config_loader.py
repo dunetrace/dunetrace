@@ -9,7 +9,14 @@ import logging
 import os
 from typing import Any
 
+from dunetrace.models import Severity
+
 logger = logging.getLogger("dunetrace.config_loader")
+
+# "severity" is accepted for every detector, independent of _PARAM_MAP below —
+# it's a cross-cutting BaseDetector attribute (see packages/sdk-py/dunetrace/
+# detectors.py), not a detector-specific tunable like THRESHOLD/WINDOW.
+_SEVERITY_KEY = "severity"
 
 # Maps YAML section key -> detector constructor kwarg names (all uppercase).
 # Only detectors with tunable params need an entry here.
@@ -92,6 +99,20 @@ def load_detector_kwargs(
                 continue
             param_map = _PARAM_MAP.get(det_key, {})
             kwargs = {param_map[k]: v for k, v in params.items() if k in param_map}
+
+            if _SEVERITY_KEY in params:
+                raw_severity = str(params[_SEVERITY_KEY]).upper()
+                try:
+                    kwargs["SEVERITY"] = Severity(raw_severity)
+                except ValueError:
+                    logger.warning(
+                        "detectors.yml: %s.%s has invalid severity %r — valid: %s. Ignoring override.",
+                        category,
+                        det_key,
+                        params[_SEVERITY_KEY],
+                        [s.value for s in Severity],
+                    )
+
             if kwargs:
                 result[category][det_key] = kwargs
 

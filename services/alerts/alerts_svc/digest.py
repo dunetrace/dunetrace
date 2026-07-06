@@ -20,6 +20,7 @@ from alerts_svc.db import (
     was_digest_sent_recently,
     log_digest_sent,
     fetch_weekly_digest_data,
+    fetch_active_org_ids,
 )
 from alerts_svc.sender import send_slack
 
@@ -57,8 +58,8 @@ def _pct(rate: Any) -> str:
         return "—"
 
 
-def format_digest_slack(data: dict[str, Any]) -> dict:
-    """Build the weekly digest Slack Block Kit payload."""
+def format_digest_slack(data: dict[str, Any], org_id: str) -> dict:
+    """Build the weekly digest Slack Block Kit payload for a single org."""
     now = datetime.datetime.now(datetime.timezone.utc)
     week_start = (now - datetime.timedelta(days=7)).strftime("%-d %b")
     week_end = now.strftime("%-d %b %Y")
@@ -77,7 +78,7 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f":bar_chart: Weekly Agent Health Digest — {week_start}–{week_end}",
+                "text": f":bar_chart: Weekly Agent Health Digest — {org_id} — {week_start}–{week_end}",
                 "emoji": True,
             },
         },
@@ -200,49 +201,61 @@ def format_digest_slack(data: dict[str, Any]) -> dict:
     return {"attachments": [{"color": "#4a9ede", "blocks": blocks}]}
 
 
-async def send_weekly_digest() -> bool:
+async def send_weekly_digest() -> int:
     """
-    Check if it's time, fetch data, format, and send the digest.
-    Returns True if a digest was sent, False otherwise.
+    Check if it's time, then send one digest per active org (an org with any
+    processed run in the last 7 days). Each org's digest is built from only
+    that org's own data — a shared Slack/webhook destination never sees
+    another org's runs/signals mixed into one message.
+    Returns the number of digests sent.
     """
     if not settings.digest_enabled:
-        return False
+        return 0
 
     if not should_send_digest():
-        return False
+        return 0
 
-    if await was_digest_sent_recently(within_days=6):
-        logger.debug("Digest already sent this week — skipping")
+    sent = 0
+    for org_id in await fetch_active_org_ids(within_days=7):
+        if await _send_org_digest(org_id):
+            sent += 1
+    return sent
+
+
+async def _send_org_digest(org_id: str) -> bool:
+    if await was_digest_sent_recently(org_id, within_days=6):
+        logger.debug("Digest already sent this week for org_id=%s — skipping", org_id)
         return False
 
     try:
-        data = await fetch_weekly_digest_data()
+        data = await fetch_weekly_digest_data(org_id)
     except Exception as exc:
-        logger.error("Failed to fetch weekly digest data: %s", exc)
+        logger.error("Failed to fetch weekly digest data for org_id=%s: %s", org_id, exc)
         return False
 
     if data.get("total_runs", 0) == 0:
-        logger.info("No runs in the last 7 days — skipping digest")
-        await log_digest_sent()  # don't retry until next week
+        logger.info("No runs in the last 7 days for org_id=%s — skipping digest", org_id)
+        await log_digest_sent(org_id)  # don't retry until next week
         return False
 
-    payload = format_digest_slack(data)
+    payload = format_digest_slack(data, org_id)
 
     try:
         result = send_slack(payload)
     except Exception as exc:
-        logger.error("Failed to send weekly digest: %s", exc)
+        logger.error("Failed to send weekly digest for org_id=%s: %s", org_id, exc)
         return False
 
     if result.success:
-        await log_digest_sent()
+        await log_digest_sent(org_id)
         logger.info(
-            "Weekly digest sent. runs=%d agents=%d signals=%d",
+            "Weekly digest sent. org_id=%s runs=%d agents=%d signals=%d",
+            org_id,
             data["total_runs"],
             data["total_agents"],
             data["total_signals"],
         )
         return True
     else:
-        logger.error("Digest Slack delivery failed: %s", result.error)
+        logger.error("Digest Slack delivery failed for org_id=%s: %s", org_id, result.error)
         return False

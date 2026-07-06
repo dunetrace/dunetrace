@@ -3,35 +3,16 @@ OTel span receiver for Dunetrace.
 
 Translates incoming OpenTelemetry spans (gen_ai.* semantic conventions) into
 Dunetrace AgentEvents and runs the full behavioral detector suite on them.
+Span content (gen_ai.prompt, gen_ai.completion, tool arguments) is carried
+through as-is, same as the native SDK — nothing is hashed or stripped at the
+receiver boundary.
 
-Privacy model — Path 2 (self-hosted):
-    Raw span content (gen_ai.prompt, gen_ai.completion, tool arguments) is
-    SHA-256 hashed HERE, at the receiver boundary, before any AgentEvent is
-    created. Nothing downstream — the Dunetrace ingest API, the database, the
-    detector — ever sees plaintext. The guarantee is identical to the native
-    SDK (Path 1); the only difference is where hashing occurs: in-process for
-    Path 1, at the self-hosted receiver boundary for Path 2.
+Use this when an agent is already instrumented with an OTel-based tracer
+(e.g. OpenLLMetry/Traceloop) and you want Dunetrace's detectors without adding
+manual dt.run() / @dt.agent() instrumentation. Attach it as a second span
+processor alongside whatever exporter you already have.
 
-    Path 3 (managed cloud) requires either the native SDK or a customer-side
-    hash proxy placed before the cloud endpoint.
-
-Instrumentation paths:
-
-    Path 1 — Native SDK (strongest, recommended for new agents):
-        Hash in-process. No raw content leaves the agent process.
-        Use: dt.init() / @dt.agent() / middleware.
-
-    Path 2 — OTel receiver, self-hosted:
-        Raw spans travel agent → self-hosted receiver on internal network.
-        Hashed at receiver boundary before persistence.
-        Use: already instrumented with OpenLLMetry, self-hosted Dunetrace.
-
-    Path 3 — OTel receiver, managed cloud (future):
-        Raw spans would travel to an external service.
-        Requirement: use Path 1 (native SDK), or deploy a customer-side
-        hash proxy before cloud ingestion.
-
-Usage with OpenLLMetry (Path 2)::
+Usage::
 
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -48,17 +29,17 @@ Usage with OpenLLMetry (Path 2)::
     from traceloop.sdk import Traceloop
     Traceloop.init(app_name="my-agent", tracer_provider=provider)
 
-gen_ai.* attributes read and their privacy handling:
+gen_ai.* attributes read:
 
-    gen_ai.request.model           → model name (not sensitive, passed as-is)
-    gen_ai.usage.prompt_tokens     → integer count (not sensitive)
-    gen_ai.usage.completion_tokens → integer count (not sensitive)
-    gen_ai.completion.0.finish_reason → short string like "stop" (not sensitive)
-    gen_ai.tool.name               → tool name (not sensitive)
-    gen_ai.prompt                  → SHA-256 hashed at receiver boundary
-    gen_ai.completion              → SHA-256 hashed at receiver boundary
-    gen_ai.prompt.0.content        → SHA-256 hashed at receiver boundary
-    gen_ai.completion.0.content    → SHA-256 hashed at receiver boundary
+    gen_ai.request.model              → model name
+    gen_ai.usage.prompt_tokens        → integer count
+    gen_ai.usage.completion_tokens    → integer count
+    gen_ai.completion.0.finish_reason → short string like "stop"
+    gen_ai.tool.name                  → tool name
+    gen_ai.prompt                     → raw prompt text
+    gen_ai.completion                 → raw completion text
+    gen_ai.prompt.0.content           → raw prompt text
+    gen_ai.completion.0.content       → raw completion text
 """
 
 from __future__ import annotations
@@ -68,7 +49,6 @@ import threading
 from collections import defaultdict
 from typing import TYPE_CHECKING, Optional, Sequence
 
-from dunetrace.models import hash_content
 
 if TYPE_CHECKING:
     from dunetrace.client import Dunetrace
@@ -232,12 +212,9 @@ def _emit_llm(run, attrs: dict, latency_ms: int, is_error: bool) -> None:
     reason_toks = int(attrs.get("gen_ai.usage.reasoning_tokens", 0) or 0)
     finish_reason = "error" if is_error else _finish_reason(attrs)
 
-    # Path 2 privacy boundary: hash raw content fields here, at the receiver,
-    # before any AgentEvent is constructed.  Non-sensitive metadata (model name,
-    # token counts, latency, finish_reason) is passed as-is.
     raw_output = attrs.get("gen_ai.completion") or attrs.get("gen_ai.completion.0.content") or ""
-    output_hash = hash_content(str(raw_output)) if raw_output else ""
-    output_length = len(str(raw_output)) if raw_output else 0
+    output_text = str(raw_output) if raw_output else ""
+    output_length = len(output_text)
 
     run.llm_called(model, prompt_tokens=prompt_toks)
     run.llm_responded(
@@ -245,7 +222,7 @@ def _emit_llm(run, attrs: dict, latency_ms: int, is_error: bool) -> None:
         reasoning_tokens=reason_toks,
         latency_ms=latency_ms,
         finish_reason=finish_reason,
-        output_hash=output_hash,
+        output=output_text,
         output_length=output_length,
     )
 

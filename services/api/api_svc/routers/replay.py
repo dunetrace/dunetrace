@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Union
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 
 logger = logging.getLogger("dunetrace.api.replay")
 router = APIRouter(tags=["Replay"])
@@ -61,9 +61,9 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
             continue
 
         if mod_type == "break_tool_loop":
-            # Remove duplicate tool.called events (same tool_name + args_hash).
+            # Remove duplicate tool.called events (same tool_name + args).
             # ToolLoopDetector counts tool_name occurrences in the window; we need
-            # to reduce the call count below THRESHOLD, not just mutate args_hash.
+            # to reduce the call count below THRESHOLD, not just mutate args.
             # Also drop the paired tool.responded at the same step so build_run_state
             # doesn't see orphaned responses.
             seen_tool_args: set[tuple] = set()
@@ -72,7 +72,7 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
             for e in events:
                 if e["event_type"] == "tool.called":
                     p = e.get("payload") or {}
-                    key = (p.get("tool_name", ""), p.get("args_hash", ""))
+                    key = (p.get("tool_name", ""), p.get("args", ""))
                     if key in seen_tool_args:
                         dropped_steps.add(e.get("step_index", -1))
                         continue
@@ -96,7 +96,7 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
                     p = e.get("payload") or {}
                     if p.get("success") is False:
                         p["success"] = True
-                        p.pop("error_hash", None)
+                        p.pop("error", None)
 
         elif mod_type == "reduce_context":
             factor = float(mod_params.get("factor", 0.5))
@@ -158,7 +158,7 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 
-async def _fetch_events(run_id: str) -> list[dict]:
+async def _fetch_events(org_id: str, run_id: str) -> list[dict]:
     from api_svc.db import queries as _q  # noqa: PLC0415
 
     pool = _q._pool
@@ -170,10 +170,11 @@ async def _fetch_events(run_id: str) -> list[dict]:
             SELECT event_type, run_id, agent_id, agent_version,
                    step_index, timestamp, payload, parent_run_id
             FROM events
-            WHERE run_id = $1
+            WHERE run_id = $1 AND org_id = $2
             ORDER BY step_index ASC, timestamp ASC
             """,
             run_id,
+            org_id,
         )
     return [
         {
@@ -188,7 +189,7 @@ async def _fetch_events(run_id: str) -> list[dict]:
     ]
 
 
-async def _fetch_signals(run_id: str) -> list[dict]:
+async def _fetch_signals(org_id: str, run_id: str) -> list[dict]:
     from api_svc.db import queries as _q  # noqa: PLC0415
 
     pool = _q._pool
@@ -199,10 +200,11 @@ async def _fetch_signals(run_id: str) -> list[dict]:
             """
             SELECT failure_type, severity, step_index, confidence
             FROM failure_signals
-            WHERE run_id = $1 AND shadow = FALSE
+            WHERE run_id = $1 AND org_id = $2 AND shadow = FALSE
             ORDER BY step_index ASC
             """,
             run_id,
+            org_id,
         )
     return [dict(r) for r in rows]
 
@@ -222,7 +224,7 @@ class ReplayRequest(BaseModel):
 async def replay_run(
     run_id: str,
     body: ReplayRequest,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> Dict[str, Any]:
     for mod in body.modifications:
         mod_type = (
@@ -234,11 +236,11 @@ async def replay_run(
                 detail=f"Unknown modification {mod_type!r}. Valid: {sorted(_VALID_MODS)}",
             )
 
-    events = await _fetch_events(run_id)
+    events = await _fetch_events(org_id, run_id)
     if not events:
         raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found or has no events.")
 
-    original_signals = await _fetch_signals(run_id)
+    original_signals = await _fetch_signals(org_id, run_id)
     modified_events = _apply_modifications(events, body.modifications)
 
     try:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import os
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -37,9 +38,10 @@ def mock_db(monkeypatch):
     # import verify_api_key` binds a local name there) — patching
     # ingest_svc.db.postgres.verify_api_key instead is a no-op, since that
     # module-level binding was already copied before this fixture runs.
-    # Return value matches make_batch()'s default agent_id below.
+    # verify_api_key returns org_id (not agent_id) since v0.5.0 — keys are
+    # org-scoped, agent_id is just per-event data, unrelated to which key sent it.
     monkeypatch.setattr(
-        "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value="agent-xyz")
+        "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value="org-test")
     )
 
 
@@ -66,7 +68,7 @@ def make_event(**overrides) -> dict:
         "agent_version": "9a3f1b2c",
         "step_index": 1,
         "timestamp": 1708934400.0,
-        "payload": {"tool_name": "web_search", "args_hash": "aabb"},
+        "payload": {"tool_name": "web_search", "args": "aabb"},
         "parent_run_id": None,
     }
     e.update(overrides)
@@ -157,7 +159,7 @@ class TestHappyPath:
         event = make_event(
             event_type="run.started",
             step_index=0,
-            payload={"input_hash": "abc", "model": "gpt-4o", "tools": ["web_search"]},
+            payload={"input_text": "abc", "model": "gpt-4o", "tools": ["web_search"]},
         )
         r = await client.post("/v1/ingest", json=make_batch(events=[event]))
         assert r.status_code == 202
@@ -253,41 +255,33 @@ class TestAuth:
         r = await client.post("/v1/ingest", json=make_batch())
         assert r.status_code == 202
 
-    async def test_key_cannot_impersonate_a_different_agent_id(self, client):
-        # mock_db resolves this key to "agent-xyz" — a batch claiming to be
-        # any other agent must be rejected, not silently accepted with the
-        # attacker-supplied identity.
-        r = await client.post("/v1/ingest", json=make_batch(agent_id="someone-elses-agent"))
-        assert r.status_code == 403
+    async def test_org_scoped_key_accepts_any_agent_id(self, client):
+        # v0.5.0 multi-tenancy: keys are org-scoped, not agent-scoped. A valid
+        # key may submit events for any agent_id under its org — agents are
+        # discovered on first ingest, not fixed at key-creation time. See
+        # docs/migrations/multi-tenancy-v0.5.0.md ("Security posture change").
+        r = await client.post("/v1/ingest", json=make_batch(agent_id="a-brand-new-agent"))
+        assert r.status_code == 202
 
-    async def test_key_cannot_impersonate_via_a_single_events_agent_id(self, client):
-        # Batch-level agent_id matches, but one event inside the batch claims
-        # a different agent — must still be rejected, not just checked at the
-        # batch level.
-        events = [make_event(), make_event(agent_id="someone-elses-agent")]
+    async def test_org_scoped_key_accepts_mixed_agent_ids_within_batch(self, client):
+        # One key, one batch, two different agents — allowed under the org-scoped
+        # model as long as both belong to the org the key resolves to.
+        events = [make_event(), make_event(agent_id="a-different-agent")]
         r = await client.post("/v1/ingest", json=make_batch(events=events))
-        assert r.status_code == 403
-
-    async def test_dev_mode_key_is_exempt_from_agent_id_match(self, client, monkeypatch):
-        # DEV_AGENT_SENTINEL ("dev") is a wildcard dev-mode identity, not a
-        # real per-agent key — local/self-hosted dev usage must keep working
-        # without every request needing to claim agent_id="dev".
-        monkeypatch.setattr(
-            "ingest_svc.routers.ingest.verify_api_key",
-            AsyncMock(return_value="dev"),
-        )
-        r = await client.post("/v1/ingest", json=make_batch(agent_id="any-agent-at-all"))
         assert r.status_code == 202
 
 
 # ── Trusted gateway (dunetrace-cloud) ───────────────────────────────────────────
 #
 # dunetrace-cloud's tenancy middleware validates the caller against its own
-# org_api_keys table, then proxies here with x-internal-token set. These
-# routes must accept that trust signal and skip the OSS-only api_keys lookup
-# entirely — that table has no rows in production (org auth lives in
-# dunetrace-cloud now), so any request that ran the DB check would 401
-# regardless of key validity. See ingest_svc/auth.py::is_trusted.
+# org_api_keys table, then proxies here with x-internal-token set plus an
+# x-org-id header carrying the already-authenticated org identity (x-customer-id
+# is accepted as a fallback for older gateway builds — see
+# docs/migrations/multi-tenancy-v0.5.0.md). These routes must accept that trust
+# signal and skip the OSS-only api_keys lookup entirely — that table has no
+# rows in production (org auth lives in dunetrace-cloud now), so any request
+# that ran the DB check would 401 regardless of key validity. See
+# ingest_svc/auth.py::is_trusted.
 #
 # mock_db's default verify_api_key mock unconditionally returns "agent-xyz"
 # regardless of the api_key passed in, so "still enforces" tests below must
@@ -302,7 +296,32 @@ class TestTrustedGateway:
         r = await client.post(
             "/v1/ingest",
             json=make_batch(api_key="not-a-dev-key"),
+            headers={"x-internal-token": "shared-secret", "x-org-id": "org-trusted"},
+        )
+        assert r.status_code == 202
+
+    async def test_trusted_request_missing_org_id_header_401s(self, client, monkeypatch):
+        # Trusted path still requires an org identity — dunetrace-cloud must send
+        # x-org-id (or the legacy x-customer-id fallback). Without either, there's
+        # nothing to stamp on the persisted events, so the request is rejected
+        # rather than silently falling back to some default.
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+
+        r = await client.post(
+            "/v1/ingest",
+            json=make_batch(api_key="not-a-dev-key"),
             headers={"x-internal-token": "shared-secret"},
+        )
+        assert r.status_code == 401
+
+    async def test_trusted_header_accepts_legacy_customer_id_fallback(self, client, monkeypatch):
+        # Pre-v0.5.0 cloud gateway builds send x-customer-id instead of x-org-id.
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+
+        r = await client.post(
+            "/v1/ingest",
+            json=make_batch(api_key="not-a-dev-key"),
+            headers={"x-internal-token": "shared-secret", "x-customer-id": "org-legacy"},
         )
         assert r.status_code == 202
 
@@ -348,7 +367,7 @@ class TestTrustedGateway:
         r = await client.post(
             "/v1/deploy",
             json={"api_key": "not-a-dev-key", "agent_id": "agent-xyz", "version": "v1.0.0"},
-            headers={"x-internal-token": "shared-secret"},
+            headers={"x-internal-token": "shared-secret", "x-org-id": "org-trusted"},
         )
         assert r.status_code == 202
 
@@ -372,9 +391,149 @@ class TestTrustedGateway:
         r = await client.post(
             "/v1/deploy",
             json={"api_key": "not-a-dev-key", "agent_id": "trusted-agent", "version": "v1.0.0"},
-            headers={"x-internal-token": "shared-secret"},
+            headers={"x-internal-token": "shared-secret", "x-org-id": "org-trusted"},
         )
         assert r.json()["agent_id"] == "trusted-agent"
+
+
+# ── Rate limiting middleware (main.py::rate_limit_and_log) ─────────────────────
+#
+# C8 audit finding: the RateLimiter class itself was already well unit-tested
+# (test_rate_limiter.py), but the HTTP-level wiring — which bucket a request
+# lands in (api_key vs. IP), the dev-key IP-fallback, the trusted-path bypass,
+# and the actual 429/Retry-After response shape — had zero coverage. These
+# tests exercise that wiring through real HTTP requests against the app.
+
+
+@pytest.fixture
+def fresh_limiter(monkeypatch):
+    """A small-rpm RateLimiter so tests trip the limit in a handful of
+    requests instead of needing hundreds. Replaces the module-level
+    singleton, which otherwise persists rate-limit windows across tests."""
+    from ingest_svc.rate_limiter import RateLimiter
+
+    limiter = RateLimiter(default_rpm=3)
+    monkeypatch.setattr("ingest_svc.rate_limiter._limiter", limiter)
+    monkeypatch.setattr("ingest_svc.main.get_limiter", lambda: limiter)
+    return limiter
+
+
+class TestRateLimitMiddleware:
+    async def test_requests_within_limit_succeed(self, client, fresh_limiter):
+        for _ in range(3):
+            r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_a"))
+            assert r.status_code == 202
+
+    async def test_request_exceeding_limit_returns_429(self, client, fresh_limiter):
+        for _ in range(3):
+            await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_b"))
+        r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_b"))
+        assert r.status_code == 429
+
+    async def test_429_has_retry_after_header(self, client, fresh_limiter):
+        for _ in range(3):
+            await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_c"))
+        r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_c"))
+        assert "retry-after" in {k.lower() for k in r.headers.keys()}
+        assert int(r.headers["retry-after"]) >= 1
+
+    async def test_429_has_detail_message(self, client, fresh_limiter):
+        for _ in range(3):
+            await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_d"))
+        r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_d"))
+        assert "detail" in r.json()
+
+    async def test_real_api_keys_are_bucketed_independently(self, client, fresh_limiter):
+        """A different (non-dev) key must get its own quota — exhausting one
+        real key's limit must not affect another."""
+        for _ in range(3):
+            await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_e1"))
+        exhausted = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_e1"))
+        assert exhausted.status_code == 429
+
+        other_key = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_e2"))
+        assert other_key.status_code == 202
+
+    async def test_dev_keys_are_bucketed_by_ip_not_by_key(self, client, fresh_limiter):
+        """dt_dev_* keys share the IP-address bucket rather than a per-key
+        one — two *different* dev keys from the same client must share one
+        quota, unlike two different real keys (see test above)."""
+        for _ in range(3):
+            r = await client.post("/v1/ingest", json=make_batch(api_key="dt_dev_test_1"))
+            assert r.status_code == 202
+        # A *different* dev key, same client — must already be exhausted,
+        # because dev keys are bucketed by IP, not by the key string.
+        r = await client.post("/v1/ingest", json=make_batch(api_key="dt_dev_test_2"))
+        assert r.status_code == 429
+
+    async def test_missing_api_key_falls_back_to_ip_bucket(self, client, fresh_limiter):
+        """An unparseable/missing api_key must not crash the middleware or
+        skip rate limiting — it falls back to the IP bucket, same as dev keys."""
+        body = {"agent_id": "agent-xyz", "events": [make_event()]}  # no api_key at all
+        for _ in range(3):
+            await client.post("/v1/ingest", json=body)
+        r = await client.post("/v1/ingest", json=body)
+        assert r.status_code == 429
+
+    async def test_trusted_path_bypasses_rate_limiting_entirely(
+        self, client, fresh_limiter, monkeypatch
+    ):
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+        headers = {"x-internal-token": "shared-secret", "x-org-id": "org-trusted"}
+        # 3 is the configured limit — a non-trusted caller would 429 on the 4th.
+        for _ in range(6):
+            r = await client.post(
+                "/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_f"), headers=headers
+            )
+            assert r.status_code == 202
+
+    async def test_deploy_endpoint_is_also_rate_limited(self, client, fresh_limiter):
+        body = {"api_key": "dt_live_ratelimit_g", "agent_id": "agent-xyz", "version": "v1.0.0"}
+        for _ in range(3):
+            r = await client.post("/v1/deploy", json=body)
+            assert r.status_code == 202
+        r = await client.post("/v1/deploy", json=body)
+        assert r.status_code == 429
+
+    async def test_other_endpoints_are_not_rate_limited(self, client, fresh_limiter):
+        """Only /v1/ingest and /v1/deploy are rate limited — e.g. /v1/policies
+        must not be affected by an exhausted ingest quota."""
+        for _ in range(3):
+            await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_h"))
+        exhausted = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_h"))
+        assert exhausted.status_code == 429
+
+        r = await client.get(
+            "/v1/policies", params={"agent_id": "agent-xyz", "api_key": "dt_live_ratelimit_h"}
+        )
+        assert r.status_code != 429
+
+
+# ── verify_api_key (real implementation, not the router-level mock) ────────────
+
+
+class TestVerifyApiKeyDevMode:
+    async def test_dev_mode_dt_dev_key_resolves_to_default_org(self, monkeypatch):
+        from ingest_svc.db.postgres import verify_api_key
+
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "dev")
+        assert await verify_api_key("dt_dev_anything") == "default"
+
+    async def test_dev_mode_empty_key_resolves_to_default_org(self, monkeypatch):
+        from ingest_svc.db.postgres import verify_api_key
+
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "dev")
+        assert await verify_api_key("") == "default"
+
+    async def test_non_dev_mode_dt_dev_key_is_not_special_cased(self, monkeypatch):
+        # dt_dev_* is only a wildcard in dev mode (is_dev checks settings.ENV,
+        # not AUTH_MODE). In prod, it's just a string that won't match any row
+        # and correctly resolves to no org.
+        from ingest_svc.db.postgres import verify_api_key
+
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "production")
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
+        assert await verify_api_key("dt_dev_anything") is None
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -509,3 +668,368 @@ class TestPruneOldEvents:
         dropped = await prune_old_events(retention_days=30)
         assert dropped == 0
         conn.execute.assert_not_called()
+
+
+# ── Retention scheduling (main.py::_run_prune_once) ────────────────────────────
+#
+# C9 audit finding: prune_old_events() existed and was tested in isolation
+# (above) but was never called from anywhere in the running service — no
+# cron loop, no scheduled task. These tests cover the scheduling glue itself:
+# does it call through with the configured retention window, and does a
+# failure get swallowed (logged, not crashed) so one bad tick doesn't kill
+# the whole background loop.
+
+
+class TestPruneScheduling:
+    @pytest.fixture(autouse=True)
+    def _reset_event_store(self):
+        # These tests install throwaway custom stores via set_event_store();
+        # reset to the default afterward so no other test in this file (or a
+        # later-collected file) accidentally exercises a stale one.
+        yield
+        import ingest_svc.db.event_store as es_mod
+
+        es_mod._store = None
+
+    async def test_calls_event_store_with_configured_retention_days(self, monkeypatch):
+        from ingest_svc.db.event_store import InMemoryEventStore, set_event_store
+        from ingest_svc.main import _run_prune_once
+
+        store = InMemoryEventStore()
+        set_event_store(store)
+        monkeypatch.setattr("ingest_svc.config.settings.EVENT_RETENTION_DAYS", 45)
+
+        calls = []
+        original_prune = store.prune_old_events
+
+        async def _spy(retention_days):
+            calls.append(retention_days)
+            return await original_prune(retention_days)
+
+        monkeypatch.setattr(store, "prune_old_events", _spy)
+
+        await _run_prune_once()
+
+        assert calls == [45]
+
+    async def test_failure_is_logged_not_raised(self, monkeypatch, caplog):
+        from ingest_svc.db.event_store import EventStore, set_event_store
+        from ingest_svc.main import _run_prune_once
+
+        class _FailingStore(EventStore):
+            async def insert_events(self, events, batch_id, org_id):
+                raise NotImplementedError
+
+            async def prune_old_events(self, retention_days):
+                raise RuntimeError("db unreachable")
+
+        set_event_store(_FailingStore())
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dunetrace.ingest"):
+            await _run_prune_once()  # must not raise
+
+        assert any("prune_old_events failed" in r.message for r in caplog.records)
+
+    async def test_logs_info_when_partitions_are_dropped(self, monkeypatch, caplog):
+        from ingest_svc.db.event_store import EventStore, set_event_store
+        from ingest_svc.main import _run_prune_once
+
+        class _DroppingStore(EventStore):
+            async def insert_events(self, events, batch_id, org_id):
+                raise NotImplementedError
+
+            async def prune_old_events(self, retention_days):
+                return 3
+
+        set_event_store(_DroppingStore())
+
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="dunetrace.ingest"):
+            await _run_prune_once()
+
+        assert any("Pruned 3 stale event partition" in r.message for r in caplog.records)
+
+
+# ── OTLP receiver (D11 — production-readiness gaps) ────────────────────────────
+#
+# Prior coverage (test_otlp.py) was entirely the otel.py mapper in isolation —
+# zero tests exercised the actual HTTP endpoint (auth, body parsing, content
+# negotiation, rate limiting). These do.
+
+
+def _protobuf_export_request_bytes(agent_id: str = "otlp-agent", span_name: str = "root") -> bytes:
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+        ExportTraceServiceRequest,
+    )
+    from opentelemetry.proto.common.v1.common_pb2 import AnyValue
+
+    req = ExportTraceServiceRequest()
+    rs = req.resource_spans.add()
+    rs.resource.attributes.add(key="service.name", value=AnyValue(string_value=agent_id))
+    ss = rs.scope_spans.add()
+    span = ss.spans.add()
+    span.trace_id = bytes.fromhex("0123456789abcdef0123456789abcdef")
+    span.span_id = bytes.fromhex("0123456789abcdef")
+    span.name = span_name
+    now_ns = int(time.time() * 1e9)
+    span.start_time_unix_nano = now_ns
+    span.end_time_unix_nano = now_ns + 1_000_000
+    return req.SerializeToString()
+
+
+def _json_otlp_body(agent_id: str = "otlp-agent") -> dict:
+    now_ns = str(int(time.time() * 1_000_000_000))
+    return {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [{"key": "service.name", "value": {"stringValue": agent_id}}]
+                },
+                "scopeSpans": [
+                    {
+                        "spans": [
+                            {
+                                "traceId": "0123456789abcdef0123456789abcdef",
+                                "spanId": "0123456789abcdef",
+                                "name": "root",
+                                "startTimeUnixNano": now_ns,
+                                "endTimeUnixNano": str(int(now_ns) + 1_000_000),
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+
+class TestOtlpEndpoint:
+    async def test_json_body_accepted(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        r = await client.post(
+            "/v1/otlp/traces",
+            json=_json_otlp_body(),
+            headers={"Authorization": "Bearer dt_live_test"},
+        )
+        assert r.status_code == 200
+        assert r.json() == {}
+
+    async def test_protobuf_body_accepted(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        r = await client.post(
+            "/v1/otlp/traces",
+            content=_protobuf_export_request_bytes(),
+            headers={
+                "Authorization": "Bearer dt_live_test",
+                "Content-Type": "application/x-protobuf",
+            },
+        )
+        assert r.status_code == 200
+        assert r.json() == {}
+
+    async def test_gzip_json_body_accepted(self, client, monkeypatch):
+        import gzip as _gzip
+        import json as _json
+
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        compressed = _gzip.compress(_json.dumps(_json_otlp_body()).encode())
+        r = await client.post(
+            "/v1/otlp/traces",
+            content=compressed,
+            headers={
+                "Authorization": "Bearer dt_live_test",
+                "Content-Type": "application/json",
+                "Content-Encoding": "gzip",
+            },
+        )
+        assert r.status_code == 200
+
+    async def test_gzip_protobuf_body_accepted(self, client, monkeypatch):
+        import gzip as _gzip
+
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        compressed = _gzip.compress(_protobuf_export_request_bytes())
+        r = await client.post(
+            "/v1/otlp/traces",
+            content=compressed,
+            headers={
+                "Authorization": "Bearer dt_live_test",
+                "Content-Type": "application/x-protobuf",
+                "Content-Encoding": "gzip",
+            },
+        )
+        assert r.status_code == 200
+
+    async def test_malformed_json_returns_400(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        r = await client.post(
+            "/v1/otlp/traces",
+            content=b"{not valid json",
+            headers={"Authorization": "Bearer dt_live_test", "Content-Type": "application/json"},
+        )
+        assert r.status_code == 400
+
+    async def test_malformed_protobuf_returns_400(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        r = await client.post(
+            "/v1/otlp/traces",
+            content=b"\xff\xff\xff not-a-real-protobuf-message",
+            headers={
+                "Authorization": "Bearer dt_live_test",
+                "Content-Type": "application/x-protobuf",
+            },
+        )
+        assert r.status_code == 400
+
+    async def test_malformed_gzip_returns_400(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        r = await client.post(
+            "/v1/otlp/traces",
+            content=b"not actually gzipped",
+            headers={
+                "Authorization": "Bearer dt_live_test",
+                "Content-Type": "application/json",
+                "Content-Encoding": "gzip",
+            },
+        )
+        assert r.status_code == 400
+
+    async def test_invalid_api_key_returns_401(self, client, monkeypatch):
+        monkeypatch.setattr("ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value=None))
+        r = await client.post(
+            "/v1/otlp/traces",
+            json=_json_otlp_body(),
+            headers={"Authorization": "Bearer dt_live_bad"},
+        )
+        assert r.status_code == 401
+
+    async def test_trusted_gateway_path_accepted(self, client, monkeypatch):
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+        r = await client.post(
+            "/v1/otlp/traces",
+            json=_json_otlp_body(),
+            headers={"x-internal-token": "shared-secret", "x-org-id": "org-trusted"},
+        )
+        assert r.status_code == 200
+
+    async def test_trusted_gateway_missing_org_id_returns_401(self, client, monkeypatch):
+        monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
+        r = await client.post(
+            "/v1/otlp/traces",
+            json=_json_otlp_body(),
+            headers={"x-internal-token": "shared-secret"},
+        )
+        assert r.status_code == 401
+
+    async def test_empty_resource_spans_returns_200_without_persisting(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        r = await client.post(
+            "/v1/otlp/traces",
+            json={"resourceSpans": []},
+            headers={"Authorization": "Bearer dt_live_test"},
+        )
+        assert r.status_code == 200
+
+    async def test_uses_event_store_abstraction(self, client, monkeypatch):
+        """D11 fixed a C9 consistency gap: otlp.py previously called the free
+        insert_events() function directly instead of going through
+        get_event_store()."""
+        from ingest_svc.db.event_store import InMemoryEventStore, set_event_store
+
+        store = InMemoryEventStore()
+        set_event_store(store)
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        try:
+            r = await client.post(
+                "/v1/otlp/traces",
+                json=_json_otlp_body(),
+                headers={"Authorization": "Bearer dt_live_test"},
+            )
+            assert r.status_code == 200
+            # _persist_otlp runs as a BackgroundTask; httpx's ASGITransport
+            # awaits it before the response context manager exits.
+            assert len(store.batches) == 1
+        finally:
+            import ingest_svc.db.event_store as es_mod
+
+            es_mod._store = None
+
+
+class TestOtlpRateLimiting:
+    @pytest.fixture
+    def fresh_limiter(self, monkeypatch):
+        from ingest_svc.rate_limiter import RateLimiter
+
+        limiter = RateLimiter(default_rpm=3)
+        monkeypatch.setattr("ingest_svc.rate_limiter._limiter", limiter)
+        monkeypatch.setattr("ingest_svc.main.get_limiter", lambda: limiter)
+        return limiter
+
+    async def test_otlp_traces_is_rate_limited(self, client, fresh_limiter, monkeypatch):
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        for _ in range(3):
+            r = await client.post(
+                "/v1/otlp/traces",
+                json=_json_otlp_body(),
+                headers={"Authorization": "Bearer dt_live_otlp_a"},
+            )
+            assert r.status_code == 200
+        r = await client.post(
+            "/v1/otlp/traces",
+            json=_json_otlp_body(),
+            headers={"Authorization": "Bearer dt_live_otlp_a"},
+        )
+        assert r.status_code == 429
+
+    async def test_otlp_bucket_key_comes_from_bearer_header_not_body(
+        self, client, fresh_limiter, monkeypatch
+    ):
+        """OTLP auth is a header, not a JSON body field — the rate limiter
+        must bucket by it correctly rather than falling back to IP for
+        every request (which would make two different real keys share
+        one quota)."""
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        for _ in range(3):
+            await client.post(
+                "/v1/otlp/traces",
+                json=_json_otlp_body(),
+                headers={"Authorization": "Bearer dt_live_otlp_b1"},
+            )
+        exhausted = await client.post(
+            "/v1/otlp/traces",
+            json=_json_otlp_body(),
+            headers={"Authorization": "Bearer dt_live_otlp_b1"},
+        )
+        assert exhausted.status_code == 429
+
+        other_key = await client.post(
+            "/v1/otlp/traces",
+            json=_json_otlp_body(),
+            headers={"Authorization": "Bearer dt_live_otlp_b2"},
+        )
+        assert other_key.status_code == 200

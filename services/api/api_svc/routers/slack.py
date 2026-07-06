@@ -94,12 +94,13 @@ async def slack_callback(request: Request) -> Response:
     signal_id = int(value.get("signal_id", 0))
     agent_id = value.get("agent_id", "")
     failure_type = value.get("failure_type", "")
+    org_id = value.get("org_id", "")
 
-    if not signal_id or not agent_id or not failure_type:
+    if not signal_id or not agent_id or not failure_type or not org_id:
         return Response(status_code=400)
 
     if action_id == "mark_resolved":
-        updated = await mark_signal_resolved(signal_id)
+        updated = await mark_signal_resolved(org_id, signal_id)
         logger.info(
             "Signal %d marked resolved by %s (agent=%s type=%s updated=%s)",
             signal_id,
@@ -114,7 +115,7 @@ async def slack_callback(request: Request) -> Response:
         )
 
     if action_id == "false_positive":
-        override = await record_false_positive(signal_id, agent_id, failure_type)
+        override = await record_false_positive(org_id, signal_id, agent_id, failure_type)
         fp_count = override.get("fp_count", 1)
         silenced = override.get("silenced", False)
         floor = override.get("confidence_floor", 0.1)

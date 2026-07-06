@@ -171,7 +171,7 @@ class DunetraceOTelExporter:
             "dunetrace.agent_id": event.agent_id,
             "dunetrace.run_id": event.run_id,
             "dunetrace.agent_version": event.agent_version,
-            "dunetrace.input_hash": event.payload.get("input_hash", ""),
+            "dunetrace.input_text": event.payload.get("input_text", ""),
             "dunetrace.model": event.payload.get("model", ""),
             "dunetrace.tools": ",".join(event.payload.get("tools", [])),
         }
@@ -215,7 +215,7 @@ class DunetraceOTelExporter:
             name = "tool_call"
             attrs = {
                 "dunetrace.tool_name": event.payload.get("tool_name", ""),
-                "dunetrace.args_hash": event.payload.get("args_hash", ""),
+                "dunetrace.args": event.payload.get("args", ""),
                 "dunetrace.step_index": event.step_index,
             }
 
@@ -223,7 +223,7 @@ class DunetraceOTelExporter:
             name = "retrieval"
             attrs = {
                 "dunetrace.index_name": event.payload.get("index_name", ""),
-                "dunetrace.query_hash": event.payload.get("query_hash", ""),
+                "dunetrace.query": event.payload.get("query", ""),
                 "dunetrace.step_index": event.step_index,
             }
 
@@ -271,8 +271,8 @@ class DunetraceOTelExporter:
             span.set_attribute("dunetrace.output_length", p["output_length"])
         if p.get("latency_ms"):
             span.set_attribute("dunetrace.latency_ms", p["latency_ms"])
-        if p.get("error_hash"):
-            span.set_attribute("dunetrace.error_hash", p["error_hash"])
+        if p.get("error"):
+            span.set_attribute("dunetrace.error", p["error"])
         if not success:
             span.set_status(StatusCode.ERROR, "tool call failed")
 

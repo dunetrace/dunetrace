@@ -37,7 +37,6 @@ export interface LlmRespondedOptions {
   latencyMs?:        number;
   finishReason?:     string;
   outputLength?:     number;
-  /** SHA-256 hashed before transmission — never sent raw. */
   outputText?:       string;
   /** Pass when prompt token count is only known after the call returns
    *  (e.g. taken from the API response). Overrides the estimate given to llmCalled(). */

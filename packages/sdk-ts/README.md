@@ -27,12 +27,12 @@ await dt.run("my-agent", { model: "gpt-4o", tools: ["web_search"] }, async (run)
     completionTokens: res.usage?.completion_tokens,
     latencyMs:        Date.now() - t0,
     finishReason:     res.choices[0].finish_reason ?? "stop",
-    outputText:       res.choices[0].message.content ?? "",  // hashed, never sent raw
+    outputText:       res.choices[0].message.content ?? "",  // sent as-is
   });
 
   // Before + after each tool call
   const toolStart = Date.now();
-  run.toolCalled("web_search", { query });          // args are SHA-256 hashed
+  run.toolCalled("web_search", { query });          // args are sent as-is
   const results = await webSearch(query);
   run.toolResponded("web_search", true, results.length, Date.now() - toolStart);
 
@@ -195,17 +195,18 @@ See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, N
 | `run.finalAnswer()` | When agent produces its final output |
 | `run.runId` | Read-only UUID — pass to Langfuse as the trace ID for correlation |
 
-## Privacy
+## Data handling
 
-All content fields are SHA-256 hashed inside your process before transmission — raw content never leaves your agent.
+Content fields are sent to the backend over TLS as-is — content-aware
+detectors need to see what the agent actually said and did.
 
 | Field | Transmitted as |
 |---|---|
-| User input | `input_hash` (16-char hex) |
-| Tool arguments | `args_hash` |
-| LLM outputs | `output_hash` |
-| Error messages | `error_hash` |
-| Retrieval queries | `query_hash` |
+| User input | `input_text` |
+| Tool arguments | `args` |
+| LLM outputs | `output` |
+| Error messages | `error` |
+| Retrieval queries | `query` |
 
 Token counts, latencies, step counts, and model names are sent as plain metadata.
 

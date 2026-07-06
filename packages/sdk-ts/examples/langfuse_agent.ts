@@ -144,7 +144,7 @@ async function runAgent(scenario: string): Promise<void> {
       const generation = trace?.generation({
         name:  `llm-step-${step}`,
         model: "gpt-4o-mini",
-        input: messages.map(m => ({ role: m.role, content: "[hashed — privacy]" })),
+        input: messages.map(m => ({ role: m.role, content: m.content })),
       });
 
       const t0       = Date.now();
@@ -170,13 +170,12 @@ async function runAgent(scenario: string): Promise<void> {
         completionTokens: response.usage?.completion_tokens,
         latencyMs,
         finishReason,
-        // outputText is hashed before transmission — never sent raw
         outputText: msg.content ?? firstToolArgs,
       });
 
-      // End the Langfuse generation — output is structural metadata only
+      // End the Langfuse generation
       generation?.end({
-        output:             "[hashed — see Langfuse for full content]",
+        output:             msg.content ?? firstToolArgs,
         usage:              response.usage
           ? {
               input:  response.usage.prompt_tokens,
@@ -202,13 +201,13 @@ async function runAgent(scenario: string): Promise<void> {
         if (tc.type !== "function") continue;
         const args = JSON.parse(tc.function.arguments) as { query?: string };
 
-        // Dunetrace: args are SHA-256 hashed before transmission
+        // Dunetrace: args are sent as-is
         run.toolCalled(tc.function.name, args);
 
-        // Langfuse: record the tool span (input hashed for privacy)
+        // Langfuse: record the tool span
         const span = trace?.span({
           name:  tc.function.name,
-          input: { query: "[hashed]" },
+          input: { query: args.query },
         });
 
         const t1     = Date.now();
@@ -227,7 +226,7 @@ async function runAgent(scenario: string): Promise<void> {
       }
     }
 
-    trace?.update({ output: { answer: "[hashed — privacy]" } });
+    trace?.update({ output: { answer } });
   });
 
   console.log(`\nAnswer: ${answer}`);

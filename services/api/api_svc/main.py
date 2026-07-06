@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.config import settings
 from api_svc.db.queries import init_pool, close_pool, check_db
 from api_svc.routers import (
@@ -85,7 +85,7 @@ def create_app() -> FastAPI:
         )
         return response
 
-    _auth = [Depends(require_customer)]
+    _auth = [Depends(require_org)]
     app.include_router(agents.router, dependencies=_auth)
     app.include_router(custom_detectors.router, dependencies=_auth)
     app.include_router(runs.router, dependencies=_auth)

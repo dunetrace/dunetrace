@@ -93,16 +93,14 @@ describe("Dunetrace.run() — lifecycle events", () => {
     await dt.shutdown();
   });
 
-  it("run.started hashes userInput — never stores raw", async () => {
+  it("run.started transmits raw userInput", async () => {
     const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
     dt._emit = (e) => events.push(e);
 
     await dt.run("my-agent", { userInput: "secret user query" }, async () => {});
     const started = events.find(e => e.event_type === "run.started")!;
-    expect(started.payload).not.toHaveProperty("input");
-    expect(typeof started.payload["input_hash"]).toBe("string");
-    expect((started.payload["input_hash"] as string)).toHaveLength(16);
+    expect(started.payload["input_text"]).toBe("secret user query");
     await dt.shutdown();
   });
 
@@ -239,7 +237,7 @@ describe("Dunetrace.tool()", () => {
 
     const resp = events.find(e => e.event_type === "tool.responded")!;
     expect(resp.payload["success"]).toBe(false);
-    expect(resp.payload).toHaveProperty("error_hash");
+    expect(resp.payload["error"]).toBe("Error: fail");
     await dt.shutdown();
   });
 
@@ -316,7 +314,7 @@ describe("Dunetrace.trace()", () => {
     await dt.shutdown();
   });
 
-  it("hashes first arg as userInput", async () => {
+  it("transmits raw first arg as userInput", async () => {
     const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
     dt._emit = (e) => events.push(e);
@@ -326,8 +324,7 @@ describe("Dunetrace.trace()", () => {
     await wrapped("sensitive input");
 
     const started = events.find(e => e.event_type === "run.started")!;
-    expect(started.payload).not.toHaveProperty("input");
-    expect(typeof started.payload["input_hash"]).toBe("string");
+    expect(started.payload["input_text"]).toBe("sensitive input");
     await dt.shutdown();
   });
 });

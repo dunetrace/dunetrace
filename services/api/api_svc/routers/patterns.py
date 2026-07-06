@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.db.queries import cross_run_patterns
 from api_svc.schemas import AgentPatterns, PatternDay, PatternRow, PatternsResponse
 
@@ -23,9 +23,9 @@ router = APIRouter(tags=["Patterns"])
     summary="Cross-run signal frequency per agent and detector over the last 7 days",
 )
 async def get_patterns(
-    customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> PatternsResponse:
-    agents_raw = await cross_run_patterns(customer)
+    agents_raw = await cross_run_patterns(org_id)
     return PatternsResponse(
         agents=[
             AgentPatterns(

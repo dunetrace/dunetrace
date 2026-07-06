@@ -33,6 +33,7 @@ class Settings:
     INTERNAL_TOKEN: str = os.getenv("INTERNAL_TOKEN", "")
     MAX_BATCH_SIZE: int = int(os.getenv("MAX_BATCH_SIZE", "500"))
     RATE_LIMIT_REQUESTS: int = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))  # per IP per minute
+    EVENT_RETENTION_DAYS: int = int(os.getenv("EVENT_RETENTION_DAYS", "90"))
 
     @property
     def is_dev(self) -> bool:

@@ -22,11 +22,15 @@ Tuned values belong in the detector service config, not here.
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from collections import Counter
 from typing import List, Optional
 
-from dunetrace.models import EventType, FailureSignal, FailureType, RunState, Severity
+from dunetrace.models import AgentEvent, EventType, FailureSignal, FailureType, RunState, Severity
+
+logger = logging.getLogger("dunetrace.detectors")
 
 
 def _scale_confidence(ratio: float) -> float:
@@ -44,6 +48,17 @@ def _scale_confidence(ratio: float) -> float:
 
 class BaseDetector:
     name: str = "base"
+
+    # None = detector computes its own severity (static or dynamic, per subclass).
+    # Set to a Severity to force every signal this detector emits to that level —
+    # tunable the same way as any other UPPERCASE attribute, including from
+    # detectors.yml (see detector_svc/config_loader.py).
+    SEVERITY: Optional[Severity] = None
+
+    # Soft performance budget in nanoseconds. run_detectors() logs a warning (does
+    # not raise, does not drop the signal) when a single on_run_completion() call
+    # exceeds this. Default matches this module's design goal of <1ms/check.
+    MAX_COST_NS: int = 1_000_000
 
     def __init__(self, **overrides: object) -> None:
         """Accept keyword overrides for UPPERCASE class attributes. Unknown keys raise TypeError at startup, not at runtime.
@@ -67,7 +82,27 @@ class BaseDetector:
         for k, v in overrides.items():
             setattr(self, k, v)
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_event(self, event: AgentEvent, state: RunState) -> Optional[FailureSignal]:
+        """Called incrementally as each event arrives during a run. Default no-op.
+
+        Not currently invoked by any built-in call site — both the server-side
+        detector worker and the SDK's OTel path call on_run_completion() once, at
+        run end. This is an extension point for future streaming/incremental
+        detectors; override it only if a detector genuinely needs to react
+        mid-run rather than to the accumulated RunState.
+        """
+        return None
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        """Called once when a run completes, with the full accumulated RunState.
+
+        This is what every Tier 1 detector implements. Must return either None or
+        a FailureSignal with a populated `evidence: dict` — evidence is what
+        downstream root-cause consumers (the Langfuse-backed LLM analysis today,
+        any native root-cause pipeline later) read to explain *why* the signal
+        fired. run_detectors() logs a warning if evidence isn't a dict, but does
+        not drop the signal.
+        """
         raise NotImplementedError
 
 
@@ -85,10 +120,11 @@ class ToolLoopDetector(BaseDetector):
     """
 
     name = "TOOL_LOOP"
+    SEVERITY = Severity.HIGH
     WINDOW = 5
     THRESHOLD = 3
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.tool_calls) < self.WINDOW:
             return None
 
@@ -98,8 +134,8 @@ class ToolLoopDetector(BaseDetector):
         for tool, count in counts.items():
             if count >= self.THRESHOLD:
                 all_calls = [c for c in state.tool_calls if c.tool_name == tool]
-                args_hashes = [c.args_hash for c in all_calls]
-                unique_hashes = len(set(args_hashes))
+                args_list = [c.args for c in all_calls]
+                unique_args = len(set(args_list))
                 calls_with_result = [c for c in all_calls if c.success is not None]
                 success_rate = (
                     sum(1 for c in calls_with_result if c.success) / len(calls_with_result)
@@ -119,7 +155,7 @@ class ToolLoopDetector(BaseDetector):
                 )
                 return FailureSignal(
                     failure_type=FailureType.TOOL_LOOP,
-                    severity=Severity.HIGH,
+                    severity=self.SEVERITY,
                     run_id=state.run_id,
                     agent_id=state.agent_id,
                     agent_version=state.agent_version,
@@ -132,9 +168,9 @@ class ToolLoopDetector(BaseDetector):
                         "first_step": first_step,
                         "last_step": last_step,
                         "step_indices": [c.step_index for c in all_calls],
-                        "args_hashes": args_hashes,
-                        "args_identical": unique_hashes == 1,
-                        "args_similar": unique_hashes <= 2,
+                        "args": args_list,
+                        "args_identical": unique_args == 1,
+                        "args_similar": unique_args <= 2,
                         "success_rate": success_rate,
                         "wasted_tokens": wasted_tokens,
                     },
@@ -155,9 +191,10 @@ class ToolThrashingDetector(BaseDetector):
     """
 
     name = "TOOL_THRASHING"
+    SEVERITY = Severity.HIGH
     WINDOW = 6
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.tool_calls) < self.WINDOW:
             return None
 
@@ -170,7 +207,7 @@ class ToolThrashingDetector(BaseDetector):
                 tools = list(unique)
                 return FailureSignal(
                     failure_type=FailureType.TOOL_THRASHING,
-                    severity=Severity.HIGH,
+                    severity=self.SEVERITY,
                     run_id=state.run_id,
                     agent_id=state.agent_id,
                     agent_version=state.agent_version,
@@ -201,9 +238,10 @@ class ToolAvoidanceDetector(BaseDetector):
     """
 
     name = "TOOL_AVOIDANCE"
+    SEVERITY = Severity.MEDIUM
     MIN_LLM_CALLS = 2
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if state.exit_reason != "final_answer":
             return None
         if not state.available_tools:
@@ -215,7 +253,7 @@ class ToolAvoidanceDetector(BaseDetector):
 
         return FailureSignal(
             failure_type=FailureType.TOOL_AVOIDANCE,
-            severity=Severity.MEDIUM,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -242,9 +280,10 @@ class GoalAbandonmentDetector(BaseDetector):
     """
 
     name = "GOAL_ABANDONMENT"
+    SEVERITY = Severity.MEDIUM
     STALL_STEPS = 4
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if state.exit_reason is not None:
             return None
         if not state.tool_calls:
@@ -259,7 +298,7 @@ class GoalAbandonmentDetector(BaseDetector):
             steps_since_last_tool = state.current_step - state.tool_calls[-1].step_index
             return FailureSignal(
                 failure_type=FailureType.GOAL_ABANDONMENT,
-                severity=Severity.MEDIUM,
+                severity=self.SEVERITY,
                 run_id=state.run_id,
                 agent_id=state.agent_id,
                 agent_version=state.agent_version,
@@ -323,6 +362,7 @@ class PromptInjectionDetector(BaseDetector):
     """
 
     name = "PROMPT_INJECTION_SIGNAL"
+    SEVERITY = Severity.CRITICAL
 
     def check_input(self, input_text: str, state: RunState) -> Optional[FailureSignal]:
         matched = [
@@ -333,7 +373,7 @@ class PromptInjectionDetector(BaseDetector):
 
         return FailureSignal(
             failure_type=FailureType.PROMPT_INJECTION_SIGNAL,
-            severity=Severity.CRITICAL,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -346,7 +386,7 @@ class PromptInjectionDetector(BaseDetector):
             },
         )
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         return None
 
 
@@ -364,10 +404,11 @@ class RagEmptyRetrievalDetector(BaseDetector):
     """
 
     name = "RAG_EMPTY_RETRIEVAL"
+    SEVERITY = Severity.MEDIUM
     MIN_SCORE = 0.3
     MIN_RESULTS = 1
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if state.exit_reason != "final_answer":
             return None
         if not state.retrievals:
@@ -386,7 +427,7 @@ class RagEmptyRetrievalDetector(BaseDetector):
         worst = min(bad_retrievals, key=lambda r: r.result_count)
         return FailureSignal(
             failure_type=FailureType.RAG_EMPTY_RETRIEVAL,
-            severity=Severity.MEDIUM,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -417,9 +458,10 @@ class LlmTruncationLoopDetector(BaseDetector):
     """
 
     name = "LLM_TRUNCATION_LOOP"
+    SEVERITY = Severity.HIGH
     THRESHOLD = 2
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.llm_calls) < self.THRESHOLD:
             return None
 
@@ -430,7 +472,7 @@ class LlmTruncationLoopDetector(BaseDetector):
 
         return FailureSignal(
             failure_type=FailureType.LLM_TRUNCATION_LOOP,
-            severity=Severity.HIGH,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -468,12 +510,13 @@ class ContextBloatDetector(BaseDetector):
     """
 
     name = "CONTEXT_BLOAT"
+    SEVERITY = Severity.MEDIUM
     MIN_CALLS = 3
     GROWTH_FACTOR = 3.0
     MIN_LAST_TOKENS = 2000
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         calls_with_tokens = [
             c for c in state.llm_calls if c.prompt_tokens is not None and c.prompt_tokens > 0
         ]
@@ -517,7 +560,7 @@ class ContextBloatDetector(BaseDetector):
 
         return FailureSignal(
             failure_type=FailureType.CONTEXT_BLOAT,
-            severity=Severity.MEDIUM,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -543,6 +586,9 @@ class SlowStepDetector(BaseDetector):
     """
 
     name = "SLOW_STEP"
+    # Dynamic by default (see on_run_completion) — set SEVERITY explicitly to
+    # force a fixed level regardless of ratio.
+    SEVERITY = None
 
     THRESHOLDS = [
         ("tool.called", 15_000, "tool execution"),
@@ -568,7 +614,7 @@ class SlowStepDetector(BaseDetector):
                 return static_ms, label
         return 60_000, "step"
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if not state.step_durations_ms or not state.events:
             return None
 
@@ -608,7 +654,11 @@ class SlowStepDetector(BaseDetector):
             return None
 
         ratio = worst_duration / worst_threshold
-        severity = Severity.HIGH if ratio >= 5 else Severity.MEDIUM
+        severity = (
+            self.SEVERITY
+            if self.SEVERITY is not None
+            else (Severity.HIGH if ratio >= 5 else Severity.MEDIUM)
+        )
 
         evidence: dict = {
             "step_index": worst_step_idx,
@@ -675,22 +725,23 @@ class SlowStepDetector(BaseDetector):
 class RetryStormDetector(BaseDetector):
     """
     Same tool called THRESHOLD or more times in a row, all returning success=False.
-    Unlike TOOL_LOOP, args_hash may differ — the agent is genuinely retrying — but the tool
+    Unlike TOOL_LOOP, args may differ — the agent is genuinely retrying — but the tool
     keeps failing. Indicates a broken dependency (API down, rejecting every request) that
     the agent can't detect and back off from. HIGH severity — each failure burns an LLM turn
     to re-plan, and the agent will almost always exhaust max_iterations with nothing to show.
 
     Evidence: args_identical (True if no variation in args), reason_identical (True if the same
-    error every time), failure_reason_hash (common error hash when reason_identical).
+    error every time), failure_reason (common error text when reason_identical).
 
     Tunable: THRESHOLD (default 3). Lower to catch dependency failures faster; raise for agents
     with built-in retry logic where 2 failures before escalation are expected.
     """
 
     name = "RETRY_STORM"
+    SEVERITY = Severity.HIGH
     THRESHOLD = 3
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.tool_calls) < self.THRESHOLD:
             return None
 
@@ -729,8 +780,8 @@ class RetryStormDetector(BaseDetector):
         # Analyse the streak for args identity and failure reason identity.
         # streak is newest-first; reverse for chronological ordering in evidence.
         best_streak.reverse()
-        args_hashes = [tc.args_hash for tc in best_streak]
-        error_hashes = [tc.error_hash for tc in best_streak]
+        args_list = [tc.args for tc in best_streak]
+        errors = [tc.error for tc in best_streak]
 
         # Self-correction check: if the tool subsequently succeeded after the streak,
         # the agent recovered and this is CoT/retry behaviour, not a storm.
@@ -742,14 +793,14 @@ class RetryStormDetector(BaseDetector):
         if recovered:
             return None
 
-        args_identical = len(set(args_hashes)) == 1
-        all_have_reason = all(h is not None for h in error_hashes)
-        reason_identical = all_have_reason and len(set(error_hashes)) == 1
-        failure_reason_hash = error_hashes[0] if reason_identical else None
+        args_identical = len(set(args_list)) == 1
+        all_have_reason = all(e is not None for e in errors)
+        reason_identical = all_have_reason and len(set(errors)) == 1
+        failure_reason = errors[0] if reason_identical else None
 
         return FailureSignal(
             failure_type=FailureType.RETRY_STORM,
-            severity=Severity.HIGH,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -762,8 +813,8 @@ class RetryStormDetector(BaseDetector):
                 "first_fail_step": best_streak[0].step_index,
                 "step_indices": [tc.step_index for tc in best_streak],
                 "args_identical": args_identical,
-                "error_hashes": error_hashes,
-                "failure_reason_hash": failure_reason_hash,
+                "errors": errors,
+                "failure_reason": failure_reason,
                 "reason_identical": reason_identical,
             },
         )
@@ -781,8 +832,9 @@ class EmptyLlmResponseDetector(BaseDetector):
     """
 
     name = "EMPTY_LLM_RESPONSE"
+    SEVERITY = Severity.HIGH
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         empty = [
             c
             for c in state.llm_calls
@@ -794,7 +846,7 @@ class EmptyLlmResponseDetector(BaseDetector):
         first = empty[0]
         return FailureSignal(
             failure_type=FailureType.EMPTY_LLM_RESPONSE,
-            severity=Severity.HIGH,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -823,9 +875,10 @@ class StepCountInflationDetector(BaseDetector):
     """
 
     name = "STEP_COUNT_INFLATION"
+    SEVERITY = Severity.MEDIUM
     INFLATION_FACTOR = 2.0
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if state.baseline_p75_steps is None:
             return None
 
@@ -838,7 +891,7 @@ class StepCountInflationDetector(BaseDetector):
 
         return FailureSignal(
             failure_type=FailureType.STEP_COUNT_INFLATION,
-            severity=Severity.MEDIUM,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -868,9 +921,10 @@ class CascadingToolFailureDetector(BaseDetector):
     """
 
     name = "CASCADING_TOOL_FAILURE"
+    SEVERITY = Severity.HIGH
     THRESHOLD = 3
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.tool_calls) < self.THRESHOLD:
             return None
 
@@ -891,7 +945,7 @@ class CascadingToolFailureDetector(BaseDetector):
 
         return FailureSignal(
             failure_type=FailureType.CASCADING_TOOL_FAILURE,
-            severity=Severity.HIGH,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -921,13 +975,14 @@ class FirstStepFailureDetector(BaseDetector):
     """
 
     name = "FIRST_STEP_FAILURE"
+    SEVERITY = Severity.MEDIUM
     MAX_STEP = 2
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if state.exit_reason == "error" and state.current_step <= self.MAX_STEP:
             return FailureSignal(
                 failure_type=FailureType.FIRST_STEP_FAILURE,
-                severity=Severity.MEDIUM,
+                severity=self.SEVERITY,
                 run_id=state.run_id,
                 agent_id=state.agent_id,
                 agent_version=state.agent_version,
@@ -950,7 +1005,7 @@ class FirstStepFailureDetector(BaseDetector):
         if early_empty:
             return FailureSignal(
                 failure_type=FailureType.FIRST_STEP_FAILURE,
-                severity=Severity.MEDIUM,
+                severity=self.SEVERITY,
                 run_id=state.run_id,
                 agent_id=state.agent_id,
                 agent_version=state.agent_version,
@@ -969,7 +1024,7 @@ class FirstStepFailureDetector(BaseDetector):
         if early_fail:
             return FailureSignal(
                 failure_type=FailureType.FIRST_STEP_FAILURE,
-                severity=Severity.MEDIUM,
+                severity=self.SEVERITY,
                 run_id=state.run_id,
                 agent_id=state.agent_id,
                 agent_version=state.agent_version,
@@ -1004,11 +1059,14 @@ class ReasoningSpinDetector(BaseDetector):
     """
 
     name = "REASONING_STALL"
+    # Dynamic by default (see on_run_completion) — set SEVERITY explicitly to
+    # force a fixed level regardless of exit_reason.
+    SEVERITY = None
     MIN_LLM_CALLS = 5
     RATIO_THRESHOLD = 4.0
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         # Skip errored runs — FIRST_STEP_FAILURE and RETRY_STORM cover those.
         if state.exit_reason == "error":
             return None
@@ -1031,7 +1089,11 @@ class ReasoningSpinDetector(BaseDetector):
 
         # A run that ended with a final answer is inefficient (MEDIUM).
         # A run that stalled without converging shows the ratio caused failure (HIGH).
-        severity = Severity.MEDIUM if state.exit_reason == "final_answer" else Severity.HIGH
+        severity = (
+            self.SEVERITY
+            if self.SEVERITY is not None
+            else (Severity.MEDIUM if state.exit_reason == "final_answer" else Severity.HIGH)
+        )
 
         action_events = [
             e
@@ -1083,11 +1145,12 @@ class CostSpikeDetector(BaseDetector):
     """
 
     name = "COST_SPIKE"
+    SEVERITY = Severity.MEDIUM
     INFLATION_FACTOR = 3.0
     STATIC_THRESHOLD_TOKENS = 50_000
     MIN_LLM_CALLS = 1
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.llm_calls) < self.MIN_LLM_CALLS:
             return None
 
@@ -1118,7 +1181,7 @@ class CostSpikeDetector(BaseDetector):
 
         return FailureSignal(
             failure_type=FailureType.COST_SPIKE,
-            severity=Severity.MEDIUM,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -1144,11 +1207,12 @@ class SessionLatencyDetector(BaseDetector):
     """
 
     name = "SESSION_LATENCY"
+    SEVERITY = Severity.MEDIUM
     INFLATION_FACTOR = 3.0
     STATIC_THRESHOLD_SECS = 300
     MIN_EVENTS = 2
 
-    def check(self, state: RunState) -> Optional[FailureSignal]:
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.events) < self.MIN_EVENTS:
             return None
 
@@ -1177,7 +1241,7 @@ class SessionLatencyDetector(BaseDetector):
 
         return FailureSignal(
             failure_type=FailureType.SESSION_LATENCY,
-            severity=Severity.MEDIUM,
+            severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
@@ -1218,11 +1282,35 @@ def run_detectors(
 ) -> List[FailureSignal]:
     """Run all detectors against a run state. Pass a custom list to use production-tuned
     parameters; defaults to TIER1_DETECTORS if omitted. Returns one FailureSignal per
-    triggered detector, or an empty list if nothing fired."""
+    triggered detector, or an empty list if nothing fired.
+
+    Each detector's on_run_completion() is timed against its MAX_COST_NS budget —
+    exceeding it logs a warning but never raises or drops the signal. Signals
+    with non-dict evidence are similarly logged (not dropped) — evidence is what
+    root-cause consumers downstream read, so a malformed shape there is worth
+    surfacing even though it isn't this function's job to fix.
+    """
     active = detectors if detectors is not None else TIER1_DETECTORS
     signals = []
     for detector in active:
-        signal = detector.check(state)
+        t0 = time.perf_counter_ns()
+        signal = detector.on_run_completion(state)
+        elapsed_ns = time.perf_counter_ns() - t0
+        if elapsed_ns > detector.MAX_COST_NS:
+            logger.warning(
+                "Detector %s exceeded its cost budget: %dns > %dns (run_id=%s)",
+                detector.name,
+                elapsed_ns,
+                detector.MAX_COST_NS,
+                state.run_id,
+            )
         if signal:
+            if not isinstance(signal.evidence, dict):
+                logger.warning(
+                    "Detector %s returned a signal with non-dict evidence (%s) — "
+                    "root-cause consumers expect evidence: dict.",
+                    detector.name,
+                    type(signal.evidence).__name__,
+                )
             signals.append(signal)
     return signals

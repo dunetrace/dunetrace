@@ -2,6 +2,8 @@
 
 `DunetraceCrewCallback` hooks into CrewAI 1.x's global hook system to track every LLM and tool call. Wrap the crew kickoff with `dt.run()` to group all events under one run.
 
+> **Looking for `dt.auto_instrument()` instead?** It installs these hooks and patches `Crew.kickoff`/`Agent.kickoff` for you — `dt.run()` becomes optional, since a run boundary and agent_id get resolved automatically when none is open. See [auto-instrumentation.md](./integrations/auto-instrumentation.md) for the full agent_id resolution order.
+
 ---
 
 ## Prerequisites

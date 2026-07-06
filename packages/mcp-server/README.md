@@ -14,7 +14,7 @@ The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](
 - *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
 - *"Walk me through run `abc123` step by step."*
 
-Signal data is read-only. Only hashed metadata is exposed — no raw prompts, tool arguments, or model outputs ever leave your process. Write operations (create/update/delete) are available for policies and custom detectors.
+Signal data is read-only, sourced from the Customer API over your existing Dunetrace deployment. Write operations (create/update/delete) are available for policies and custom detectors.
 
 ---
 
@@ -150,7 +150,7 @@ Get recent failure signals for a specific agent, with titles, explanations, and 
 🟠 [HIGH] TOOL_LOOP  conf=90%  step=7  6h ago
    Tool loop detected: `web_search` called 6× in steps 2–7
    What: The agent called web_search 6 times with identical args.
-   Fix:  Deduplicate `web_search` calls — identical args hash seen 6×
+   Fix:  Deduplicate `web_search` calls — identical arguments seen 6×
 ```
 
 ---
@@ -184,14 +184,14 @@ Why it matters:
   Looping agents burn tokens without producing value. A 5-step loop at
   typical gpt-4o pricing costs $0.15–$0.30 with nothing to show for it.
 
-Evidence (hashed/structural data):
+Evidence:
   tool: web_search
   count: 6
   args_identical: True
-  args_hashes: ['ffa8f58f', 'ffa8f58f', …+4 more]
+  args: ['{"query": "LLM benchmarks"}', '{"query": "LLM benchmarks"}', …+4 more]
 
 Suggested fixes (2):
-  1. Deduplicate `web_search` calls — identical args hash seen 6×
+  1. Deduplicate `web_search` calls — identical arguments seen 6×
      ```python
      seen = set()
      if args not in seen:
@@ -200,8 +200,6 @@ Suggested fixes (2):
      ```
   2. Set a hard step limit as a circuit breaker
 ```
-
-> **Privacy note:** The `args_hashes` field contains SHA-256 hashes of the original tool arguments — the raw arguments never leave your agent process.
 
 ---
 
@@ -264,7 +262,7 @@ Exit:     run.completed
 Signals (1):
   🟠 TOOL_LOOP  [HIGH]  conf=90%  step=7
      Tool loop detected: `web_search` called 6× in steps 2–7
-     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
+     Fix: Deduplicate `web_search` calls — identical arguments seen 6×
 
 Event timeline (18 events):
   [  0]    +0.0s  run.started
@@ -377,7 +375,7 @@ Most recent signals:
   🟠 TOOL_LOOP  conf=90%  6h ago  run=019e217d…
      The agent called `web_search` 6 times with identical args.
      Impact: Looping agents burn tokens without producing value.
-     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
+     Fix: Deduplicate `web_search` calls — identical arguments seen 6×
 
 Health components:
   failure_rate         ███░░░░░░░░░░░░░░░░░  7/40
@@ -661,7 +659,7 @@ You:   I got a Slack alert for TOOL_LOOP on research-agent. What's happening?
 
 Agent: [calls summarize_agent("research-agent")]
        Health is 41/100. TOOL_LOOP is systemic — 46 signals across 36% of
-       runs. The fix is to deduplicate web_search calls (identical args hash
+       runs. The fix is to deduplicate web_search calls (identical arguments
        seen 6× per run). Signal #495 is the most recent. Want the code?
 
 You:   Yes, show me signal #495.
@@ -704,16 +702,15 @@ Agent: [calls get_agent_patterns("research-agent")]
 
 ---
 
-## Privacy
+## Data Handling
 
-All data served by the MCP tools comes from the Dunetrace Customer API, which stores only hashed or structural metadata:
+All data served by the MCP tools comes from the Dunetrace Customer API:
 
-- Tool arguments → SHA-256 hash (shown as `args_hashes`)
-- LLM prompts and outputs → SHA-256 hash (never stored)
+- Tool arguments, LLM prompts and outputs → stored and returned as-is (shown as `args`, `output`, etc. in evidence)
 - Token counts, latency, step counts → stored as plain numbers
 - Run and signal metadata → stored as plain text
 
-The `evidence` dict in signal responses contains the hashed fingerprints the detector used — not the original content.
+The `evidence` dict in signal responses contains the actual content the detector used, not a hash of it.
 
 ---
 

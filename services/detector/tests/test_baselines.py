@@ -49,7 +49,7 @@ def _row(sample_size: int, p75: float | None) -> dict:
 
 class TestFetchStepCountBaseline(unittest.IsolatedAsyncioTestCase):
     FUNC = staticmethod(db_module.fetch_step_count_baseline)
-    ARGS = ("agent-1", "v1", "run-excluded")
+    ARGS = ("org-1", "agent-1", "v1", "run-excluded")
 
     async def test_returns_none_when_no_pool(self):
         """Without a pool the function must return None, not raise."""
@@ -106,7 +106,7 @@ class TestFetchStepCountBaseline(unittest.IsolatedAsyncioTestCase):
 
 class TestFetchLatencyBaseline(unittest.IsolatedAsyncioTestCase):
     FUNC = staticmethod(db_module.fetch_latency_baseline)
-    ARGS = ("agent-1", "v1", "run-excluded", "tool.called")
+    ARGS = ("org-1", "agent-1", "v1", "run-excluded", "tool.called")
 
     async def test_returns_none_when_no_pool(self):
         with patch.object(db_module, "_pool", None):
@@ -149,7 +149,7 @@ class TestFetchLatencyBaseline(unittest.IsolatedAsyncioTestCase):
 
 class TestFetchTokenGrowthBaseline(unittest.IsolatedAsyncioTestCase):
     FUNC = staticmethod(db_module.fetch_token_growth_baseline)
-    ARGS = ("agent-1", "v1", "run-excluded")
+    ARGS = ("org-1", "agent-1", "v1", "run-excluded")
 
     async def test_returns_none_when_no_pool(self):
         with patch.object(db_module, "_pool", None):
@@ -186,7 +186,7 @@ class TestFetchTokenGrowthBaseline(unittest.IsolatedAsyncioTestCase):
 
 class TestFetchDurationBaseline(unittest.IsolatedAsyncioTestCase):
     FUNC = staticmethod(db_module.fetch_duration_baseline)
-    ARGS = ("agent-1", "v1", "run-excluded")
+    ARGS = ("org-1", "agent-1", "v1", "run-excluded")
 
     async def test_returns_none_when_no_pool(self):
         with patch.object(db_module, "_pool", None):
@@ -223,7 +223,7 @@ class TestFetchDurationBaseline(unittest.IsolatedAsyncioTestCase):
 
 class TestFetchTotalTokensBaseline(unittest.IsolatedAsyncioTestCase):
     FUNC = staticmethod(db_module.fetch_total_tokens_baseline)
-    ARGS = ("agent-1", "v1", "run-excluded")
+    ARGS = ("org-1", "agent-1", "v1", "run-excluded")
 
     async def test_returns_none_when_no_pool(self):
         with patch.object(db_module, "_pool", None):

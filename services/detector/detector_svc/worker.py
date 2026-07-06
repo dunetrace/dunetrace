@@ -105,10 +105,11 @@ async def process_run(
     agent_id: str,
     agent_version: str,
     trigger: str,
+    org_id: str,
 ) -> int:
     events = await fetch_run_events(run_id)
     if not events:
-        await mark_run_processed(run_id, agent_id, agent_version, trigger, 0)
+        await mark_run_processed(run_id, agent_id, agent_version, trigger, 0, org_id)
         return 0
 
     try:
@@ -122,13 +123,13 @@ async def process_run(
             state.baseline_p75_total_tokens,
             state.baseline_p75_duration_s,
         ) = await asyncio.gather(
-            fetch_step_count_baseline(agent_id, agent_version, run_id),
-            fetch_latency_baseline(agent_id, agent_version, run_id, "tool.called"),
-            fetch_latency_baseline(agent_id, agent_version, run_id, "llm.called"),
-            fetch_token_growth_baseline(agent_id, agent_version, run_id),
-            fetch_llm_tool_ratio_baseline(agent_id, agent_version, run_id),
-            fetch_total_tokens_baseline(agent_id, agent_version, run_id),
-            fetch_duration_baseline(agent_id, agent_version, run_id),
+            fetch_step_count_baseline(org_id, agent_id, agent_version, run_id),
+            fetch_latency_baseline(org_id, agent_id, agent_version, run_id, "tool.called"),
+            fetch_latency_baseline(org_id, agent_id, agent_version, run_id, "llm.called"),
+            fetch_token_growth_baseline(org_id, agent_id, agent_version, run_id),
+            fetch_llm_tool_ratio_baseline(org_id, agent_id, agent_version, run_id),
+            fetch_total_tokens_baseline(org_id, agent_id, agent_version, run_id),
+            fetch_duration_baseline(org_id, agent_id, agent_version, run_id),
         )
         signals = run_detectors(state, detectors=get_detectors(agent_id))
         inj = _injection_signal_from_events(events, run_id, agent_id, agent_version)
@@ -148,27 +149,27 @@ async def process_run(
         _apply_cooccurrence_boost(signals)
     except Exception:
         logger.exception("Run processing failed. run_id=%s", run_id)
-        await mark_run_processed(run_id, agent_id, agent_version, trigger, 0)
+        await mark_run_processed(run_id, agent_id, agent_version, trigger, 0, org_id)
         return 0
 
     count = 0
     for signal in signals:
         is_live = signal.failure_type.value in LIVE_DETECTORS
-        written = await write_signals([signal], shadow=not is_live)
+        written = await write_signals([signal], shadow=not is_live, org_id=org_id)
         count += written
 
-    # Issue persistence: track open/resolved lifecycle per (agent_id, failure_type)
+    # Issue persistence: track open/resolved lifecycle per (org_id, agent_id, failure_type)
     fired_types = [s.failure_type.value for s in signals if s.failure_type.value in LIVE_DETECTORS]
     try:
         if fired_types:
-            await upsert_fired_issues(agent_id, fired_types)
-        await advance_clean_runs(agent_id, fired_types)
+            await upsert_fired_issues(org_id, agent_id, fired_types)
+        await advance_clean_runs(org_id, agent_id, fired_types)
     except Exception as exc:
         logger.warning("Issue tracking failed for run_id=%s: %s", run_id, exc)
 
     # Custom detectors — run after built-ins, tracked separately
     try:
-        custom_defs = await fetch_custom_detectors(agent_id)
+        custom_defs = await fetch_custom_detectors(org_id, agent_id)
         if custom_defs:
             cdr_records = []
             for cd in custom_defs:
@@ -193,13 +194,14 @@ async def process_run(
                         confidence=result["confidence"],
                         evidence=result["evidence"],
                         shadow=cd["shadow"],
+                        org_id=org_id,
                     )
                     count += 1
-            await record_custom_detector_results(cdr_records)
+            await record_custom_detector_results(cdr_records, org_id)
     except Exception as exc:
         logger.warning("Custom detector processing failed for run_id=%s: %s", run_id, exc)
 
-    await mark_run_processed(run_id, agent_id, agent_version, trigger, count)
+    await mark_run_processed(run_id, agent_id, agent_version, trigger, count, org_id)
     return count
 
 
@@ -228,6 +230,7 @@ async def poll_once() -> tuple[int, int]:
                 r["agent_id"],
                 r["agent_version"],
                 r.get("trigger", "unknown"),
+                r["org_id"],
             )
 
     results = await asyncio.gather(*[process_run_bounded(r) for r in runs])

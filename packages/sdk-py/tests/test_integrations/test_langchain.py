@@ -89,14 +89,12 @@ class TestRunLifecycle(unittest.TestCase):
         self.assertEqual(payload["tools"], ["search", "calc"])
         self.assertEqual(payload["model"], "gpt-4o")
 
-    def test_run_started_hashes_input(self):
+    def test_run_started_transmits_raw_input(self):
         handler, emitted = _make_handler()
         secret = "my secret query"
         handler.on_chain_start({}, {"input": secret}, run_id="lc-1")
-        import json
 
-        self.assertNotIn(secret, json.dumps(emitted[0].payload))
-        self.assertIn("input_hash", emitted[0].payload)
+        self.assertEqual(emitted[0].payload["input_text"], secret)
 
     def test_run_completed_payload_has_exit_reason(self):
         handler, emitted = _make_handler()
@@ -112,14 +110,14 @@ class TestRunLifecycle(unittest.TestCase):
         errored = next(e for e in emitted if e.event_type == EventType.RUN_ERRORED)
         self.assertEqual(errored.payload["error_type"], "RuntimeError")
 
-    def test_run_errored_does_not_include_raw_error_message(self):
+    def test_run_errored_includes_raw_error_message(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         secret_msg = "secret internal error detail"
         handler.on_chain_error(RuntimeError(secret_msg), run_id="lc-1")
-        import json
+        errored = next(e for e in emitted if e.event_type == EventType.RUN_ERRORED)
 
-        self.assertNotIn(secret_msg, json.dumps([e.payload for e in emitted]))
+        self.assertEqual(errored.payload["error"], secret_msg)
 
     def test_sub_chain_start_is_ignored(self):
         handler, emitted = _make_handler()
@@ -158,10 +156,8 @@ class TestRunLifecycle(unittest.TestCase):
         """LangGraph passes input as {'messages': [('human', text)]}"""
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"messages": [("human", "secret message")]}, run_id="lc-1")
-        import json
 
-        self.assertNotIn("secret message", json.dumps(emitted[0].payload))
-        self.assertIn("input_hash", emitted[0].payload)
+        self.assertEqual(emitted[0].payload["input_text"], "secret message")
 
 
 # ── LLM callbacks ─────────────────────────────────────────────────────────────
@@ -220,11 +216,11 @@ class TestLlmCallbacks(unittest.TestCase):
         self.assertIn("latency_ms", responded.payload)
         self.assertGreaterEqual(responded.payload["latency_ms"], 0)
 
-    def test_llm_responded_does_not_include_raw_output(self):
+    def test_llm_responded_includes_raw_output(self):
         _, emitted = self._run_with_llm(output_text="secret output")
-        import json
+        responded = next(e for e in emitted if e.event_type == EventType.LLM_RESPONDED)
 
-        self.assertNotIn("secret output", json.dumps([e.payload for e in emitted]))
+        self.assertEqual(responded.payload["output"], "secret output")
 
     def test_llm_error_emits_responded_with_error_finish_reason(self):
         handler, emitted = _make_handler()
@@ -267,15 +263,15 @@ class TestToolCallbacks(unittest.TestCase):
         called = next(e for e in emitted if e.event_type == EventType.TOOL_CALLED)
         self.assertEqual(called.payload["tool_name"], "calculator")
 
-    def test_tool_called_hashes_args(self):
+    def test_tool_called_transmits_raw_args(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         handler.on_tool_start(
             {"name": "search"}, "secret args", run_id="lc-tool", parent_run_id="lc-1"
         )
-        import json
+        called = next(e for e in emitted if e.event_type == EventType.TOOL_CALLED)
 
-        self.assertNotIn("secret args", json.dumps([e.payload for e in emitted]))
+        self.assertIn("secret args", called.payload["args"])
 
     def test_tool_end_emits_tool_responded_success(self):
         handler, emitted = _make_handler()
@@ -310,7 +306,7 @@ class TestToolCallbacks(unittest.TestCase):
         responded = next((e for e in emitted if e.event_type == EventType.TOOL_RESPONDED), None)
         self.assertIsNotNone(responded)
         self.assertFalse(responded.payload["success"])
-        self.assertIn("error_hash", responded.payload)
+        self.assertEqual(responded.payload["error"], "timeout")
 
     def test_tool_end_without_error_kwarg_emits_success(self):
         """Normal on_tool_end (no error kwarg) still reports success=True."""
@@ -322,16 +318,16 @@ class TestToolCallbacks(unittest.TestCase):
         self.assertIsNotNone(responded)
         self.assertTrue(responded.payload["success"])
 
-    def test_tool_error_does_not_include_raw_error(self):
+    def test_tool_error_includes_raw_error(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         handler.on_tool_start({"name": "search"}, "q", run_id="lc-tool", parent_run_id="lc-1")
         handler.on_tool_error(
             RuntimeError("secret error details"), run_id="lc-tool", parent_run_id="lc-1"
         )
-        import json
+        responded = next(e for e in emitted if e.event_type == EventType.TOOL_RESPONDED)
 
-        self.assertNotIn("secret error details", json.dumps([e.payload for e in emitted]))
+        self.assertEqual(responded.payload["error"], "secret error details")
 
     def test_on_agent_action_emits_tool_called(self):
         """AgentExecutor path (LangChain < 1.x)."""
@@ -400,15 +396,15 @@ class TestRetrievalCallbacks(unittest.TestCase):
         responded = next(e for e in emitted if e.event_type == EventType.RETRIEVAL_RESPONDED)
         self.assertEqual(responded.payload["result_count"], 0)
 
-    def test_retriever_hashes_query(self):
+    def test_retriever_transmits_raw_query(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")
         handler.on_retriever_start(
             {"name": "idx"}, "secret query", run_id="lc-ret", parent_run_id="lc-1"
         )
-        import json
+        called = next(e for e in emitted if e.event_type == EventType.RETRIEVAL_CALLED)
 
-        self.assertNotIn("secret query", json.dumps([e.payload for e in emitted]))
+        self.assertEqual(called.payload["query"], "secret query")
 
 
 # ── Step counter ───────────────────────────────────────────────────────────────
@@ -443,11 +439,11 @@ class TestStepCounter(unittest.TestCase):
         self.assertEqual(steps, [1, 2, 3])
 
 
-# ── Privacy ────────────────────────────────────────────────────────────────────
+# ── Raw content transmission ────────────────────────────────────────────────────
 
 
-class TestPrivacy(unittest.TestCase):
-    def test_no_raw_content_in_any_event(self):
+class TestRawContentTransmission(unittest.TestCase):
+    def test_raw_content_in_every_event(self):
         import json
 
         handler, emitted = _make_handler()
@@ -456,8 +452,8 @@ class TestPrivacy(unittest.TestCase):
         handler.on_tool_start(
             {"name": "search"}, f"search: {secret}", run_id="lc-t", parent_run_id="lc-1"
         )
-        for event in emitted:
-            self.assertNotIn(secret, json.dumps(event.payload))
+        payloads = [json.dumps(event.payload) for event in emitted]
+        self.assertTrue(all(secret in p for p in payloads))
 
     def test_all_events_share_same_run_id(self):
         handler, emitted = _make_handler()

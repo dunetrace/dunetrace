@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Optional
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.config import settings
 from api_svc.db.queries import (
     list_agents,
@@ -31,12 +31,12 @@ router = APIRouter(prefix="/v1/agents", tags=["Agents"])
 async def get_agents(
     offset: int = Query(0, ge=0),
     limit: int = Query(settings.PAGE_SIZE_DEFAULT, ge=1, le=settings.PAGE_SIZE_MAX),
-    customer_id: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> AgentListResponse:
-    rows, total = await list_agents(customer_id, offset, limit)
+    rows, total = await list_agents(org_id, offset, limit)
     sparklines, ft_counts = await asyncio.gather(
-        agent_signal_sparklines(customer_id),
-        agent_failure_type_counts(customer_id),
+        agent_signal_sparklines(org_id),
+        agent_failure_type_counts(org_id),
     )
 
     def ts(v):
@@ -70,7 +70,7 @@ async def get_agents(
 )
 async def get_agent_fixes(
     agent_id: str,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> FixListResponse:
     """
     Returns all fixes applied via the dashboard for this agent — both Langfuse prompt
@@ -82,7 +82,7 @@ async def get_agent_fixes(
     - **still_occurring** — the failure type reappeared after the fix
     - **insufficient_data** — fewer than 5 runs recorded since the fix
     """
-    fixes = await list_agent_fixes(agent_id)
+    fixes = await list_agent_fixes(org_id, agent_id)
     return FixListResponse(fixes=[FixRecord(**f) for f in fixes])
 
 
@@ -93,7 +93,7 @@ async def get_agent_fixes(
 )
 async def get_token_stats(
     agent_id: str,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> AgentTokenStats:
     """
     Token usage broken down by 1-day, 7-day, and 30-day windows.
@@ -108,7 +108,7 @@ async def get_token_stats(
     `waste_by_failure_type` (30-day) lists which failure types caused the most wasted spend,
     sorted by wasted_cost_usd descending.
     """
-    data = await agent_token_stats(agent_id)
+    data = await agent_token_stats(org_id, agent_id)
     return AgentTokenStats(agent_id=agent_id, **data)
 
 
@@ -119,7 +119,7 @@ async def get_token_stats(
 )
 async def get_health_score(
     agent_id: str,
-    customer_id: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> AgentHealthScore:
     """
     Composite health score derived from the last 30 days of run data.
@@ -133,5 +133,5 @@ async def get_health_score(
     Returns `score: null` when fewer than 3 sample runs are available.
     `baseline_ready: false` when fewer than 30 runs — token and latency components are held at neutral.
     """
-    result = await get_agent_health_score(agent_id)
+    result = await get_agent_health_score(org_id, agent_id)
     return AgentHealthScore(agent_id=agent_id, **result)

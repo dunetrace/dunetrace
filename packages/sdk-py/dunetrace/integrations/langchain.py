@@ -51,7 +51,7 @@ except ImportError:
     BaseCallbackHandler = object  # type: ignore[assignment,misc]
 
 from dunetrace.context import _current_run
-from dunetrace.models import hash_content, agent_version as calc_version
+from dunetrace.models import agent_version as calc_version
 from dunetrace.policies import PolicyViolation
 
 if TYPE_CHECKING:
@@ -75,6 +75,8 @@ class _RunCtx:
 
     run_id: str
     dt_ctx: Any  # RunContext — typed Any to avoid a hard import cycle at class-definition time
+    agent_id: str = ""
+    owns_run: bool = True  # False when dt_ctx is an ambient dt.run() we merely attached to
     llm_start_time: Optional[float] = None
     model: str = ""
     children: Set[str] = field(default_factory=set)  # child lc_run_ids
@@ -117,16 +119,24 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
     def __init__(
         self,
         client: "Dunetrace",
-        agent_id: str,
+        agent_id: Optional[str] = None,
         system_prompt: str = "",
         model: str = "unknown",
         tools: Optional[List[str]] = None,
     ) -> None:
+        """
+        :param agent_id: Default agent_id for runs this handler opens itself.
+            Optional — when omitted, each run resolves its own agent_id via
+            the tiered scheme in :mod:`dunetrace.integrations._agent_resolution`
+            (ambient ``dt.run()`` → per-call ``config.metadata["agent_id"]`` →
+            ``default_agent_id`` → loud fallback). Passing it explicitly here
+            is equivalent to always supplying that same default.
+        """
         if not _LANGCHAIN_AVAILABLE:
             raise ImportError("langchain is not installed. Run: pip install 'dunetrace[langchain]'")
         super().__init__()
         self._client = client
-        self._agent_id = agent_id
+        self._agent_id = agent_id  # may be None — resolved per-run in on_chain_start
         self._model = model
         self._version = calc_version(system_prompt, model, tools or [])
         self._tools = tools or []
@@ -145,7 +155,20 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _ctx(self, kwargs: dict) -> Optional[_RunCtx]:
-        """Look up the RunCtx for this callback by walking parent_run_id → root."""
+        """Look up the RunCtx for this callback by walking parent_run_id → root.
+
+        Falls back to the ambient dt.run() context (if one is active) when no
+        tracked root is found. This is what makes LLM/tool events attach
+        correctly even when on_chain_start never fires — which happens
+        whenever this handler is only attached at the LLM/tool leaf level
+        (auto_instrument()'s LangChain patch injects it into
+        BaseChatModel/BaseTool calls directly, not into the top-level
+        chain/agent invoke, so on_chain_start is never triggered for it).
+        Every leaf call within the same dt.run() block resolves the same
+        ambient RunContext, so no root-tracking bookkeeping is needed here —
+        each call just gets a fresh lightweight wrapper around the same
+        underlying (shared) RunContext.
+        """
         with self._lock:
             for key in ("parent_run_id", "run_id"):
                 lc_id = str(kwargs.get(key) or "")
@@ -154,6 +177,11 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 root = self._lc_parent.get(lc_id) or (lc_id if lc_id in self._runs else None)
                 if root and root in self._runs:
                     return self._runs[root]
+        ambient = _current_run.get()
+        if ambient is not None and not getattr(ambient, "_dt_langchain_handler_owned", False):
+            return _RunCtx(
+                run_id=ambient.run_id, dt_ctx=ambient, agent_id=ambient.agent_id, owns_run=False
+            )
         return None
 
     def _register_child(self, child_lc_id: str, parent_lc_id: str) -> None:
@@ -179,7 +207,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 AgentEvent(
                     event_type=event_type,
                     run_id=ctx.run_id,
-                    agent_id=self._agent_id,
+                    agent_id=ctx.agent_id,
                     agent_version=self._version,
                     step_index=step if step is not None else ctx.step,
                     payload=payload,
@@ -224,6 +252,34 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             # Prune stale runs before adding a new one.
             self._sweep_stale()
 
+            # Tier 1: an ambient dt.run() is already open — attach to it
+            # instead of opening a nested run of our own. LLM/tool events
+            # below route through ctx.dt_ctx either way, so they land on
+            # whichever run this resolves to; only run-lifecycle events
+            # (RUN_STARTED/COMPLETED/ERRORED) are skipped when we don't own it,
+            # since the ambient dt.run() block already emits those itself.
+            #
+            # Only a genuine dt.run() counts here — a RunContext this same
+            # handler opened for an earlier invocation (tagged below) doesn't,
+            # so an invocation that outlives its own on_chain_end (e.g. a test
+            # that doesn't call it, or an interrupted invocation elsewhere in
+            # the same thread) can never be mistaken for an ambient wrap by
+            # some *other* invocation that happens to run next.
+            ambient_run = _current_run.get()
+            if ambient_run is not None and not getattr(
+                ambient_run, "_dt_langchain_handler_owned", False
+            ):
+                ctx = _RunCtx(
+                    run_id=ambient_run.run_id,
+                    dt_ctx=ambient_run,
+                    agent_id=ambient_run.agent_id,
+                    owns_run=False,
+                )
+                with self._lock:
+                    self._runs[lc_run_id] = ctx
+                    self._lc_parent[lc_run_id] = lc_run_id
+                return
+
             user_input = str(inputs.get("input", ""))
             if not user_input and "messages" in inputs:
                 msgs = inputs["messages"]
@@ -232,6 +288,19 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                     user_input = str(last[1]) if len(last) > 1 else ""
                 elif last is not None and hasattr(last, "content"):
                     user_input = str(last.content)
+
+            # Tiers 2-4: no ambient run, so resolve an agent_id and open one
+            # of our own. Tier 2 (per-call override) comes from this specific
+            # invocation's config.metadata; tier 3 falls back to whatever this
+            # handler was constructed with.
+            from dunetrace.integrations._agent_resolution import resolve_agent_id
+
+            metadata = kwargs.get("metadata") or {}
+            agent_id = resolve_agent_id(
+                per_call_agent_id=metadata.get("agent_id"),
+                default_agent_id=self._agent_id,
+                integration="langchain",
+            )
 
             # A real RunContext — the same object dt.run(...) yields. Routing
             # LLM/tool events through it below (instead of emitting AgentEvents
@@ -242,14 +311,15 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
 
             dt_ctx = RunContext(
                 client=self._client,
-                agent_id=self._agent_id,
+                agent_id=agent_id,
                 agent_version=self._version,
                 available_tools=self._tools,
-                input_text_hash=hash_content(user_input) if user_input else "",
+                input_text=user_input,
                 run_id=lc_run_id or str(uuid.uuid4()),
             )
+            dt_ctx._dt_langchain_handler_owned = True  # see tier-1 check above
 
-            ctx = _RunCtx(run_id=dt_ctx.run_id, dt_ctx=dt_ctx)
+            ctx = _RunCtx(run_id=dt_ctx.run_id, dt_ctx=dt_ctx, agent_id=agent_id, owns_run=True)
             with self._lock:
                 self._runs[lc_run_id] = ctx
                 self._lc_parent[lc_run_id] = lc_run_id
@@ -263,7 +333,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 EventType.RUN_STARTED,
                 ctx,
                 {
-                    "input_hash": hash_content(user_input),
+                    "input_text": user_input,
                     "tools": self._tools,
                     "model": self._model,
                 },
@@ -279,17 +349,20 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             if not ctx:
                 return
 
-            from dunetrace.models import EventType
+            if ctx.owns_run:
+                # Ambient dt.run() runs emit their own RUN_COMPLETED on exit —
+                # emitting one here too would double-count the run boundary.
+                from dunetrace.models import EventType
 
-            self._safe_emit(
-                EventType.RUN_COMPLETED,
-                ctx,
-                {
-                    "exit_reason": "final_answer",
-                    "total_steps": ctx.step,
-                    "tool_call_count": ctx.tool_call_count,
-                },
-            )
+                self._safe_emit(
+                    EventType.RUN_COMPLETED,
+                    ctx,
+                    {
+                        "exit_reason": "final_answer",
+                        "total_steps": ctx.step,
+                        "tool_call_count": ctx.tool_call_count,
+                    },
+                )
             self._last_run_id = ctx.run_id
             self._cleanup(lc_run_id)
             self._client.flush()
@@ -304,18 +377,21 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             if not ctx:
                 return
 
-            from dunetrace.models import EventType
+            if ctx.owns_run:
+                # Ambient dt.run() runs emit their own RUN_ERRORED on exit —
+                # emitting one here too would double-count the run boundary.
+                from dunetrace.models import EventType
 
-            payload: Dict[str, Any] = {
-                "error_type": type(error).__name__,
-                "error_hash": hash_content(str(error)),
-            }
-            if isinstance(error, PolicyViolation):
-                # Mirror dt.run()'s own RUN_ERRORED payload shape for a stopped run.
-                payload["exit_reason"] = "policy_violation"
-                payload["policy_name"] = error.policy_name
+                payload: Dict[str, Any] = {
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                if isinstance(error, PolicyViolation):
+                    # Mirror dt.run()'s own RUN_ERRORED payload shape for a stopped run.
+                    payload["exit_reason"] = "policy_violation"
+                    payload["policy_name"] = error.policy_name
 
-            self._safe_emit(EventType.RUN_ERRORED, ctx, payload)
+                self._safe_emit(EventType.RUN_ERRORED, ctx, payload)
             self._cleanup(lc_run_id)
             self._client.flush()
         except Exception as exc:
@@ -412,7 +488,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 reasoning_tokens=reasoning_tokens or 0,
                 latency_ms=latency_ms,
                 finish_reason=finish_reason,
-                output_hash=hash_content(output_text),
+                output=output_text,
                 output_length=len(output_text),
                 prompt_tokens=prompt_tokens or 0,
             )
@@ -431,7 +507,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             self._safe_call(
                 ctx.dt_ctx.llm_responded,
                 finish_reason="error",
-                output_hash="",
+                output="",
                 output_length=0,
                 latency_ms=0,
                 error=str(error),
@@ -558,7 +634,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 ctx,
                 {
                     "index_name": index_name,
-                    "query_hash": hash_content(query),
+                    "query": query,
                 },
             )
         except Exception as exc:
@@ -611,7 +687,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 {
                     "result_count": 0,
                     "top_score": None,
-                    "error_hash": hash_content(str(error)),
+                    "error": str(error),
                 },
                 step=step,
             )

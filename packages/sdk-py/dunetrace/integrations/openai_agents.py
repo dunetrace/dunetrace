@@ -48,7 +48,7 @@ except ImportError:
     TracingProcessor = object  # type: ignore[assignment,misc]
 
 from dunetrace.context import _current_run
-from dunetrace.models import hash_content, agent_version as calc_version
+from dunetrace.models import agent_version as calc_version
 
 if TYPE_CHECKING:
     from dunetrace.client import Dunetrace
@@ -177,7 +177,7 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
 
         from dunetrace.models import EventType
 
-        input_hash = hash_content(ctx.input_text)
+        input_text = ctx.input_text
         # run.started is always the run's first event. On the lazy path it is
         # emitted from on_span_start *after* ctx.step was incremented for that
         # span, so pin step=0 explicitly rather than defaulting to ctx.step.
@@ -185,20 +185,20 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
             EventType.RUN_STARTED,
             ctx,
             {
-                "input_hash": input_hash,
+                "input_text": input_text,
                 "tools": self._tools,
                 "model": self._model,
             },
             step=0,
         )
 
-        # Only stamp the hash onto the *current* run if it is this run. When two
+        # Only stamp input_text onto the *current* run if it is this run. When two
         # traces share a contextvar context (e.g. interleaved in one task), the
         # active RunContext may belong to a different trace — writing to it would
-        # corrupt that run's input hash.
+        # corrupt that run's input.
         run_ctx = _current_run.get(None)
         if run_ctx is not None and run_ctx.run_id == ctx.run_id:
-            run_ctx.state.input_text_hash = input_hash
+            run_ctx.state.input_text = input_text
 
     def _finish_run(self, ctx: _RunCtx, trace_id: str) -> None:
         from dunetrace.models import EventType
@@ -214,13 +214,13 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
             tool_call_count = ctx.tool_call_count
 
         if had_error:
-            error_hash = hash_content(last_error or "span_error")
+            error_text = last_error or "span_error"
             self._safe_emit(
                 EventType.RUN_ERRORED,
                 ctx,
                 {
                     "error_type": "AgentRunError",
-                    "error_hash": error_hash,
+                    "error": error_text,
                 },
             )
         else:
@@ -261,7 +261,7 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                 agent_id=self._agent_id,
                 agent_version=self._version,
                 available_tools=self._tools,
-                input_text_hash=hash_content(ctx.input_text) if ctx.input_text else "",
+                input_text=ctx.input_text or "",
                 run_id=ctx.run_id,
             )
             existing = _current_run.get(None)
@@ -364,8 +364,8 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                         ctx.span_kinds[span_id] = "tool"
                         ctx.open_spans += 1
                     tool_name = self._tool_name(span_data)
-                    args_hash = hash_content(str(getattr(span_data, "input", "") or ""))
-                    emit_tool = (tool_name, args_hash, step)
+                    args = str(getattr(span_data, "input", "") or "")
+                    emit_tool = (tool_name, args, step)
 
                 elif span_type == _HANDOFF_SPAN_TYPE:
                     ctx.step += 1
@@ -394,11 +394,11 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                 model, step = emit_llm
                 self._safe_emit(EventType.LLM_CALLED, ctx, {"model": model}, step=step)
             elif emit_tool is not None:
-                tool_name, args_hash, step = emit_tool
+                tool_name, args, step = emit_tool
                 self._safe_emit(
                     EventType.TOOL_CALLED,
                     ctx,
-                    {"tool_name": tool_name, "args_hash": args_hash},
+                    {"tool_name": tool_name, "args": args},
                     step=step,
                 )
             elif emit_handoff is not None:
@@ -408,7 +408,7 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                     ctx,
                     {
                         "tool_name": f"handoff:{to_agent}",
-                        "args_hash": hash_content(from_agent),
+                        "args": from_agent,
                     },
                     step=step,
                 )
@@ -498,7 +498,7 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                             "tool_name": tool_name,
                             "success": False,
                             "latency_ms": latency_ms,
-                            "error_hash": hash_content(err_str),
+                            "error": err_str,
                         },
                         step=step,
                     )
@@ -539,7 +539,7 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                             "tool_name": tool_name,
                             "success": False,
                             "latency_ms": latency_ms,
-                            "error_hash": hash_content(err_str),
+                            "error": err_str,
                         },
                         step=step,
                     )
@@ -599,10 +599,10 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
                 ctx,
                 {
                     "finish_reason": "error",
-                    "output_hash": "",
+                    "output": "",
                     "output_length": 0,
                     "latency_ms": latency_ms,
-                    "error_hash": hash_content(self._error_str(error)),
+                    "error": self._error_str(error),
                 },
                 step=step,
             )
@@ -623,7 +623,7 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
 
         payload: Dict[str, Any] = {
             "finish_reason": finish_reason,
-            "output_hash": hash_content(output_text),
+            "output": output_text,
             "output_length": len(output_text),
             "latency_ms": latency_ms,
         }
@@ -796,7 +796,7 @@ def _trace_input_text(trace: Any) -> str:
 
 
 def _span_input_text(span_data: Any) -> str:
-    """Extract hashable user input from an LLM span's input field."""
+    """Extract raw user input text from an LLM span's input field."""
     raw = getattr(span_data, "input", None)
     if raw is None:
         return ""

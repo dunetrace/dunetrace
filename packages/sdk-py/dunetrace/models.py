@@ -1,6 +1,7 @@
 """
 Core data models. No external dependencies.
-Content fields store SHA-256 hashes — raw text never leaves your process.
+Content fields carry raw text — tool args, tool output, LLM output, and errors
+are transmitted as-is to the backend over TLS.
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ class FailureType(str, Enum):
 
 @dataclass
 class AgentEvent:
-    """A single instrumentation event emitted by the SDK. All content fields are hashed — no raw prompts or outputs."""
+    """A single instrumentation event emitted by the SDK."""
 
     event_type: EventType
     run_id: str
@@ -101,11 +102,11 @@ class AgentEvent:
 @dataclass
 class ToolCall:
     tool_name: str
-    args_hash: str
+    args: str
     step_index: int
     timestamp: float
     success: Optional[bool] = None
-    error_hash: Optional[str] = None  # hash_content(error_message) when success=False
+    error: Optional[str] = None  # raw error message when success=False
 
 
 @dataclass
@@ -163,7 +164,7 @@ class RunState:
     step_durations_ms: Dict[int, int] = field(default_factory=dict)
     current_step: int = 0
     exit_reason: Optional[str] = None
-    input_text_hash: Optional[str] = None
+    input_text: Optional[str] = None
     # Cross-run baselines populated by the server before detectors run.
     # None = insufficient history. Local self-hosted mode may leave these None.
     baseline_p75_steps: Optional[float] = None
@@ -264,11 +265,6 @@ class CallableExporter:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def hash_content(text: str) -> str:
-    """SHA-256, truncated to 16 chars. Used for all content fields."""
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def agent_version(system_prompt: str, model: str, tools: List[str]) -> str:

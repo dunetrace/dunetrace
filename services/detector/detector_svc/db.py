@@ -90,7 +90,7 @@ BEGIN
     END IF;
 END $$;
 
--- Persistent issue tracking: one row per (agent_id, failure_type) pair.
+-- Persistent issue tracking: one row per (org_id, agent_id, failure_type) triple.
 -- status: open | resolved | reopened
 -- clean_runs_since: consecutive runs with no signal of this type (reset to 0 on each hit).
 -- Resolved when clean_runs_since reaches CLEAN_RUNS_THRESHOLD (default 5).
@@ -141,6 +141,114 @@ CREATE INDEX IF NOT EXISTS idx_failure_signals_agent_shadow_alerted
     ON failure_signals(agent_id, shadow, alerted, detected_at DESC);
 """
 
+# ── Multi-tenancy unification (v0.5.0) ──────────────────────────────────────────
+#
+# processed_runs/issues/custom_detectors/custom_detector_results all gain org_id.
+# Unlike ingest_svc, this service doesn't own api_keys — org_id is backfilled by
+# joining through events.org_id (agent_id -> most-recent org_id seen for that
+# agent), which ingest_svc's own migration guarantees is populated and NOT NULL.
+#
+# Startup-order hazard: docker-compose starts detector only after ingest has
+# *started* (service_started, not "migration complete"), so it's possible for
+# this service's first startup to race ingest's. If events.org_id doesn't exist
+# yet, the backfill/NOT NULL step is skipped this run and retried on the next
+# restart — every ensure_*_schema() call is idempotent, so this converges
+# without operator action once ingest's migration has actually run.
+_MULTI_TENANCY_DDL = """
+ALTER TABLE processed_runs        ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE issues                ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE custom_detectors      ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE custom_detector_results ADD COLUMN IF NOT EXISTS org_id TEXT;
+"""
+
+_ORG_BACKFILL_TABLES_BY_AGENT = ("issues", "custom_detectors", "custom_detector_results")
+
+
+async def _backfill_org_id(conn) -> None:
+    """See module docstring above. No-ops (leaves org_id nullable) until
+    events.org_id exists and is populated."""
+    events_ready = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'events' AND column_name = 'org_id'
+        )
+        """
+    )
+    if not events_ready:
+        logger.warning(
+            "Multi-tenancy backfill deferred: events.org_id doesn't exist yet "
+            "(ingest_svc migration hasn't run). Will retry on next restart."
+        )
+        return
+
+    # processed_runs has run_id, which maps 1:1 to events.run_id — exact join,
+    # no ambiguity possible (every event in a run shares one org_id by construction).
+    await conn.execute(
+        """
+        UPDATE processed_runs pr
+        SET org_id = e.org_id
+        FROM (SELECT DISTINCT run_id, org_id FROM events) e
+        WHERE pr.run_id = e.run_id AND pr.org_id IS NULL
+        """
+    )
+    await conn.execute("UPDATE processed_runs SET org_id = 'default' WHERE org_id IS NULL")
+    await conn.execute("ALTER TABLE processed_runs ALTER COLUMN org_id SET NOT NULL")
+
+    # issues/custom_detectors/custom_detector_results have no run_id — backfill by
+    # agent_id's most-recently-seen org in events. Ambiguous agent_ids (same
+    # agent_id used by >1 org — only possible pre-migration) fall back to 'default'.
+    for table in _ORG_BACKFILL_TABLES_BY_AGENT:
+        await conn.execute(
+            f"""
+            UPDATE {table} t
+            SET org_id = e.org_id
+            FROM (
+                SELECT DISTINCT ON (agent_id) agent_id, org_id
+                FROM events
+                ORDER BY agent_id, received_at DESC
+            ) e
+            WHERE t.agent_id = e.agent_id AND t.org_id IS NULL
+            """
+        )
+        await conn.execute(f"UPDATE {table} SET org_id = 'default' WHERE org_id IS NULL")
+        await conn.execute(f"ALTER TABLE {table} ALTER COLUMN org_id SET NOT NULL")
+
+    # issues' UNIQUE constraint must widen to include org_id, or two orgs with an
+    # identically-named agent_id + failure_type would collide.
+    await conn.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'issues_agent_id_failure_type_key'
+            ) THEN
+                ALTER TABLE issues DROP CONSTRAINT issues_agent_id_failure_type_key;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'issues_org_agent_failure_type_key'
+            ) THEN
+                ALTER TABLE issues
+                    ADD CONSTRAINT issues_org_agent_failure_type_key
+                    UNIQUE (org_id, agent_id, failure_type);
+            END IF;
+        END $$;
+        """
+    )
+
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_processed_runs_org_agent_version "
+        "ON processed_runs(org_id, agent_id, agent_version, processed_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issues_org_agent ON issues(org_id, agent_id)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_custom_detectors_org_agent "
+        "ON custom_detectors(org_id, agent_id, status)"
+    )
+
+
 # Detectors that have graduated out of shadow mode.
 # Add a detector name here ONLY after verifying precision > 80% on real data.
 # LIVE_DETECTORS: set[str] = set()  # empty until we validate on real traffic
@@ -170,6 +278,8 @@ async def ensure_detector_schema() -> None:
         return
     async with _pool.acquire() as conn:
         await conn.execute(_DETECTOR_SCHEMA)
+        await conn.execute(_MULTI_TENANCY_DDL)
+        await _backfill_org_id(conn)
     logger.info("Detector schema ready")
 
 
@@ -183,6 +293,7 @@ _MIN_BASELINE_RUNS = 20
 
 
 async def fetch_step_count_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -195,6 +306,10 @@ async def fetch_step_count_baseline(
 
     Errored runs are excluded — early-exit errors pull P75 down and cause STEP_COUNT_INFLATION
     to fire on runs that took a perfectly normal number of steps for a complex task.
+
+    org_id is required: agent_id/agent_version are not guaranteed unique across
+    orgs, so without it a baseline could mix in another org's identically-named
+    agent's history.
     """
     if not _pool:
         return None
@@ -207,16 +322,17 @@ async def fetch_step_count_baseline(
                 -- not runs that errored out at step 1-2.
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             step_counts AS (
                 SELECT MAX(e.step_index) AS step_count
@@ -229,6 +345,7 @@ async def fetch_step_count_baseline(
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY step_count)     AS p75
             FROM step_counts
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -241,6 +358,7 @@ async def fetch_step_count_baseline(
 
 
 async def fetch_latency_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -255,7 +373,7 @@ async def fetch_latency_baseline(
 
     Used by SlowStepDetector to replace the hard-coded 15s/30s thresholds with a
     per-agent learned baseline.  Returns None when fewer than ``min_runs`` runs have
-    at least one matching event.
+    at least one matching event. org_id required — see fetch_step_count_baseline.
     """
     if not _pool:
         return None
@@ -266,16 +384,17 @@ async def fetch_latency_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             event_gaps AS (
                 SELECT
@@ -286,7 +405,7 @@ async def fetch_latency_baseline(
                     ) - e.timestamp) * 1000.0 AS gap_ms
                 FROM events e
                 WHERE e.run_id IN (SELECT run_id FROM recent)
-                  AND e.event_type = $5
+                  AND e.event_type = $6
             )
             SELECT
                 COUNT(DISTINCT run_id)                                              AS sample_size,
@@ -295,6 +414,7 @@ async def fetch_latency_baseline(
             WHERE gap_ms >= 0
               AND gap_ms IS NOT NULL
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -308,6 +428,7 @@ async def fetch_latency_baseline(
 
 
 async def fetch_token_growth_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -331,16 +452,17 @@ async def fetch_token_growth_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             token_data AS (
                 SELECT
@@ -371,6 +493,7 @@ async def fetch_token_growth_baseline(
                 )                                                                           AS p75
             FROM run_growth
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -383,6 +506,7 @@ async def fetch_token_growth_baseline(
 
 
 async def fetch_llm_tool_ratio_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -405,16 +529,17 @@ async def fetch_llm_tool_ratio_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             run_counts AS (
                 SELECT
@@ -433,6 +558,7 @@ async def fetch_llm_tool_ratio_baseline(
                 )                                                                               AS p75
             FROM run_counts
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -445,6 +571,7 @@ async def fetch_llm_tool_ratio_baseline(
 
 
 async def fetch_total_tokens_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -467,16 +594,17 @@ async def fetch_total_tokens_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             run_tokens AS (
                 -- prompt_tokens may be in llm.called (direct SDK) or llm.responded (LangChain);
@@ -498,6 +626,7 @@ async def fetch_total_tokens_baseline(
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY total_tokens)       AS p75
             FROM run_tokens
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -510,6 +639,7 @@ async def fetch_total_tokens_baseline(
 
 
 async def fetch_duration_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -532,16 +662,17 @@ async def fetch_duration_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             run_durations AS (
                 SELECT
@@ -557,6 +688,7 @@ async def fetch_duration_baseline(
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY duration_s)         AS p75
             FROM run_durations
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -578,6 +710,10 @@ async def fetch_completed_runs(
     When shard_count > 1 each worker instance claims only the runs whose agent_id
     hashes to its bucket: abs(hashtext(agent_id)) % shard_count = shard_index.
     shard_count=1 (default) bypasses the filter entirely.
+
+    Intentionally not org_id-scoped: this worker processes every org's runs in one
+    poll loop (sharding is by agent_id hash bucket, not by org). org_id is returned
+    per-row so the caller can propagate it into processed_runs/failure_signals/issues.
     """
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
@@ -586,6 +722,7 @@ async def fetch_completed_runs(
                 e.run_id,
                 e.agent_id,
                 e.agent_version,
+                e.org_id,
                 e.event_type AS trigger
             FROM events e
             WHERE e.event_type IN ('run.completed', 'run.errored')
@@ -612,6 +749,7 @@ async def fetch_stalled_runs(
     """Runs that started, never completed, and haven't received a new event in stall_timeout_secs — likely agents stuck mid-run.
 
     When shard_count > 1 only the runs whose agent_id hashes to shard_index are returned.
+    Not org_id-scoped — see fetch_completed_runs.
     """
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
@@ -620,6 +758,7 @@ async def fetch_stalled_runs(
                 e.run_id,
                 e.agent_id,
                 e.agent_version,
+                e.org_id,
                 'stalled' AS trigger
             FROM events e
             WHERE e.event_type = 'run.started'
@@ -675,8 +814,14 @@ async def fetch_run_events(run_id: str) -> list[dict]:
 # ── Writes ─────────────────────────────────────────────────────────────────────
 
 
-async def write_signals(signals: list, shadow: bool) -> int:
-    """Write FailureSignal objects to failure_signals. shadow=True stores them without alerting. Returns row count written."""
+async def write_signals(signals: list, shadow: bool, org_id: str) -> int:
+    """Write FailureSignal objects to failure_signals. shadow=True stores them without alerting. Returns row count written.
+
+    org_id is a parameter, not a field on FailureSignal — that dataclass is shared
+    with the SDK (packages/sdk-py/dunetrace/models.py), which has no concept of
+    org_id. All signals in one call come from processing a single run, which
+    belongs to exactly one org.
+    """
     if not signals:
         return 0
 
@@ -692,6 +837,7 @@ async def write_signals(signals: list, shadow: bool) -> int:
             json.dumps(s.evidence),
             shadow,
             s.co_signal_count,
+            org_id,
         )
         for s in signals
     ]
@@ -701,8 +847,8 @@ async def write_signals(signals: list, shadow: bool) -> int:
             """
             INSERT INTO failure_signals
                 (failure_type, severity, run_id, agent_id, agent_version,
-                 step_index, confidence, evidence, shadow, co_signal_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+                 step_index, confidence, evidence, shadow, co_signal_count, org_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
             """,
             rows,
         )
@@ -710,15 +856,15 @@ async def write_signals(signals: list, shadow: bool) -> int:
 
 
 async def mark_run_processed(
-    run_id: str, agent_id: str, agent_version: str, trigger: str, signal_count: int
+    run_id: str, agent_id: str, agent_version: str, trigger: str, signal_count: int, org_id: str
 ) -> None:
     """Record that this run has been processed. Prevents double-processing."""
     async with _pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO processed_runs
-                (run_id, agent_id, agent_version, trigger, signal_count)
-            VALUES ($1, $2, $3, $4, $5)
+                (run_id, agent_id, agent_version, trigger, signal_count, org_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (run_id) DO NOTHING
             """,
             run_id,
@@ -726,6 +872,7 @@ async def mark_run_processed(
             agent_version,
             trigger,
             signal_count,
+            org_id,
         )
 
 
@@ -734,16 +881,16 @@ async def mark_run_processed(
 CLEAN_RUNS_THRESHOLD = 5  # consecutive clean runs before an issue is marked resolved
 
 
-async def upsert_fired_issues(agent_id: str, fired_types: list[str]) -> None:
+async def upsert_fired_issues(org_id: str, agent_id: str, fired_types: list[str]) -> None:
     """For each failure type that fired this run: open a new issue or reopen/update an existing one."""
     if not fired_types or not _pool:
         return
     async with _pool.acquire() as conn:
         await conn.executemany(
             """
-            INSERT INTO issues (agent_id, failure_type, status, affected_runs, clean_runs_since)
-            VALUES ($1, $2, 'open', 1, 0)
-            ON CONFLICT (agent_id, failure_type) DO UPDATE
+            INSERT INTO issues (org_id, agent_id, failure_type, status, affected_runs, clean_runs_since)
+            VALUES ($1, $2, $3, 'open', 1, 0)
+            ON CONFLICT (org_id, agent_id, failure_type) DO UPDATE
                 SET last_seen        = NOW(),
                     affected_runs    = issues.affected_runs + 1,
                     clean_runs_since = 0,
@@ -756,11 +903,11 @@ async def upsert_fired_issues(agent_id: str, fired_types: list[str]) -> None:
                         ELSE issues.resolved_at
                     END
             """,
-            [(agent_id, ft) for ft in fired_types],
+            [(org_id, agent_id, ft) for ft in fired_types],
         )
 
 
-async def advance_clean_runs(agent_id: str, fired_types: list[str]) -> None:
+async def advance_clean_runs(org_id: str, agent_id: str, fired_types: list[str]) -> None:
     """For open/reopened issues that did NOT fire this run: increment clean counter, resolve if threshold reached."""
     if not _pool:
         return
@@ -770,25 +917,30 @@ async def advance_clean_runs(agent_id: str, fired_types: list[str]) -> None:
             UPDATE issues
             SET clean_runs_since = clean_runs_since + 1,
                 status      = CASE
-                    WHEN clean_runs_since + 1 >= $3 THEN 'resolved'
+                    WHEN clean_runs_since + 1 >= $4 THEN 'resolved'
                     ELSE status
                 END,
                 resolved_at = CASE
-                    WHEN clean_runs_since + 1 >= $3 THEN NOW()
+                    WHEN clean_runs_since + 1 >= $4 THEN NOW()
                     ELSE resolved_at
                 END
-            WHERE agent_id    = $1
+            WHERE org_id      = $1
+              AND agent_id    = $2
               AND status      IN ('open', 'reopened')
-              AND ($2::text[] IS NULL OR failure_type != ALL($2::text[]))
+              AND ($3::text[] IS NULL OR failure_type != ALL($3::text[]))
             """,
+            org_id,
             agent_id,
             fired_types or None,
             CLEAN_RUNS_THRESHOLD,
         )
 
 
-async def fetch_custom_detectors(agent_id: str) -> list[dict]:
-    """Load active and shadow custom detectors for the given agent_id (plus '*' wildcards)."""
+async def fetch_custom_detectors(org_id: str, agent_id: str) -> list[dict]:
+    """Load active and shadow custom detectors for the given org_id + agent_id (plus '*' wildcards).
+
+    A '*' wildcard applies to all agents within org_id — never across orgs.
+    """
     if not _pool:
         return []
     async with _pool.acquire() as conn:
@@ -796,10 +948,12 @@ async def fetch_custom_detectors(agent_id: str) -> list[dict]:
             """
             SELECT id, name, config_json, status
             FROM custom_detectors
-            WHERE (agent_id = $1 OR agent_id = '*')
+            WHERE org_id = $1
+              AND (agent_id = $2 OR agent_id = '*')
               AND status IN ('shadow', 'active')
             ORDER BY id
             """,
+            org_id,
             agent_id,
         )
     return [
@@ -817,10 +971,12 @@ async def fetch_custom_detectors(agent_id: str) -> list[dict]:
 
 async def record_custom_detector_results(
     results: list[dict],
+    org_id: str,
 ) -> None:
     """Bulk-insert custom detector evaluation results for shadow analytics.
 
-    Each entry: {detector_id, run_id, agent_id, fired}
+    Each entry: {detector_id, run_id, agent_id, fired}. org_id is a single param,
+    not per-entry — all results in one call come from evaluating one run.
     """
     if not results or not _pool:
         return
@@ -830,10 +986,13 @@ async def record_custom_detector_results(
         async with conn.transaction():
             await conn.executemany(
                 """
-                INSERT INTO custom_detector_results (detector_id, run_id, agent_id, fired)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO custom_detector_results (detector_id, run_id, agent_id, fired, org_id)
+                VALUES ($1, $2, $3, $4, $5)
                 """,
-                [(r["detector_id"], r["run_id"], r["agent_id"], r["fired"]) for r in results],
+                [
+                    (r["detector_id"], r["run_id"], r["agent_id"], r["fired"], org_id)
+                    for r in results
+                ],
             )
             if all_ids:
                 await conn.execute(
@@ -863,6 +1022,7 @@ async def write_custom_signal(
     confidence: float,
     evidence: dict,
     shadow: bool,
+    org_id: str,
 ) -> None:
     """Write a custom detector signal directly as TEXT failure_type (no enum required)."""
     if not _pool:
@@ -872,8 +1032,8 @@ async def write_custom_signal(
             """
             INSERT INTO failure_signals
                 (failure_type, severity, run_id, agent_id, agent_version,
-                 step_index, confidence, evidence, shadow, co_signal_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 0)
+                 step_index, confidence, evidence, shadow, co_signal_count, org_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 0, $10)
             """,
             failure_type,
             severity,
@@ -884,50 +1044,5 @@ async def write_custom_signal(
             confidence,
             json.dumps(evidence),
             shadow,
+            org_id,
         )
-
-
-async def list_issues(agent_id: str, status: Optional[str] = None) -> list[dict]:
-    """Return issues for an agent, optionally filtered by status."""
-    if not _pool:
-        return []
-
-    def _ts(v):
-        if v is None:
-            return None
-        return v.timestamp() if hasattr(v, "timestamp") else float(v)
-
-    where = "WHERE agent_id = $1"
-    params: list = [agent_id]
-    if status:
-        params.append(status.lower())
-        where += f" AND status = ${len(params)}"
-
-    async with _pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"""
-            SELECT id, agent_id, failure_type, status,
-                   first_seen, last_seen, resolved_at,
-                   affected_runs, clean_runs_since
-            FROM issues
-            {where}
-            ORDER BY
-                CASE status WHEN 'open' THEN 0 WHEN 'reopened' THEN 1 ELSE 2 END,
-                last_seen DESC
-            """,
-            *params,
-        )
-    return [
-        {
-            "id": r["id"],
-            "agent_id": r["agent_id"],
-            "failure_type": r["failure_type"],
-            "status": r["status"],
-            "first_seen": _ts(r["first_seen"]),
-            "last_seen": _ts(r["last_seen"]),
-            "resolved_at": _ts(r["resolved_at"]),
-            "affected_runs": r["affected_runs"],
-            "clean_runs_since": r["clean_runs_since"],
-        }
-        for r in rows
-    ]

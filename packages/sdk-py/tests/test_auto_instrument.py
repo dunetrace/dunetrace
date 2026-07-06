@@ -11,6 +11,7 @@ import json
 import sys
 import types
 import unittest
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 from dunetrace import (
@@ -21,6 +22,42 @@ from dunetrace import (
 )
 from dunetrace.auto import _PATCHED
 from dunetrace.models import EventType
+
+# If the real langchain_core is installed, other tests in this same process
+# (e.g. test_integrations/test_langchain_policies.py, or even
+# TestAutoInstrumentIdempotency below, which calls the unscoped
+# dt.auto_instrument() covering every framework) may patch
+# BaseChatModel/BaseTool for real, permanently, before
+# TestAutoInstrumentLangChain's own setUpClass ever runs — auto_instrument()
+# patches are deliberately process-wide and idempotent-forever, not meant to
+# be reversible per test. Snapshotting the true pre-patch methods here, at
+# module IMPORT time (during unittest's collection phase, before any test
+# anywhere has run), is the only reliable way to restore them afterwards.
+try:
+    from langchain_core.language_models.chat_models import BaseChatModel as _PRISTINE_BCM_CLS
+    from langchain_core.tools import BaseTool as _PRISTINE_BT_CLS
+
+    _PRISTINE_BCM_METHODS = {
+        name: _PRISTINE_BCM_CLS.__dict__.get(name)
+        for name in ("invoke", "ainvoke", "stream", "astream")
+    }
+    _PRISTINE_BT_METHODS = {name: _PRISTINE_BT_CLS.__dict__.get(name) for name in ("run", "arun")}
+except ImportError:
+    _PRISTINE_BCM_CLS = _PRISTINE_BT_CLS = None
+    _PRISTINE_BCM_METHODS = _PRISTINE_BT_METHODS = {}
+
+
+def _restore_pristine_langchain_methods():
+    if _PRISTINE_BCM_CLS is not None:
+        for name, fn in _PRISTINE_BCM_METHODS.items():
+            if fn is not None:
+                setattr(_PRISTINE_BCM_CLS, name, fn)
+    if _PRISTINE_BT_CLS is not None:
+        for name, fn in _PRISTINE_BT_METHODS.items():
+            if fn is not None:
+                setattr(_PRISTINE_BT_CLS, name, fn)
+    _PATCHED.discard("langchain")
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -170,6 +207,259 @@ def _install_fake_requests():
     return mod
 
 
+def _get_langchain_classes():
+    """Return (BaseChatModel, BaseTool) usable for testing _patch_langchain.
+
+    Prefers the real langchain_core if it's installed — overwriting it with a
+    stub in sys.modules would break other test modules in the same process
+    that exercise a real LangGraph agent end-to-end (test_langchain_policies.py
+    does exactly that). Only falls back to a minimal fake when langchain_core
+    genuinely isn't importable.
+
+    Real BaseChatModel/BaseTool are abstract/require pydantic fields, so this
+    returns minimal concrete subclasses either way — callers just need
+    something they can construct and call .invoke()/.run() on.
+    """
+    try:
+        from langchain_core.language_models.chat_models import BaseChatModel
+        from langchain_core.messages import AIMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        from langchain_core.tools import BaseTool
+
+        class _RealFakeChatModel(BaseChatModel):
+            last_in_framework_call: ClassVar[object] = None
+
+            @property
+            def _llm_type(self) -> str:
+                return "dunetrace-test-fake"
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                from dunetrace.context import _in_framework_call
+
+                type(self).last_in_framework_call = _in_framework_call.get()
+                return ChatResult(
+                    generations=[ChatGeneration(message=AIMessage(content="fake-response"))]
+                )
+
+        class _RealFakeTool(BaseTool):
+            name: str = "fake_tool"
+            description: str = "a fake tool for testing"
+
+            def _run(self, *args, **kwargs):
+                return "fake-tool-result"
+
+        return _RealFakeChatModel, _RealFakeTool
+    except ImportError:
+        pass
+
+    return _install_stub_langchain_core()
+
+
+def _install_stub_langchain_core():
+    """Fallback used only when the real langchain_core isn't installed.
+    Doesn't simulate the full callback protocol (on_chain_start/on_llm_end/...)
+    — that's covered by test_integrations/test_langchain.py against the real
+    DunetraceCallbackHandler. These fakes only need to prove the *patch*
+    mechanics: config/callbacks injection, the re-entrancy flag, idempotency.
+    """
+    lc_core = types.ModuleType("langchain_core")
+    lc_lm = types.ModuleType("langchain_core.language_models")
+    lc_lm_cm = types.ModuleType("langchain_core.language_models.chat_models")
+    lc_tools = types.ModuleType("langchain_core.tools")
+    lc_runnables = types.ModuleType("langchain_core.runnables")
+    lc_runnables_config = types.ModuleType("langchain_core.runnables.config")
+    lc_callbacks = types.ModuleType("langchain_core.callbacks")
+    lc_callbacks_base = types.ModuleType("langchain_core.callbacks.base")
+
+    class BaseCallbackHandler:
+        def __init__(self):
+            pass
+
+    lc_callbacks_base.BaseCallbackHandler = BaseCallbackHandler
+    lc_callbacks.base = lc_callbacks_base
+
+    def ensure_config(config):
+        return dict(config) if config else {}
+
+    class BaseChatModel:
+        last_config = None
+        last_in_framework_call = None
+
+        def invoke(self, input, config=None, *, stop=None, **kwargs):
+            from dunetrace.context import _in_framework_call
+
+            BaseChatModel.last_config = config
+            BaseChatModel.last_in_framework_call = _in_framework_call.get()
+            return "fake-response"
+
+        async def ainvoke(self, input, config=None, *, stop=None, **kwargs):
+            BaseChatModel.last_config = config
+            return "fake-response"
+
+        def stream(self, input, config=None, *, stop=None, **kwargs):
+            BaseChatModel.last_config = config
+            yield "fake-chunk"
+
+        async def astream(self, input, config=None, *, stop=None, **kwargs):
+            BaseChatModel.last_config = config
+            yield "fake-chunk"
+
+    class BaseTool:
+        last_callbacks = None
+
+        def run(
+            self,
+            tool_input,
+            verbose=None,
+            start_color="green",
+            color="green",
+            callbacks=None,
+            *,
+            tags=None,
+            metadata=None,
+            run_name=None,
+            run_id=None,
+            config=None,
+            tool_call_id=None,
+            **kwargs,
+        ):
+            BaseTool.last_callbacks = callbacks
+            return "fake-tool-result"
+
+        async def arun(
+            self,
+            tool_input,
+            verbose=None,
+            start_color="green",
+            color="green",
+            callbacks=None,
+            *,
+            tags=None,
+            metadata=None,
+            run_name=None,
+            run_id=None,
+            config=None,
+            tool_call_id=None,
+            **kwargs,
+        ):
+            BaseTool.last_callbacks = callbacks
+            return "fake-tool-result"
+
+    lc_lm_cm.BaseChatModel = BaseChatModel
+    lc_tools.BaseTool = BaseTool
+    lc_runnables_config.ensure_config = ensure_config
+    lc_lm.chat_models = lc_lm_cm
+    lc_runnables.config = lc_runnables_config
+    lc_core.language_models = lc_lm
+    lc_core.tools = lc_tools
+    lc_core.runnables = lc_runnables
+    lc_core.callbacks = lc_callbacks
+
+    sys.modules["langchain_core"] = lc_core
+    sys.modules["langchain_core.language_models"] = lc_lm
+    sys.modules["langchain_core.language_models.chat_models"] = lc_lm_cm
+    sys.modules["langchain_core.tools"] = lc_tools
+    sys.modules["langchain_core.runnables"] = lc_runnables
+    sys.modules["langchain_core.runnables.config"] = lc_runnables_config
+    sys.modules["langchain_core.callbacks"] = lc_callbacks
+    sys.modules["langchain_core.callbacks.base"] = lc_callbacks_base
+
+    # dunetrace.integrations.langchain resolves BaseCallbackHandler and
+    # _LANGCHAIN_AVAILABLE in a top-level try/except at import time. Reload it
+    # now that the fakes are in sys.modules so that resolution re-runs against
+    # them, regardless of whether some other test module imported it first.
+    import importlib
+
+    import dunetrace.integrations.langchain as _lc_mod
+
+    importlib.reload(_lc_mod)
+
+    return BaseChatModel, BaseTool
+
+
+def _install_fake_crewai():
+    """crewai.hooks stub (mirrors test_integrations/test_crewai.py) plus
+    Crew/Agent classes with kickoff/kickoff_async, so _patch_crewai has a
+    run boundary to patch."""
+    crewai = types.ModuleType("crewai")
+    crewai_hooks = types.ModuleType("crewai.hooks")
+    crewai_hooks_llm = types.ModuleType("crewai.hooks.llm_hooks")
+    crewai_hooks_tool = types.ModuleType("crewai.hooks.tool_hooks")
+
+    _before_llm_hooks: list = []
+    _after_llm_hooks: list = []
+    _before_tool_hooks: list = []
+    _after_tool_hooks: list = []
+
+    class LLMCallHookContext:
+        def __init__(self, llm=None, messages=None, response=""):
+            self.llm = llm
+            self.messages = messages or []
+            self.response = response
+
+    class ToolCallHookContext:
+        def __init__(self, tool_name="tool", tool_input=None, tool_result=None, error=None):
+            self.tool_name = tool_name
+            self.tool_input = tool_input or {}
+            self.tool_result = tool_result
+            self.error = error
+
+    crewai_hooks.get_before_llm_call_hooks = lambda: list(_before_llm_hooks)
+    crewai_hooks.get_after_llm_call_hooks = lambda: list(_after_llm_hooks)
+    crewai_hooks.get_before_tool_call_hooks = lambda: list(_before_tool_hooks)
+    crewai_hooks.get_after_tool_call_hooks = lambda: list(_after_tool_hooks)
+    crewai_hooks.register_before_llm_call_hook = lambda fn: _before_llm_hooks.append(fn)
+    crewai_hooks.register_after_llm_call_hook = lambda fn: _after_llm_hooks.append(fn)
+    crewai_hooks.register_before_tool_call_hook = lambda fn: _before_tool_hooks.append(fn)
+    crewai_hooks.register_after_tool_call_hook = lambda fn: _after_tool_hooks.append(fn)
+    crewai_hooks.unregister_before_llm_call_hook = lambda fn: _before_llm_hooks.remove(fn)
+    crewai_hooks.unregister_after_llm_call_hook = lambda fn: _after_llm_hooks.remove(fn)
+    crewai_hooks.unregister_before_tool_call_hook = lambda fn: _before_tool_hooks.remove(fn)
+    crewai_hooks.unregister_after_tool_call_hook = lambda fn: _after_tool_hooks.remove(fn)
+    crewai_hooks_llm.LLMCallHookContext = LLMCallHookContext
+    crewai_hooks_tool.ToolCallHookContext = ToolCallHookContext
+
+    class Crew:
+        def __init__(self, name="crew"):
+            self.name = name
+
+        def kickoff(self, inputs=None, **kwargs):
+            return "fake-crew-result"
+
+        async def kickoff_async(self, inputs=None, **kwargs):
+            return "fake-crew-result"
+
+    class Agent:
+        def __init__(self, role="fake-role"):
+            self.role = role
+
+        def kickoff(self, messages, *args, **kwargs):
+            return "fake-agent-result"
+
+        async def kickoff_async(self, messages, *args, **kwargs):
+            return "fake-agent-result"
+
+    crewai.hooks = crewai_hooks
+    crewai.Crew = Crew
+    crewai.Agent = Agent
+    sys.modules["crewai"] = crewai
+    sys.modules["crewai.hooks"] = crewai_hooks
+    sys.modules["crewai.hooks.llm_hooks"] = crewai_hooks_llm
+    sys.modules["crewai.hooks.tool_hooks"] = crewai_hooks_tool
+
+    # dunetrace.integrations.crewai resolves _crewai_hooks/_CREWAI_AVAILABLE
+    # in a top-level try/except at import time. Reload it now that the fakes
+    # are in sys.modules so resolution re-runs against them, regardless of
+    # whether some other test module imported it first.
+    import importlib
+
+    import dunetrace.integrations.crewai as _cw_mod
+
+    importlib.reload(_cw_mod)
+
+    return Crew, Agent
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. get_current_run()
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,7 +556,7 @@ class TestAgentDecorator(unittest.TestCase):
 
         fn("my query")
         started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
-        self.assertNotEqual(started.payload.get("input_hash"), "")
+        self.assertEqual(started.payload.get("input_text"), "my query")
         dt.shutdown(timeout=1)
 
     def test_input_from_named_param(self):
@@ -554,7 +844,7 @@ class TestAutoInstrumentHTTPX(unittest.TestCase):
         self.assertIn(EventType.TOOL_RESPONDED, types_)
         dt.shutdown(timeout=1)
 
-    def test_url_hash_not_raw_url(self):
+    def test_url_transmitted_raw(self):
         dt = _make_client()
         captured = _capture(dt)
 
@@ -563,7 +853,7 @@ class TestAutoInstrumentHTTPX(unittest.TestCase):
 
         called = next(e for e in captured if e.event_type == EventType.TOOL_CALLED)
         raw_url = str(self._httpx._FakeRequest().url)
-        self.assertNotIn(raw_url, json.dumps(called.payload))
+        self.assertIn(raw_url, json.dumps(called.payload))
         dt.shutdown(timeout=1)
 
 
@@ -691,8 +981,7 @@ class TestASGIMiddleware(unittest.TestCase):
         self._run_request(dt, "api", scope={"type": "http", "method": "GET", "path": "/health"})
 
         started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
-        # user_input is hashed — just verify it's non-empty
-        self.assertNotEqual(started.payload.get("input_hash", ""), "")
+        self.assertNotEqual(started.payload.get("input_text", ""), "")
         dt.shutdown(timeout=1)
 
 
@@ -761,7 +1050,7 @@ class TestWSGIMiddleware(unittest.TestCase):
         self._run_request(dt, "api", environ={"REQUEST_METHOD": "GET", "PATH_INFO": "/health"})
 
         started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
-        self.assertNotEqual(started.payload.get("input_hash", ""), "")
+        self.assertNotEqual(started.payload.get("input_text", ""), "")
         dt.shutdown(timeout=1)
 
 
@@ -784,6 +1073,370 @@ class TestAutoInstrumentIdempotency(unittest.TestCase):
         with self.assertLogs("dunetrace.auto", level="WARNING") as cm:
             dt.auto_instrument(["nonexistent_framework"])
         self.assertTrue(any("nonexistent_framework" in m for m in cm.output))
+        dt.shutdown(timeout=1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Framework re-entrancy guard (avoids double-counting LangChain/CrewAI
+#     calls that pass through the raw openai/anthropic/httpx/requests patches)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFrameworkReentrancyGuard(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._completions_mod = _install_fake_openai()
+        _PATCHED.discard("openai")
+        from dunetrace.auto import _patch_openai
+
+        _patch_openai()
+
+    def test_no_event_emitted_while_in_framework_call(self):
+        from dunetrace.context import _in_framework_call
+
+        dt = _make_client()
+        captured = _capture(dt)
+
+        with dt.run("agent"):
+            token = _in_framework_call.set(True)
+            try:
+                self._completions_mod.Completions().create(
+                    messages=[{"role": "user", "content": "hi"}], model="gpt-4o"
+                )
+            finally:
+                _in_framework_call.reset(token)
+
+        types_ = [e.event_type for e in captured]
+        self.assertNotIn(EventType.LLM_CALLED, types_)
+        self.assertNotIn(EventType.LLM_RESPONDED, types_)
+        dt.shutdown(timeout=1)
+
+    def test_call_still_goes_through_while_suppressed(self):
+        """Suppression must only skip emission, never skip the real call."""
+        from dunetrace.context import _in_framework_call
+
+        dt = _make_client()
+        token = _in_framework_call.set(True)
+        try:
+            result = self._completions_mod.Completions().create(
+                messages=[{"role": "user", "content": "hi"}], model="gpt-4o"
+            )
+        finally:
+            _in_framework_call.reset(token)
+        self.assertIsNotNone(result)
+        dt.shutdown(timeout=1)
+
+    def test_events_resume_after_flag_cleared(self):
+        from dunetrace.context import _in_framework_call
+
+        dt = _make_client()
+        captured = _capture(dt)
+
+        with dt.run("agent"):
+            token = _in_framework_call.set(True)
+            _in_framework_call.reset(token)
+            self._completions_mod.Completions().create(
+                messages=[{"role": "user", "content": "hi"}], model="gpt-4o"
+            )
+
+        types_ = [e.event_type for e in captured]
+        self.assertIn(EventType.LLM_CALLED, types_)
+        dt.shutdown(timeout=1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. auto_instrument(langchain=...) — patches BaseChatModel + BaseTool
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAutoInstrumentLangChain(unittest.TestCase):
+    """Verifies the *patch* mechanics end-to-end against real langchain_core
+    classes (falling back to a minimal stub only if langchain_core isn't
+    installed) — the real DunetraceCallbackHandler behavior itself (tiered
+    agent_id resolution, ambient-run reuse, policy evaluation, ...) is
+    covered separately in test_integrations/test_langchain.py.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.BaseChatModel, cls.BaseTool = _get_langchain_classes()
+
+    def setUp(self):
+        # Undo any patching left behind by an earlier test class in this same
+        # process (e.g. TestAutoInstrumentIdempotency's unscoped
+        # dt.auto_instrument() call, which legitimately — and permanently, by
+        # design — patches every registered framework including langchain).
+        _restore_pristine_langchain_methods()
+
+    def tearDown(self):
+        _restore_pristine_langchain_methods()
+
+    def test_requires_client(self):
+        with self.assertLogs("dunetrace.auto", level="WARNING") as cm:
+            from dunetrace.auto import _patch_langchain
+
+            _patch_langchain(client=None)
+        self.assertTrue(any("requires a client" in m for m in cm.output))
+        self.assertNotIn("langchain", _PATCHED)
+
+    def test_no_run_created_without_ambient_dt_run(self):
+        """Documents a real, deliberate limitation (see
+        docs/integrations/auto-instrumentation.md): on_chain_start — which
+        DunetraceCallbackHandler's own run-creation logic hangs off — never
+        fires for a bare leaf-level BaseChatModel/BaseTool call with no
+        enclosing chain callback. Auto-instrumented LangChain/LangGraph calls
+        only attach to an *already open* dt.run(); they never open their own."""
+        dt = _make_client()
+        captured = _capture(dt)
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        model = self.BaseChatModel()
+        model.invoke("hello")  # no ambient dt.run()
+
+        self.assertEqual(captured, [])
+        dt.shutdown(timeout=1)
+
+    def test_invoke_drives_dunetrace_handler_end_to_end(self):
+        dt = _make_client()
+        captured = _capture(dt)
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        # dt.run() wrapping is required: on_chain_start (which the handler's
+        # own run-creation logic hangs off) never fires for a bare leaf-level
+        # BaseChatModel/BaseTool call with no enclosing chain callback — see
+        # docs/integrations/auto-instrumentation.md. Auto-instrumented
+        # LangChain/LangGraph calls attach to whichever dt.run() is active.
+        model = self.BaseChatModel()
+        with dt.run("my-agent"):
+            model.invoke("hello")
+
+        types_ = [e.event_type for e in captured]
+        self.assertIn(EventType.RUN_STARTED, types_)
+        self.assertIn(EventType.LLM_CALLED, types_)
+        self.assertIn(EventType.LLM_RESPONDED, types_)
+        self.assertIn(EventType.RUN_COMPLETED, types_)
+        started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
+        self.assertEqual(started.agent_id, "my-agent")
+        dt.shutdown(timeout=1)
+
+    def test_handler_not_duplicated_when_config_already_carries_it(self):
+        """A config that already carries the shared handler — as a nested
+        Runnable call inheriting its parent's config would — must not get it
+        added a second time. A duplicate would fire on_llm_start/on_llm_end
+        twice for the same logical LLM call."""
+        from dunetrace.integrations.langchain import DunetraceCallbackHandler
+
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        seen_handlers = []
+
+        class _RecordingModel(self.BaseChatModel):
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                handlers = run_manager.handlers if run_manager else []
+                seen_handlers.append(
+                    [h for h in handlers if isinstance(h, DunetraceCallbackHandler)]
+                )
+                return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+        model = _RecordingModel()
+        model.invoke("hello", config={"callbacks": []})
+        self.assertEqual(len(seen_handlers[0]), 1)
+
+        # Simulates a nested call inheriting a config that already resolved
+        # to include our handler (what happens in a real Runnable chain).
+        model.invoke("hello again", config={"callbacks": list(seen_handlers[0])})
+        self.assertEqual(len(seen_handlers[1]), 1)
+        self.assertIs(seen_handlers[0][0], seen_handlers[1][0])
+        dt.shutdown(timeout=1)
+
+    def test_reentrancy_flag_set_during_invoke_and_reset_after(self):
+        from dunetrace.context import _in_framework_call
+
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        model = self.BaseChatModel()
+        self.assertFalse(_in_framework_call.get())
+        model.invoke("hello")
+        # The fake's own _generate() runs inside _patch_langchain's wrapper
+        # and records the flag it observed — proves the flag is set for the
+        # duration of the underlying call, not just around it.
+        self.assertTrue(type(model).last_in_framework_call)
+        self.assertFalse(_in_framework_call.get())  # reset after the call completes
+        dt.shutdown(timeout=1)
+
+    def test_tool_run_drives_dunetrace_handler(self):
+        dt = _make_client()
+        captured = _capture(dt)
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        tool = self.BaseTool()
+        with dt.run("my-agent"):
+            tool.run("some input")
+
+        types_ = [e.event_type for e in captured]
+        self.assertIn(EventType.RUN_STARTED, types_)
+        self.assertIn(EventType.TOOL_CALLED, types_)
+        dt.shutdown(timeout=1)
+
+    def test_idempotent(self):
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+        invoke_after_first = self.BaseChatModel.invoke
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+        self.assertIs(self.BaseChatModel.invoke, invoke_after_first)
+        dt.shutdown(timeout=1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. auto_instrument(crewai=...) — Crew/Agent kickoff run boundary
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAutoInstrumentCrewAI(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.Crew, cls.Agent = _install_fake_crewai()
+        # Fresh fake classes, so this snapshot (unlike langchain's, which
+        # patches the real process-wide BaseChatModel) is genuinely pristine.
+        cls._pristine = {
+            "Crew.kickoff": cls.Crew.__dict__.get("kickoff"),
+            "Crew.kickoff_async": cls.Crew.__dict__.get("kickoff_async"),
+            "Agent.kickoff": cls.Agent.__dict__.get("kickoff"),
+            "Agent.kickoff_async": cls.Agent.__dict__.get("kickoff_async"),
+        }
+
+    def _restore_pristine(self):
+        self.Crew.kickoff = self._pristine["Crew.kickoff"]
+        self.Crew.kickoff_async = self._pristine["Crew.kickoff_async"]
+        self.Agent.kickoff = self._pristine["Agent.kickoff"]
+        self.Agent.kickoff_async = self._pristine["Agent.kickoff_async"]
+        _PATCHED.discard("crewai")
+
+    def setUp(self):
+        self._restore_pristine()
+
+    def tearDown(self):
+        self._restore_pristine()
+
+    def test_requires_client(self):
+        with self.assertLogs("dunetrace.auto", level="WARNING") as cm:
+            from dunetrace.auto import _patch_crewai
+
+            _patch_crewai(client=None)
+        self.assertTrue(any("requires a client" in m for m in cm.output))
+        self.assertNotIn("crewai", _PATCHED)
+
+    def test_crew_kickoff_opens_a_run_when_none_active(self):
+        dt = _make_client()
+        captured = _capture(dt)
+        from dunetrace.auto import _patch_crewai
+
+        _patch_crewai(client=dt, default_agent_id="fallback-agent")
+
+        crew = self.Crew(name="crew")  # unset (default) name — falls through to default_agent_id
+        crew.kickoff(inputs={"topic": "AI trends"})
+
+        started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
+        self.assertEqual(started.agent_id, "fallback-agent")
+        self.assertIn(EventType.RUN_COMPLETED, [e.event_type for e in captured])
+        dt.shutdown(timeout=1)
+
+    def test_crew_name_used_as_agent_id_when_set(self):
+        dt = _make_client()
+        captured = _capture(dt)
+        from dunetrace.auto import _patch_crewai
+
+        _patch_crewai(client=dt, default_agent_id="fallback-agent")
+
+        crew = self.Crew(name="research-crew")
+        crew.kickoff(inputs={"topic": "AI trends"})
+
+        started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
+        self.assertEqual(started.agent_id, "research-crew")
+        dt.shutdown(timeout=1)
+
+    def test_per_call_agent_id_wins_over_crew_name(self):
+        dt = _make_client()
+        captured = _capture(dt)
+        from dunetrace.auto import _patch_crewai
+
+        _patch_crewai(client=dt, default_agent_id="fallback-agent")
+
+        crew = self.Crew(name="research-crew")
+        crew.kickoff(inputs={"agent_id": "explicit-override"})
+
+        started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
+        self.assertEqual(started.agent_id, "explicit-override")
+        dt.shutdown(timeout=1)
+
+    def test_ambient_run_reused_not_double_started(self):
+        dt = _make_client()
+        captured = _capture(dt)
+        from dunetrace.auto import _patch_crewai
+
+        _patch_crewai(client=dt, default_agent_id="fallback-agent")
+
+        crew = self.Crew(name="research-crew")
+        with dt.run("ambient-agent"):
+            crew.kickoff(inputs={"topic": "AI trends"})
+
+        started_events = [e for e in captured if e.event_type == EventType.RUN_STARTED]
+        self.assertEqual(len(started_events), 1)
+        self.assertEqual(started_events[0].agent_id, "ambient-agent")
+        dt.shutdown(timeout=1)
+
+    def test_agent_kickoff_uses_role_as_agent_id(self):
+        dt = _make_client()
+        captured = _capture(dt)
+        from dunetrace.auto import _patch_crewai
+
+        _patch_crewai(client=dt, default_agent_id="fallback-agent")
+
+        agent = self.Agent(role="researcher")
+        agent.kickoff("find the latest AI news")
+
+        started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
+        self.assertEqual(started.agent_id, "researcher")
+        dt.shutdown(timeout=1)
+
+    def test_loud_fallback_when_nothing_resolves(self):
+        dt = _make_client()
+        captured = _capture(dt)
+        from dunetrace.auto import _patch_crewai
+
+        _patch_crewai(client=dt, default_agent_id=None)
+
+        crew = self.Crew(name="crew")  # default name, no per-call override, no default
+        with self.assertLogs("dunetrace.auto", level="WARNING") as cm:
+            crew.kickoff(inputs={"topic": "AI trends"})
+        self.assertTrue(any("could not determine an agent_id" in m for m in cm.output))
+
+        started = next(e for e in captured if e.event_type == EventType.RUN_STARTED)
+        self.assertEqual(started.agent_id, "unattributed-agent")
+        dt.shutdown(timeout=1)
+
+    def test_idempotent(self):
+        dt = _make_client()
+        from dunetrace.auto import _patch_crewai
+
+        _patch_crewai(client=dt, default_agent_id="agent")
+        kickoff_after_first = self.Crew.kickoff
+        _patch_crewai(client=dt, default_agent_id="agent")
+        self.assertIs(self.Crew.kickoff, kickoff_after_first)
         dt.shutdown(timeout=1)
 
 

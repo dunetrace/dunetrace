@@ -404,6 +404,7 @@ class TestWorkerRowToSignal(unittest.TestCase):
             "severity": "HIGH",
             "run_id": "run-1",
             "agent_id": "agent-1",
+            "org_id": "org-1",
             "agent_version": "v1",
             "step_index": 5,
             "confidence": 0.95,
@@ -426,6 +427,7 @@ class TestWorkerRowToSignal(unittest.TestCase):
             "severity": "HIGH",
             "run_id": "r",
             "agent_id": "a",
+            "org_id": "org-1",
             "agent_version": "v",
             "step_index": 1,
             "confidence": 0.9,
@@ -442,6 +444,7 @@ class TestWorkerRowToSignal(unittest.TestCase):
             "severity": "HIGH",
             "run_id": "r",
             "agent_id": "a",
+            "org_id": "org-1",
             "agent_version": "v",
             "step_index": 1,
             "confidence": 0.9,
@@ -530,6 +533,7 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
                 "severity": "HIGH",
                 "run_id": "run-1",
                 "agent_id": "agent-1",
+                "org_id": "org-1",
                 "agent_version": "v1",
                 "step_index": 5,
                 "confidence": 0.95,
@@ -563,6 +567,7 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
                 "severity": "HIGH",
                 "run_id": "r",
                 "agent_id": "a",
+                "org_id": "org-1",
                 "agent_version": "v",
                 "step_index": 1,
                 "confidence": 0.9,
@@ -597,6 +602,7 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
                 "severity": "HIGH",
                 "run_id": "r",
                 "agent_id": "a",
+                "org_id": "org-1",
                 "agent_version": "v",
                 "step_index": 1,
                 "confidence": 0.9,
@@ -629,6 +635,7 @@ class TestWorkerRowToSignalCustomType(unittest.IsolatedAsyncioTestCase):
             "severity": "HIGH",
             "run_id": "run-custom",
             "agent_id": "agent-1",
+            "org_id": "org-1",
             "agent_version": "v1",
             "step_index": 3,
             "confidence": 0.75,
@@ -680,6 +687,7 @@ class TestWorkerRowToSignalCustomType(unittest.IsolatedAsyncioTestCase):
                 "severity": "HIGH",
                 "run_id": "run-cust",
                 "agent_id": "agent-1",
+                "org_id": "org-1",
                 "agent_version": "v1",
                 "step_index": 2,
                 "confidence": 0.75,
@@ -711,6 +719,7 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
             "severity": "HIGH",
             "run_id": run_id,
             "agent_id": "agent-1",
+            "org_id": "org-1",
             "agent_version": "v1",
             "step_index": 5,
             "confidence": 0.9,
@@ -721,7 +730,7 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
     async def _run(self, token_map: dict, captured: list) -> tuple:
         rows = [self._make_row()]
 
-        def fake_deliver(explanation, suppressed_count=0, signal_id=None):
+        def fake_deliver(explanation, suppressed_count=0, signal_id=None, org_id=None):
             captured.append(explanation)
             return {"slack": SendResult(True, "slack", 1, 200)}
 
@@ -771,26 +780,26 @@ class TestAlertPolicyModes(unittest.IsolatedAsyncioTestCase):
 
     async def test_immediate_always_met(self):
         met, reason = await worker_module.evaluate_alert_policy(
-            "agent", "TOOL_LOOP", mode="immediate", threshold=1, window_runs=1
+            "org-1", "agent", "TOOL_LOOP", mode="immediate", threshold=1, window_runs=1
         )
         self.assertTrue(met)
 
     async def test_unknown_mode_fails_open(self):
         met, _ = await worker_module.evaluate_alert_policy(
-            "agent", "TOOL_LOOP", mode="unknown_mode", threshold=1, window_runs=1
+            "org-1", "agent", "TOOL_LOOP", mode="unknown_mode", threshold=1, window_runs=1
         )
         self.assertTrue(met)
 
     async def test_consecutive_no_pool_fails_open(self):
         """Without a DB pool, policy must fail open so alerts aren't silently lost."""
         met, _ = await worker_module.evaluate_alert_policy(
-            "agent", "TOOL_LOOP", mode="consecutive", threshold=3, window_runs=5
+            "org-1", "agent", "TOOL_LOOP", mode="consecutive", threshold=3, window_runs=5
         )
         self.assertTrue(met)
 
     async def test_frequency_no_pool_fails_open(self):
         met, _ = await worker_module.evaluate_alert_policy(
-            "agent", "TOOL_LOOP", mode="frequency", threshold=2, window_runs=5
+            "org-1", "agent", "TOOL_LOOP", mode="frequency", threshold=2, window_runs=5
         )
         self.assertTrue(met)
 
@@ -805,6 +814,7 @@ class TestDedupWindowHandling(unittest.IsolatedAsyncioTestCase):
             "severity": "HIGH",
             "run_id": run_id,
             "agent_id": "agent-1",
+            "org_id": "org-1",
             "agent_version": "v1",
             "step_index": 5,
             "confidence": 0.9,
@@ -819,7 +829,7 @@ class TestDedupWindowHandling(unittest.IsolatedAsyncioTestCase):
 
         row = self._make_row()
         dedup_state = {
-            ("agent-1", "TOOL_LOOP"): {
+            ("org-1", "agent-1", "TOOL_LOOP"): {
                 "last_alerted_at": datetime.now(timezone.utc) - timedelta(seconds=60),
                 "suppressed_count": 0,
             }
@@ -849,7 +859,7 @@ class TestDedupWindowHandling(unittest.IsolatedAsyncioTestCase):
 
         row = self._make_row()
         dedup_state = {
-            ("agent-1", "TOOL_LOOP"): {
+            ("org-1", "agent-1", "TOOL_LOOP"): {
                 "last_alerted_at": datetime.now(timezone.utc) - timedelta(seconds=7200),
                 "suppressed_count": 3,
             }

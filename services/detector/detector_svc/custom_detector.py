@@ -37,7 +37,7 @@ def _compute_metric(state: RunState, metric: str) -> float:
             return 0.0
         max_run = curr = 1
         for i in range(1, len(tc)):
-            if tc[i].tool_name == tc[i - 1].tool_name and tc[i].args_hash == tc[i - 1].args_hash:
+            if tc[i].tool_name == tc[i - 1].tool_name and tc[i].args == tc[i - 1].args:
                 curr += 1
                 max_run = max(max_run, curr)
             else:

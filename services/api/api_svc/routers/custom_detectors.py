@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
+from api_svc.auth import require_org
 from api_svc.custom_detector_translator import translate_description, SUPPORTED_METRICS
 from api_svc.db.queries import (
     create_custom_detector,
@@ -110,16 +111,17 @@ async def preview_detector(body: PreviewRequest):
 
 
 @router.get("")
-async def list_detectors(agent_id: Optional[str] = None):
+async def list_detectors(agent_id: Optional[str] = None, org_id: str = Depends(require_org)):
     """List all custom detectors, optionally filtered by agent_id."""
-    return await list_custom_detectors(agent_id)
+    return await list_custom_detectors(org_id, agent_id)
 
 
 @router.post("", status_code=201)
-async def create_detector(body: CreateRequest):
+async def create_detector(body: CreateRequest, org_id: str = Depends(require_org)):
     """Save a new custom detector (always starts in shadow mode)."""
     _validate_config(body.config)
     detector = await create_custom_detector(
+        org_id=org_id,
         agent_id=body.agent_id,
         name=body.config["detector_name"],
         description=body.description,
@@ -129,27 +131,27 @@ async def create_detector(body: CreateRequest):
 
 
 @router.get("/{detector_id}")
-async def get_detector(detector_id: int):
-    det = await get_custom_detector(detector_id)
+async def get_detector(detector_id: int, org_id: str = Depends(require_org)):
+    det = await get_custom_detector(org_id, detector_id)
     if not det:
         raise HTTPException(404, "Custom detector not found")
     return det
 
 
 @router.get("/{detector_id}/shadow-stats")
-async def shadow_stats(detector_id: int):
+async def shadow_stats(detector_id: int, org_id: str = Depends(require_org)):
     """Return shadow evaluation results — how often the detector would have fired."""
-    det = await get_custom_detector(detector_id)
+    det = await get_custom_detector(org_id, detector_id)
     if not det:
         raise HTTPException(404, "Custom detector not found")
-    return await get_custom_detector_shadow_stats(detector_id)
+    return await get_custom_detector_shadow_stats(org_id, detector_id)
 
 
 @router.patch("/{detector_id}")
-async def update_detector(detector_id: int, body: StatusUpdate):
+async def update_detector(detector_id: int, body: StatusUpdate, org_id: str = Depends(require_org)):
     """Activate, pause, or return a detector to shadow mode."""
     try:
-        updated = await update_custom_detector_status(detector_id, body.status)
+        updated = await update_custom_detector_status(org_id, detector_id, body.status)
     except RuntimeError:
         raise HTTPException(503, "Database unavailable")
     if not updated:
@@ -158,9 +160,9 @@ async def update_detector(detector_id: int, body: StatusUpdate):
 
 
 @router.delete("/{detector_id}", status_code=204)
-async def remove_detector(detector_id: int):
+async def remove_detector(detector_id: int, org_id: str = Depends(require_org)):
     try:
-        deleted = await delete_custom_detector(detector_id)
+        deleted = await delete_custom_detector(org_id, detector_id)
     except RuntimeError:
         raise HTTPException(503, "Database unavailable")
     if not deleted:

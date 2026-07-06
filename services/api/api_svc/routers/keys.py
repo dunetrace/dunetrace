@@ -8,7 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.db import queries
 
 logger = logging.getLogger("dunetrace.api.keys")
@@ -20,19 +20,16 @@ router = APIRouter(prefix="/v1/keys", tags=["Keys"])
 
 class KeyOut(BaseModel):
     id: int
-    key_prefix: str
-    agent_id: str
-    customer_id: str
-    company_name: Optional[str]
+    org_id: str
+    org_name: Optional[str]
     active: bool
     rate_limit_rpm: int
     created_at: str
 
 
 class KeyCreateBody(BaseModel):
-    agent_id: str = Field(min_length=1)
-    customer_id: str = Field(min_length=1)
-    company_name: Optional[str] = None
+    org_id: str = Field(min_length=1)
+    org_name: Optional[str] = None
     rate_limit_rpm: int = Field(default=600, ge=1, le=100_000)
 
 
@@ -40,9 +37,8 @@ class KeyCreateResponse(BaseModel):
     id: int
     key: str  # full key — only returned once
     key_prefix: str
-    agent_id: str
-    customer_id: str
-    company_name: str
+    org_id: str
+    org_name: str
     rate_limit_rpm: int
     created_at: str
 
@@ -52,29 +48,24 @@ class KeyCreateResponse(BaseModel):
 
 @router.get("", response_model=List[KeyOut])
 async def list_keys(
-    agent_id: Optional[str] = Query(None),
-    customer_id: Optional[str] = Query(None),
     active_only: bool = Query(True),
     limit: int = Query(100, ge=1, le=500),
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ):
-    return await queries.list_api_keys(
-        agent_id=agent_id, customer_id=customer_id, active_only=active_only, limit=limit
-    )
+    return await queries.list_api_keys(org_id=org_id, active_only=active_only, limit=limit)
 
 
 @router.post("", response_model=KeyCreateResponse, status_code=201)
-async def create_key(body: KeyCreateBody, _customer: str = Depends(require_customer)):
+async def create_key(body: KeyCreateBody, _org_id: str = Depends(require_org)):
     return await queries.create_api_key(
-        agent_id=body.agent_id,
-        customer_id=body.customer_id,
-        company_name=body.company_name,
+        org_id=body.org_id,
+        org_name=body.org_name,
         rate_limit_rpm=body.rate_limit_rpm,
     )
 
 
 @router.delete("/{key_id}", status_code=204)
-async def revoke_key(key_id: int, _customer: str = Depends(require_customer)):
-    ok = await queries.revoke_api_key(key_id)
+async def revoke_key(key_id: int, org_id: str = Depends(require_org)):
+    ok = await queries.revoke_api_key(org_id, key_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Key not found")

@@ -35,7 +35,7 @@ from dunetrace import Dunetrace
 dt = Dunetrace()
 
 @dt.tool                                  # auto-emits tool.called / tool.responded
-def web_search(query: str) -> list: ...   # args are SHA-256 hashed, never transmitted raw
+def web_search(query: str) -> list: ...   # args are transmitted as-is
 
 @dt.trace                                 # agent_id defaults to "my_agent"
 def my_agent(question: str) -> str:

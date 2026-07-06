@@ -9,9 +9,7 @@ This guide covers how to instrument a Python agent already running in production
 
 ## What Dunetrace Captures
 
-Dunetrace detects behavioral failures in AI agents — tool loops, cost spikes, session latency, context bloat, and 13 more patterns — within ~15 seconds of a run completing. It never transmits raw prompts or outputs: all user content, tool arguments, and completions are SHA-256 hashed in-process before any data leaves your agent.
-
-What does transmit: model names, token counts, latencies, tool names, finish reasons, and step counts.
+Dunetrace detects behavioral failures in AI agents — tool loops, cost spikes, session latency, context bloat, and 13 more patterns — within ~15 seconds of a run completing. Content-aware detectors need to see what the agent actually said and did, so user content, tool arguments, and completions are sent to the backend over TLS as-is, alongside model names, token counts, latencies, tool names, finish reasons, and step counts.
 
 ---
 
@@ -100,7 +98,7 @@ dt = Dunetrace(endpoint="http://localhost:8001")
 
 @dt.tool                                      # auto-emits tool.called / tool.responded
 def web_search(query: str) -> list:
-    return search_api(query)                  # tool args are SHA-256 hashed, never transmitted raw
+    return search_api(query)                  # tool args are transmitted as-is
 
 @dt.tool("calculator")                        # explicit tool name
 def calc(expr: str) -> float:
@@ -231,7 +229,7 @@ with dt.run("my-production-agent", user_input=query, model="gpt-4o", tools=TOOLS
     run.tool_responded("web_search", success=True, output_length=len(result), latency_ms=300)
 
     # RAG/retrieval (if applicable)
-    run.retrieval_called(index_name="product-docs", query_hash="abc123")
+    run.retrieval_called(index_name="product-docs", query=query)
     docs = retrieve(query)
     run.retrieval_responded(index_name="product-docs", result_count=len(docs), top_score=0.91, latency_ms=45)
 
@@ -249,11 +247,11 @@ run.llm_called(model, prompt_tokens)
 run.llm_responded(completion_tokens, latency_ms, finish_reason, output_length)
 
 # Tool events
-run.tool_called(tool_name, args)           # args dict gets hashed in-process
+run.tool_called(tool_name, args)           # args dict is sent as-is
 run.tool_responded(tool_name, success, output_length, latency_ms, error)
 
 # Retrieval/RAG events
-run.retrieval_called(index_name, query_hash)
+run.retrieval_called(index_name, query)
 run.retrieval_responded(index_name, result_count, top_score, latency_ms)
 
 # Infrastructure signals (no step counter increment)
@@ -492,14 +490,14 @@ These run automatically on every completed run. No configuration needed to enabl
 
 ---
 
-## Privacy Summary
+## Data Handling Summary
 
 | Data | Transmitted? |
 |---|---|
-| User input text | No — SHA-256 hash only |
-| LLM prompts and completions | No — SHA-256 hash only |
-| Tool arguments | No — SHA-256 hash only |
-| Tool outputs | No — SHA-256 hash only |
+| User input text | Yes — sent as-is |
+| LLM prompts and completions | Yes — sent as-is |
+| Tool arguments | Yes — sent as-is |
+| Tool outputs | Yes — sent as-is |
 | Model names (`gpt-4o`, `claude-3-5-sonnet`) | Yes |
 | Tool names (`web_search`, `calculator`) | Yes |
 | Token counts | Yes |
@@ -507,7 +505,7 @@ These run automatically on every completed run. No configuration needed to enabl
 | Finish reasons | Yes |
 | HTTP status codes | Yes |
 
-Hashing happens in-process. Raw content never leaves your agent.
+Content is sent to the backend over TLS. Self-host if you need an air-gapped deployment.
 
 ---
 

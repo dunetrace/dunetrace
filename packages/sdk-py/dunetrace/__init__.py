@@ -1,5 +1,13 @@
 from dunetrace.client import Dunetrace, DunetraceClient
 from dunetrace.context import get_current_run
+from dunetrace.emitters import (
+    BatchingEmitter,
+    HttpBatchingEmitter,
+    NoopBatchingEmitter,
+    ConsoleBatchingEmitter,
+    FileBatchingEmitter,
+    DurableRetryEmitter,
+)
 from dunetrace.middleware import DunetraceASGIMiddleware, DunetraceWSGIMiddleware
 from dunetrace.models import (
     RunState,
@@ -43,4 +51,10 @@ __all__ = [
     "RiskScore",
     "Exporter",
     "CallableExporter",
+    "BatchingEmitter",
+    "HttpBatchingEmitter",
+    "NoopBatchingEmitter",
+    "ConsoleBatchingEmitter",
+    "FileBatchingEmitter",
+    "DurableRetryEmitter",
 ]

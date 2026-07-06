@@ -42,7 +42,7 @@ services:
       AUTH_MODE: dev
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
-      PYTHONPATH: /app/services/ingest
+      PYTHONPATH: /app/packages/schemas-py:/app/services/ingest
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\" || exit 1"]
       interval: 10s

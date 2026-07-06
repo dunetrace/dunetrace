@@ -1,10 +1,5 @@
 import { createHash } from "node:crypto";
 
-/** SHA-256, first 16 hex chars. Matches Python: hashlib.sha256(text.encode()).hexdigest()[:16] */
-export function hashContent(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
-}
-
 /**
  * Stable 8-char fingerprint of the agent configuration.
  * Any change to system prompt, model, or tool list produces a new version.

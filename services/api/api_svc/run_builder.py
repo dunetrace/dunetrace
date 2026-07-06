@@ -47,7 +47,7 @@ def build_run_state(events: list[dict]) -> RunState:
 
         if event_type == "run.started":
             state.available_tools = payload.get("tools", [])
-            state.input_text_hash = payload.get("input_hash")
+            state.input_text = payload.get("input_text")
 
         elif event_type == "run.completed":
             state.exit_reason = payload.get("exit_reason", "completed")
@@ -86,7 +86,7 @@ def build_run_state(events: list[dict]) -> RunState:
             state.tool_calls.append(
                 ToolCall(
                     tool_name=tool_name,
-                    args_hash=payload.get("args_hash", ""),
+                    args=payload.get("args", ""),
                     step_index=step_index,
                     timestamp=raw.get("timestamp", 0.0),
                 )
@@ -99,7 +99,7 @@ def build_run_state(events: list[dict]) -> RunState:
                 for tc in reversed(state.tool_calls):
                     if tc.tool_name == tool_name and tc.success is None:
                         tc.success = bool(success)
-                        tc.error_hash = payload.get("error_hash")
+                        tc.error = payload.get("error")
                         break
 
         elif event_type == "retrieval.responded":

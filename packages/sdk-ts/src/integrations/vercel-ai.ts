@@ -238,7 +238,7 @@ export function toolNames(tools: ToolSet | undefined): string[] {
  * Prefers a string `prompt`. The AI SDK also allows `prompt` to be a message
  * array, and supports a separate `messages` array (the common chat pattern);
  * for either, the last message is used so multi-turn calls don't collapse to a
- * constant input_hash. The text content of that message is used when available;
+ * constant input. The text content of that message is used when available;
  * otherwise the message is JSON-stringified.
  */
 function deriveUserInput(opts: { prompt?: unknown; messages?: unknown }): string {

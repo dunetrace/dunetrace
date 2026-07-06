@@ -5,7 +5,6 @@ These tests stub out the ``agents`` package so they run without installing
 openai-agents, and use lightweight fakes for the SDK's Trace/Span objects.
 """
 
-import json
 import sys
 import time
 import types
@@ -48,7 +47,7 @@ from dunetrace.integrations.openai_agents import (  # noqa: E402
     DunetraceTracingProcessor,
     add_dunetrace_processor,
 )
-from dunetrace.models import EventType, hash_content  # noqa: E402
+from dunetrace.models import EventType  # noqa: E402
 
 
 # ── Fakes for SDK Trace/Span objects ────────────────────────────────────────
@@ -136,7 +135,7 @@ class TestRunLifecycle(unittest.TestCase):
         proc, emitted = _make_processor()
         proc.on_trace_start(_FakeTrace(metadata={"input": "hello world"}))
         self.assertEqual(emitted[0].event_type, EventType.RUN_STARTED)
-        self.assertEqual(emitted[0].payload["input_hash"], hash_content("hello world"))
+        self.assertEqual(emitted[0].payload["input_text"], "hello world")
 
     def test_trace_start_without_metadata_defers_run_started(self):
         proc, emitted = _make_processor()
@@ -149,7 +148,7 @@ class TestRunLifecycle(unittest.TestCase):
         span = _FakeSpan("s1", "trace_1", _GenerationData(input="user query"))
         proc.on_span_start(span)
         started = next(e for e in emitted if e.event_type == EventType.RUN_STARTED)
-        self.assertEqual(started.payload["input_hash"], hash_content("user query"))
+        self.assertEqual(started.payload["input_text"], "user query")
 
     def test_trace_end_emits_run_completed(self):
         proc, emitted = _make_processor()
@@ -187,7 +186,7 @@ class TestRunLifecycle(unittest.TestCase):
         self.assertEqual(completed.payload["total_steps"], 1)
         self.assertEqual(completed.payload["tool_call_count"], 1)
 
-    def test_run_errored_uses_last_error_hash(self):
+    def test_run_errored_uses_last_error(self):
         proc, emitted = _make_processor()
         proc.on_trace_start(_FakeTrace(metadata={"input": "q"}))
         span = _FakeSpan("s1", "trace_1", _GenerationData())
@@ -196,7 +195,7 @@ class TestRunLifecycle(unittest.TestCase):
         proc.on_span_end(span)
         proc.on_trace_end(_FakeTrace())
         errored = next(e for e in emitted if e.event_type == EventType.RUN_ERRORED)
-        self.assertEqual(errored.payload["error_hash"], hash_content("boom"))
+        self.assertEqual(errored.payload["error"], "boom")
 
     def test_state_cleared_after_completion(self):
         proc, _ = _make_processor()
@@ -236,7 +235,7 @@ class TestLLMSpans(unittest.TestCase):
         called = next(e for e in emitted if e.event_type == EventType.LLM_CALLED)
         self.assertEqual(called.payload["model"], "gpt-4o-mini")
 
-    def test_llm_responded_hashes_output(self):
+    def test_llm_responded_transmits_raw_output(self):
         proc, emitted = _make_processor()
         proc.on_trace_start(_FakeTrace(metadata={"input": "q"}))
         secret = "secret model output"
@@ -244,8 +243,7 @@ class TestLLMSpans(unittest.TestCase):
         proc.on_span_start(span)
         proc.on_span_end(span)
         responded = next(e for e in emitted if e.event_type == EventType.LLM_RESPONDED)
-        self.assertNotIn(secret, json.dumps(responded.payload))
-        self.assertIn("output_hash", responded.payload)
+        self.assertEqual(responded.payload["output"], secret)
 
     def test_generation_usage_tokens(self):
         proc, emitted = _make_processor()
@@ -281,7 +279,7 @@ class TestLLMSpans(unittest.TestCase):
         self.assertEqual(responded.payload["prompt_tokens"], 7)
         self.assertEqual(responded.payload["completion_tokens"], 3)
         self.assertEqual(responded.payload["output_length"], len("answer text"))
-        self.assertEqual(responded.payload["output_hash"], hash_content("answer text"))
+        self.assertEqual(responded.payload["output"], "answer text")
 
     def test_response_span_tool_calls_finish_reason(self):
         proc, emitted = _make_processor()
@@ -322,7 +320,7 @@ class TestLLMSpans(unittest.TestCase):
         proc.on_span_end(span)
         responded = next(e for e in emitted if e.event_type == EventType.LLM_RESPONDED)
         self.assertEqual(responded.payload["output_length"], len("structured answer"))
-        self.assertEqual(responded.payload["output_hash"], hash_content("structured answer"))
+        self.assertEqual(responded.payload["output"], "structured answer")
 
     def test_llm_error_emits_error_finish_reason(self):
         proc, emitted = _make_processor()
@@ -333,8 +331,7 @@ class TestLLMSpans(unittest.TestCase):
         proc.on_span_end(span)
         responded = next(e for e in emitted if e.event_type == EventType.LLM_RESPONDED)
         self.assertEqual(responded.payload["finish_reason"], "error")
-        self.assertNotIn("rate limited", json.dumps(responded.payload))
-        self.assertIn("error_hash", responded.payload)
+        self.assertEqual(responded.payload["error"], "rate limited")
 
     def test_response_failed_status_emits_run_errored(self):
         proc, emitted = _make_processor()
@@ -377,7 +374,7 @@ class TestLLMSpans(unittest.TestCase):
         self.assertEqual(len(llm_called), 1)
         self.assertEqual(len(llm_responded), 1)
         responded = llm_responded[0]
-        self.assertEqual(responded.payload["output_hash"], hash_content("from generation"))
+        self.assertEqual(responded.payload["output"], "from generation")
 
     def test_response_span_emitted_after_generation_when_handoff_intervenes(self):
         """Mixed API backends in one trace: generation then handoff then response."""
@@ -406,7 +403,7 @@ class TestLLMSpans(unittest.TestCase):
         llm_responded = [e for e in emitted if e.event_type == EventType.LLM_RESPONDED]
         self.assertEqual(len(llm_called), 2)
         self.assertEqual(len(llm_responded), 2)
-        self.assertEqual(llm_responded[-1].payload["output_hash"], hash_content("responses answer"))
+        self.assertEqual(llm_responded[-1].payload["output"], "responses answer")
 
 
 # ── Tool spans ───────────────────────────────────────────────────────────────
@@ -424,15 +421,14 @@ class TestToolSpans(unittest.TestCase):
         called = next(e for e in emitted if e.event_type == EventType.TOOL_CALLED)
         self.assertEqual(called.payload["tool_name"], "get_weather")
 
-    def test_tool_args_are_hashed(self):
+    def test_tool_args_transmitted_raw(self):
         proc, emitted = _make_processor()
         proc.on_trace_start(_FakeTrace(metadata={"input": "q"}))
         secret = "sensitive args"
         span = _FakeSpan("s1", "trace_1", _FunctionData(input=secret))
         proc.on_span_start(span)
         called = next(e for e in emitted if e.event_type == EventType.TOOL_CALLED)
-        self.assertNotIn(secret, json.dumps(called.payload))
-        self.assertIn("args_hash", called.payload)
+        self.assertIn(secret, called.payload["args"])
 
     def test_tool_count_in_run_completed(self):
         proc, emitted = _make_processor()
@@ -454,7 +450,7 @@ class TestToolSpans(unittest.TestCase):
         proc.on_span_end(span)
         responded = next(e for e in emitted if e.event_type == EventType.TOOL_RESPONDED)
         self.assertFalse(responded.payload["success"])
-        self.assertNotIn("tool blew up", json.dumps(responded.payload))
+        self.assertEqual(responded.payload["error"], "tool blew up")
 
     def test_called_and_responded_share_step_index(self):
         proc, emitted = _make_processor()
@@ -523,7 +519,7 @@ class TestHandoffSpans(unittest.TestCase):
         called = next(e for e in emitted if e.event_type == EventType.TOOL_CALLED)
         responded = next(e for e in emitted if e.event_type == EventType.TOOL_RESPONDED)
         self.assertEqual(called.payload["tool_name"], "handoff:Specialist")
-        self.assertEqual(called.payload["args_hash"], hash_content("Triage"))
+        self.assertEqual(called.payload["args"], "Triage")
         self.assertTrue(responded.payload["success"])
 
     def test_handoff_responded_includes_latency_ms(self):

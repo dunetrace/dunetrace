@@ -424,10 +424,10 @@ def get_signal_detail(signal_id: int, agent_id: str = "") -> str:
         "",
     ]
 
-    # Evidence dict (structured data, hashed values only — no raw content)
+    # Evidence dict — includes raw content fields (args, output, errors) where the detector used them
     ev = signal.get("evidence") or {}
     if ev:
-        lines.append("Evidence (hashed/structural data):")
+        lines.append("Evidence:")
         for k, v in ev.items():
             if isinstance(v, list) and len(v) > 6:
                 v = v[:6] + [f"…+{len(v) - 6} more"]
@@ -1058,8 +1058,8 @@ def create_custom_detector(description: str, agent_id: str = "*") -> str:
 
     if preview.get("requires_content"):
         return (
-            "This description requires access to raw prompt/response content, "
-            "which is unavailable (everything is hashed at the SDK). "
+            "This description requires matching on prompt/response content, which "
+            "custom detector conditions don't support yet. "
             "Rephrase to use structural metrics: tool call counts, latency, "
             "token usage, step count, retry count, etc."
         )
@@ -1506,7 +1506,7 @@ _GUIDES: dict[str, str] = {
 
         @dt.tool
         def web_search(query: str) -> list:
-            ...  # your tool implementation — args are hashed, never sent raw
+            ...  # your tool implementation — args are sent as-is
 
         @dt.trace("my-agent")
         def run_agent(question: str) -> str:
@@ -1555,16 +1555,8 @@ _GUIDES: dict[str, str] = {
         ## Minimal client
         ```typescript
         import { randomUUID } from "crypto";
-        import * as crypto from "crypto";
 
         const ENDPOINT = process.env.DUNETRACE_ENDPOINT ?? "http://localhost:8001";
-
-        function sha256(value: unknown): string {
-          return crypto.createHash("sha256")
-            .update(JSON.stringify(value))
-            .digest("hex")
-            .slice(0, 16);
-        }
 
         async function sendEvent(event: object) {
           await fetch(`${ENDPOINT}/v1/ingest`, {
@@ -1587,7 +1579,7 @@ _GUIDES: dict[str, str] = {
           event_type: "run.started",
           run_id: runId, agent_id: agentId, agent_version: "1.0.0",
           step_index: step++, timestamp: t0,
-          payload: { input_hash: sha256(userQuery), available_tools: ["web_search"] },
+          payload: { input_text: userQuery, available_tools: ["web_search"] },
         });
 
         // 2. LLM call
@@ -1611,7 +1603,7 @@ _GUIDES: dict[str, str] = {
           event_type: "tool.called",
           run_id: runId, agent_id: agentId, agent_version: "1.0.0",
           step_index: step, timestamp: Date.now() / 1000,
-          payload: { tool_name: "web_search", args_hash: sha256(args) },
+          payload: { tool_name: "web_search", args: JSON.stringify(args) },
         });
         const toolResult = await webSearch(args);
         await sendEvent({
@@ -1650,7 +1642,7 @@ _GUIDES: dict[str, str] = {
             results = web_search(question)   # automatically tracked inside a run
             return results[0]
         ```
-        Args are SHA-256 hashed before transmission — raw arguments never leave your process.
+        Args are sent to the backend as-is.
 
         ## Python — context manager (explicit)
         ```python
@@ -1660,7 +1652,7 @@ _GUIDES: dict[str, str] = {
             run.tool_responded(
                 "web_search",
                 success=True,
-                result=result,      # hashed before sending
+                output_length=len(str(result)),
                 latency_ms=120,
             )
         ```
@@ -1678,7 +1670,7 @@ _GUIDES: dict[str, str] = {
         ```typescript
         // Before calling
         await sendEvent({ event_type: "tool.called", payload: {
-          tool_name: "web_search", args_hash: sha256(args)
+          tool_name: "web_search", args: JSON.stringify(args)
         }, ... });
 
         const result = await webSearch(args);

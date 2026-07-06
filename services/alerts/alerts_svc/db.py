@@ -40,6 +40,10 @@ async def close_pool() -> None:
 
 
 async def fetch_unalerted_signals(limit: int = 50) -> list[dict[str, Any]]:
+    """Scan unalerted live signals across ALL orgs in one poll — mirrors
+    detector_svc's fetch_completed_runs/fetch_stalled_runs, which also scan
+    globally rather than per-org. org_id is returned per-row so the worker
+    can group and scope downstream policy/dedup checks correctly."""
     if not _pool:
         return []
     async with _pool.acquire() as conn:
@@ -51,6 +55,7 @@ async def fetch_unalerted_signals(limit: int = 50) -> list[dict[str, Any]]:
                 severity,
                 run_id,
                 agent_id,
+                org_id,
                 agent_version,
                 step_index,
                 confidence,
@@ -82,7 +87,12 @@ async def mark_alerted_batch(signal_ids: list[int]) -> None:
 
 
 async def ensure_digest_schema() -> None:
-    """Create digest_log table if it doesn't exist."""
+    """Create digest_log table if it doesn't exist, and migrate it to be org-scoped.
+
+    Each org gets its own weekly digest send, gated independently — the digest
+    aggregates that org's own runs/signals/issues only, so a shared Slack/webhook
+    destination never sees another org's data mixed into one message.
+    """
     if not _pool:
         return
     async with _pool.acquire() as conn:
@@ -93,39 +103,67 @@ async def ensure_digest_schema() -> None:
                 sent_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
             )
             """)
+        await conn.execute("ALTER TABLE digest_log ADD COLUMN IF NOT EXISTS org_id TEXT")
+        await conn.execute("UPDATE digest_log SET org_id = 'default' WHERE org_id IS NULL")
+        await conn.execute("ALTER TABLE digest_log ALTER COLUMN org_id SET NOT NULL")
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_digest_log_org_type_sent "
+            "ON digest_log (org_id, digest_type, sent_at)"
+        )
 
 
-async def was_digest_sent_recently(within_days: int = 6) -> bool:
-    """True if a weekly digest was sent within the last `within_days` days."""
+async def fetch_active_org_ids(within_days: int = 7) -> list[str]:
+    """Distinct org_ids with any processed run in the last `within_days` days.
+    Orgs with zero activity are skipped entirely — no digest, no digest_log row."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT org_id FROM processed_runs
+            WHERE processed_at >= NOW() - ($1 || ' days')::INTERVAL
+            """,
+            str(within_days),
+        )
+    return [r["org_id"] for r in rows]
+
+
+async def was_digest_sent_recently(org_id: str, within_days: int = 6) -> bool:
+    """True if org_id's weekly digest was sent within the last `within_days` days."""
     if not _pool:
         return False
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT 1 FROM digest_log
-            WHERE digest_type = 'weekly'
-              AND sent_at >= NOW() - ($1 || ' days')::INTERVAL
+            WHERE org_id = $1
+              AND digest_type = 'weekly'
+              AND sent_at >= NOW() - ($2 || ' days')::INTERVAL
             LIMIT 1
             """,
+            org_id,
             str(within_days),
         )
     return row is not None
 
 
-async def log_digest_sent() -> None:
+async def log_digest_sent(org_id: str) -> None:
     if not _pool:
         return
     async with _pool.acquire() as conn:
-        await conn.execute("INSERT INTO digest_log (digest_type) VALUES ('weekly')")
+        await conn.execute(
+            "INSERT INTO digest_log (digest_type, org_id) VALUES ('weekly', $1)", org_id
+        )
 
 
-async def fetch_weekly_digest_data() -> dict[str, Any]:
-    """Aggregate the last 7 days of signal + run + issue data for the weekly digest."""
+async def fetch_weekly_digest_data(org_id: str) -> dict[str, Any]:
+    """Aggregate the last 7 days of signal + run + issue data for org_id's weekly digest."""
     if not _pool:
         return {}
     async with _pool.acquire() as conn:
-        # Total runs and signals across all agents in the last 7 days
-        totals = await conn.fetchrow("""
+        # Total runs and signals for this org in the last 7 days
+        totals = await conn.fetchrow(
+            """
             SELECT
                 COUNT(DISTINCT pr.run_id)              AS total_runs,
                 COUNT(DISTINCT pr.agent_id)            AS total_agents,
@@ -133,11 +171,15 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             FROM processed_runs pr
             LEFT JOIN failure_signals fs
                 ON fs.run_id = pr.run_id AND fs.shadow = FALSE
-            WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
-            """)
+            WHERE pr.org_id = $1
+              AND pr.processed_at >= NOW() - INTERVAL '7 days'
+            """,
+            org_id,
+        )
 
         # Top failure types by affected run count
-        top_failures = await conn.fetch("""
+        top_failures = await conn.fetch(
+            """
             SELECT
                 fs.failure_type,
                 COUNT(DISTINCT fs.run_id)::int  AS affected_runs,
@@ -149,14 +191,18 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             FROM processed_runs pr
             JOIN failure_signals fs
                 ON fs.run_id = pr.run_id AND fs.shadow = FALSE
-            WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
+            WHERE pr.org_id = $1
+              AND pr.processed_at >= NOW() - INTERVAL '7 days'
             GROUP BY fs.failure_type
             ORDER BY affected_runs DESC
             LIMIT 5
-            """)
+            """,
+            org_id,
+        )
 
         # Top agents by signal volume with dominant failure type
-        top_agents = await conn.fetch("""
+        top_agents = await conn.fetch(
+            """
             WITH agent_signals AS (
                 SELECT
                     pr.agent_id,
@@ -165,7 +211,8 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
                 FROM processed_runs pr
                 JOIN failure_signals fs
                     ON fs.run_id = pr.run_id AND fs.shadow = FALSE
-                WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
+                WHERE pr.org_id = $1
+                  AND pr.processed_at >= NOW() - INTERVAL '7 days'
                 GROUP BY pr.agent_id
             ),
             dominant AS (
@@ -175,7 +222,8 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
                 FROM processed_runs pr
                 JOIN failure_signals fs
                     ON fs.run_id = pr.run_id AND fs.shadow = FALSE
-                WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
+                WHERE pr.org_id = $1
+                  AND pr.processed_at >= NOW() - INTERVAL '7 days'
                 GROUP BY pr.agent_id, fs.failure_type
                 ORDER BY pr.agent_id, COUNT(*) DESC
             )
@@ -184,10 +232,13 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             JOIN dominant d ON d.agent_id = a.agent_id
             ORDER BY a.signal_count DESC
             LIMIT 5
-            """)
+            """,
+            org_id,
+        )
 
         # Systemic patterns: failure types at ≥10% of runs per agent in last 7 days
-        systemic = await conn.fetch("""
+        systemic = await conn.fetch(
+            """
             SELECT
                 pr.agent_id,
                 fs.failure_type,
@@ -200,7 +251,8 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             FROM processed_runs pr
             JOIN failure_signals fs
                 ON fs.run_id = pr.run_id AND fs.shadow = FALSE
-            WHERE pr.processed_at >= NOW() - INTERVAL '7 days'
+            WHERE pr.org_id = $1
+              AND pr.processed_at >= NOW() - INTERVAL '7 days'
             GROUP BY pr.agent_id, fs.failure_type
             HAVING ROUND(
                 COUNT(DISTINCT fs.run_id)::numeric
@@ -208,22 +260,32 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
             ) >= 0.10
             ORDER BY rate DESC
             LIMIT 10
-            """)
+            """,
+            org_id,
+        )
 
         # Issues opened and resolved this week
         issues_opened = (
-            await conn.fetchval("""
+            await conn.fetchval(
+                """
             SELECT COUNT(*) FROM issues
-            WHERE first_seen >= NOW() - INTERVAL '7 days'
-            """)
+            WHERE org_id = $1
+              AND first_seen >= NOW() - INTERVAL '7 days'
+            """,
+                org_id,
+            )
             or 0
         )
 
         issues_resolved = (
-            await conn.fetchval("""
+            await conn.fetchval(
+                """
             SELECT COUNT(*) FROM issues
-            WHERE resolved_at >= NOW() - INTERVAL '7 days'
-            """)
+            WHERE org_id = $1
+              AND resolved_at >= NOW() - INTERVAL '7 days'
+            """,
+                org_id,
+            )
             or 0
         )
 
@@ -239,8 +301,10 @@ async def fetch_weekly_digest_data() -> dict[str, Any]:
     }
 
 
-async def fetch_signal_rate_context(agent_id: str, failure_type: str) -> dict[str, Any]:
-    """Return 7-day rate context for a failure_type on this agent.
+async def fetch_signal_rate_context(
+    org_id: str, agent_id: str, failure_type: str
+) -> dict[str, Any]:
+    """Return 7-day rate context for a failure_type on this org's agent.
     Used to distinguish systemic patterns from one-off alerts in Slack messages.
     Returns: {total_runs, affected_runs, rate, is_systemic}. Empty dict on error."""
     if not _pool:
@@ -260,12 +324,15 @@ async def fetch_signal_rate_context(agent_id: str, failure_type: str) -> dict[st
                 FROM processed_runs pr
                 JOIN failure_signals fs
                     ON fs.run_id    = pr.run_id
+                    AND fs.org_id   = pr.org_id
                     AND fs.agent_id = pr.agent_id
                     AND fs.shadow   = FALSE
-                    AND fs.failure_type = $2
-                WHERE pr.agent_id = $1
+                    AND fs.failure_type = $3
+                WHERE pr.org_id = $1
+                  AND pr.agent_id = $2
                   AND pr.processed_at >= NOW() - INTERVAL '7 days'
                 """,
+                org_id,
                 agent_id,
                 failure_type,
             )
@@ -284,31 +351,36 @@ async def fetch_signal_rate_context(agent_id: str, failure_type: str) -> dict[st
 
 
 async def fetch_agent_overrides(
-    pairs: list[tuple[str, str]],
-) -> dict[tuple[str, str], dict]:
-    """Return agent_detector_overrides rows keyed by (agent_id, failure_type).
-    Gracefully returns {} if the table doesn't exist yet."""
-    if not _pool or not pairs:
+    triples: list[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], dict]:
+    """Return agent_detector_overrides rows keyed by (org_id, agent_id, failure_type).
+    Gracefully returns {} if the table (or its org_id column) doesn't exist yet —
+    agent_detector_overrides is owned by api_svc; until that service's migration
+    adds org_id, this degrades to 'no overrides' rather than erroring."""
+    if not _pool or not triples:
         return {}
-    pair_set = set(pairs)
-    agent_ids = [p[0] for p in pairs]
-    ftypes = [p[1] for p in pairs]
+    triple_set = set(triples)
+    org_ids = [t[0] for t in triples]
+    agent_ids = [t[1] for t in triples]
+    ftypes = [t[2] for t in triples]
     try:
         async with _pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT agent_id, failure_type, fp_count, confidence_floor, silenced
+                SELECT org_id, agent_id, failure_type, fp_count, confidence_floor, silenced
                 FROM agent_detector_overrides
-                WHERE agent_id = ANY($1::text[])
-                  AND failure_type = ANY($2::text[])
+                WHERE org_id = ANY($1::text[])
+                  AND agent_id = ANY($2::text[])
+                  AND failure_type = ANY($3::text[])
                 """,
+                org_ids,
                 agent_ids,
                 ftypes,
             )
         return {
-            (r["agent_id"], r["failure_type"]): dict(r)
+            (r["org_id"], r["agent_id"], r["failure_type"]): dict(r)
             for r in rows
-            if (r["agent_id"], r["failure_type"]) in pair_set
+            if (r["org_id"], r["agent_id"], r["failure_type"]) in triple_set
         }
     except Exception as exc:
         logger.warning("fetch_agent_overrides failed (table may not exist yet): %s", exc)
@@ -316,6 +388,7 @@ async def fetch_agent_overrides(
 
 
 async def evaluate_alert_policy(
+    org_id: str,
     agent_id: str,
     failure_type: str,
     mode: str,
@@ -333,14 +406,15 @@ async def evaluate_alert_policy(
         return True, ""  # can't check — fail open
 
     async with _pool.acquire() as conn:
-        # Last window_runs completed runs for this agent, newest first
+        # Last window_runs completed runs for this org's agent, newest first
         run_rows = await conn.fetch(
             """
             SELECT run_id FROM processed_runs
-            WHERE agent_id = $1
+            WHERE org_id = $1 AND agent_id = $2
             ORDER BY processed_at DESC
-            LIMIT $2
+            LIMIT $3
             """,
+            org_id,
             agent_id,
             window_runs,
         )
@@ -353,11 +427,13 @@ async def evaluate_alert_policy(
         flagged_rows = await conn.fetch(
             """
             SELECT DISTINCT run_id FROM failure_signals
-            WHERE agent_id = $1
-              AND failure_type = $2
+            WHERE org_id = $1
+              AND agent_id = $2
+              AND failure_type = $3
               AND shadow = FALSE
-              AND run_id = ANY($3::text[])
+              AND run_id = ANY($4::text[])
             """,
+            org_id,
             agent_id,
             failure_type,
             run_ids,
@@ -391,7 +467,13 @@ async def evaluate_alert_policy(
 
 
 async def ensure_dedup_schema() -> None:
-    """Create alert_dedup table if it doesn't exist."""
+    """Create alert_dedup table if it doesn't exist, and migrate its key to be org-scoped.
+
+    agent_id is not guaranteed unique across orgs, so a dedup window keyed only on
+    (agent_id, failure_type) could let one org's alert suppress another org's
+    identically-named agent's alert. Widening the key to (org_id, agent_id,
+    failure_type) closes that.
+    """
     if not _pool:
         return
     async with _pool.acquire() as conn:
@@ -404,53 +486,77 @@ async def ensure_dedup_schema() -> None:
                 PRIMARY KEY (agent_id, failure_type)
             )
             """)
+        await conn.execute("ALTER TABLE alert_dedup ADD COLUMN IF NOT EXISTS org_id TEXT")
+        await conn.execute("UPDATE alert_dedup SET org_id = 'default' WHERE org_id IS NULL")
+        await conn.execute("ALTER TABLE alert_dedup ALTER COLUMN org_id SET NOT NULL")
+        await conn.execute("""
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'alert_dedup_pkey'
+                ) THEN
+                    ALTER TABLE alert_dedup DROP CONSTRAINT alert_dedup_pkey;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'alert_dedup_org_agent_failure_type_key'
+                ) THEN
+                    ALTER TABLE alert_dedup ADD CONSTRAINT alert_dedup_org_agent_failure_type_key
+                        PRIMARY KEY (org_id, agent_id, failure_type);
+                END IF;
+            END $$;
+            """)
 
 
 async def fetch_dedup_states(
-    pairs: list[tuple[str, str]],
-) -> dict[tuple[str, str], dict]:
-    """Return dedup records keyed by (agent_id, failure_type) for the given pairs."""
-    if not _pool or not pairs:
+    triples: list[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], dict]:
+    """Return dedup records keyed by (org_id, agent_id, failure_type) for the given triples."""
+    if not _pool or not triples:
         return {}
-    pair_set = set(pairs)
-    agent_ids = [p[0] for p in pairs]
-    ftypes = [p[1] for p in pairs]
+    triple_set = set(triples)
+    org_ids = [t[0] for t in triples]
+    agent_ids = [t[1] for t in triples]
+    ftypes = [t[2] for t in triples]
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT agent_id, failure_type, last_alerted_at, suppressed_count
+            SELECT org_id, agent_id, failure_type, last_alerted_at, suppressed_count
             FROM alert_dedup
-            WHERE agent_id = ANY($1::text[])
-              AND failure_type = ANY($2::text[])
+            WHERE org_id = ANY($1::text[])
+              AND agent_id = ANY($2::text[])
+              AND failure_type = ANY($3::text[])
             """,
+            org_ids,
             agent_ids,
             ftypes,
         )
     return {
-        (r["agent_id"], r["failure_type"]): dict(r)
+        (r["org_id"], r["agent_id"], r["failure_type"]): dict(r)
         for r in rows
-        if (r["agent_id"], r["failure_type"]) in pair_set
+        if (r["org_id"], r["agent_id"], r["failure_type"]) in triple_set
     }
 
 
-async def record_alert_sent(agent_id: str, failure_type: str) -> None:
+async def record_alert_sent(org_id: str, agent_id: str, failure_type: str) -> None:
     """Upsert dedup record: reset suppressed_count, stamp now as last_alerted_at."""
     if not _pool:
         return
     async with _pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO alert_dedup (agent_id, failure_type, last_alerted_at, suppressed_count)
-            VALUES ($1, $2, NOW(), 0)
-            ON CONFLICT (agent_id, failure_type)
+            INSERT INTO alert_dedup (org_id, agent_id, failure_type, last_alerted_at, suppressed_count)
+            VALUES ($1, $2, $3, NOW(), 0)
+            ON CONFLICT (org_id, agent_id, failure_type)
             DO UPDATE SET last_alerted_at = NOW(), suppressed_count = 0
             """,
+            org_id,
             agent_id,
             failure_type,
         )
 
 
-async def increment_suppressed_count(agent_id: str, failure_type: str, count: int) -> None:
+async def increment_suppressed_count(
+    org_id: str, agent_id: str, failure_type: str, count: int
+) -> None:
     """Increment suppressed_count for a key that is within its silence window."""
     if not _pool:
         return
@@ -458,9 +564,10 @@ async def increment_suppressed_count(agent_id: str, failure_type: str, count: in
         await conn.execute(
             """
             UPDATE alert_dedup
-            SET suppressed_count = suppressed_count + $3
-            WHERE agent_id = $1 AND failure_type = $2
+            SET suppressed_count = suppressed_count + $4
+            WHERE org_id = $1 AND agent_id = $2 AND failure_type = $3
             """,
+            org_id,
             agent_id,
             failure_type,
             count,

@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { hashContent } from "./hash.js";
 import type { AgentEvent, EventType, LlmRespondedOptions } from "./models.js";
 
 export interface EventEmitter {
@@ -35,7 +34,7 @@ export class DunetraceRun {
       latency_ms:        opts.latencyMs        ?? 0,
       finish_reason:     opts.finishReason      ?? "stop",
       output_length:     opts.outputLength      ?? (opts.outputText?.length ?? 0),
-      output_hash:       hashContent(opts.outputText ?? ""),
+      output:            opts.outputText ?? "",
     };
     if (opts.promptTokens) payload["prompt_tokens"] = opts.promptTokens;
     this._emit("llm.responded", payload, false);
@@ -43,11 +42,10 @@ export class DunetraceRun {
 
   // ── Tool hooks ─────────────────────────────────────────────────────────────
 
-  /** args are SHA-256 hashed before transmission — raw values never leave the process. */
   toolCalled(toolName: string, args: Record<string, unknown> = {}): void {
     this._emit("tool.called", {
       tool_name: toolName,
-      args_hash: hashContent(JSON.stringify(args)),
+      args: JSON.stringify(args),
     });
   }
 
@@ -64,17 +62,16 @@ export class DunetraceRun {
       output_length: outputLength,
       latency_ms:    latencyMs,
     };
-    if (error) payload["error_hash"] = hashContent(error);
+    if (error) payload["error"] = error;
     this._emit("tool.responded", payload, false);
   }
 
   // ── Retrieval hooks ────────────────────────────────────────────────────────
 
-  /** query is SHA-256 hashed before transmission. */
   retrievalCalled(indexName: string, query = ""): void {
     this._emit("retrieval.called", {
       index_name: indexName,
-      query_hash: query ? hashContent(query) : "",
+      query,
     });
   }
 

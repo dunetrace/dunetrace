@@ -185,7 +185,7 @@ async function runAgent(query: string) {
 }
 ```
 
-Works for both sync and async functions. On failure, `success=false` and the error string is hashed and recorded before the exception is re-thrown.
+Works for both sync and async functions. On failure, `success=false` and the raw error string is recorded before the exception is re-thrown.
 
 ---
 
@@ -259,7 +259,7 @@ await dt.run("rag-agent", { model: "gpt-4o", tools: ["vector_search"] }, async (
   run.llmCalled("gpt-4o", 200);
   run.llmResponded({ finishReason: "tool_calls" });
 
-  // retrieval.called — query is hashed before transmission
+  // retrieval.called — query is sent as-is
   run.retrievalCalled("product-docs", query);
   const t0   = Date.now();
   const docs = await vectorStore.search(query, { topK: 5 });
@@ -290,7 +290,7 @@ await dt.run("my-agent", { model: "gpt-4o", tools: ["external_api"] }, async (ru
     if (isRateLimitError(err)) {
       run.externalSignal("rate_limit", "external_api", { http_status: 429 });
     }
-    // Record the failure — error message is hashed before transmission
+    // Record the failure — error message is sent as-is
     run.toolResponded("external_api", false, 0, Date.now() - t0, String(err));
     throw err;   // re-throw — dt.run() will emit run.errored
   }
@@ -538,11 +538,6 @@ function sha256hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-/** SHA-256, first 16 chars. Used for all content fields (args, errors, outputs). */
-export function hashContent(text: string): string {
-  return sha256hex(text).slice(0, 16);
-}
-
 /**
  * Stable 8-char agent version fingerprint. Any change to system prompt, model,
  * or tool list produces a new version string, preventing false positives in
@@ -608,14 +603,14 @@ export class DunetraceRun {
       latency_ms:        opts.latencyMs        ?? 0,
       finish_reason:     opts.finishReason      ?? "stop",
       output_length:     opts.outputText?.length ?? 0,
-      output_hash:       hashContent(opts.outputText ?? ""),
+      output:            opts.outputText ?? "",
     }, false);
   }
 
   toolCalled(toolName: string, args: Record<string, unknown> = {}): void {
     this.emit("tool.called", {
       tool_name: toolName,
-      args_hash: hashContent(JSON.stringify(args)),
+      args: JSON.stringify(args),
     });
   }
 
@@ -626,14 +621,14 @@ export class DunetraceRun {
     const payload: Record<string, unknown> = {
       tool_name: toolName, success, output_length: outputLength, latency_ms: latencyMs,
     };
-    if (error) payload["error_hash"] = hashContent(error);
+    if (error) payload["error"] = error;
     this.emit("tool.responded", payload, false);
   }
 
   retrievalCalled(indexName: string, query = ""): void {
     this.emit("retrieval.called", {
       index_name: indexName,
-      query_hash: query ? hashContent(query) : "",
+      query,
     });
   }
 
@@ -684,7 +679,7 @@ export class Dunetrace {
     const startEvent: AgentEvent = {
       event_type: "run.started", run_id: run.runId, agent_id: agentId,
       agent_version: version, step_index: 0, timestamp: Date.now() / 1000,
-      payload: { input_hash: opts.userInput ? hashContent(opts.userInput) : "", model, tools },
+      payload: { input_text: opts.userInput ?? "", model, tools },
       parent_run_id: opts.parentRunId ?? null,
     };
 
@@ -697,7 +692,7 @@ export class Dunetrace {
           event_type: "run.errored", run_id: run.runId, agent_id: agentId,
           agent_version: version, step_index: run.currentStep(),
           timestamp: Date.now() / 1000,
-          payload: { error_type: (err as Error).name ?? "Error", error_hash: hashContent(String(err)) },
+          payload: { error_type: (err as Error).name ?? "Error", error: String(err) },
         },
       ]);
       throw err;
@@ -755,7 +750,7 @@ Opens a run, calls `fn(run)`, and emits `run.completed` on clean return. Emits `
 |---|---|---|
 | `model` | `string` | LLM model name — used for agent version fingerprint |
 | `tools` | `string[]` | Declared tool names — used for `TOOL_AVOIDANCE` detector |
-| `userInput` | `string` | User query — SHA-256 hashed before transmission |
+| `userInput` | `string` | User query — sent as-is |
 | `systemPrompt` | `string` | System prompt — used for agent version fingerprint only |
 | `parentRunId` | `string` | Link to a parent run for sub-agent tracking |
 
@@ -797,10 +792,10 @@ Immediately ship all buffered events. Useful in tests or when you need a synchro
 |---|---|
 | `run.llm(model, callPromise)` | Wrap any OpenAI/Anthropic call — auto-extracts tokens, latency, finish_reason |
 | `run.llmCalled(model, promptTokens?)` | Manual: before each LLM API call |
-| `run.llmResponded({ completionTokens?, latencyMs?, finishReason?, outputText? })` | Manual: after LLM responds — `outputText` is hashed, never transmitted raw |
-| `run.toolCalled(toolName, args?)` | Before each tool execution — `args` is SHA-256 hashed |
-| `run.toolResponded(toolName, success, outputLength?, latencyMs?, error?)` | After tool returns — `error` is SHA-256 hashed |
-| `run.retrievalCalled(indexName, query?)` | Before vector search — `query` is SHA-256 hashed |
+| `run.llmResponded({ completionTokens?, latencyMs?, finishReason?, outputText? })` | Manual: after LLM responds — `outputText` is sent as-is |
+| `run.toolCalled(toolName, args?)` | Before each tool execution — `args` is sent as-is (JSON-stringified) |
+| `run.toolResponded(toolName, success, outputLength?, latencyMs?, error?)` | After tool returns — `error` is sent as-is |
+| `run.retrievalCalled(indexName, query?)` | Before vector search — `query` is sent as-is |
 | `run.retrievalResponded(indexName, resultCount, topScore?, latencyMs?)` | After retrieval returns |
 | `run.externalSignal(signalName, source?, meta?)` | Rate limits, cache misses, upstream errors — does not advance step |
 | `run.finalAnswer()` | When agent produces its final output |
@@ -809,19 +804,13 @@ Immediately ship all buffered events. Useful in tests or when you need a synchro
 
 ---
 
-## What Is and Isn't Captured
+## What Is Captured
 
-**Transmitted (safe metadata only):**
 - Model names, token counts, latencies, finish reasons
 - Tool names, success/failure, output lengths
 - Retrieval index names, result counts, top scores
 - Signal names and sources
-
-**Never transmitted:**
-- User input text → SHA-256 hashed before transmission
-- LLM prompts and completions → SHA-256 hashed before transmission
-- Tool arguments and outputs → SHA-256 hashed (16 chars); raw values never leave your process
-- Error messages → SHA-256 hashed before transmission
+- User input text, LLM prompts and completions, tool arguments and outputs, error messages — all sent as-is over TLS
 
 ---
 
@@ -834,7 +823,7 @@ cd packages/sdk-ts
 npm test
 ```
 
-Tests cover: event emission, step counting, privacy (no raw content in events), error paths, `dt.tool()` wrapping (sync + async), `dt.trace()` decorator, `getCurrentRun()` context propagation, `dt.markDeploy()`, background buffering and drain, `emitAsJson` output, agent version fingerprinting, `shutdown()` flush, `run.llm()` with OpenAI and Anthropic response shapes, `dt.wrapOpenAI()` / `dt.wrapAnthropic()` patching and streaming skip.
+Tests cover: event emission, step counting, raw content transmission, error paths, `dt.tool()` wrapping (sync + async), `dt.trace()` decorator, `getCurrentRun()` context propagation, `dt.markDeploy()`, background buffering and drain, `emitAsJson` output, agent version fingerprinting, `shutdown()` flush, `run.llm()` with OpenAI and Anthropic response shapes, `dt.wrapOpenAI()` / `dt.wrapAnthropic()` patching and streaming skip.
 
 ---
 

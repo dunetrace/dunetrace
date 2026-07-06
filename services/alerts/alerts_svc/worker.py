@@ -112,6 +112,7 @@ def deliver(
     explanation: Explanation,
     suppressed_count: int = 0,
     signal_id: int | None = None,
+    org_id: str | None = None,
 ) -> dict[str, SendResult]:
     """Send an explanation to all configured destinations. Returns {destination: SendResult}. Synchronous — called via asyncio.to_thread to avoid blocking the event loop."""
     results = {}
@@ -124,6 +125,7 @@ def deliver(
                 suppressed_count=suppressed_count,
                 dedup_window=settings.ALERT_DEDUP_WINDOW,
                 signal_id=signal_id,
+                org_id=org_id,
             )
             results["slack"] = send_slack(payload)
         else:
@@ -162,9 +164,12 @@ async def poll_once() -> tuple[int, int]:
     from collections import defaultdict
     import time
 
-    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    # Grouped by (org_id, agent_id, failure_type) — agent_id alone is not unique
+    # across orgs, so a 2-key group could merge two different orgs' signals and
+    # silently drop one org's alert as a "duplicate" of another org's.
+    groups: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for row in rows:
-        groups[(row["agent_id"], row["failure_type"])].append(row)
+        groups[(row["org_id"], row["agent_id"], row["failure_type"])].append(row)
 
     # Load alert policies from detectors.yml (fast — file read, no DB)
     alert_policies = load_alert_policies()
@@ -173,7 +178,7 @@ async def poll_once() -> tuple[int, int]:
     agent_overrides = await fetch_agent_overrides(list(groups.keys()))
 
     dedup_window = settings.ALERT_DEDUP_WINDOW
-    dedup_states: dict[tuple[str, str], dict] = {}
+    dedup_states: dict[tuple[str, str, str], dict] = {}
     if dedup_window > 0:
         dedup_states = await fetch_dedup_states(list(groups.keys()))
 
@@ -184,15 +189,16 @@ async def poll_once() -> tuple[int, int]:
     # IDs to mark alerted without sending (policy pending or dedup suppressed)
     silent_ids: list[int] = []
     duplicate_ids: list[int] = []
-    suppressed_groups: list[tuple[str, str, int]] = []  # for dedup count increment
+    suppressed_groups: list[tuple[str, str, str, int]] = []  # for dedup count increment
 
-    for (agent_id, failure_type), group_rows in groups.items():
+    for (org_id, agent_id, failure_type), group_rows in groups.items():
         best = max(group_rows, key=lambda r: r["confidence"])
         rest_ids = [r["id"] for r in group_rows if r["id"] != best["id"]]
 
         # ── Step 1: Alert policy ──────────────────────────────────────────────
         policy = get_alert_policy(alert_policies, failure_type)
         policy_met, policy_reason = await evaluate_alert_policy(
+            org_id,
             agent_id,
             failure_type,
             mode=policy["mode"],
@@ -212,7 +218,7 @@ async def poll_once() -> tuple[int, int]:
             continue
 
         # ── Step 2: False-positive confidence floor ───────────────────────────
-        override = agent_overrides.get((agent_id, failure_type))
+        override = agent_overrides.get((org_id, agent_id, failure_type))
         if override:
             if override["silenced"]:
                 logger.info(
@@ -237,7 +243,7 @@ async def poll_once() -> tuple[int, int]:
                 continue
 
         # ── Step 3: Dedup window ──────────────────────────────────────────────
-        state = dedup_states.get((agent_id, failure_type))
+        state = dedup_states.get((org_id, agent_id, failure_type))
         within_window = (
             dedup_window > 0
             and state is not None
@@ -245,7 +251,7 @@ async def poll_once() -> tuple[int, int]:
         )
 
         if within_window:
-            suppressed_groups.append((agent_id, failure_type, len(group_rows)))
+            suppressed_groups.append((org_id, agent_id, failure_type, len(group_rows)))
             silent_ids.extend(r["id"] for r in group_rows)
             logger.debug(
                 "Dedup suppressed %d signal(s): agent=%s type=%s (%.0fs remaining)",
@@ -262,8 +268,8 @@ async def poll_once() -> tuple[int, int]:
         duplicate_ids.extend(rest_ids)
 
     # Persist dedup counts before any network calls so they survive a crash
-    for agent_id, failure_type, count in suppressed_groups:
-        await increment_suppressed_count(agent_id, failure_type, count)
+    for org_id, agent_id, failure_type, count in suppressed_groups:
+        await increment_suppressed_count(org_id, agent_id, failure_type, count)
 
     # Mark policy-pending and dedup-suppressed signals as processed
     mark_now = silent_ids + duplicate_ids
@@ -272,8 +278,8 @@ async def poll_once() -> tuple[int, int]:
 
     if not to_deliver:
         if silent_ids:
-            policy_cnt = len(silent_ids) - sum(c for _, _, c in suppressed_groups)
-            dedup_cnt = sum(c for _, _, c in suppressed_groups)
+            policy_cnt = len(silent_ids) - sum(c for _, _, _, c in suppressed_groups)
+            dedup_cnt = sum(c for _, _, _, c in suppressed_groups)
             logger.info(
                 "No alerts to send: %d policy-pending, %d dedup-suppressed",
                 policy_cnt,
@@ -292,12 +298,13 @@ async def poll_once() -> tuple[int, int]:
     # TODO: batch this into a single query — currently one DB round-trip per signal
     rate_contexts = await asyncio.gather(
         *[
-            fetch_signal_rate_context(row["agent_id"], row["failure_type"])
+            fetch_signal_rate_context(row["org_id"], row["agent_id"], row["failure_type"])
             for row, _ in signals_by_row
         ]
     )
 
     run_token_map = await fetch_run_tokens([row["run_id"] for row, _ in signals_by_row])
+    org_by_signal_id = {row["id"]: row["org_id"] for row in rows}
 
     # work: (signal_id, explanation, suppressed_count)
     work: list[tuple[int, Explanation, int]] = []
@@ -323,6 +330,7 @@ async def poll_once() -> tuple[int, int]:
     async def _deliver_one(
         signal_id: int, explanation: Explanation, suppressed_count: int
     ) -> int | None:
+        org_id = org_by_signal_id.get(signal_id)
         if suppressed_count > 0:
             logger.info(
                 "[%s] %s — run_id=%s agent_id=%s confidence=%s (+%d suppressed)",
@@ -343,7 +351,9 @@ async def poll_once() -> tuple[int, int]:
                 explanation.confidence_pct(),
             )
         try:
-            results = await asyncio.to_thread(deliver, explanation, suppressed_count, signal_id)
+            results = await asyncio.to_thread(
+                deliver, explanation, suppressed_count, signal_id, org_id
+            )
         except Exception as exc:
             logger.error("Delivery error for signal_id=%d: %s", signal_id, exc)
             return None
@@ -376,10 +386,10 @@ async def poll_once() -> tuple[int, int]:
         # Update dedup records for successful deliveries
         for sid, exp, _ in work:
             if sid in delivered_ids:
-                await record_alert_sent(exp.agent_id, exp.failure_type)
+                await record_alert_sent(org_by_signal_id[sid], exp.agent_id, exp.failure_type)
         logger.info("Marked %d signal(s) as alerted", len(delivered_ids))
 
-    total_suppressed = sum(c for _, _, c in suppressed_groups)
+    total_suppressed = sum(c for _, _, _, c in suppressed_groups)
     if total_suppressed:
         logger.info("Suppressed %d signal(s) within dedup window", total_suppressed)
 
@@ -440,7 +450,9 @@ async def run_worker() -> None:
                 logger.error("Poll cycle error: %s", exc)
 
             try:
-                await send_weekly_digest()
+                sent = await send_weekly_digest()
+                if sent:
+                    logger.info("Weekly digests sent: %d org(s)", sent)
             except Exception as exc:
                 logger.error("Digest cycle error: %s", exc)
 

@@ -1,37 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { hashContent, agentVersion } from "../src/hash.js";
-
-describe("hashContent", () => {
-  it("returns 16 hex chars", () => {
-    expect(hashContent("hello")).toHaveLength(16);
-    expect(hashContent("hello")).toMatch(/^[0-9a-f]{16}$/);
-  });
-
-  it("is deterministic", () => {
-    expect(hashContent("test")).toBe(hashContent("test"));
-  });
-
-  it("hashes empty string without error", () => {
-    expect(hashContent("")).toHaveLength(16);
-  });
-
-  it("produces different hashes for different inputs", () => {
-    expect(hashContent("foo")).not.toBe(hashContent("bar"));
-  });
-
-  it("matches Python SDK output for known value", () => {
-    // Python: hashlib.sha256("hello world".encode()).hexdigest()[:16]
-    // = "b94d27b9934d3e08"
-    expect(hashContent("hello world")).toBe("b94d27b9934d3e08");
-  });
-
-  it("matches Python SDK output for JSON args", () => {
-    // Python: hash_content('{"query": "test"}')
-    const jsonArgs = JSON.stringify({ query: "test" });
-    expect(hashContent(jsonArgs)).toHaveLength(16);
-    expect(hashContent(jsonArgs)).toBe(hashContent('{"query":"test"}'));
-  });
-});
+import { agentVersion } from "../src/hash.js";
 
 describe("agentVersion", () => {
   it("returns 8 hex chars", () => {

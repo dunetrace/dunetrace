@@ -171,7 +171,7 @@ def s_tool_loop() -> str:
                     rid,
                     AGENT_ID,
                     i,
-                    {"tool_name": "search", "args_hash": "h1"},
+                    {"tool_name": "search", "args": "h1"},
                 )
                 for i in range(1, 6)
             ],
@@ -192,7 +192,7 @@ def s_tool_thrashing() -> str:
                 rid,
                 AGENT_ID,
                 i,
-                {"tool_name": tool, "args_hash": f"h{i}"},
+                {"tool_name": tool, "args": f"h{i}"},
             )
         )
     ingest(
@@ -345,7 +345,7 @@ def s_slow_step() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"tool_name": "slow_api", "args_hash": "h1"},
+                {"tool_name": "slow_api", "args": "h1"},
                 ts=T,
             ),
             ev(
@@ -373,7 +373,7 @@ def s_retry_storm() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"tool_name": "payment_api", "args_hash": "h1"},
+                {"tool_name": "payment_api", "args": "h1"},
             ),
             ev(
                 "tool.responded",
@@ -387,7 +387,7 @@ def s_retry_storm() -> str:
                 rid,
                 AGENT_ID,
                 2,
-                {"tool_name": "payment_api", "args_hash": "h2"},
+                {"tool_name": "payment_api", "args": "h2"},
             ),
             ev(
                 "tool.responded",
@@ -401,7 +401,7 @@ def s_retry_storm() -> str:
                 rid,
                 AGENT_ID,
                 3,
-                {"tool_name": "payment_api", "args_hash": "h3"},
+                {"tool_name": "payment_api", "args": "h3"},
             ),
             ev(
                 "tool.responded",
@@ -444,7 +444,7 @@ def s_cascading_failure() -> str:
         rid,
         [
             ev("run.started", rid, AGENT_ID, 0),
-            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "db", "args_hash": "h1"}),
+            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "db", "args": "h1"}),
             ev(
                 "tool.responded",
                 rid,
@@ -457,7 +457,7 @@ def s_cascading_failure() -> str:
                 rid,
                 AGENT_ID,
                 2,
-                {"tool_name": "search", "args_hash": "h2"},
+                {"tool_name": "search", "args": "h2"},
             ),
             ev(
                 "tool.responded",
@@ -466,7 +466,7 @@ def s_cascading_failure() -> str:
                 2,
                 {"tool_name": "search", "success": False},
             ),
-            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "db", "args_hash": "h3"}),
+            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "db", "args": "h3"}),
             ev(
                 "tool.responded",
                 rid,
@@ -512,7 +512,7 @@ def s_reasoning_stall() -> str:
                 },
             )
         )
-    events.append(ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args_hash": "h1"}))
+    events.append(ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args": "h1"}))
     events.append(ev("tool.responded", rid, AGENT_ID, 3, {"success": True}))
     events.append(ev("run.completed", rid, AGENT_ID, 6, {"exit_reason": "final_answer"}))
     ingest(AGENT_ID, rid, events)
@@ -570,7 +570,7 @@ def s_step_count_inflation() -> str:
                     "output_length": 30,
                 },
             ),
-            _infl("tool.called", rid, i, {"tool_name": "search", "args_hash": f"h{i}"}),
+            _infl("tool.called", rid, i, {"tool_name": "search", "args": f"h{i}"}),
             _infl("tool.responded", rid, i, {"success": True}),
         ]
     events.append(_infl("run.completed", rid, 20, {"exit_reason": "completed"}))

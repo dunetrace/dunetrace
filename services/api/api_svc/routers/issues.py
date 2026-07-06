@@ -15,7 +15,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.db.queries import list_issues
 from api_svc.schemas import IssueListResponse
 
@@ -33,7 +33,7 @@ async def get_issues(
         default=None,
         description="Filter by status: open | resolved | reopened",
     ),
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> IssueListResponse:
-    issues = await list_issues(agent_id, status=status)
+    issues = await list_issues(org_id, agent_id, status=status)
     return IssueListResponse(issues=issues, total=len(issues))

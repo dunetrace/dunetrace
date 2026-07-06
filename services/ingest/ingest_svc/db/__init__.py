@@ -1,3 +1,10 @@
+from .event_store import (
+    EventStore,
+    InMemoryEventStore,
+    PostgresEventStore,
+    get_event_store,
+    set_event_store,
+)
 from .postgres import (
     check_db,
     close_pool,
@@ -22,4 +29,9 @@ __all__ = [
     "insert_deploy_event",
     "insert_events",
     "verify_api_key",
+    "EventStore",
+    "PostgresEventStore",
+    "InMemoryEventStore",
+    "get_event_store",
+    "set_event_store",
 ]

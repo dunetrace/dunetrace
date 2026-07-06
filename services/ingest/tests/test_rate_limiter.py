@@ -212,12 +212,47 @@ class TestRateLimiterRpmCache(unittest.IsolatedAsyncioTestCase):
     """_get_rpm uses a cache with TTL; fallback to default_rpm when no pool."""
 
     async def test_defaults_to_default_rpm_with_no_pool(self):
-        """Without a DB pool, rpm should be the constructor default."""
+        """Without a DB pool, rpm should be the constructor default.
+
+        Exercises the real _get_rpm code path (patches get_pool at its real
+        source, ingest_svc.db.postgres, where _get_rpm imports it from) —
+        not a stand-in for _get_rpm itself, which would prove nothing about
+        the actual no-pool fallback logic inside it.
+        """
         limiter = RateLimiter(default_rpm=42)
-        # Patch get_pool to return None (no pool available)
-        with patch("ingest_svc.rate_limiter.RateLimiter._get_rpm", AsyncMock(return_value=42)):
+        with patch("ingest_svc.db.postgres.get_pool", return_value=None):
             rpm = await limiter._get_rpm("some_key")
         self.assertEqual(rpm, 42)
+
+    async def test_db_lookup_failure_falls_back_to_default(self):
+        """A DB error (not just an absent pool) must also fall back gracefully."""
+        limiter = RateLimiter(default_rpm=17)
+        with patch("ingest_svc.db.postgres.get_pool", side_effect=RuntimeError("boom")):
+            rpm = await limiter._get_rpm("some_key")
+        self.assertEqual(rpm, 17)
+
+    async def test_db_rpm_used_when_pool_present(self):
+        """When the pool is present and the key is found, the DB's rpm wins
+        over the constructor default."""
+        limiter = RateLimiter(default_rpm=10)
+
+        class _FakeConn:
+            async def fetchrow(self, query, key):
+                return {"rate_limit_rpm": 250}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _FakePool:
+            def acquire(self):
+                return _FakeConn()
+
+        with patch("ingest_svc.db.postgres.get_pool", return_value=_FakePool()):
+            rpm = await limiter._get_rpm("db_key")
+        self.assertEqual(rpm, 250)
 
     async def test_rpm_is_cached_after_lookup(self):
         """A second _get_rpm call within TTL should hit the cache, not the DB."""
@@ -226,6 +261,110 @@ class TestRateLimiterRpmCache(unittest.IsolatedAsyncioTestCase):
         limiter._rpm_cache["cached_key"] = (999, time.monotonic())
         rpm = await limiter._get_rpm("cached_key")
         self.assertEqual(rpm, 999)
+
+
+class TestRateLimiterHeartbeat(unittest.IsolatedAsyncioTestCase):
+    """_heartbeat coordinates cross-process rate limiting via active worker count."""
+
+    async def test_no_pool_resets_active_workers_to_one(self):
+        limiter = RateLimiter()
+        limiter._active_workers = 7  # simulate a stale prior reading
+        with patch("ingest_svc.db.postgres.get_pool", return_value=None):
+            await limiter._heartbeat()
+        self.assertEqual(limiter._active_workers, 1)
+
+    async def test_db_failure_preserves_last_known_active_workers(self):
+        """A transient DB error must NOT reset active_workers to 1 — that
+        would let every worker briefly enforce the full rpm again, causing
+        exactly the aggregate overshoot heartbeat coordination prevents."""
+        limiter = RateLimiter()
+        limiter._active_workers = 4
+        with patch("ingest_svc.db.postgres.get_pool", side_effect=RuntimeError("boom")):
+            await limiter._heartbeat()
+        self.assertEqual(limiter._active_workers, 4)
+
+    async def test_active_workers_set_from_worker_count_query(self):
+        limiter = RateLimiter()
+
+        class _FakeConn:
+            async def execute(self, query, *args):
+                return None
+
+            async def fetchval(self, query):
+                return 3
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _FakePool:
+            def acquire(self):
+                return _FakeConn()
+
+        with patch("ingest_svc.db.postgres.get_pool", return_value=_FakePool()):
+            await limiter._heartbeat()
+        self.assertEqual(limiter._active_workers, 3)
+
+    async def test_zero_count_floors_to_one(self):
+        """A COUNT(*) of 0 (shouldn't happen — this worker just inserted its
+        own row — but guard against it) must never floor active_workers below 1."""
+        limiter = RateLimiter()
+
+        class _FakeConn:
+            async def execute(self, query, *args):
+                return None
+
+            async def fetchval(self, query):
+                return 0
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _FakePool:
+            def acquire(self):
+                return _FakeConn()
+
+        with patch("ingest_svc.db.postgres.get_pool", return_value=_FakePool()):
+            await limiter._heartbeat()
+        self.assertEqual(limiter._active_workers, 1)
+
+
+class TestEffectiveRpmScalesWithActiveWorkers(unittest.IsolatedAsyncioTestCase):
+    """is_allowed() divides the configured rpm by the current active-worker
+    count, so N workers collectively approximate the configured limit."""
+
+    async def test_single_worker_matches_full_rpm(self):
+        """active_workers defaults to 1 — identical to pre-coordination behavior."""
+        limiter = RateLimiter(default_rpm=10)
+        for _ in range(10):
+            allowed, _ = await limiter.is_allowed("key1")
+            self.assertTrue(allowed)
+        allowed, _ = await limiter.is_allowed("key1")
+        self.assertFalse(allowed)
+
+    async def test_two_workers_each_get_half_rpm(self):
+        limiter = RateLimiter(default_rpm=10)
+        limiter._active_workers = 2
+        for _ in range(5):
+            allowed, _ = await limiter.is_allowed("key1")
+            self.assertTrue(allowed)
+        allowed, _ = await limiter.is_allowed("key1")
+        self.assertFalse(allowed)
+
+    async def test_effective_rpm_never_floors_below_one(self):
+        """More workers than configured rpm must still allow at least 1 req/window,
+        not zero."""
+        limiter = RateLimiter(default_rpm=3)
+        limiter._active_workers = 100
+        allowed, _ = await limiter.is_allowed("key1")
+        self.assertTrue(allowed)
+        allowed, _ = await limiter.is_allowed("key1")
+        self.assertFalse(allowed)
 
 
 if __name__ == "__main__":

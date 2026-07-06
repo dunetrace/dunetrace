@@ -19,7 +19,7 @@ This guide covers adding Dunetrace monitoring to a Haystack 2.x pipeline. The in
 
 Token counts (prompt + completion) are extracted from component output metadata — no extra configuration needed for OpenAI, Anthropic, Amazon Bedrock, Cohere, Gemini, Mistral, and Ollama generators.
 
-Content tracing is enabled so that Haystack passes component I/O to the tracer, but all text is **SHA-256 hashed before any network call** — raw prompts, documents, and outputs never leave your process.
+Content tracing is enabled so that Haystack passes component I/O to the tracer, and that text — prompts, documents, outputs — is sent to the backend as-is.
 
 ---
 
@@ -255,17 +255,11 @@ result = await async_pipeline.run({
 ## What Is and Isn't Captured
 
 **Captured automatically:**
-- Every LLM call: model name, token counts (prompt + completion), latency, finish reason
+- Every LLM call: model name, token counts (prompt + completion), latency, finish reason, raw prompt/completion text
 - Every retrieval: index/component name, result count, top similarity score
-- Every tool call via `ToolInvoker` or `ComponentTool`: name, success/failure, output length
-- Run-level: total steps, latency, exit reason
-
-**Not captured (privacy — hashed in-process):**
-- User input text
-- LLM prompts and completions
-- Retrieved document content
-- Tool arguments and outputs
-- Error messages
+- Every tool call via `ToolInvoker` or `ComponentTool`: name, success/failure, output length, raw arguments and output
+- Run-level: total steps, latency, exit reason, raw user input text
+- Error messages, raw text
 
 **Not captured:**
 - Intermediate `PromptBuilder` / `OutputAdapter` outputs (classified as "other" — no events)

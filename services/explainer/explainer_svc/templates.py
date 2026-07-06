@@ -59,16 +59,15 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
     if args_identical:
         what = (
             f"The agent called `{tool}` {count} times in {step_range} with identical "
-            f"arguments every time (same args_hash across all calls). It is not tracking "
-            f"which queries it has already tried."
+            f"arguments every time. It is not tracking which queries it has already tried."
         )
         root_fix = CodeFix(
-            description=f"Deduplicate `{tool}` calls — identical args hash seen {count}×",
+            description=f"Deduplicate `{tool}` calls — identical arguments seen {count}×",
             language="python",
             code=(
                 f"seen_{tool}_args = set()\n\n"
                 f"def call_{tool}(args):\n"
-                f"    key = hash_args(args)  # same hash the SDK computes\n"
+                f"    key = repr(args)\n"
                 f"    if key in seen_{tool}_args:\n"
                 f"        return None  # skip — already tried this\n"
                 f"    seen_{tool}_args.add(key)\n"
@@ -76,10 +75,11 @@ def explain_tool_loop(signal: FailureSignal) -> Explanation:
             ),
         )
     elif args_similar:
+        unique_args = ev.get("args", []) and len(set(ev.get("args", []))) or "≤2"
         what = (
             f"The agent called `{tool}` {count} times in {step_range} with slightly "
-            f"different arguments each time (args_hash varied, but only {ev.get('args_hashes', []) and len(set(ev.get('args_hashes', []))) or '≤2'} "
-            f"unique hashes). It is rephrasing the same query without making progress."
+            f"different arguments each time ({unique_args} unique variants). "
+            f"It is rephrasing the same query without making progress."
         )
         root_fix = CodeFix(
             description=f"Add a result-quality check — `{tool}` is being retried with rephrasings",

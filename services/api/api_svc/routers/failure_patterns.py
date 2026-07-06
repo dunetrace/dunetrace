@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.db.queries import agent_failure_pattern
 from api_svc.schemas import (
     FailurePatternAnalysis,
@@ -60,7 +60,7 @@ _VALID_FAILURE_TYPES = {
 async def get_failure_pattern(
     agent_id: str,
     failure_type: str,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> FailurePatternAnalysis:
     if failure_type not in _VALID_FAILURE_TYPES:
         raise HTTPException(
@@ -68,7 +68,7 @@ async def get_failure_pattern(
             detail=f"Unknown failure_type '{failure_type}'. Valid: {sorted(_VALID_FAILURE_TYPES)}",
         )
 
-    data = await agent_failure_pattern(agent_id, failure_type)
+    data = await agent_failure_pattern(org_id, agent_id, failure_type)
     if not data:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DB unavailable"

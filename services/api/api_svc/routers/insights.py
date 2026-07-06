@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from fastapi import APIRouter, Depends
 
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.db.queries import (
     agent_input_hash_patterns,
     agent_signal_recurrence,
@@ -48,7 +48,7 @@ router = APIRouter(tags=["Insights"])
 )
 async def get_insights(
     agent_id: str,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> AgentInsights:
     (
         patterns,
@@ -63,17 +63,17 @@ async def get_insights(
         regressions,
         user_impact,
     ) = await asyncio.gather(
-        agent_input_hash_patterns(agent_id),
-        agent_signal_recurrence(agent_id),
-        agent_version_stats(agent_id),
-        agent_time_to_first_tool(agent_id),
-        agent_hourly_pattern(agent_id),
-        agent_failure_rates(agent_id),
-        agent_systemic_patterns(agent_id),
-        agent_deploy_events(agent_id),
-        agent_cost_stats(agent_id),
-        deploy_regression_check(agent_id),
-        agent_user_impact(agent_id),
+        agent_input_hash_patterns(org_id, agent_id),
+        agent_signal_recurrence(org_id, agent_id),
+        agent_version_stats(org_id, agent_id),
+        agent_time_to_first_tool(org_id, agent_id),
+        agent_hourly_pattern(org_id, agent_id),
+        agent_failure_rates(org_id, agent_id),
+        agent_systemic_patterns(org_id, agent_id),
+        agent_deploy_events(org_id, agent_id),
+        agent_cost_stats(org_id, agent_id),
+        deploy_regression_check(org_id, agent_id),
+        agent_user_impact(org_id, agent_id),
     )
     return AgentInsights(
         input_patterns=[InputHashPattern(**r) for r in patterns],

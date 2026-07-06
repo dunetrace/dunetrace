@@ -246,7 +246,7 @@ describe("T6 — Error scenarios", () => {
         agent_version: "v1",
         step_index: i,
         timestamp: Date.now() / 1000,
-        payload: { tool_name: "search", args_hash: "aa" },
+        payload: { tool_name: "search", args: "aa" },
       });
     }
 

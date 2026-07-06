@@ -165,7 +165,169 @@ CREATE TABLE IF NOT EXISTS deploy_events (
     meta         JSONB       NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_deploys_agent ON deploy_events(agent_id, deployed_at DESC);
+
+-- Cross-process rate-limit coordination: each ingest worker process upserts
+-- its own row on a heartbeat (see rate_limiter.py::RateLimiter._heartbeat).
+-- Rows older than the heartbeat's own staleness window are deleted by the
+-- same heartbeat, so this table is self-cleaning — no separate reaper needed.
+CREATE TABLE IF NOT EXISTS rate_limit_workers (
+    worker_id  TEXT             PRIMARY KEY,
+    last_seen  DOUBLE PRECISION NOT NULL
+);
 """
+
+# ── Multi-tenancy unification (v0.5.0) ──────────────────────────────────────────
+#
+# `organizations` replaces `companies`; `org_id` replaces `api_keys.customer_id`.
+# Renamed (not recreated) so existing data survives. `company_id` is dropped —
+# it was always redundant with customer_id (create_api_key wrote the same value
+# to both). See docs/migrations/multi-tenancy-v0.5.0.md.
+#
+# Every other org_id-bearing table below is nullable until _backfill_org_id()
+# populates it from the (now-renamed) api_keys.org_id, then NOT NULL is applied.
+# This runs after _SCHEMA so the tables it touches already exist.
+_MULTI_TENANCY_DDL = """
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'companies')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'organizations')
+    THEN
+        ALTER TABLE companies RENAME TO organizations;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id          TEXT PRIMARY KEY,
+    name        TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO organizations (id, name) VALUES ('default', 'Default Organization')
+ON CONFLICT (id) DO NOTHING;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'api_keys' AND column_name = 'customer_id'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'api_keys' AND column_name = 'org_id'
+    ) THEN
+        ALTER TABLE api_keys RENAME COLUMN customer_id TO org_id;
+    END IF;
+END $$;
+
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE api_keys DROP COLUMN IF EXISTS company_id;
+
+-- api_keys.agent_id is NOT dropped here — _backfill_org_id() below still needs it
+-- to join events/signals/etc to the org that issued the key. It's dropped by
+-- _backfill_org_id() itself, after the join is done. See that function's docstring.
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE table_name = 'api_keys' AND constraint_name = 'api_keys_org_id_fkey'
+    ) THEN
+        ALTER TABLE api_keys
+            ADD CONSTRAINT api_keys_org_id_fkey FOREIGN KEY (org_id) REFERENCES organizations(id);
+    END IF;
+END $$;
+
+ALTER TABLE events          ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE fixes           ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE deploy_events   ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE policies        ADD COLUMN IF NOT EXISTS org_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_events_org_agent  ON events(org_id, agent_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_org_agent ON failure_signals(org_id, agent_id, detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fixes_org         ON fixes(org_id);
+CREATE INDEX IF NOT EXISTS idx_deploys_org       ON deploy_events(org_id);
+CREATE INDEX IF NOT EXISTS idx_policies_org      ON policies(org_id, enabled);
+"""
+
+_ORG_BACKFILL_TABLES = ("events", "failure_signals", "fixes", "deploy_events", "policies")
+
+
+async def _backfill_org_id(conn) -> None:
+    """Populate org_id on pre-v0.5.0 rows via the agent_id -> api_keys.org_id mapping,
+    then enforce NOT NULL. Idempotent — a second run is a fast no-op since org_id IS NULL
+    matches nothing once backfilled.
+
+    agent_ids that map to more than one distinct org_id in api_keys (only possible if
+    a self-hosted install issued keys for the same agent_id under different customer_ids
+    pre-migration) can't be safely auto-resolved. They're logged and fall back to
+    'default' — see docs/migrations/multi-tenancy-v0.5.0.md to reconcile by hand.
+    """
+    agent_id_column_exists = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'api_keys' AND column_name = 'agent_id'
+        )
+        """
+    )
+    if not agent_id_column_exists:
+        # api_keys.agent_id is dropped as the final step of a previous successful
+        # run of this function — its absence means the backfill already completed.
+        return
+
+    ambiguous = await conn.fetch(
+        """
+        SELECT agent_id, COUNT(DISTINCT org_id) AS org_count
+        FROM api_keys
+        WHERE org_id IS NOT NULL
+        GROUP BY agent_id
+        HAVING COUNT(DISTINCT org_id) > 1
+        """
+    )
+    if ambiguous:
+        logger.warning(
+            "Multi-tenancy backfill: %d agent_id(s) map to multiple orgs in api_keys and "
+            "cannot be auto-assigned — defaulting to org_id='default': %s. "
+            "See docs/migrations/multi-tenancy-v0.5.0.md to reconcile manually.",
+            len(ambiguous),
+            [r["agent_id"] for r in ambiguous],
+        )
+
+    for table in _ORG_BACKFILL_TABLES:
+        if table == "fixes":
+            # fixes has no agent_id column of its own — it only carries signal_id/run_id.
+            # Backfill via the failure_signals row the fix was recorded against instead.
+            await conn.execute(
+                """
+                UPDATE fixes f
+                SET org_id = fs.org_id
+                FROM failure_signals fs
+                WHERE f.signal_id = fs.id AND f.org_id IS NULL AND fs.org_id IS NOT NULL
+                """
+            )
+        else:
+            await conn.execute(
+                f"""
+                UPDATE {table} t
+                SET org_id = ak.org_id
+                FROM (
+                    SELECT agent_id, MIN(org_id) AS org_id
+                    FROM api_keys
+                    WHERE org_id IS NOT NULL
+                    GROUP BY agent_id
+                    HAVING COUNT(DISTINCT org_id) = 1
+                ) ak
+                WHERE t.agent_id = ak.agent_id AND t.org_id IS NULL
+                """
+            )
+        await conn.execute(f"UPDATE {table} SET org_id = 'default' WHERE org_id IS NULL")
+        await conn.execute(f"ALTER TABLE {table} ALTER COLUMN org_id SET NOT NULL")
+
+    await conn.execute("UPDATE api_keys SET org_id = 'default' WHERE org_id IS NULL")
+    await conn.execute("ALTER TABLE api_keys ALTER COLUMN org_id SET NOT NULL")
+
+    # Safe to drop now — every row that needed it for the join above has been read.
+    await conn.execute("ALTER TABLE api_keys DROP COLUMN IF EXISTS agent_id")
 
 
 async def _ensure_event_partitions(conn, months_ahead: int = 3) -> None:
@@ -261,6 +423,8 @@ async def ensure_schema() -> None:
         return
     async with _pool.acquire() as conn:
         await conn.execute(_SCHEMA)
+        await conn.execute(_MULTI_TENANCY_DDL)
+        await _backfill_org_id(conn)
         await _ensure_event_partitions(conn)
     logger.info("Schema ready")
 
@@ -268,8 +432,12 @@ async def ensure_schema() -> None:
 # ── Queries ────────────────────────────────────────────────────────────────────
 
 
-async def insert_events(events: list, batch_id: str) -> int:
-    """Bulk insert IngestEvent objects. Called from a BackgroundTask after the response is already sent."""
+async def insert_events(events: list, batch_id: str, org_id: str) -> int:
+    """Bulk insert IngestEvent objects. Called from a BackgroundTask after the response is already sent.
+
+    org_id is resolved once per request (from the API key) at the router, not carried
+    per-event — a batch always belongs to one org.
+    """
     if not _pool:
         logger.error("insert_events: pool not available, dropping %d events", len(events))
         return 0
@@ -285,6 +453,7 @@ async def insert_events(events: list, batch_id: str) -> int:
             e.timestamp,
             json.dumps(e.payload),
             e.parent_run_id,
+            org_id,
         )
         for e in events
     ]
@@ -295,8 +464,8 @@ async def insert_events(events: list, batch_id: str) -> int:
                 """
                 INSERT INTO events
                     (batch_id, event_type, run_id, agent_id, agent_version,
-                     step_index, timestamp, payload, parent_run_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+                     step_index, timestamp, payload, parent_run_id, org_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
                 """,
                 rows,
             )
@@ -306,7 +475,7 @@ async def insert_events(events: list, batch_id: str) -> int:
         return 0
 
 
-async def insert_deploy_event(agent_id: str, version: str, meta: dict) -> int:
+async def insert_deploy_event(agent_id: str, version: str, meta: dict, org_id: str) -> int:
     """Insert a deploy marker. Returns the new row id, or 0 on failure."""
     if not _pool:
         return 0
@@ -316,13 +485,14 @@ async def insert_deploy_event(agent_id: str, version: str, meta: dict) -> int:
         async with _pool.acquire() as conn:
             row_id = await conn.fetchval(
                 """
-                INSERT INTO deploy_events (agent_id, version, meta)
-                VALUES ($1, $2, $3::jsonb)
+                INSERT INTO deploy_events (agent_id, version, meta, org_id)
+                VALUES ($1, $2, $3::jsonb, $4)
                 RETURNING id
                 """,
                 agent_id,
                 version,
                 _json.dumps(meta),
+                org_id,
             )
         return int(row_id)
     except Exception as exc:
@@ -330,10 +500,13 @@ async def insert_deploy_event(agent_id: str, version: str, meta: dict) -> int:
         return 0
 
 
-async def fetch_policies(agent_id: str) -> list:
+async def fetch_policies(agent_id: str, org_id: str) -> list:
     """
-    Return enabled policies matching agent_id or '*'.
+    Return enabled policies for this org matching agent_id or '*'.
     Called by the ingest service's policy fetch endpoint (SDK-facing).
+
+    org_id is filtered first: a wildcard agent_id policy only applies within
+    the org that created it, never across orgs.
     """
     if not _pool:
         return []
@@ -343,10 +516,12 @@ async def fetch_policies(agent_id: str) -> list:
                 """
                 SELECT id, agent_id, name, condition, action, enabled, priority, signature
                 FROM policies
-                WHERE enabled = TRUE
-                  AND (agent_id = $1 OR agent_id = '*')
+                WHERE org_id = $1
+                  AND enabled = TRUE
+                  AND (agent_id = $2 OR agent_id = '*')
                 ORDER BY priority ASC, id ASC
                 """,
+                org_id,
                 agent_id,
             )
 
@@ -376,41 +551,43 @@ async def fetch_policies(agent_id: str) -> list:
 
 
 async def create_api_key(
-    agent_id: str, customer_id: str, company_name: str | None = None, rate_limit_rpm: int = 600
+    org_id: str, org_name: str | None = None, rate_limit_rpm: int = 600
 ) -> str:
-    """Generate a new API key, upsert the company, store the key, and return it."""
+    """Generate a new API key for an org, upsert the organization, store the key, and return it.
+
+    Keys are org-scoped, not agent-scoped: this key can submit events for any
+    agent_id under org_id, discovered on first ingest. See
+    docs/migrations/multi-tenancy-v0.5.0.md.
+    """
     import secrets
 
     key = "dt_" + secrets.token_urlsafe(32)
     if not _pool:
         raise RuntimeError("DB pool not ready")
-    name = company_name or customer_id
+    name = org_name or org_id
     async with _pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
-                "INSERT INTO companies (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
-                customer_id,
+                "INSERT INTO organizations (id, name) VALUES ($1, $2) "
+                "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
+                org_id,
                 name,
             )
             await conn.execute(
-                "INSERT INTO api_keys (key, agent_id, customer_id, company_id, rate_limit_rpm) VALUES ($1, $2, $3, $3, $4)",
+                "INSERT INTO api_keys (key, org_id, rate_limit_rpm) VALUES ($1, $2, $3)",
                 key,
-                agent_id,
-                customer_id,
+                org_id,
                 rate_limit_rpm,
             )
     return key
 
 
-DEV_AGENT_SENTINEL = "dev"
-"""Not a real agent_id — dev-mode keys are a wildcard, not scoped to one
-agent, so callers must not enforce agent_id-match checks against this."""
-
-
 async def verify_api_key(api_key: str) -> Optional[str]:
-    """Returns agent_id if the key is valid, None otherwise. In dev mode, any dt_dev_* key is accepted."""
+    """Returns org_id if the key is valid, None otherwise. In dev mode, any dt_dev_* key
+    (or no key at all) resolves to the 'default' org — a real row created by the
+    multi-tenancy migration, not a sentinel."""
     if settings.is_dev and (not api_key or api_key.startswith("dt_dev_")):
-        return DEV_AGENT_SENTINEL
+        return "default"
 
     if not _pool:
         return None
@@ -418,10 +595,10 @@ async def verify_api_key(api_key: str) -> Optional[str]:
     try:
         async with _pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT agent_id FROM api_keys WHERE key = $1 AND active = TRUE",
+                "SELECT org_id FROM api_keys WHERE key = $1 AND active = TRUE",
                 api_key,
             )
-        return row["agent_id"] if row else None
+        return row["org_id"] if row else None
     except Exception as exc:
         logger.error("verify_api_key failed: %s", exc)
         return None

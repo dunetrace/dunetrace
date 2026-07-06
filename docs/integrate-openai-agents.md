@@ -33,7 +33,7 @@ The Agents SDK emits a *trace* per run and *spans* for each step inside it. Dune
 | `function` span | `tool.called` / `tool.responded` (tool name, latency, success) |
 | `handoff` span | `tool.called` / `tool.responded` with `tool_name` `handoff:<to_agent>` |
 
-Each SDK `trace_id` becomes the Dunetrace `run_id`, so a run lines up across tools that share the same trace. Content fields (prompts, tool args, outputs) are **hashed** — no raw content leaves your process.
+Each SDK `trace_id` becomes the Dunetrace `run_id`, so a run lines up across tools that share the same trace. Content fields (prompts, tool args, outputs) are sent to the backend as-is.
 
 The processor is registered *alongside* the SDK's default exporter, so existing OpenAI tracing (and any other processors like Langfuse) keep working.
 

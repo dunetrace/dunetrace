@@ -449,7 +449,7 @@ svg.run-graph{display:block}
 .ev-time{color:var(--chalk4)}
 .ev-status{}
 .ev-payload{font-size:10px;color:var(--chalk4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ev-hash{color:var(--blue);font-size:10px}
+.ev-raw{color:var(--blue);font-size:10px}
 .ev-ok{color:var(--green)}
 .ev-warn{color:var(--amber)}
 .ev-err{color:var(--red)}
@@ -1084,7 +1084,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     </div>
     <div class="explain-card" style="margin-top:0">
       <div class="explain-title">Graph interpretation</div>
-      <div class="explain-text" id="detail-graph-text">Each node is one step. Edges show causation order — left to right. Red nodes are looping tool calls where the same args_hash was seen in a previous step.</div>
+      <div class="explain-text" id="detail-graph-text">Each node is one step. Edges show causation order — left to right. Red nodes are looping tool calls where the same args were seen in a previous step.</div>
     </div>
   </div>
 
@@ -1107,7 +1107,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       </div>
     </div>
     <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);margin-bottom:1.25rem">
-      ↑ click any row to expand payload · all content fields are SHA-256 hashed — no raw text stored
+      ↑ click any row to expand payload
     </div>
     <div class="actions-row">
       <button class="act-btn act-secondary" onclick="copyRunId()">Copy run_id</button>
@@ -2460,7 +2460,7 @@ function renderTimeline(events, signals) {
 
   const html = steps.map((st, i) => {
     const isLoop   = st.types.includes('tool.called') &&
-      loopTools.has(st.payload?.tool_name + ':' + st.payload?.args_hash);
+      loopTools.has(st.payload?.tool_name + ':' + st.payload?.args);
     const isLLM    = st.types.some(t => t.startsWith('llm.'));
     const isFail   = st.types.includes('tool.responded') && st.payload?.success === false;
     const isStart  = st.types.includes('run.started');
@@ -2900,7 +2900,7 @@ function drawGraph() {
   // Map step → node position
   const nodes = steps.map((st, i) => {
     const isLoop = st.types.includes('tool.called') &&
-      loopSet.has(st.payload?.tool_name + ':' + st.payload?.args_hash);
+      loopSet.has(st.payload?.tool_name + ':' + st.payload?.args);
     const isLLM   = st.types.some(t => t.startsWith('llm.'));
     const isStart = st.types.includes('run.started');
     const isEnd   = st.types.includes('run.completed') || st.types.includes('run.final_answer');
@@ -3003,10 +3003,10 @@ function drawGraph() {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function detectLoops(events) {
-  // Returns Set of "tool_name:args_hash" combos that appear 3+ times
+  // Returns Set of "tool_name:args" combos that appear 3+ times
   const counts = {};
   events.filter(e => e.event_type === 'tool.called').forEach(e => {
-    const key = (e.payload?.tool_name || '') + ':' + (e.payload?.args_hash || '');
+    const key = (e.payload?.tool_name || '') + ':' + (e.payload?.args || '');
     counts[key] = (counts[key] || 0) + 1;
   });
   return new Set(Object.entries(counts).filter(([,v]) => v >= 3).map(([k]) => k));
@@ -3033,10 +3033,10 @@ function payloadSummary(e) {
   if (p.completion_tokens)  parts.push('completion_tokens=' + p.completion_tokens);
   if (p.latency_ms != null) parts.push('latency=' + p.latency_ms + 'ms');
   if (p.output_length)      parts.push('output_len=' + p.output_length);
-  if (p.input_hash)         parts.push('input_hash=<span class="ev-hash">' + esc(p.input_hash.slice(0,8)) + '</span>');
-  if (p.args_hash)          parts.push('args_hash=<span class="ev-hash">' + esc(p.args_hash.slice(0,8)) + '</span>');
-  if (p.output_hash && p.output_hash.length > 0)
-    parts.push('output_hash=<span class="ev-hash">' + esc(p.output_hash.slice(0,8)) + '</span>');
+  if (p.input_text)         parts.push('input=<span class="ev-raw">' + esc(p.input_text.length > 40 ? p.input_text.slice(0,40)+'…' : p.input_text) + '</span>');
+  if (p.args)               parts.push('args=<span class="ev-raw">' + esc(p.args.length > 40 ? p.args.slice(0,40)+'…' : p.args) + '</span>');
+  if (p.output && p.output.length > 0)
+    parts.push('output=<span class="ev-raw">' + esc(p.output.length > 40 ? p.output.slice(0,40)+'…' : p.output) + '</span>');
   return parts.join(' · ') || '—';
 }
 
@@ -4449,7 +4449,7 @@ async function previewCustomDetector() {
         <div style="padding:1rem;background:rgba(255,200,0,0.07);border:1px solid rgba(255,200,0,0.2);border-radius:6px">
           <div style="font-size:12px;color:var(--amber);font-weight:600;margin-bottom:.4rem">Cannot be detected from metadata</div>
           <div style="font-size:12px;color:var(--chalk3)">${esc(data.reason)}</div>
-          <div style="font-size:11px;color:var(--chalk4);margin-top:.75rem">Dunetrace only monitors agent metadata — no prompts or outputs stored. For semantic quality checks, connect Langfuse via Settings → Integrations.</div>
+          <div style="font-size:11px;color:var(--chalk4);margin-top:.75rem">Custom detector conditions don't support content matching yet. For semantic quality checks, connect Langfuse via Settings → Integrations.</div>
         </div>`;
       document.getElementById('cd-save-row').style.display = 'none';
     } else {

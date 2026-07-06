@@ -98,60 +98,53 @@ describe("DunetraceRun — event payloads", () => {
     expect(resp.payload["completion_tokens"]).toBe(50);
   });
 
-  it("llmResponded hashes outputText — does not include raw text", () => {
+  it("llmResponded transmits raw outputText", () => {
     const { run, emitted } = makeRun();
     run.llmCalled("gpt-4o");
     run.llmResponded({ outputText: "secret output" });
     const resp = emitted.find(e => e.event_type === "llm.responded")!;
-    expect(resp.payload).not.toHaveProperty("output_text");
-    expect(typeof resp.payload["output_hash"]).toBe("string");
-    expect((resp.payload["output_hash"] as string)).toHaveLength(16);
+    expect(resp.payload["output"]).toBe("secret output");
   });
 
-  it("toolCalled hashes args", () => {
+  it("toolCalled transmits raw args", () => {
     const { run, emitted } = makeRun();
     run.toolCalled("search", { query: "secret" });
     const ev = emitted.find(e => e.event_type === "tool.called")!;
     expect(ev.payload["tool_name"]).toBe("search");
-    expect(ev.payload).not.toHaveProperty("query");
-    expect(ev.payload).not.toHaveProperty("args");
-    expect(typeof ev.payload["args_hash"]).toBe("string");
-    expect((ev.payload["args_hash"] as string)).toHaveLength(16);
+    expect(ev.payload["args"]).toBe(JSON.stringify({ query: "secret" }));
   });
 
-  it("toolResponded includes error_hash when error provided", () => {
+  it("toolResponded includes raw error when error provided", () => {
     const { run, emitted } = makeRun();
     run.toolCalled("search");
     run.toolResponded("search", false, 0, 100, "Connection refused");
     const ev = emitted.find(e => e.event_type === "tool.responded")!;
     expect(ev.payload["success"]).toBe(false);
-    expect(typeof ev.payload["error_hash"]).toBe("string");
-    expect(ev.payload).not.toHaveProperty("error");
+    expect(ev.payload["error"]).toBe("Connection refused");
   });
 
-  it("toolResponded success=true has no error_hash", () => {
+  it("toolResponded success=true has no error field", () => {
     const { run, emitted } = makeRun();
     run.toolCalled("search");
     run.toolResponded("search", true, 256);
     const ev = emitted.find(e => e.event_type === "tool.responded")!;
     expect(ev.payload["success"]).toBe(true);
-    expect(ev.payload).not.toHaveProperty("error_hash");
+    expect(ev.payload).not.toHaveProperty("error");
   });
 
-  it("retrievalCalled hashes query", () => {
+  it("retrievalCalled transmits raw query", () => {
     const { run, emitted } = makeRun();
     run.retrievalCalled("docs", "sensitive query");
     const ev = emitted.find(e => e.event_type === "retrieval.called")!;
     expect(ev.payload["index_name"]).toBe("docs");
-    expect(ev.payload).not.toHaveProperty("query");
-    expect(typeof ev.payload["query_hash"]).toBe("string");
+    expect(ev.payload["query"]).toBe("sensitive query");
   });
 
-  it("retrievalCalled without query sets empty hash", () => {
+  it("retrievalCalled without query sets empty string", () => {
     const { run, emitted } = makeRun();
     run.retrievalCalled("docs");
     const ev = emitted.find(e => e.event_type === "retrieval.called")!;
-    expect(ev.payload["query_hash"]).toBe("");
+    expect(ev.payload["query"]).toBe("");
   });
 
   it("retrievalResponded includes result_count", () => {

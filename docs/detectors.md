@@ -127,7 +127,7 @@ curl -s -X POST "http://localhost:8002/v1/custom-detectors" \
 
 ### What you can detect
 
-Custom detectors evaluate structural metrics computed from the `RunState`. They cannot access raw content (prompts, tool arguments, model outputs — those are hashed at the SDK).
+Custom detectors evaluate structural metrics computed from the `RunState`. They cannot match on raw content (prompts, tool arguments, model outputs) yet — content-matching conditions aren't supported by the evaluation engine.
 
 | Metric | What it measures |
 |---|---|
@@ -146,7 +146,7 @@ Custom detectors evaluate structural metrics computed from the `RunState`. They 
 
 Supported operators: `>`, `>=`, `<`, `<=`, `==`, `!=`. Multiple conditions are ANDed — all must be true for the detector to fire.
 
-**What cannot be detected**: content patterns (specific words in prompts, tool output values, model names), multi-run trends, or any condition that requires access to raw text. The preview endpoint will return `{"requires_content": true, "reason": "..."}` for these cases and the config cannot be saved.
+**What cannot be detected**: content patterns (specific words in prompts, tool output values, model names) or multi-run trends — the evaluation engine only supports the structural metrics above. The preview endpoint will return `{"requires_content": true, "reason": "..."}` for these cases and the config cannot be saved.
 
 ### Shadow stats
 

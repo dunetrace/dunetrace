@@ -80,6 +80,78 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 
 ---
 
+## Detection: Two Independent Paths
+
+Dunetrace runs Tier 1 detectors in two different places, and they are not the same
+detection run seen twice — they are two independent evaluations that can disagree.
+Understanding which path produced a given signal matters: only one of them is the
+source of truth for alerts and the dashboard.
+
+```
+              ┌────────────────────────────────────────┐
+              │            Your Agent Process           │
+              │                                         │
+              │   SDK builds RunState in memory          │
+              │   as events occur                        │
+              └───────────────────┬─────────────────────┘
+                                  │  at run end, before span export
+                                  ▼
+              ┌────────────────────────────────────────┐
+PATH 1        │  Client-side (OTel) pass                 │
+client-side,  │  Tier 1 detectors run                     │
+in-process    │  TIER1_DETECTORS thresholds                │
+              │  (hardcoded in detectors.py)                │
+              │  → root span attributes (dunetrace.signal.N.*)
+              └────────────────────────────────────────┘
+                (only exists if an OTel exporter is configured;
+                 works with no backend at all)
+
+
+              ┌────────────────────────────────────────┐
+              │                Ingest API                │
+              │  writes raw events to Postgres            │
+              └───────────────────┬─────────────────────┘
+                                  │  detector worker polls every 5s
+                                  ▼
+              ┌────────────────────────────────────────┐
+PATH 2        │  Server-side pass                        │
+server-side,  │  Tier 1 + custom detectors                │
+after         │  detectors.yml thresholds (configurable,   │
+ingestion     │  hot-reloadable without redeploying the SDK)│
+              │  → failure_signals table                    │
+              │    → alerts worker → Slack/webhook           │
+              │    → dashboard                                │
+              └────────────────────────────────────────┘
+                (requires the full backend stack running)
+```
+
+| | Path 1 — client-side (OTel) | Path 2 — server-side |
+|---|---|---|
+| Where it runs | In the SDK process, at run end | Detector worker, after ingestion |
+| When | Before span export, synchronously | On the next 5s poll cycle |
+| Thresholds | `TIER1_DETECTORS` hardcoded in `detectors.py` | `detectors.yml`, loaded at worker startup |
+| Output | Root span attributes (`dunetrace.signal.N.*`) | `failure_signals` table |
+| Feeds alerts / dashboard? | No | Yes — this is the only path that does |
+| Works without the backend running? | Yes | No |
+| Custom detectors | Not evaluated | Evaluated (Tier 1 always runs first) |
+
+**Why two paths instead of one:** the OTel path exists for SDK-only deployments — teams
+piping spans straight into Tempo/Honeycomb/Datadog without running `ingest`/`detector`/
+`alerts` at all, or wanting agent failures correlated with infra spans in one place. The
+server-side path exists because it's the only one with access to `detectors.yml`
+overrides, custom detectors, cross-run baselines (P75 step count, token growth, etc.),
+and the issue-tracking/alerting/digest machinery — none of which a stateless SDK process
+can compute for itself.
+
+**They can disagree.** If you tune a threshold in `detectors.yml`, the OTel span
+annotations (Path 1) keep using the SDK's hardcoded defaults — they will not pick up the
+override. A signal that fires in your Tempo trace may not fire in the dashboard, or vice
+versa. **The server-side path (Path 2) is the source of truth** for anything user-facing
+— alerts, the dashboard, issue tracking. Treat Path 1 purely as a convenience for
+SDK-only / infra-correlation use cases, not as a second copy of the same detection result.
+
+---
+
 ## SDKs
 
 Two first-class SDKs send events to the same ingest API — runs from either appear together in the dashboard under the same `agent_id`.
@@ -110,11 +182,39 @@ The Python SDK supports three independent output modes that can be combined:
 
 | Mode | How to enable | Destination | Use case |
 |---|---|---|---|
-| HTTP ingest (default) | `endpoint="http://…"` (default); set `endpoint=None` to disable | Ingest API → Postgres → Detector | Full pipeline: detection, alerts, dashboard |
+| HTTP ingest (default) | `endpoint="http://…"` (default: `http://localhost:8001`) | Ingest API → Postgres → Detector | Full pipeline: detection, alerts, dashboard |
 | Loki NDJSON | `emit_as_json=True` | stdout → Promtail/Alloy → Loki | Existing Grafana stack integration |
 | OTel spans | `otel_exporter=DunetraceOTelExporter(provider)` | OTel collector → Tempo / Honeycomb / Datadog | Infra metric correlation |
 
-All three modes can be active simultaneously. OTel and NDJSON are zero-cost when disabled. Pass `endpoint=None` to use OTel or NDJSON without any HTTP ingest (useful for local testing or pure-OTel deployments).
+All three modes can be active simultaneously. OTel and NDJSON are zero-cost when disabled.
+
+HTTP ingest is shipped through a pluggable `BatchingEmitter` (see
+[dunetrace/emitters.py](../packages/sdk-py/dunetrace/emitters.py)) — the drain
+thread hands each batch to whichever emitter is configured. The default is
+`HttpBatchingEmitter`, which is what "HTTP ingest" above refers to. To use OTel
+or NDJSON without any HTTP ingest (local testing, pure-OTel deployments), pass
+`emitter=NoopBatchingEmitter()` explicitly:
+
+```python
+from dunetrace import Dunetrace, NoopBatchingEmitter
+
+dt = Dunetrace(emitter=NoopBatchingEmitter(), otel_exporter=my_exporter)
+```
+
+This is the one supported way to disable HTTP shipping — there is no
+`endpoint=None` special case; an explicit `endpoint` value (including `""`) is
+always taken literally rather than silently replaced by a default. Other
+built-in emitters:
+
+- `ConsoleBatchingEmitter` — prints each batch as JSON to stdout, once per
+  drain cycle. Distinct from `emit_as_json`'s per-event NDJSON stream.
+- `FileBatchingEmitter(path)` — appends each batch to a local file. For
+  offline/audit trails.
+- `DurableRetryEmitter(inner, ...)` — wraps any of the above (most commonly
+  `HttpBatchingEmitter`) to survive a backend outage across process restarts.
+  See [Failure Modes](#failure-modes) below for the full behavior.
+
+Implement `BatchingEmitter.ship(batch) -> bool` directly for anything else.
 
 The TypeScript SDK supports HTTP ingest and `emitAsJson` (Loki NDJSON). `otel_exporter` is Python-only.
 
@@ -145,17 +245,7 @@ Trace (trace_id = run_id as 128-bit int)
 
 At run end, Tier 1 detectors run on the completed `RunState`. Each signal is written as indexed attributes on the root span (`dunetrace.signal.0.failure_type`, `.severity`, `.confidence`, `.evidence.*`). HIGH/CRITICAL signals set `span.status = ERROR`.
 
-**Two independent detector passes — thresholds may differ:**
-
-| | OTel path | Server-side path |
-|---|---|---|
-| Where | Client-side, in the SDK process | Detector worker, server-side |
-| When | At run end, before span export | After ingestion, on next poll cycle |
-| Thresholds | SDK defaults (`TIER1_DETECTORS` hardcoded in `detectors.py`) | `detectors.yml` (configurable, loaded at worker startup) |
-| Output | Root span attributes | `failure_signals` table → alerts → dashboard |
-| Works without server | Yes | No |
-
-If you tune thresholds in `detectors.yml`, the OTel span annotations and the dashboard signals can disagree. The server-side path is the source of truth for alerts and the dashboard. The OTel path is useful for SDK-only deployments or correlating signals with infra metrics in Tempo/Honeycomb without running the full server stack.
+This is Path 1 of the two independent detection paths — see [Detection: Two Independent Paths](#detection-two-independent-paths) above for the full comparison against the server-side path, and why the two can disagree.
 
 Orphaned child spans (a `tool_called` with no matching `tool_responded`, e.g. when an exception fires mid-tool) are force-closed with `status = ERROR` so backends visually flag the broken step.
 
@@ -178,7 +268,7 @@ Without resource attributes, spans appear as an anonymous service in Datadog, Ho
 
 | Gap | Detail |
 |---|---|
-| Streaming LLM | `llm_called` / `llm_responded` fire once each. Streaming runs produce a single `llm_call` span covering the full stream duration with no per-chunk events. No fix planned — the SDK's privacy model hashes all content, so chunk payloads can't be attached as span events anyway. |
+| Streaming LLM | `llm_called` / `llm_responded` fire once each. Streaming runs produce a single `llm_call` span covering the full stream duration with no per-chunk events — the integration hooks only fire once per completed response, not per chunk. No fix planned. |
 | Parallel tool calls | The exporter tracks one open child span per run (`rs.child_span`). If two tools fire concurrently, the first span is orphan-closed (marked ERROR) when the second `tool_called` arrives. Both spans end up in the trace but the first loses response-time precision. Parallel agents (LangGraph `Send`) will see this. |
 | Multi-agent W3C trace linking | `parent_run_id` is stored as a span attribute (`dunetrace.parent_run_id`) but child agent runs start a fresh trace with their own `trace_id`. Traces from parent and child agents appear as disconnected in Tempo/Honeycomb. Full W3C `traceparent` propagation is not implemented — callers who need linked traces must propagate the parent span context manually via the standard OTel API. |
 
@@ -195,13 +285,27 @@ Without resource attributes, spans appear as an anonymous service in Datadog, Ho
 The entry point for all SDK traffic. Its only job is to accept events as fast as possible and not lose them.
 
 - Validates the event schema (Pydantic)
-- Authenticates via `api_keys` table
+- Authenticates via `api_keys` table and resolves the caller's `org_id`; every event is tagged with it before being written — see [Database Schema](#database-schema)
 - Returns `202 Accepted` before touching the database
 - Writes events to Postgres in a `BackgroundTask` (after the 202)
 - Never does any detection logic
 - `POST /v1/deploy` — accepts deploy markers from `dt.mark_deploy()` and writes to the `deploy_events` table synchronously (no background task; deploy markers are rare and low-volume)
 
 **Why the 202 before writing?** Your agent is waiting. The round-trip to the agent should be as short as possible. Validation is synchronous; persistence is async.
+
+**EventStore abstraction** (`services/ingest/ingest_svc/db/event_store.py`) — the write path (`insert_events`) and retention (`prune_old_events`) sit behind an `EventStore` interface, swapped via `get_event_store()`/`set_event_store()`. `PostgresEventStore` (the default) delegates to the same partition-aware functions in `db/postgres.py` described below; `InMemoryEventStore` is a fully in-process fake for tests that want to assert on what actually got "written" rather than mocking a free function. This covers only ingest_svc's own write path — the four read-side services (detector, alerts, api, explainer) each query Postgres directly and are intentionally left alone; introducing a shared cross-service storage interface would cross a boundary this codebase keeps deliberately separate (see System Overview: "communicate only through a shared Postgres database", no shared business logic beyond the SDK/schemas packages).
+
+Partition creation (`_ensure_event_partitions`) is *not* part of the abstract `EventStore` contract — it's a Postgres-specific detail of how `PostgresEventStore` stays ready to receive writes, not a concept every backend would even have.
+
+Retention enforcement runs on a daily background loop (`main.py::_prune_loop`, `EVENT_RETENTION_DAYS` env var, default 90) that calls `get_event_store().prune_old_events(...)` — this loop is what actually invokes the partition-dropping logic described under [Partitioning & Retention](#partitioning--retention); before it existed, `prune_old_events()` was implemented and tested but never called from anywhere, so partitions accumulated indefinitely.
+
+**OTLP/HTTP receiver** (`POST /v1/otlp/traces`, `routers/otlp.py` + `otel.py`) — lets any OTel-instrumented agent (an OTel Collector, or any `OTLPSpanExporter`) send traces directly, no Dunetrace SDK required. Accepts both `application/x-protobuf` (the default for most real-world OTLP senders) and `application/json`, either gzip-compressed or not:
+
+- `protobuf_to_resource_spans()` parses an `ExportTraceServiceRequest` via `google.protobuf.json_format.MessageToDict()`, which already produces the exact proto3 JSON mapping — the same `resourceSpans`/`scopeSpans`/`spans` shape a JSON request body has — so `otlp_to_events()` needs no protobuf-specific code path. The one correction needed: `MessageToDict` base64-encodes `bytes` fields (`traceId`/`spanId`/`parentSpanId`), but the OTLP spec's own JSON convention (and the rest of this module) uses plain hex — `_fix_ids_to_hex()` corrects that in place after parsing.
+- Gzip (`Content-Encoding: gzip`) is decompressed before format detection, for both protobuf and JSON bodies.
+- Rate-limited the same as `/v1/ingest`/`/v1/deploy` (see [Rate Limiting](#rate-limiting)) — bucketed by the `Authorization: Bearer` header directly, since OTLP auth isn't a JSON body field the way ingest's is.
+- Writes through the same `EventStore` abstraction as `/v1/ingest`.
+- `otlp_to_events()` processes each resourceSpan and each trace inside its own `try/except` — a single malformed one is logged and skipped, so it can't cost every other valid trace in the same batch (an OTel Collector commonly batches spans from many concurrent runs into one export).
 
 ---
 
@@ -212,7 +316,7 @@ A background polling loop that runs every 5 seconds. It is the only process that
 1. Fetches runs completed since last poll (terminal events `run.completed` or `run.errored`) plus any runs that have stalled (no new events for `STALL_TIMEOUT_SECS`, default 90s)
 2. Checks `processed_runs` to skip already-processed runs
 3. Reconstructs `RunState` by fetching and replaying all events for each run
-4. Runs 16 Tier 1 detectors against the `RunState`. `PROMPT_INJECTION_SIGNAL` is handled separately — the SDK detects injection on raw input before hashing and embeds evidence in the `run.started` payload; the worker extracts it from there rather than running the detector on `RunState`
+4. Runs 16 Tier 1 detectors against the `RunState`. `PROMPT_INJECTION_SIGNAL` is handled separately — the SDK detects injection on raw input at run-start and embeds evidence in the `run.started` payload; the worker extracts it from there rather than running the detector on `RunState`
 5. Writes any `FailureSignal` rows to Postgres
 6. Updates the `issues` table: UPSERTs an issue row for each live signal fired (`upsert_fired_issues`) and increments the clean-run counter for any open issues that did not fire this run (`advance_clean_runs`). An issue auto-resolves after 5 consecutive clean runs. Issue tracking failures are caught and logged — they do not affect run processing.
 7. Marks the run as processed
@@ -270,8 +374,8 @@ A read-only FastAPI service. Powers the dashboard and any customer integrations.
 | `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution. Also returns `failure_rates` (daily affected/total per failure type), `systemic_patterns` (7-day rate + `is_systemic` flag), and `deploy_events` (last 90 days of deploy markers) — the data powering the Health Record and Deploy Timeline panels |
 | `GET /v1/agents/{id}/issues` | Open/resolved issue list for an agent. Accepts optional `status` filter (`open`, `resolved`, `reopened`). Returns id, failure_type, status, first_seen, last_seen, resolved_at, affected_runs, clean_runs_since |
 | `GET /v1/runs/{id}` | Full run detail — metadata, all events, all signals with explanations |
-| `POST /v1/signals/{id}/explain` | Fetch Langfuse trace, run LLM analysis, return `root_cause`, `fix_content`, `fix_type`, `apply_blocked`, and `langfuse_prompt_name`. Requires `LANGFUSE_*` and `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in env |
-| `POST /v1/signals/{id}/apply-fix` | Append `fix_content` to the named Langfuse prompt and publish a new version. Records the fix in the `fixes` table. Blocked for `PROMPT_INJECTION_SIGNAL` (returns 403) |
+| `POST /v1/signals/{id}/explain` | Native root-cause analysis built from Dunetrace's own events — no Langfuse required. Returns `fix_category` (`dunetrace_native`, with a deterministic `suggested_policy`; or `customer_code`, with LLM-generated `fix_content`/`fix_patch`), plus `root_cause` and `apply_blocked`. Requires `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in env. If Langfuse is also configured, a best-effort trace lookup runs to populate `langfuse_prompt_name` for apply-fix, but never blocks the response |
+| `POST /v1/signals/{id}/apply-fix` | For `customer_code` fixes only: pushes `fix_content` to whichever external prompt store is connected (Langfuse today — see `prompt_stores.py`) and publishes a new version. Records the fix in the `fixes` table. Blocked for `PROMPT_INJECTION_SIGNAL` (returns 403) and when no store is connected (503). `dunetrace_native` fixes (a `suggested_policy`) are applied via the existing `POST /v1/policies` instead, after user confirmation — no separate endpoint |
 | `POST /v1/signals/{id}/record-copy` | Record a clipboard-path fix in the `fixes` table without writing to Langfuse |
 | `GET /v1/signals/{id}/fix-status` | Return fix history and recurrence verdict (`verified / likely_fixed / still_occurring / insufficient_data`) |
 | `GET /health` | Service health check — returns `{"status":"ok","db":"ok"}` |
@@ -309,7 +413,7 @@ Auto-refreshes every 15 seconds. All data is computed client-side from the API r
 
 - **Analysis** — step timeline, signal score cards, plain-English explanation + suggested fix from the explain layer
 - **Run graph** — SVG node graph built from raw events: green = LLM, orange = tool (ok), red = looping tool call, blue = start/end. Loop clusters highlighted with dashed outline.
-- **Event log** — all events in order, expandable to full payload. Content fields shown as SHA-256 hashes.
+- **Event log** — all events in order, expandable to full payload, including raw content fields (args, input, output).
 
 **Shadow signal rendering** — the dashboard fetches all signals with `?include_shadow=true` and splits them client-side: `shadow=false` signals feed the normal alert groups; `shadow=true` signals feed the shadow section in Alerts and the shadow count badge on agent health cards.
 
@@ -317,10 +421,35 @@ Auto-refreshes every 15 seconds. All data is computed client-side from the API r
 
 ## Database Schema
 
+Every table below carries `org_id` (see
+[docs/migrations/multi-tenancy-v0.5.0.md](migrations/multi-tenancy-v0.5.0.md)) —
+the primary tenancy dimension. `agent_id` is secondary and org-scoped: one org can
+have many agents, discovered dynamically as they send their first events. Every
+query filters `org_id` first, `agent_id` second.
+
 ```sql
+-- Tenant root. One org per self-hosted install by default ('default'),
+-- or many orgs for a multi-tenant deployment built on this backend.
+CREATE TABLE organizations (
+    id          TEXT PRIMARY KEY,
+    name        TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- API key → org mapping. A key is NOT bound to a single agent_id — see the
+-- "Security posture change" section of the multi-tenancy migration guide.
+CREATE TABLE api_keys (
+    key            TEXT PRIMARY KEY,
+    org_id         TEXT        NOT NULL REFERENCES organizations(id),
+    active         BOOLEAN     NOT NULL DEFAULT TRUE,
+    rate_limit_rpm INTEGER     NOT NULL DEFAULT 600,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Deploy markers: one row per dt.mark_deploy() call
 CREATE TABLE deploy_events (
     id           BIGSERIAL PRIMARY KEY,
+    org_id       TEXT        NOT NULL,
     agent_id     TEXT        NOT NULL,
     version      TEXT        NOT NULL,
     deployed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -337,6 +466,7 @@ CREATE TABLE events (
     batch_id       TEXT             NOT NULL,
     event_type     TEXT             NOT NULL,
     run_id         TEXT             NOT NULL,
+    org_id         TEXT             NOT NULL,
     agent_id       TEXT             NOT NULL,
     agent_version  TEXT             NOT NULL,
     step_index     INTEGER          NOT NULL,
@@ -353,6 +483,7 @@ CREATE TABLE failure_signals (
     failure_type   TEXT        NOT NULL,
     severity       TEXT        NOT NULL,
     run_id         TEXT        NOT NULL,
+    org_id         TEXT        NOT NULL,
     agent_id       TEXT        NOT NULL,
     agent_version  TEXT        NOT NULL,
     step_index     INTEGER     NOT NULL,
@@ -366,6 +497,7 @@ CREATE TABLE failure_signals (
 -- Prevents detector from reprocessing completed runs
 CREATE TABLE processed_runs (
     run_id         TEXT PRIMARY KEY,
+    org_id         TEXT        NOT NULL,
     agent_id       TEXT        NOT NULL,
     agent_version  TEXT        NOT NULL,
     processed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -373,18 +505,10 @@ CREATE TABLE processed_runs (
     trigger        TEXT        NOT NULL   -- "completed" | "errored" | "stalled"
 );
 
--- API key → customer mapping
-CREATE TABLE api_keys (
-    key            TEXT PRIMARY KEY,
-    agent_id       TEXT        NOT NULL,
-    customer_id    TEXT        NOT NULL,
-    active         BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- Cross-run issue tracker: one row per (agent_id, failure_type) pair
+-- Cross-run issue tracker: one row per (org_id, agent_id, failure_type)
 CREATE TABLE issues (
     id               BIGSERIAL    PRIMARY KEY,
+    org_id           TEXT         NOT NULL,
     agent_id         TEXT         NOT NULL,
     failure_type     TEXT         NOT NULL,
     status           TEXT         NOT NULL DEFAULT 'open',   -- open | resolved | reopened
@@ -393,12 +517,13 @@ CREATE TABLE issues (
     resolved_at      TIMESTAMPTZ,
     affected_runs    INTEGER      NOT NULL DEFAULT 1,
     clean_runs_since INTEGER      NOT NULL DEFAULT 0,
-    UNIQUE (agent_id, failure_type)
+    UNIQUE (org_id, agent_id, failure_type)
 );
 
--- Prevents weekly digest from re-sending within a 6-day window
+-- Prevents weekly digest from re-sending within a 6-day window, per org
 CREATE TABLE digest_log (
     id          BIGSERIAL    PRIMARY KEY,
+    org_id      TEXT         NOT NULL,
     digest_type TEXT         NOT NULL DEFAULT 'weekly',
     sent_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
@@ -408,12 +533,60 @@ CREATE TABLE fixes (
     id                    BIGSERIAL    PRIMARY KEY,
     run_id                TEXT         NOT NULL,
     signal_id             BIGINT       NOT NULL,
+    org_id                TEXT         NOT NULL,
     fix_content           TEXT         NOT NULL,
     fix_type              TEXT         NOT NULL DEFAULT 'prompt_addition',
     applied_via           TEXT         NOT NULL,   -- 'langfuse' or 'clipboard'
     langfuse_prompt_name  TEXT,                    -- null when applied_via='clipboard'
     langfuse_version      INTEGER,                 -- new version number after apply
     applied_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- User-defined detectors (plain-English description → structured config via LLM)
+CREATE TABLE custom_detectors (
+    id                BIGSERIAL    PRIMARY KEY,
+    org_id            TEXT         NOT NULL,
+    agent_id          TEXT         NOT NULL DEFAULT '*',
+    name              TEXT         NOT NULL,
+    description       TEXT         NOT NULL,
+    config_json       JSONB        NOT NULL,
+    status            TEXT         NOT NULL DEFAULT 'shadow',   -- shadow | active | paused
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    total_runs        INTEGER      NOT NULL DEFAULT 0,
+    shadow_fire_count INTEGER      NOT NULL DEFAULT 0
+);
+
+-- Per-run evaluation outcomes for custom detectors
+CREATE TABLE custom_detector_results (
+    id           BIGSERIAL    PRIMARY KEY,
+    detector_id  BIGINT       NOT NULL REFERENCES custom_detectors(id) ON DELETE CASCADE,
+    org_id       TEXT         NOT NULL,
+    run_id       TEXT         NOT NULL,
+    agent_id     TEXT         NOT NULL,
+    fired        BOOLEAN      NOT NULL,
+    evaluated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- False-positive suppression state per (org_id, agent_id, failure_type)
+CREATE TABLE agent_detector_overrides (
+    org_id           TEXT        NOT NULL,
+    agent_id         TEXT        NOT NULL,
+    failure_type     TEXT        NOT NULL,
+    fp_count         INTEGER     NOT NULL DEFAULT 0,
+    confidence_floor FLOAT       NOT NULL DEFAULT 0.0,
+    silenced         BOOLEAN     NOT NULL DEFAULT FALSE,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (org_id, agent_id, failure_type)
+);
+
+-- Alert dedup window state per (org_id, agent_id, failure_type)
+CREATE TABLE alert_dedup (
+    org_id           TEXT        NOT NULL,
+    agent_id         TEXT        NOT NULL,
+    failure_type     TEXT        NOT NULL,
+    last_alerted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    suppressed_count INTEGER     NOT NULL DEFAULT 0,
+    PRIMARY KEY (org_id, agent_id, failure_type)
 );
 ```
 
@@ -425,10 +598,10 @@ CREATE TABLE fixes (
 
 The `events` table uses PostgreSQL range partitioning on `received_at` with monthly child partitions (`events_202606`, `events_202607`, …). A `events_default` partition catches any rows that fall outside the defined monthly range (e.g. rows written during startup before the first monthly partition is created).
 
-Partition management runs automatically on every ingest service startup via `ensure_schema()`:
+Partition creation runs automatically on every ingest service startup via `ensure_schema()`; retention runs on its own daily background loop:
 
-- `_ensure_event_partitions()` creates child partitions for the current month through 3 months ahead. All `CREATE TABLE IF NOT EXISTS` — idempotent and safe to call on every restart.
-- `prune_old_events(retention_days=90)` drops monthly partitions whose entire window is older than the retention cutoff. Dropping a partition is an instant DDL operation — no row-by-row DELETE, no vacuum debt.
+- `_ensure_event_partitions()` creates child partitions for the current month through 3 months ahead. All `CREATE TABLE IF NOT EXISTS` — idempotent and safe to call on every restart. Runs at startup, not on a timer — a long-running process still gets its next month's partition the next time it restarts or redeploys, well before it's needed.
+- `prune_old_events(retention_days=90)` drops monthly partitions whose entire window is older than the retention cutoff. Dropping a partition is an instant DDL operation — no row-by-row DELETE, no vacuum debt. Invoked once a day by `main.py::_prune_loop` (via the [EventStore abstraction](#ingest-api-port-8001), `EVENT_RETENTION_DAYS` env var, default 90) — not tied to startup, since retention needs to fire on a process that's been running for a while, not just on restart.
 
 **Why partitioning matters at scale:** Without it, `events` grows unboundedly and the `fetch_run_events` and baseline queries (which scan by `run_id` and `agent_id`) degrade as the table crosses hundreds of millions of rows. Monthly partitions let Postgres prune non-matching partitions from baseline queries that filter by `received_at` range, and make retention instant.
 
@@ -476,9 +649,9 @@ AND ($n::int = 1 OR abs(hashtext(e.agent_id)) % $n = $m)
 **`SHARD_COUNT=1` (default)** — the condition short-circuits to `TRUE` and all runs are processed. No configuration change needed for single-instance deployments.
 
 **Invariants:**
-- A run belongs to exactly one agent, so there is no cross-shard coordination.
+- A run belongs to exactly one agent, so there is no cross-shard coordination. Sharding is by `agent_id` hash bucket only, not `org_id` — an org's agents can land on different shards.
 - `processed_runs` deduplication still works — a run can only be claimed by the shard whose bucket matches its `agent_id`.
-- Baseline queries (`fetch_step_count_baseline`, `fetch_token_growth_baseline`, etc.) are already scoped by `agent_id` and require no changes.
+- Baseline queries (`fetch_step_count_baseline`, `fetch_token_growth_baseline`, etc.) are scoped by `(org_id, agent_id, agent_version)` — `org_id` is required, since `agent_id`/`agent_version` are not guaranteed unique across orgs.
 - The alerts worker and customer API are stateless readers — they do not need sharding.
 
 **Validation:** The detector worker raises `ValueError` at startup if `SHARD_COUNT < 1` or `SHARD_INDEX` is outside `[0, SHARD_COUNT)`, so misconfigured replicas crash immediately rather than silently claiming no work.
@@ -487,6 +660,20 @@ AND ($n::int = 1 OR abs(hashtext(e.agent_id)) % $n = $m)
 |---|---|---|
 | `SHARD_COUNT` | `1` | Total number of detector replicas |
 | `SHARD_INDEX` | `0` | This replica's bucket index (0-based) |
+
+---
+
+## Rate Limiting
+
+The ingest API (`services/ingest/ingest_svc/rate_limiter.py`) enforces a per-key sliding-window request limit on `POST /v1/ingest` and `POST /v1/deploy`, applied by the `rate_limit_and_log` middleware in `main.py`.
+
+**Bucketing:** a real (non-`dt_dev_`) API key is rate-limited independently by key — `rate_limit_rpm` (from `api_keys`, default `600`) governs it. A `dt_dev_*` key, or a request with no parseable `api_key` at all, is bucketed by client IP instead — dev keys are for local-only usage and aren't expected to carry a meaningful per-tenant identity. Requests from `is_trusted()` callers (the internal gateway path — see the Ingest API Endpoints section) skip rate limiting entirely; the gateway is expected to enforce its own limits before proxying here.
+
+A denied request gets `429` with a `Retry-After` header (seconds until the oldest request in the window expires).
+
+**Cross-process coordination:** the limiter is a per-process in-memory singleton, so a single instance enforces `rate_limit_rpm` exactly. Running multiple ingest workers or replicas would otherwise let each one enforce the *full* limit independently — N processes silently allowing N× the configured rate. `RateLimiter._heartbeat()` closes this gap approximately rather than exactly: every 10s, each process upserts a liveness row into `rate_limit_workers`, reaps rows older than 30s, and sets `self._active_workers` to the resulting count; `is_allowed()` then checks each request against `rate_limit_rpm // active_workers` instead of the raw configured value. With the default single-instance deployment, `active_workers` is always `1` and enforcement is exact, identical to before this mechanism existed.
+
+This is a deliberate approximation, not a shortcut: an exact answer would mean a synchronous Postgres round-trip on every ingest request, which conflicts with the API's "return `202` before writing to DB" design and its throughput target. The tradeoff is a lag of up to one heartbeat interval (~10s) when a worker joins or leaves — during that window the aggregate limit across all workers can be briefly over- or under-enforced. A transient heartbeat failure (DB blip) leaves `active_workers` at its last known value rather than resetting to `1`, since resetting would itself cause every worker to briefly re-enforce the full limit — exactly the overshoot this mechanism exists to prevent.
 
 ---
 
@@ -509,7 +696,7 @@ AND ($n::int = 1 OR abs(hashtext(e.agent_id)) % $n = $m)
 
 ## Failure Modes
 
-**Ingest API down:** The drain thread drains events from the buffer before shipping. If `_ship()` fails, those events are dropped — there is no retry. New events continue to buffer (up to 10,000) and will be shipped once the API recovers. The agent is never blocked.
+**Ingest API down:** The drain thread drains events from the buffer before shipping. With the default `HttpBatchingEmitter`, a failed batch is dropped — no retry, no persistence. New events continue to buffer (up to 10,000) and will be shipped once the API recovers. The agent is never blocked. To survive an outage that outlasts the buffer (or a process restart mid-outage), wrap the emitter: `Dunetrace(emitter=DurableRetryEmitter(HttpBatchingEmitter(endpoint, api_key)))` persists failed batches to a local SQLite queue (`~/.dunetrace/queue.db` by default, or `DUNETRACE_QUEUE_PATH`) and retries them roughly every 30s (±5s jitter) once the backend is reachable again. The queue is bounded (100k events / 100MB by default, oldest evicted first) and logs a rate-limited warning when eviction happens, so a long outage doesn't silently lose data without a trace in the logs.
 
 **Detector worker down:** Runs queue up in the `events` table. When the worker restarts, it processes all unprocessed runs. Signals are delayed but not lost.
 

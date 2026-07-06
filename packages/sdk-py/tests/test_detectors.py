@@ -31,7 +31,7 @@ def make_state(**kwargs) -> RunState:
 
 
 def make_tool_call(name: str, step: int = 0) -> ToolCall:
-    return ToolCall(tool_name=name, args_hash="aaa", step_index=step, timestamp=time.time())
+    return ToolCall(tool_name=name, args="aaa", step_index=step, timestamp=time.time())
 
 
 # ── ToolLoopDetector ──────────────────────────────────────────────────────────
@@ -44,13 +44,13 @@ class TestToolLoopDetector(unittest.TestCase):
         state = make_state()
         state.tool_calls = [make_tool_call("web_search")] * 2
         state.current_step = 2
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_fires_at_threshold(self):
         state = make_state()
         state.tool_calls = [make_tool_call("web_search")] * 5  # 3 in window of 5
         state.current_step = 5
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.failure_type == FailureType.TOOL_LOOP
         assert signal.evidence["tool"] == "web_search"
@@ -66,19 +66,19 @@ class TestToolLoopDetector(unittest.TestCase):
             make_tool_call("calculator"),
         ]
         state.current_step = 5
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_confidence_scales_with_count(self):
         # 5 calls at threshold=3 → ratio 1.67 → dynamic confidence ~0.77
         state = make_state()
         state.tool_calls = [make_tool_call("web_search")] * 5
         state.current_step = 5
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert 0.7 <= signal.confidence <= 0.85
         # More calls → higher confidence
         state.tool_calls = [make_tool_call("web_search")] * 9
         state.current_step = 9
-        high = self.detector.check(state)
+        high = self.detector.on_run_completion(state)
         assert high.confidence > signal.confidence
 
 
@@ -99,7 +99,7 @@ class TestToolThrashingDetector(unittest.TestCase):
             make_tool_call("calculator"),
         ]
         state.current_step = 6
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.failure_type == FailureType.TOOL_THRASHING
 
@@ -114,14 +114,14 @@ class TestToolThrashingDetector(unittest.TestCase):
             make_tool_call("c"),
         ]
         state.current_step = 6
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_on_same_tool_repeated(self):
         state = make_state()
         state.tool_calls = [make_tool_call("web_search")] * 6
         state.current_step = 6
         # This is TOOL_LOOP not thrashing
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
 
 # ── ToolAvoidanceDetector ─────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ class TestToolAvoidanceDetector(unittest.TestCase):
             )
             for i in range(1, 3)
         ]
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.failure_type == FailureType.TOOL_AVOIDANCE
 
@@ -156,19 +156,19 @@ class TestToolAvoidanceDetector(unittest.TestCase):
         state = make_state(available_tools=["web_search"])
         state.exit_reason = "final_answer"
         state.tool_calls = [make_tool_call("web_search")]
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_when_no_tools_available(self):
         state = make_state(available_tools=[])
         state.exit_reason = "final_answer"
         state.tool_calls = []
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_before_final_answer(self):
         state = make_state(available_tools=["web_search"])
         state.exit_reason = None
         state.tool_calls = []
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
 
 # ── PromptInjectionDetector ───────────────────────────────────────────────────
@@ -238,7 +238,7 @@ class TestRagEmptyRetrievalDetector(unittest.TestCase):
         state.exit_reason = "final_answer"
         state.retrievals = [self.make_retrieval(count=0, score=None)]
         state.current_step = 3
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.failure_type == FailureType.RAG_EMPTY_RETRIEVAL
 
@@ -247,7 +247,7 @@ class TestRagEmptyRetrievalDetector(unittest.TestCase):
         state.exit_reason = "final_answer"
         state.retrievals = [self.make_retrieval(count=3, score=0.1)]
         state.current_step = 3
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
 
     def test_no_signal_on_good_retrieval(self):
@@ -255,19 +255,19 @@ class TestRagEmptyRetrievalDetector(unittest.TestCase):
         state.exit_reason = "final_answer"
         state.retrievals = [self.make_retrieval(count=5, score=0.87)]
         state.current_step = 3
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_before_final_answer(self):
         state = make_state()
         state.exit_reason = None
         state.retrievals = [self.make_retrieval(count=0)]
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_when_no_retrieval(self):
         state = make_state()
         state.exit_reason = "final_answer"
         state.retrievals = []
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
 
 # ── LlmTruncationLoopDetector ─────────────────────────────────────────────────
@@ -304,7 +304,7 @@ class TestLlmTruncationLoopDetector(unittest.TestCase):
             make_llm_call("stop", step=3),
         ]
         state.current_step = 3
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_fires_on_two_truncations(self):
         state = make_state()
@@ -314,7 +314,7 @@ class TestLlmTruncationLoopDetector(unittest.TestCase):
             make_llm_call("length", step=3),
         ]
         state.current_step = 3
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.failure_type == FailureType.LLM_TRUNCATION_LOOP
         assert signal.severity.value == "HIGH"
@@ -324,39 +324,39 @@ class TestLlmTruncationLoopDetector(unittest.TestCase):
         state = make_state()
         state.llm_calls = [make_llm_call("length", step=i) for i in range(3)]
         state.current_step = 3
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.evidence["truncation_count"] == 3
 
     def test_no_signal_with_no_llm_calls(self):
         state = make_state()
         state.llm_calls = []
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_all_stop(self):
         state = make_state()
         state.llm_calls = [make_llm_call("stop", step=i) for i in range(5)]
         state.current_step = 5
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_tool_calls_finish_reason(self):
         """tool_calls finish reason is normal — not truncation."""
         state = make_state()
         state.llm_calls = [make_llm_call("tool_calls", step=i) for i in range(5)]
         state.current_step = 5
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_confidence_scales_with_truncation_count(self):
         # 3 truncations at threshold=2 → ratio 1.5 → dynamic confidence 0.70
         state = make_state()
         state.llm_calls = [make_llm_call("length", step=i) for i in range(3)]
         state.current_step = 3
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert round(signal.confidence, 2) == 0.70
         # More truncations → higher confidence
         state.llm_calls = [make_llm_call("length", step=i) for i in range(6)]
         state.current_step = 6
-        high = self.detector.check(state)
+        high = self.detector.on_run_completion(state)
         assert high.confidence > signal.confidence
 
     def test_evidence_contains_step_indices(self):
@@ -368,7 +368,7 @@ class TestLlmTruncationLoopDetector(unittest.TestCase):
             make_llm_call("length", step=4),
         ]
         state.current_step = 4
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal.evidence["first_truncation_step"] == 2
         assert signal.evidence["last_truncation_step"] == 4
 
@@ -386,7 +386,7 @@ class TestContextBloatDetector(unittest.TestCase):
             make_llm_call(prompt_tokens=2000, step=2),
         ]
         state.current_step = 2
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_below_growth_factor(self):
         state = make_state()
@@ -396,7 +396,7 @@ class TestContextBloatDetector(unittest.TestCase):
             make_llm_call(prompt_tokens=1200, step=3),
         ]
         state.current_step = 3
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_fires_at_3x_growth(self):
         state = make_state()
@@ -406,7 +406,7 @@ class TestContextBloatDetector(unittest.TestCase):
             make_llm_call(prompt_tokens=2100, step=3),
         ]
         state.current_step = 3
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None  # 2100/600 = 3.5x — exceeds threshold and MIN_LAST_TOKENS=2000
         assert signal.evidence["growth_factor"] == 3.5
 
@@ -419,7 +419,7 @@ class TestContextBloatDetector(unittest.TestCase):
             make_llm_call(prompt_tokens=5200, step=4),
         ]
         state.current_step = 4
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.failure_type == FailureType.CONTEXT_BLOAT
         assert signal.severity.value == "MEDIUM"
@@ -433,7 +433,7 @@ class TestContextBloatDetector(unittest.TestCase):
             make_llm_call(prompt_tokens=4500, step=3),
         ]
         state.current_step = 3
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.evidence["first_tokens"] == 300
         assert signal.evidence["last_tokens"] == 4500
@@ -454,7 +454,7 @@ class TestContextBloatDetector(unittest.TestCase):
             for i in range(5)
         ]
         state.current_step = 5
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_stable_context(self):
         """Agent using summarisation — tokens stay flat."""
@@ -466,7 +466,7 @@ class TestContextBloatDetector(unittest.TestCase):
             make_llm_call(prompt_tokens=1280, step=4),
         ]
         state.current_step = 4
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_confidence_scales_with_growth(self):
         # 300→4500 tokens → growth=15×, threshold=3.0 → ratio=5.0 → confidence=1.0
@@ -477,7 +477,7 @@ class TestContextBloatDetector(unittest.TestCase):
             make_llm_call(prompt_tokens=4500, step=3),
         ]
         state.current_step = 3
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal.confidence == 1.0
         # Barely over threshold (3.01×) → near-minimum confidence
         state.llm_calls = [
@@ -486,7 +486,7 @@ class TestContextBloatDetector(unittest.TestCase):
             make_llm_call(prompt_tokens=3010, step=3),
         ]
         state.current_step = 3
-        low = self.detector.check(state)
+        low = self.detector.on_run_completion(state)
         assert low.confidence < signal.confidence
 
 
@@ -513,7 +513,7 @@ class TestReasoningSpinDetector(unittest.TestCase):
     def test_fires_on_high_llm_to_tool_ratio(self):
         """12 LLM calls, 1 tool call → ratio 12.0 — well above 4.0 threshold."""
         state = _make_spin_state(llm_count=12, tool_count=1)
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.failure_type == FailureType.REASONING_STALL
         assert signal.evidence["ratio"] == 12.0
@@ -523,66 +523,66 @@ class TestReasoningSpinDetector(unittest.TestCase):
     def test_fires_at_boundary_ratio(self):
         """8 LLM calls, 2 tool calls → ratio 4.0 — exactly at threshold."""
         state = _make_spin_state(llm_count=8, tool_count=2)
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
 
     def test_fires_with_zero_tool_calls(self):
         """5 LLM calls, 0 tool calls → ratio treated as 5/1 = 5.0."""
         state = _make_spin_state(llm_count=5, tool_count=0)
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.evidence["ratio"] == 5.0
 
     def test_no_signal_below_min_llm_calls(self):
         """Only 4 LLM calls — below MIN_LLM_CALLS=5, must not fire."""
         state = _make_spin_state(llm_count=4, tool_count=0)
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_on_healthy_ratio(self):
         """6 LLM calls, 4 tool calls → ratio 1.5 — healthy agent."""
         state = _make_spin_state(llm_count=6, tool_count=4)
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_no_signal_below_threshold_ratio(self):
         """5 LLM calls, 2 tool calls → ratio 2.5 — below 4.0."""
         state = _make_spin_state(llm_count=5, tool_count=2)
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_fires_at_high_severity_when_stalled(self):
         """Run never converged — fires at HIGH because the ratio caused failure, not just inefficiency."""
         state = _make_spin_state(llm_count=12, tool_count=1, exit_reason=None)
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.severity.value == "HIGH"
 
     def test_no_signal_on_error_exit(self):
         """Run errored — must not fire (FIRST_STEP_FAILURE / RETRY_STORM cover errors)."""
         state = _make_spin_state(llm_count=12, tool_count=1, exit_reason="error")
-        assert self.detector.check(state) is None
+        assert self.detector.on_run_completion(state) is None
 
     def test_severity_is_medium_when_final_answer(self):
         """Run finished — CoT-heavy but still converged, so MEDIUM not HIGH."""
         state = _make_spin_state(llm_count=10, tool_count=1)
-        signal = self.detector.check(state)
+        signal = self.detector.on_run_completion(state)
         assert signal.severity.value == "MEDIUM"
 
     def test_confidence_scales_with_ratio(self):
         # ratio=10/4=2.5 above threshold → confidence=1.0; barely above (5.1/4=1.275) → lower
         high_state = _make_spin_state(llm_count=10, tool_count=1)
-        high_signal = self.detector.check(high_state)
+        high_signal = self.detector.on_run_completion(high_state)
         assert high_signal.confidence == 1.0
         low_state = _make_spin_state(llm_count=5, tool_count=1)  # ratio=5/4=1.25 above threshold
-        low_signal = self.detector.check(low_state)
+        low_signal = self.detector.on_run_completion(low_state)
         assert 0.5 < low_signal.confidence < high_signal.confidence
 
     def test_custom_threshold(self):
         detector = ReasoningSpinDetector(RATIO_THRESHOLD=2.0)
         state = _make_spin_state(llm_count=6, tool_count=2)  # ratio=3.0
-        signal = detector.check(state)
+        signal = detector.on_run_completion(state)
         assert signal is not None
 
     def test_custom_min_llm_calls(self):
         detector = ReasoningSpinDetector(MIN_LLM_CALLS=3)
         state = _make_spin_state(llm_count=4, tool_count=0)  # ratio=4.0, now above MIN
-        signal = detector.check(state)
+        signal = detector.on_run_completion(state)
         assert signal is not None

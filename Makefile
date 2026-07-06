@@ -13,7 +13,10 @@ build:
 	docker compose build --no-cache
 
 test-ingest:
-	PYTHONPATH=packages/sdk-py:services/ingest python -m pytest services/ingest/tests/ -v
+	PYTHONPATH=packages/sdk-py:packages/schemas-py:services/ingest python -m pytest services/ingest/tests/ -v
+
+test-schemas:
+	PYTHONPATH=packages/sdk-py:packages/schemas-py python -m pytest packages/schemas-py/tests/ -v
 
 test-detector:
 	PYTHONPATH=packages/sdk-py:services/detector python -m pytest services/detector/tests/ -v
@@ -34,4 +37,4 @@ test-sdk-ts:
 	cd packages/sdk-ts && npm test
 
 test:
-	$(MAKE) test-ingest test-detector test-explainer test-alerts test-api test-mcp test-sdk-ts
+	$(MAKE) test-schemas test-ingest test-detector test-explainer test-alerts test-api test-mcp test-sdk-ts
