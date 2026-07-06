@@ -55,7 +55,7 @@ with dt.run(
     user_input="Explain what Retrieval-Augmented Generation is.",
     model="gpt-4o-mini",
 ) as run:
-    run.llm_called()
+    run.llm_called("gpt-4o-mini")
 
     async with agent.iter(
         "Explain what Retrieval-Augmented Generation is."
@@ -72,7 +72,7 @@ with dt.run(
         finish_reason="stop",
     )
 
-    run.final_answer(final_result.output)
+    run.final_answer()
 
 dt.shutdown()
 ```
