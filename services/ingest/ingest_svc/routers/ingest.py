@@ -82,7 +82,7 @@ async def ingest(
     n = len(body.events)
 
     logger.info(
-        "Accepted. batch_id=%s org_id=%s agent_id=%s events=%d", batch_id, org_id, body.agent_id, n
+        "Accepted. batch_id=%s agent_id=%s events=%d", batch_id, body.agent_id, n
     )
 
     # Persist after response is sent
