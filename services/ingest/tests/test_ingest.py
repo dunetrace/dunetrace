@@ -535,6 +535,47 @@ class TestVerifyApiKeyDevMode:
         monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
         assert await verify_api_key("dt_dev_anything") is None
 
+    async def test_db_error_never_logs_the_raw_api_key(self, monkeypatch, caplog):
+        """CodeQL: clear-text logging of sensitive info. Some DB drivers embed
+        bound parameter values in their exception's string representation —
+        verify_api_key() must log only the exception type, never str(exc) or
+        the key itself, even when the underlying error object does contain it."""
+        import logging
+
+        from ingest_svc.db.postgres import verify_api_key
+
+        secret_key = "dt_live_super_secret_value_12345"
+
+        class _LeakyError(Exception):
+            def __str__(self):
+                # Simulates a driver whose error message echoes back the
+                # failed query's bound parameters.
+                return f"query failed with param={secret_key!r}"
+
+        class _FakeConn:
+            async def fetchrow(self, query, key):
+                raise _LeakyError()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _FakePool:
+            def acquire(self):
+                return _FakeConn()
+
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "production")
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", _FakePool())
+
+        with caplog.at_level(logging.ERROR, logger="dunetrace.ingest.db"):
+            result = await verify_api_key(secret_key)
+
+        assert result is None
+        assert secret_key not in caplog.text
+        assert "_LeakyError" in caplog.text
+
 
 # ── Health ─────────────────────────────────────────────────────────────────────
 

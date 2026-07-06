@@ -600,5 +600,9 @@ async def verify_api_key(api_key: str) -> Optional[str]:
             )
         return row["org_id"] if row else None
     except Exception as exc:
-        logger.error("verify_api_key failed: %s", exc)
+        # Log the exception type only, never the exception object itself —
+        # some DB drivers embed bound parameter values (here, the raw
+        # api_key) in error message strings, which would otherwise put a
+        # live credential in plaintext logs.
+        logger.error("verify_api_key failed: %s", type(exc).__name__)
         return None

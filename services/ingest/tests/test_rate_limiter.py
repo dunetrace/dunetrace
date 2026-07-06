@@ -231,6 +231,43 @@ class TestRateLimiterRpmCache(unittest.IsolatedAsyncioTestCase):
             rpm = await limiter._get_rpm("some_key")
         self.assertEqual(rpm, 17)
 
+    async def test_db_error_never_logs_the_raw_api_key(self):
+        """CodeQL: clear-text logging of sensitive info — same finding, same
+        fix, as verify_api_key() in db/postgres.py: this query is also bound
+        with the raw api_key, so the exception logged on failure must never
+        include str(exc) itself, only its type name."""
+        secret_key = "dt_live_super_secret_value_12345"
+
+        class _LeakyError(Exception):
+            def __str__(self):
+                return f"query failed with param={secret_key!r}"
+
+        class _FakeConn:
+            async def fetchrow(self, query, key):
+                raise _LeakyError()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _FakePool:
+            def acquire(self):
+                return _FakeConn()
+
+        limiter = RateLimiter(default_rpm=99)
+        with (
+            self.assertLogs("dunetrace.ingest.ratelimit", level="DEBUG") as cm,
+            patch("ingest_svc.db.postgres.get_pool", return_value=_FakePool()),
+        ):
+            rpm = await limiter._get_rpm(secret_key)
+
+        self.assertEqual(rpm, 99)
+        logged = "\n".join(cm.output)
+        self.assertNotIn(secret_key, logged)
+        self.assertIn("_LeakyError", logged)
+
     async def test_db_rpm_used_when_pool_present(self):
         """When the pool is present and the key is found, the DB's rpm wins
         over the constructor default."""

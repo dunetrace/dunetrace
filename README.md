@@ -169,7 +169,7 @@ Root-cause analysis is native — no third-party tracer required. Click **Explai
 
 Fix effectiveness is tracked automatically.
 
-→ [docs/migrations/native-root-cause-v0.6.0.md](docs/migrations/native-root-cause-v0.6.0.md) · connect Langfuse: [docs/integrate-langfuse.md](docs/integrate-langfuse.md)
+connect Langfuse: [docs/integrate-langfuse.md](docs/integrate-langfuse.md)
 
 ---
 
@@ -254,7 +254,7 @@ transit and at rest, SOC2, no training on customer data. If you need an
 air-gapped deployment, self-host — same code, same detectors, your
 infrastructure.
 
-→ [docs/architecture.md](docs/architecture.md) · upgrading a self-hosted install? see [docs/migrations/multi-tenancy-v0.5.0.md](docs/migrations/multi-tenancy-v0.5.0.md)
+→ [docs/architecture.md](docs/architecture.md)
 
 ---
 

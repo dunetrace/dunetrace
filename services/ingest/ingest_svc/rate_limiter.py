@@ -74,7 +74,11 @@ class RateLimiter:
                 if row:
                     rpm = row["rate_limit_rpm"]
         except Exception as exc:
-            logger.debug("rpm lookup failed: %s", exc)
+            # Type name only, not the exception object — same reasoning as
+            # verify_api_key() in db/postgres.py: this query is also bound
+            # with the raw api_key, which some DB drivers echo into error
+            # message strings.
+            logger.debug("rpm lookup failed: %s", type(exc).__name__)
 
         self._rpm_cache[api_key] = (rpm, now)
         return rpm
