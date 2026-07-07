@@ -125,9 +125,9 @@ List all monitored agents with their run counts, signal counts, and failure type
 ```
 AGENT                                RUNS  SIGS CRIT HIGH  LAST SEEN
 ───────────────────────────────────────────────────────────────────────────
-langfuse-example-agent                 52    48    0   47  12h ago
+python-example-agent                   52    48    0   47  12h ago
                                       FIRST_STEP_FAILURE×1, TOOL_LOOP×47
-langfuse-ts-example-agent               4     3    0    3  21h ago
+ts-example-agent                        4     3    0    3  21h ago
                                       TOOL_LOOP×3
 langchain-example-agent               134    57    0   48  5d ago
                                       FIRST_STEP_FAILURE×1, TOOL_LOOP×48, STEP_COUNT_INFLATION×8
@@ -543,7 +543,7 @@ Claude: [calls get_signal_detail(518, "langchain-example-agent")]
             If a search returned no useful results, reformulate
             the query before trying again."
 
-        Option 2 can be applied via Langfuse in one click from the dashboard.
+        Option 2 is a diff you copy into your system prompt manually.
 ```
 
 ---
@@ -569,8 +569,8 @@ Claude: [calls get_run_detail("019e2314-6b7")]
 You:   Which agents had issues in the last 24 hours?
 
 Claude: [calls list_agents]
-        langfuse-example-agent — 47 HIGH signals (TOOL_LOOP), last seen 12h ago.
-        langfuse-ts-example-agent — 3 HIGH signals (TOOL_LOOP), last seen 21h ago.
+        python-example-agent — 47 HIGH signals (TOOL_LOOP), last seen 12h ago.
+        ts-example-agent — 3 HIGH signals (TOOL_LOOP), last seen 21h ago.
         Both are looping on web_search. Likely the same root cause — want me
         to compare?
 ```

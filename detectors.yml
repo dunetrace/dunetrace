@@ -17,6 +17,22 @@
 #   frequency   — alert when N of the last M runs trigger this detector
 #
 # One-off failures are silently counted. Only sustained patterns alert.
+#
+# ── Custom detectors ──────────────────────────────────────────────────────────
+# Global (not per-agent-category) budget for evaluating user-defined custom
+# detectors, including content-condition operators (contains, regex_matches,
+# etc. — see docs/detectors.md). Not part of the per-agent-category "default"
+# section below since custom detectors are org-scoped, not agent-tuned.
+#
+# custom_detectors:
+#   evaluation_budget_ms: 10   # wall-clock cap for evaluating one custom detector
+#                              # against one run. Exceeding it aborts that
+#                              # detector's evaluation for this run (treated as
+#                              # not-fired) and logs a rate-limited warning —
+#                              # never crashes the detector worker.
+#   regex_timeout_ms: 5        # per-regex_matches-call timeout, enforced by the
+#                              # `regex` package's native timeout support (ReDoS
+#                              # protection). Must be <= evaluation_budget_ms.
 
 default:
 
@@ -68,7 +84,7 @@ default:
     growth_factor: 3.0    # last/first prompt token ratio to trigger (static fallback when no baseline)
     min_calls: 3          # minimum LLM calls with token data required
     min_last_tokens: 2000 # suppress signal if final token count is below this
-    inflation_factor: 2.0 # fire when growth > P75_baseline × this (requires ≥10 historical runs)
+    inflation_factor: 2.0 # fire when growth > P75_baseline × this (requires ≥20 historical runs)
     alert_policy:
       mode: frequency     # trending issue — alert when it's becoming a pattern
       threshold: 3
@@ -82,7 +98,7 @@ default:
       window_runs: 10
 
   slow_step:
-    inflation_factor: 2.0 # fire when step duration > P75_baseline × this (requires ≥10 historical runs)
+    inflation_factor: 2.0 # fire when step duration > P75_baseline × this (requires ≥20 historical runs)
     alert_policy:
       mode: frequency
       threshold: 3
@@ -112,14 +128,14 @@ default:
   reasoning_stall:
     ratio_threshold: 4.0  # LLM calls / tool calls ratio to trigger (static fallback when no baseline)
     min_llm_calls: 5      # ignore short runs with fewer LLM calls
-    inflation_factor: 2.0 # fire when ratio > P75_baseline × this (requires ≥10 historical runs)
+    inflation_factor: 2.0 # fire when ratio > P75_baseline × this (requires ≥20 historical runs)
     alert_policy:
       mode: frequency
       threshold: 3
       window_runs: 10
 
   cost_spike:
-    inflation_factor: 3.0        # fire when total tokens > P75_baseline × this (requires ≥10 historical runs)
+    inflation_factor: 3.0        # fire when total tokens > P75_baseline × this (requires ≥20 historical runs)
     static_threshold_tokens: 50000  # fallback threshold when no baseline exists
     min_llm_calls: 1             # ignore runs with no LLM calls
     alert_policy:
@@ -128,7 +144,7 @@ default:
       window_runs: 1
 
   session_latency:
-    inflation_factor: 3.0        # fire when duration > P75_baseline × this (requires ≥10 historical runs)
+    inflation_factor: 3.0        # fire when duration > P75_baseline × this (requires ≥20 historical runs)
     static_threshold_secs: 300   # fallback threshold when no baseline exists (5 min)
     min_events: 2                # need at least two events to compute a duration
     alert_policy:
@@ -147,6 +163,85 @@ default:
       mode: consecutive
       threshold: 2
       window_runs: 10
+
+  premature_termination:
+    min_message_length: 20   # skip LLM outputs shorter than this (e.g. a bare "Done.")
+    case_sensitive: false
+    # completion_terms, error_acknowledgment_terms, error_markers: word lists,
+    # override only if you need to add/remove terms — see docs/detectors.md
+    # for the defaults. Live (see services/detector/detector_svc/db.py's
+    # LIVE_DETECTORS) — alerts fire on first occurrence.
+    alert_policy:
+      mode: immediate   # a caught silent-degradation claim is worth knowing about immediately
+      threshold: 1
+      window_runs: 1
+
+  unread_tool_error:
+    case_sensitive: false
+    # error_acknowledgment_terms, error_markers: shared word lists with
+    # premature_termination — override both together if you tune one. See
+    # docs/detectors.md for defaults. Live (see LIVE_DETECTORS in
+    # services/detector/detector_svc/db.py) — alert_policy below is
+    # "consecutive" (not "immediate" like premature_termination) since this
+    # is the noisier of the two by design (fires on absence of a signal).
+    alert_policy:
+      mode: consecutive
+      threshold: 2
+      window_runs: 10
+
+  tool_argument_fabrication:
+    case_sensitive: false
+    small_int_min: 1
+    small_int_max: 100   # integers in this range are skipped — see docs/detectors.md
+    # allowlist, destructive_tool_patterns: lists, override only to add/remove
+    # entries — see docs/detectors.md for the defaults. Live (see
+    # LIVE_DETECTORS). Provenance checks rely on system_prompt and tool
+    # output text being instrumented — see the detector's docstring for what
+    # happens when they're absent.
+    alert_policy:
+      mode: immediate   # a fabricated argument is worth knowing about immediately
+      threshold: 1
+      window_runs: 1
+
+  retrieved_content_injection:
+    case_sensitive: false
+    detect_behavior_deviation: true
+    # injection_phrases: list, override only to add/remove entries — see
+    # docs/detectors.md for the defaults. Live (see LIVE_DETECTORS). Relies
+    # on retrieval_responded(content=...) / tool_responded(output=...) being
+    # instrumented — see the detector's docstring for what happens when
+    # neither is present.
+    alert_policy:
+      mode: immediate   # a security signal — always alert on first occurrence
+      threshold: 1
+      window_runs: 1
+
+  handoff_context_loss:
+    size_drop_threshold: 0.5     # fire if child's input is >50% smaller than parent's accumulated context
+    entity_loss_threshold: 1     # fire if >=1 entity from the parent's context is missing from the child's input
+    # Live (see LIVE_DETECTORS). Only evaluates when a run carries a
+    # parent_run_id — see the detector's docstring for the known limitation
+    # that no built-in integration sets this today for LangGraph/CrewAI
+    # hierarchical crews. Evaluated at the worker level, not via the normal
+    # per-run detector loop — see services/detector/detector_svc/worker.py.
+    alert_policy:
+      mode: immediate   # multi-agent context loss is worth knowing about immediately
+      threshold: 1
+      window_runs: 1
+
+  runaway_iteration:
+    step_threshold: 50           # fire if step count exceeds this
+    cost_threshold_usd: 1.0      # fire if estimated LLM cost exceeds this
+    lookback_messages: 3         # number of recent llm.responded outputs checked for completion language
+    case_sensitive: false
+    # completion_patterns: list, override only to add/remove entries — see
+    # docs/detectors.md for the defaults. Live (see LIVE_DETECTORS). Never
+    # fires on a run whose exit_reason is "final_answer" — see the
+    # detector's docstring.
+    alert_policy:
+      mode: immediate   # crossing an absolute ceiling with no completion signal is worth knowing about immediately
+      threshold: 1
+      window_runs: 1
 
 
 # ── Per-agent-category overrides ─────────────────────────────────────────────

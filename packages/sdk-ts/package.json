@@ -1,6 +1,6 @@
 {
   "name": "dunetrace",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Real-time monitoring for AI agents",
   "author": "Dunetrace <dunetrace@gmail.com>",
   "license": "Apache-2.0",
@@ -43,18 +43,24 @@
     "example:vercel-ai:loop": "SCENARIO=tool_loop tsx examples/vercel_ai_agent.ts"
   },
   "peerDependencies": {
-    "ai": ">=7.0.0"
+    "ai": ">=7.0.0",
+    "better-sqlite3": ">=11.0.0"
   },
   "peerDependenciesMeta": {
     "ai": {
+      "optional": true
+    },
+    "better-sqlite3": {
       "optional": true
     }
   },
   "devDependencies": {
     "@ai-sdk/openai-compatible": "^3.0.0",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/dotenv": "^6.1.1",
     "@types/node": "^22.20.0",
     "ai": "^7.0.2",
+    "better-sqlite3": "^12.11.1",
     "dotenv": "^17.4.2",
     "langfuse": "^3.38.20",
     "openai": "^6.37.0",

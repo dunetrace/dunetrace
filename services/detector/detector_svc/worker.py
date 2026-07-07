@@ -8,13 +8,15 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from dunetrace.detectors import run_detectors
+from dunetrace.detectors import CUSTOM_DETECTOR_REGISTRY, HandoffContextLossDetector, run_detectors
 from dunetrace.models import FailureSignal, FailureType, Severity
 from dunetrace.risk_engine import RiskEngine
 from detector_svc.detectors import get_detectors
 
 from detector_svc.config import settings
+from detector_svc.config_loader import load_custom_detector_budget
 from detector_svc.custom_detector import evaluate_custom_detector
+from detector_svc.custom_python_detectors import load_custom_detector_plugins
 from detector_svc.db import (
     LIVE_DETECTORS,
     close_pool,
@@ -45,6 +47,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("dunetrace.detector")
 
+# Loaded once at startup, like detector_svc/detectors.py's _CONFIG — restart the
+# detector container to apply a detectors.yml change.
+_CUSTOM_DETECTOR_BUDGET = load_custom_detector_budget()
 
 _COOCCURRENCE_MULTIPLIERS = {1: 1.0, 2: 1.15, 3: 1.30}
 
@@ -100,6 +105,51 @@ def _injection_signal_from_events(
     return None
 
 
+def _accumulated_context_text(events: list[dict]) -> str:
+    """A proxy for "everything this run currently knows": its own input_text
+    plus every llm.responded/tool.responded output text seen so far. Used to
+    compare a parent run's state against a child run's input at a handoff —
+    see HandoffContextLossDetector's docstring."""
+    parts = []
+    for e in events:
+        event_type = e.get("event_type")
+        payload = e.get("payload") or {}
+        if event_type == "run.started":
+            input_text = payload.get("input_text")
+            if input_text:
+                parts.append(input_text)
+        elif event_type in ("llm.responded", "tool.responded"):
+            output = payload.get("output")
+            if output:
+                parts.append(output)
+    return "\n".join(parts)
+
+
+def _handoff_signal_from_events(
+    events: list[dict],
+    parent_events: list[dict],
+    run_id: str,
+    agent_id: str,
+    agent_version: str,
+    detector: HandoffContextLossDetector,
+) -> FailureSignal | None:
+    """Cross-run comparison for HANDOFF_CONTEXT_LOSS — see process_run()'s
+    caller for how parent_events is fetched and filtered."""
+    if not parent_events:
+        return None
+    child_started = next((e for e in events if e.get("event_type") == "run.started"), None)
+    if child_started is None:
+        return None
+    child_input = (child_started.get("payload") or {}).get("input_text", "")
+    # Only count what the parent knew up to the moment of handoff — later
+    # parent activity (concurrent or after) must not leak into this signal.
+    cutoff = child_started.get("timestamp", float("inf"))
+    parent_context = _accumulated_context_text(
+        [e for e in parent_events if e.get("timestamp", 0) <= cutoff]
+    )
+    return detector.evaluate_handoff(parent_context, child_input, run_id, agent_id, agent_version)
+
+
 async def process_run(
     run_id: str,
     agent_id: str,
@@ -131,10 +181,26 @@ async def process_run(
             fetch_total_tokens_baseline(org_id, agent_id, agent_version, run_id),
             fetch_duration_baseline(org_id, agent_id, agent_version, run_id),
         )
-        signals = run_detectors(state, detectors=get_detectors(agent_id))
+        detectors = get_detectors(agent_id)
+        signals = run_detectors(state, detectors=detectors)
         inj = _injection_signal_from_events(events, run_id, agent_id, agent_version)
         if inj:
             signals.append(inj)
+
+        parent_run_id = next(
+            (e.get("parent_run_id") for e in events if e.get("parent_run_id")), None
+        )
+        if parent_run_id:
+            handoff_detector = next(
+                (d for d in detectors if isinstance(d, HandoffContextLossDetector)), None
+            )
+            if handoff_detector is not None:
+                parent_events = await fetch_run_events(parent_run_id)
+                handoff = _handoff_signal_from_events(
+                    events, parent_events, run_id, agent_id, agent_version, handoff_detector
+                )
+                if handoff:
+                    signals.append(handoff)
 
         risk = RiskEngine().evaluate(signals, state)
         logger.debug(
@@ -154,6 +220,39 @@ async def process_run(
 
     count = 0
     for signal in signals:
+        plugin_name = (
+            signal.evidence.get("detector_name")
+            if signal.failure_type == FailureType.CUSTOM
+            else None
+        )
+        if plugin_name:
+            # A third-party Python-class custom detector (see
+            # custom_python_detectors.py) — FailureType is a closed enum, so
+            # it can't carry the plugin's own identity; evidence["detector_name"]
+            # does instead, same convention JSON-config custom detectors already
+            # use. Written via the same TEXT-failure_type path as those, not
+            # write_signals() (which is enum-constrained and LIVE_DETECTORS-gated,
+            # neither of which apply to a plugin the built-in allowlist has never
+            # heard of).
+            plugin_cls = next(
+                (c for c in CUSTOM_DETECTOR_REGISTRY.values() if c.name == plugin_name), None
+            )
+            shadow = plugin_cls.SHADOW_BY_DEFAULT if plugin_cls else True
+            await write_custom_signal(
+                failure_type=plugin_name,
+                severity=signal.severity.value,
+                run_id=signal.run_id,
+                agent_id=signal.agent_id,
+                agent_version=signal.agent_version,
+                step_index=signal.step_index,
+                confidence=signal.confidence,
+                evidence=signal.evidence,
+                shadow=shadow,
+                org_id=org_id,
+            )
+            count += 1
+            continue
+
         is_live = signal.failure_type.value in LIVE_DETECTORS
         written = await write_signals([signal], shadow=not is_live, org_id=org_id)
         count += written
@@ -173,7 +272,12 @@ async def process_run(
         if custom_defs:
             cdr_records = []
             for cd in custom_defs:
-                result = evaluate_custom_detector(cd["config"], state)
+                result = evaluate_custom_detector(
+                    cd["config"],
+                    state,
+                    evaluation_budget_ms=_CUSTOM_DETECTOR_BUDGET["evaluation_budget_ms"],
+                    regex_timeout_ms=_CUSTOM_DETECTOR_BUDGET["regex_timeout_ms"],
+                )
                 fired = result is not None
                 cdr_records.append(
                     {
@@ -240,6 +344,9 @@ async def poll_once() -> tuple[int, int]:
 async def run_worker() -> None:
     await init_pool()
     await ensure_detector_schema()
+    loaded = load_custom_detector_plugins()
+    if loaded:
+        logger.info("Loaded %d custom detector plugin file(s).", loaded)
     logger.info("Detector worker started. poll_interval=%ss", settings.POLL_INTERVAL)
     try:
         while True:

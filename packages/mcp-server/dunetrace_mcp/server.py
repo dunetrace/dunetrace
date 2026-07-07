@@ -737,7 +737,7 @@ def list_agent_fixes(agent_id: str) -> str:
     List all fixes that have been applied for an agent's signals.
 
     Shows which signals were fixed, how they were applied (clipboard copy or
-    Langfuse apply), the fix type, and whether the fix was verified effective.
+    GitHub PR), the fix type, and whether the fix was verified effective.
 
     Args:
         agent_id: The agent ID to query.
@@ -777,9 +777,10 @@ def trigger_explain(signal_id: int, agent_id: str = "") -> str:
     Trigger LLM-powered root cause analysis for a signal and return a fix
     suggestion.
 
-    Fetches the Langfuse trace for the signal's run, runs the analysis, and
-    returns a structured explanation with a fix (either a prompt addition or a
-    code/infra change description).
+    Runs natively against Dunetrace's own stored events for the signal's run
+    — no external tracing system involved — and returns a structured
+    explanation with either a suggested runtime policy (for failure types
+    Dunetrace can guard against directly) or a prompt/code diff.
 
     Note: this makes an LLM call and may take 5–15 seconds.
 
@@ -792,10 +793,23 @@ def trigger_explain(signal_id: int, agent_id: str = "") -> str:
     except Exception as exc:
         return f"Error: {exc}"
 
+    lines = [
+        f"Root cause analysis for signal #{signal_id}",
+        "",
+        "Root cause:",
+        f"  {result.get('root_cause', '—')}",
+        "",
+    ]
+
+    if result.get("fix_category") == "dunetrace_native":
+        policy = result.get("suggested_policy", {})
+        lines.append("Suggested fix: a Dunetrace runtime policy (applies directly, no code change)")
+        lines.append(f"  {policy}")
+        lines.append("  Apply via POST /v1/policies.")
+        return "\n".join(lines)
+
     fix_type = result.get("fix_type", "unknown")
     apply_blocked = result.get("apply_blocked", True)
-    prompt_name = result.get("langfuse_prompt_name")
-    prompt_ver = result.get("langfuse_prompt_version")
 
     fix_type_labels = {
         "prompt_addition": "Prompt addition (add a sentence to your system prompt)",
@@ -803,30 +817,18 @@ def trigger_explain(signal_id: int, agent_id: str = "") -> str:
         "no_auto_apply": "No auto-apply available for this failure type",
     }
 
-    lines = [
-        f"Root cause analysis for signal #{signal_id}",
-        "",
-        "Root cause:",
-        f"  {result.get('root_cause', '—')}",
-        "",
-        f"Fix ({fix_type_labels.get(fix_type, fix_type)}):",
-        f"  {result.get('fix_content', '—')}",
-        "",
-    ]
+    lines.append(f"Fix ({fix_type_labels.get(fix_type, fix_type)}):")
+    lines.append(f"  {result.get('fix_content', '—')}")
+    lines.append("")
 
-    if not apply_blocked and prompt_name:
-        lines.append("Apply instructions:")
-        lines.append(f"  Prompt name:    {prompt_name}")
-        if prompt_ver is not None:
-            lines.append(f"  Current version: {prompt_ver}")
+    if fix_type == "code_change" and not apply_blocked:
         lines.append(
-            "  Use the 'Apply Fix' button in the dashboard, or call the apply-fix API endpoint."
+            "Can be applied automatically: POST /v1/signals/{id}/open-pr opens a draft GitHub PR."
         )
-    elif apply_blocked:
-        lines.append(
-            "Apply blocked: this failure type requires a code or infra change — "
-            "no Langfuse prompt to patch."
-        )
+    elif fix_type == "no_auto_apply":
+        lines.append("Never auto-applied — this is a security signal. Review manually.")
+    else:
+        lines.append("Apply blocked: copy this fix into your system prompt or code manually.")
 
     return "\n".join(lines)
 
@@ -1058,10 +1060,11 @@ def create_custom_detector(description: str, agent_id: str = "*") -> str:
 
     if preview.get("requires_content"):
         return (
-            "This description requires matching on prompt/response content, which "
-            "custom detector conditions don't support yet. "
-            "Rephrase to use structural metrics: tool call counts, latency, "
-            "token usage, step count, retry count, etc."
+            f"Could not translate this description: {preview.get('reason', 'unsupported')}. "
+            "Rephrase using either a structural metric (tool call counts, latency, "
+            "token usage, step count, retry count, etc.) or a content condition with "
+            "a specific value to look for (e.g. \"when a tool error mentions 'timeout'\"). "
+            "See docs/detectors.md for the supported metrics and content fields."
         )
 
     # Derive a name from the description

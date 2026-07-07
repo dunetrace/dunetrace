@@ -28,7 +28,6 @@ class KeyOut(BaseModel):
 
 
 class KeyCreateBody(BaseModel):
-    org_id: str = Field(min_length=1)
     org_name: Optional[str] = None
     rate_limit_rpm: int = Field(default=600, ge=1, le=100_000)
 
@@ -56,9 +55,9 @@ async def list_keys(
 
 
 @router.post("", response_model=KeyCreateResponse, status_code=201)
-async def create_key(body: KeyCreateBody, _org_id: str = Depends(require_org)):
+async def create_key(body: KeyCreateBody, org_id: str = Depends(require_org)):
     return await queries.create_api_key(
-        org_id=body.org_id,
+        org_id=org_id,
         org_name=body.org_name,
         rate_limit_rpm=body.rate_limit_rpm,
     )

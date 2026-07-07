@@ -161,7 +161,7 @@ Two first-class SDKs send events to the same ingest API — runs from either app
 | Python (`dunetrace`) | `pip install dunetrace` | `from dunetrace import Dunetrace` |
 | TypeScript / Node.js (`dunetrace`) | `npm install dunetrace` | `import { Dunetrace } from "dunetrace"` |
 
-The Python SDK supports all three output modes (HTTP ingest, Loki NDJSON, OTel spans) and ships framework integrations for LangChain, CrewAI, AutoGen, and Langfuse. The TypeScript SDK supports HTTP ingest and Loki NDJSON (`emitAsJson`); OTel spans are Python-only.
+The Python SDK supports all three output modes (HTTP ingest, Loki NDJSON, OTel spans) and ships framework integrations for LangChain, CrewAI, and AutoGen. The TypeScript SDK supports HTTP ingest and Loki NDJSON (`emitAsJson`); OTel spans are Python-only.
 
 **Framework integrations (Python SDK):**
 
@@ -172,7 +172,7 @@ The Python SDK supports all three output modes (HTTP ingest, Loki NDJSON, OTel s
 | AutoGen (autogen-agentchat ≥ 0.4) | `DunetraceAutoGenObserver` | `pip install dunetrace autogen-agentchat autogen-ext` |
 | OpenLLMetry / OTel receiver | `DunetraceOTelReceiver` | `pip install 'dunetrace[otel]'` |
 
-See the [docs/](.) directory for per-framework integration guides (LangChain, CrewAI, AutoGen, TypeScript, Langdock, Langfuse).
+See the [docs/](.) directory for per-framework integration guides (LangChain, CrewAI, AutoGen, TypeScript, Langdock).
 
 ---
 
@@ -374,9 +374,9 @@ A read-only FastAPI service. Powers the dashboard and any customer integrations.
 | `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution. Also returns `failure_rates` (daily affected/total per failure type), `systemic_patterns` (7-day rate + `is_systemic` flag), and `deploy_events` (last 90 days of deploy markers) — the data powering the Health Record and Deploy Timeline panels |
 | `GET /v1/agents/{id}/issues` | Open/resolved issue list for an agent. Accepts optional `status` filter (`open`, `resolved`, `reopened`). Returns id, failure_type, status, first_seen, last_seen, resolved_at, affected_runs, clean_runs_since |
 | `GET /v1/runs/{id}` | Full run detail — metadata, all events, all signals with explanations |
-| `POST /v1/signals/{id}/explain` | Native root-cause analysis built from Dunetrace's own events — no Langfuse required. Returns `fix_category` (`dunetrace_native`, with a deterministic `suggested_policy`; or `customer_code`, with LLM-generated `fix_content`/`fix_patch`), plus `root_cause` and `apply_blocked`. Requires `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in env. If Langfuse is also configured, a best-effort trace lookup runs to populate `langfuse_prompt_name` for apply-fix, but never blocks the response |
-| `POST /v1/signals/{id}/apply-fix` | For `customer_code` fixes only: pushes `fix_content` to whichever external prompt store is connected (Langfuse today — see `prompt_stores.py`) and publishes a new version. Records the fix in the `fixes` table. Blocked for `PROMPT_INJECTION_SIGNAL` (returns 403) and when no store is connected (503). `dunetrace_native` fixes (a `suggested_policy`) are applied via the existing `POST /v1/policies` instead, after user confirmation — no separate endpoint |
-| `POST /v1/signals/{id}/record-copy` | Record a clipboard-path fix in the `fixes` table without writing to Langfuse |
+| `POST /v1/signals/{id}/explain` | Root-cause analysis, fully native — built from Dunetrace's own events, no external tracing system involved. Returns `fix_category` (`dunetrace_native`, with a deterministic `suggested_policy`; or `customer_code`, with LLM-generated `fix_content`/`fix_patch`), plus `root_cause` and `apply_blocked`. Requires `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in env |
+| `POST /v1/signals/{id}/open-pr` | For `customer_code` / `code_change` fixes only: opens a draft GitHub PR with the fix diff. Records the fix in the `fixes` table. Blocked for `PROMPT_INJECTION_SIGNAL` (returns 403) and when GitHub isn't configured (503). `dunetrace_native` fixes (a `suggested_policy`) are applied via the existing `POST /v1/policies` instead, after user confirmation — no separate endpoint. `prompt_addition` fixes have no automated apply path — always a manual copy |
+| `POST /v1/signals/{id}/record-copy` | Record a clipboard-path fix in the `fixes` table |
 | `GET /v1/signals/{id}/fix-status` | Return fix history and recurrence verdict (`verified / likely_fixed / still_occurring / insufficient_data`) |
 | `GET /health` | Service health check — returns `{"status":"ok","db":"ok"}` |
 
@@ -421,8 +421,7 @@ Auto-refreshes every 15 seconds. All data is computed client-side from the API r
 
 ## Database Schema
 
-Every table below carries `org_id` (see
-[docs/migrations/multi-tenancy-v0.5.0.md](migrations/multi-tenancy-v0.5.0.md)) —
+Every table below carries `org_id` —
 the primary tenancy dimension. `agent_id` is secondary and org-scoped: one org can
 have many agents, discovered dynamically as they send their first events. Every
 query filters `org_id` first, `agent_id` second.
@@ -528,7 +527,7 @@ CREATE TABLE digest_log (
     sent_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- Records every autofix action (clipboard copy or Langfuse apply)
+-- Records every autofix action (clipboard copy or GitHub PR)
 CREATE TABLE fixes (
     id                    BIGSERIAL    PRIMARY KEY,
     run_id                TEXT         NOT NULL,
@@ -536,9 +535,11 @@ CREATE TABLE fixes (
     org_id                TEXT         NOT NULL,
     fix_content           TEXT         NOT NULL,
     fix_type              TEXT         NOT NULL DEFAULT 'prompt_addition',
-    applied_via           TEXT         NOT NULL,   -- 'langfuse' or 'clipboard'
-    langfuse_prompt_name  TEXT,                    -- null when applied_via='clipboard'
-    langfuse_version      INTEGER,                 -- new version number after apply
+    applied_via           TEXT         NOT NULL,   -- 'github_pr' or 'clipboard'
+    langfuse_prompt_name  TEXT,                    -- historical column name — unused since the Langfuse
+                                                    -- apply-fix integration was removed; always null now
+    langfuse_version      INTEGER,                 -- historical column name — reused to store the GitHub
+                                                    -- PR number when applied_via='github_pr'
     applied_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
@@ -696,7 +697,10 @@ This is a deliberate approximation, not a shortcut: an exact answer would mean a
 
 ## Failure Modes
 
-**Ingest API down:** The drain thread drains events from the buffer before shipping. With the default `HttpBatchingEmitter`, a failed batch is dropped — no retry, no persistence. New events continue to buffer (up to 10,000) and will be shipped once the API recovers. The agent is never blocked. To survive an outage that outlasts the buffer (or a process restart mid-outage), wrap the emitter: `Dunetrace(emitter=DurableRetryEmitter(HttpBatchingEmitter(endpoint, api_key)))` persists failed batches to a local SQLite queue (`~/.dunetrace/queue.db` by default, or `DUNETRACE_QUEUE_PATH`) and retries them roughly every 30s (±5s jitter) once the backend is reachable again. The queue is bounded (100k events / 100MB by default, oldest evicted first) and logs a rate-limited warning when eviction happens, so a long outage doesn't silently lose data without a trace in the logs.
+**Ingest API down:** The drain thread drains events from the buffer before shipping. With the default emitter, a failed batch is dropped — no retry, no persistence. New events continue to buffer (up to 10,000) and will be shipped once the API recovers. The agent is never blocked. To survive an outage that outlasts the buffer (or a process restart mid-outage), wrap the emitter with a durable retry queue — same design in both SDKs, backed by a local SQLite queue, retried roughly every 30s (±5s jitter) once the backend is reachable again, bounded (100k events / 100MB by default, oldest evicted first) with a rate-limited eviction warning so a long outage doesn't silently lose data without a trace in the logs:
+
+- **Python**: `Dunetrace(emitter=DurableRetryEmitter(HttpBatchingEmitter(endpoint, api_key)))` — queue at `~/.dunetrace/queue.db` by default, or `DUNETRACE_QUEUE_PATH`. `sqlite3` is stdlib, no extra install.
+- **TypeScript**: `new Dunetrace({ emitter: new DurableRetryEmitter(new HttpBatchEmitter(endpoint, apiKey)) })` — queue at `~/.dunetrace/queue-ts.db` by default (a different filename from Python's, so a mixed-language deployment sharing `~/.dunetrace/` can't have one SDK corrupt the other's queue), or `DUNETRACE_QUEUE_PATH`. Requires the optional peer dependency `better-sqlite3` (Node has no SQLite in its standard library) — see the [TypeScript SDK README](https://github.com/dunetrace/dunetrace/blob/main/packages/sdk-ts/README.md#durable-retry). Node.js only; there is no browser build of the TypeScript SDK.
 
 **Detector worker down:** Runs queue up in the `events` table. When the worker restarts, it processes all unprocessed runs. Signals are delayed but not lost.
 

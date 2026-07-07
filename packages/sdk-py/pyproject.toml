@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace"
-version = "0.4.0"
+version = "0.4.1"
 description = "Real-time monitoring for AI agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -27,7 +27,6 @@ dependencies = []
 
 [project.optional-dependencies]
 langchain = ["langchain>=1.0", "langgraph>=0.2"]
-langfuse = ["langfuse>=2.0"]
 haystack = ["haystack-ai>=2.0"]
 openai-agents = ["openai-agents>=0.1,<1.0"]
 otel = [

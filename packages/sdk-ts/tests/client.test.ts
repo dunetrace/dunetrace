@@ -116,6 +116,28 @@ describe("Dunetrace.run() — lifecycle events", () => {
     await dt.shutdown();
   });
 
+  it("run.started transmits raw systemPrompt", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("my-agent", { systemPrompt: "You are a helpful assistant." }, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.payload["system_prompt"]).toBe("You are a helpful assistant.");
+    await dt.shutdown();
+  });
+
+  it("run.started defaults system_prompt to empty string when omitted", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("my-agent", {}, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.payload["system_prompt"]).toBe("");
+    await dt.shutdown();
+  });
+
   it("sets consistent agent_version across all events", async () => {
     const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
@@ -160,7 +182,7 @@ describe("Dunetrace.run() — lifecycle events", () => {
     await dt.shutdown();
   });
 
-  it("preset runId is used on all events (Langfuse correlation)", async () => {
+  it("preset runId is used on all events (external trace correlation)", async () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
     dt._emit = (e) => events.push(e);
@@ -222,6 +244,21 @@ describe("Dunetrace.tool()", () => {
     const resp = events.find(e => e.event_type === "tool.responded")!;
     expect(resp.payload["success"]).toBe(true);
     await dt.shutdown();
+  });
+
+  it("transmits the raw result as tool.responded output", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    const search = dt.tool(async (_q: unknown) => ["result1", "result2"], "search");
+
+    await dt.run("agent", {}, async () => {
+      await search("query");
+    });
+
+    const resp = events.find(e => e.event_type === "tool.responded")!;
+    expect(resp.payload["output"]).toBe(JSON.stringify(["result1", "result2"]));
   });
 
   it("emits success=false on error and re-throws", async () => {

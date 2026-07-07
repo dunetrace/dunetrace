@@ -213,10 +213,6 @@ async def export_signals_endpoint(
     )
 
 
-class ExplainRequest(BaseModel):
-    langfuse_trace_id: Optional[str] = None
-
-
 @router.post(
     "/v1/signals/{signal_id}/explain",
     summary="Explain a signal using Dunetrace's own native event data",
@@ -224,14 +220,12 @@ class ExplainRequest(BaseModel):
 )
 async def explain_signal(
     signal_id: int,
-    body: ExplainRequest = ExplainRequest(),
     org_id: str = Depends(require_org),
 ) -> Dict[str, Any]:
-    """Root-cause analysis is native — no Langfuse required. If Langfuse IS
-    configured, a trace fetch is still attempted, but only as a best-effort
-    side lookup for langfuse_prompt_name/version (so apply-fix keeps working
-    for customer_code signals on Langfuse-managed prompts); a missing or
-    unreachable Langfuse trace never blocks this endpoint.
+    """Root-cause analysis is fully native — Dunetrace analyzes its own stored
+    events (including the system prompt, when the caller passes one to
+    dt.run()) and always produces a root cause and a fix. No external tracing
+    system is consulted at all.
     """
     if not (settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY):
         raise HTTPException(
@@ -251,29 +245,6 @@ async def explain_signal(
     events = run_detail["events"] if run_detail else []
     source = "native" if events else "signal_only"
     user_prompt = await build_native_explain_prompt(signal, events)
-
-    # Best-effort Langfuse prompt-name detection — independent of the prompt
-    # built above, and never fatal. Only runs when Langfuse is actually
-    # configured; a customer with no Langfuse connected pays no latency for it.
-    prompt_name, prompt_version = None, None
-    if settings.langfuse_configured:
-        import time as _time
-
-        from api_svc.langfuse_client import _detect_langfuse_prompt, fetch_langfuse_trace
-
-        trace_lookup_id = body.langfuse_trace_id or signal["run_id"]
-        signal_age_s = _time.time() - (signal.get("detected_at") or 0)
-        max_retries = 3 if signal_age_s < 300 else 0
-        try:
-            trace = await fetch_langfuse_trace(trace_lookup_id, max_retries=max_retries)
-            prompt_name, prompt_version = _detect_langfuse_prompt(trace.get("observations", []))
-        except LookupError:
-            logger.info("Trace %s not in Langfuse; no managed prompt to detect", trace_lookup_id)
-        except Exception as exc:
-            logger.warning(
-                "Langfuse prompt-name lookup failed for run %s: %s", signal["run_id"], exc
-            )
-            # Non-fatal: apply-fix to a managed prompt just won't be offered
 
     failure_type = signal["failure_type"]
 
@@ -295,8 +266,6 @@ async def explain_signal(
             "suggested_policy": suggested_policy,
             "fix_type": "policy",
             "apply_blocked": False,  # a Policy is Dunetrace's own config — always directly applicable
-            "langfuse_prompt_name": prompt_name,
-            "langfuse_prompt_version": prompt_version,
         }
 
     if failure_type in _CODE_CHANGE_TYPES:
@@ -306,12 +275,17 @@ async def explain_signal(
     else:
         fix_type = "prompt_addition"
 
-    from api_svc.prompt_stores import get_connected_prompt_store
-
-    # prompt_addition fixes touch the customer's system prompt — Dunetrace can
-    # only push that change somewhere (a connected external store) or hand
-    # back a diff; it never has direct write access, unlike a Policy.
-    apply_blocked = fix_type != "prompt_addition" or get_connected_prompt_store() is None
+    if fix_type == "code_change":
+        # code_change has a real one-click path — POST /v1/signals/{id}/open-pr —
+        # gated only on GitHub being configured, independent of anything else.
+        apply_blocked = not settings.github_configured
+    elif fix_type == "no_auto_apply":
+        apply_blocked = True  # security signal — never auto-apply, review manually
+    else:
+        # prompt_addition touches the customer's system prompt — Dunetrace has
+        # no write access to wherever that actually lives (the customer's own
+        # code), so this is always a diff to copy in manually.
+        apply_blocked = True
 
     return {
         "signal_id": signal_id,
@@ -322,90 +296,11 @@ async def explain_signal(
         "fix_patch": llm_result["fix_patch"],
         "fix_type": fix_type,
         "apply_blocked": apply_blocked,
-        "langfuse_prompt_name": prompt_name,
-        "langfuse_prompt_version": prompt_version,
     }
 
 
-class ApplyFixRequest(BaseModel):
+class RecordCopyRequest(BaseModel):
     fix_content: str
-    langfuse_prompt_name: str
-    applied_via: str = "langfuse"
-
-
-@router.post(
-    "/v1/signals/{signal_id}/apply-fix",
-    summary="Apply a fix to the Langfuse-managed system prompt for this signal",
-    response_model=Dict[str, Any],
-)
-async def apply_fix(
-    signal_id: int,
-    body: ApplyFixRequest,
-    org_id: str = Depends(require_org),
-) -> Dict[str, Any]:
-    """Pushes a customer_code fix (system prompt edit) to whichever external
-    prompt store is connected — Langfuse today, others in future (see
-    prompt_stores.py). Not for dunetrace_native fixes — those are applied by
-    POSTing the explain response's suggested_policy to POST /v1/policies
-    directly; there's no external store involved."""
-    signal = await get_signal_by_id(org_id, signal_id)
-    if signal is None:
-        raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
-
-    if signal["failure_type"] in _NO_AUTO_APPLY_TYPES:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Auto-apply is blocked for PROMPT_INJECTION_SIGNAL. "
-                "The trace contains untrusted input — review the fix manually "
-                "before applying it to your prompt."
-            ),
-        )
-
-    from api_svc.prompt_stores import get_connected_prompt_store
-
-    store = get_connected_prompt_store()
-    if store is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "No external prompt store connected. Connect Langfuse "
-                "(LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY) or copy the fix manually."
-            ),
-        )
-
-    try:
-        result = await store.push_fix(body.langfuse_prompt_name, body.fix_content)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    except Exception as exc:
-        logger.warning("push_fix failed: %s", exc)
-        raise HTTPException(status_code=502, detail="Could not apply fix via the connected store.")
-
-    fix_id = None
-    try:
-        fix_id = await record_fix(
-            org_id=org_id,
-            signal_id=signal_id,
-            run_id=signal["run_id"],
-            fix_content=body.fix_content,
-            applied_via=body.applied_via,
-            langfuse_prompt_name=body.langfuse_prompt_name,
-            langfuse_version=result.get("new_version"),
-        )
-    except Exception as exc:
-        logger.warning("record_fix failed (non-fatal): %s", exc)
-
-    return {
-        "fix_id": fix_id,
-        "signal_id": signal_id,
-        "new_version": result["new_version"],
-        "prompt_url": result["prompt_url"],
-        "old_text": result["old_text"],
-        "new_text": result["new_text"],
-    }
 
 
 @router.post(
@@ -416,7 +311,7 @@ async def apply_fix(
 )
 async def record_copy(
     signal_id: int,
-    body: ApplyFixRequest,
+    body: RecordCopyRequest,
     org_id: str = Depends(require_org),
 ) -> Dict[str, Any]:
     """Thin endpoint so clipboard-path fixes are also tracked in the fixes table."""
@@ -464,6 +359,16 @@ async def open_pr(
     signal = await get_signal_by_id(org_id, signal_id)
     if signal is None:
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
+
+    if signal["failure_type"] in _NO_AUTO_APPLY_TYPES:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Auto-apply is blocked for PROMPT_INJECTION_SIGNAL. "
+                "The trace contains untrusted input — review the fix manually "
+                "before opening a PR."
+            ),
+        )
 
     from api_svc.github_client import create_fix_pr
 

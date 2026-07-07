@@ -1,11 +1,11 @@
 /**
  * TypeScript agent example: Dunetrace + Vercel AI SDK integration.
  *
- * Mirrors langfuse_agent.ts, but drives the Vercel AI SDK (`generateText`)
- * against a local Ollama instead of raw OpenAI — no API key required, since
- * Ollama exposes an OpenAI-compatible endpoint. The Dunetrace run is opened
- * via the `traceGenerateText` wrapper, which instruments the SDK call and
- * emits the same llm.* / tool.* events the manual loop produces.
+ * Drives the Vercel AI SDK (`generateText`) against a local Ollama instead
+ * of raw OpenAI — no API key required, since Ollama exposes an
+ * OpenAI-compatible endpoint. The Dunetrace run is opened via the
+ * `traceGenerateText` wrapper, which instruments the SDK call and emits the
+ * same llm.* / tool.* events a manual instrumentation loop would produce.
  *
  * Install deps:
  *   cd packages/sdk-ts && npm install

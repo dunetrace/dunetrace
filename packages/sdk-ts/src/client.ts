@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { agentVersion } from "./hash.js";
 import { DunetraceRun } from "./run.js";
-import { resultLength as _resultLength } from "./util.js";
+import { resultLength as _resultLength, resultText as _resultText } from "./util.js";
+import { HttpBatchEmitter, type BatchEmitter } from "./emitters.js";
 import type { AgentEvent, ClientOptions, RunOptions } from "./models.js";
 
 const _runStorage = new AsyncLocalStorage<DunetraceRun>();
@@ -14,6 +15,7 @@ export class Dunetrace {
   private _timeoutMs:  number;
   private _drainTimer: ReturnType<typeof setInterval> | null = null;
   private _emitJson:   boolean;
+  private _emitter:    BatchEmitter;
 
   constructor(opts: ClientOptions = {}) {
     const base      = (opts.endpoint ?? "http://localhost:8001").replace(/\/$/, "");
@@ -22,6 +24,7 @@ export class Dunetrace {
     this._emitJson  = opts.emitAsJson ?? false;
     this._bufferSize = opts.bufferSize ?? 10_000;
     this._timeoutMs  = opts.timeoutMs  ?? 5_000;
+    this._emitter    = opts.emitter ?? new HttpBatchEmitter(base, this._apiKey, this._timeoutMs);
 
     const interval = opts.flushIntervalMs ?? 200;
     this._drainTimer = setInterval(() => { this._drain(); }, interval);
@@ -51,7 +54,8 @@ export class Dunetrace {
       step_index:    0,
       timestamp:     Date.now() / 1000,
       payload: {
-        input_text:   opts.userInput ?? "",
+        input_text:    opts.userInput ?? "",
+        system_prompt: opts.systemPrompt ?? "",
         model,
         tools,
       },
@@ -117,7 +121,7 @@ export class Dunetrace {
         const t0 = Date.now();
         try {
           const result = await (fn as (...a: unknown[]) => Promise<unknown>)(...args);
-          if (run) run.toolResponded(toolName, true, _resultLength(result), Date.now() - t0);
+          if (run) run.toolResponded(toolName, true, _resultLength(result), Date.now() - t0, undefined, _resultText(result));
           return result;
         } catch (err) {
           if (run) run.toolResponded(toolName, false, 0, Date.now() - t0, String(err));
@@ -132,7 +136,7 @@ export class Dunetrace {
         const t0 = Date.now();
         try {
           const result = (fn as (...a: unknown[]) => unknown)(...args);
-          if (run) run.toolResponded(toolName, true, _resultLength(result), Date.now() - t0);
+          if (run) run.toolResponded(toolName, true, _resultLength(result), Date.now() - t0, undefined, _resultText(result));
           return result;
         } catch (err) {
           if (run) run.toolResponded(toolName, false, 0, Date.now() - t0, String(err));
@@ -257,7 +261,7 @@ export class Dunetrace {
 
   async flush(): Promise<void> {
     const batch = this._buffer.splice(0);
-    if (batch.length > 0) await this._ship(batch);
+    if (batch.length > 0) await this._emitter.ship(batch);
   }
 
   async shutdown(timeoutMs = 5000): Promise<void> {
@@ -282,39 +286,7 @@ export class Dunetrace {
   private _drain(): void {
     const batch = this._buffer.splice(0, 100);
     if (batch.length === 0 || !this._ingestUrl) return;
-    this._ship(batch).catch(() => {});
-  }
-
-  private async _ship(batch: AgentEvent[]): Promise<void> {
-    if (!this._ingestUrl) return;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this._timeoutMs);
-    try {
-      await fetch(this._ingestUrl, {
-        method:  "POST",
-        headers: {
-          "Content-Type":      "application/json",
-          "X-Dunetrace-Agent": batch[0]?.agent_id ?? "",
-        },
-        body: JSON.stringify({
-          api_key:  this._apiKey,
-          agent_id: batch[0]?.agent_id ?? "",
-          events:   batch,
-        }),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      const isConnRefused = String(err).includes("ECONNREFUSED") || String(err).includes("fetch failed");
-      if (isConnRefused) {
-        process.stderr.write(
-          `[dunetrace] Backend unreachable at ${this._ingestUrl} — is it running? (docker compose up -d)\n`
-        );
-      } else {
-        process.stderr.write(`[dunetrace] Failed to ship ${batch.length} events: ${err}\n`);
-      }
-    } finally {
-      clearTimeout(timer);
-    }
+    this._emitter.ship(batch).catch(() => {});
   }
 
   private _writeJsonLine(event: AgentEvent): void {

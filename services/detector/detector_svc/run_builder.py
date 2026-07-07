@@ -49,6 +49,7 @@ def build_run_state(events: list[dict]) -> RunState:
         if event_type == "run.started":
             state.available_tools = payload.get("tools", [])
             state.input_text = payload.get("input_text")
+            state.system_prompt = payload.get("system_prompt") or None
 
         # run.completed - record exit reason
         elif event_type == "run.completed":
@@ -111,6 +112,7 @@ def build_run_state(events: list[dict]) -> RunState:
                     if tc.tool_name == tool_name and tc.success is None:
                         tc.success = bool(success)
                         tc.error = payload.get("error")
+                        tc.output = payload.get("output") or None
                         break
 
         # retrieval.responded - append to retrievals list
@@ -121,6 +123,7 @@ def build_run_state(events: list[dict]) -> RunState:
                     result_count=payload.get("result_count", 0),
                     top_score=payload.get("top_score"),
                     step_index=step_index,
+                    content=payload.get("content") or None,
                 )
             )
 

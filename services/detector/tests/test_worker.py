@@ -91,6 +91,48 @@ class TestRunBuilder(unittest.TestCase):
         state = build_run_state([run_started(tools=["web_search", "calculator"])])
         self.assertEqual(state.available_tools, ["web_search", "calculator"])
 
+    def test_extracts_system_prompt_from_run_started(self):
+        events = [
+            evt(
+                "run.started",
+                0,
+                {
+                    "input_text": "hi",
+                    "system_prompt": "You are a helpful assistant.",
+                    "model": "gpt-4o",
+                    "tools": [],
+                },
+            )
+        ]
+        state = build_run_state(events)
+        self.assertEqual(state.system_prompt, "You are a helpful assistant.")
+
+    def test_system_prompt_none_when_absent_from_run_started(self):
+        state = build_run_state([run_started()])
+        self.assertIsNone(state.system_prompt)
+
+    def test_backfills_tool_output_from_tool_responded(self):
+        events = [
+            run_started(),
+            tool_evt("web_search", 1),
+            evt(
+                "tool.responded",
+                2,
+                {"tool_name": "web_search", "success": True, "output": "3 results found"},
+            ),
+        ]
+        state = build_run_state(events)
+        self.assertEqual(state.tool_calls[0].output, "3 results found")
+
+    def test_tool_output_none_when_absent_from_tool_responded(self):
+        events = [
+            run_started(),
+            tool_evt("web_search", 1),
+            evt("tool.responded", 2, {"tool_name": "web_search", "success": True}),
+        ]
+        state = build_run_state(events)
+        self.assertIsNone(state.tool_calls[0].output)
+
     def test_extracts_exit_reason_from_run_completed(self):
         state = build_run_state([run_started(), run_completed()])
         self.assertEqual(state.exit_reason, "final_answer")
@@ -150,6 +192,23 @@ class TestRunBuilder(unittest.TestCase):
         state = build_run_state(events)
         self.assertEqual(state.retrievals[0].result_count, 0)
         self.assertIsNone(state.retrievals[0].top_score)
+
+    def test_extracts_retrieval_content_when_present(self):
+        events = [
+            run_started(),
+            evt(
+                "retrieval.responded",
+                1,
+                {"index_name": "docs", "result_count": 1, "top_score": 0.9, "content": "the text"},
+            ),
+        ]
+        state = build_run_state(events)
+        self.assertEqual(state.retrievals[0].content, "the text")
+
+    def test_retrieval_content_none_when_absent(self):
+        events = [run_started(), retrieval_evt("docs", count=1, score=0.9, step=1)]
+        state = build_run_state(events)
+        self.assertIsNone(state.retrievals[0].content)
 
     def test_current_step_is_max_step_index(self):
         events = [
@@ -558,6 +617,184 @@ class TestProcessRun(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(signals, 0)
 
 
+def _handoff_evt(
+    event_type: str, step: int, ts: float, run_id: str, payload=None, parent_run_id=None
+) -> dict:
+    return {
+        "event_type": event_type,
+        "run_id": run_id,
+        "agent_id": "agent-test",
+        "agent_version": "abc12345",
+        "step_index": step,
+        "timestamp": ts,
+        "payload": payload or {},
+        "parent_run_id": parent_run_id,
+    }
+
+
+class TestHandoffContextLossWiring(unittest.IsolatedAsyncioTestCase):
+    """Cross-run wiring for HANDOFF_CONTEXT_LOSS — see worker.py's
+    process_run() and HandoffContextLossDetector's docstring for why this
+    needs its own DB-fetch path rather than the normal detector battery."""
+
+    def _run_with_fetch(self, events_by_run: dict):
+        async def fetch_side_effect(run_id):
+            return events_by_run.get(run_id, [])
+
+        return AsyncMock(side_effect=fetch_side_effect)
+
+    async def test_fires_when_parent_context_is_lost_on_handoff(self):
+        parent_events = [
+            _handoff_evt(
+                "run.started", 0, 100.0, "run-parent", {"input_text": "Investigate the outage."}
+            ),
+            _handoff_evt(
+                "llm.responded",
+                1,
+                101.0,
+                "run-parent",
+                {
+                    "output": "Customer jane.doe@acme.com needs a refund for order 12345 — escalate to billing.",
+                    "finish_reason": "stop",
+                },
+            ),
+        ]
+        child_events = [
+            _handoff_evt(
+                "run.started",
+                0,
+                102.0,
+                "run-child",
+                {"input_text": "Handle a refund.", "model": "gpt-4o", "tools": []},
+                parent_run_id="run-parent",
+            ),
+            _handoff_evt("run.completed", 1, 103.0, "run-child", {"exit_reason": "final_answer"}),
+        ]
+
+        written_signals = []
+
+        async def mock_write(signals, shadow, org_id):
+            written_signals.extend(signals)
+            return len(signals)
+
+        with (
+            patch(
+                "detector_svc.worker.fetch_run_events",
+                self._run_with_fetch({"run-parent": parent_events, "run-child": child_events}),
+            ),
+            patch("detector_svc.worker.write_signals", mock_write),
+            patch("detector_svc.worker.mark_run_processed", AsyncMock()),
+        ):
+            from detector_svc.worker import process_run
+
+            await process_run("run-child", "billing-agent", "v1", "completed", "org-1")
+
+        self.assertIn(FailureType.HANDOFF_CONTEXT_LOSS, [s.failure_type for s in written_signals])
+
+    async def test_no_handoff_signal_without_parent_run_id(self):
+        child_events = [
+            _handoff_evt(
+                "run.started",
+                0,
+                100.0,
+                "run-child",
+                {"input_text": "Handle a refund.", "tools": []},
+            ),
+            _handoff_evt("run.completed", 1, 101.0, "run-child", {"exit_reason": "final_answer"}),
+        ]
+        fetch_mock = self._run_with_fetch({"run-child": child_events})
+
+        with (
+            patch("detector_svc.worker.fetch_run_events", fetch_mock),
+            patch("detector_svc.worker.write_signals", AsyncMock(return_value=0)),
+            patch("detector_svc.worker.mark_run_processed", AsyncMock()),
+        ):
+            from detector_svc.worker import process_run
+
+            await process_run("run-child", "billing-agent", "v1", "completed", "org-1")
+
+        # Only the child's own run_id should ever have been fetched.
+        fetch_mock.assert_awaited_once_with("run-child")
+
+    async def test_no_handoff_signal_when_parent_events_missing(self):
+        child_events = [
+            _handoff_evt(
+                "run.started",
+                0,
+                100.0,
+                "run-child",
+                {"input_text": "Handle a refund.", "tools": []},
+                parent_run_id="run-nonexistent",
+            ),
+            _handoff_evt("run.completed", 1, 101.0, "run-child", {"exit_reason": "final_answer"}),
+        ]
+        written_signals = []
+
+        async def mock_write(signals, shadow, org_id):
+            written_signals.extend(signals)
+            return len(signals)
+
+        with (
+            patch(
+                "detector_svc.worker.fetch_run_events",
+                self._run_with_fetch({"run-child": child_events}),  # parent lookup returns []
+            ),
+            patch("detector_svc.worker.write_signals", mock_write),
+            patch("detector_svc.worker.mark_run_processed", AsyncMock()),
+        ):
+            from detector_svc.worker import process_run
+
+            await process_run("run-child", "billing-agent", "v1", "completed", "org-1")
+
+        self.assertNotIn(
+            FailureType.HANDOFF_CONTEXT_LOSS, [s.failure_type for s in written_signals]
+        )
+
+    async def test_parent_activity_after_handoff_is_excluded(self):
+        # The parent keeps working AFTER the handoff (e.g. on something else
+        # entirely) — that later activity must not count as "lost" context,
+        # since it didn't exist yet at the moment of handoff.
+        parent_events = [
+            _handoff_evt("run.started", 0, 100.0, "run-parent", {"input_text": "Investigate."}),
+            _handoff_evt(
+                "llm.responded",
+                2,
+                105.0,  # after the child's run.started at ts=102.0
+                "run-parent",
+                {
+                    "output": "unrelated.followup@acme.com needs attention too.",
+                    "finish_reason": "stop",
+                },
+            ),
+        ]
+        child_events = [
+            _handoff_evt(
+                "run.started",
+                0,
+                102.0,
+                "run-child",
+                {"input_text": "Handle a refund."},
+                parent_run_id="run-parent",
+            ),
+            _handoff_evt("run.completed", 1, 103.0, "run-child", {"exit_reason": "final_answer"}),
+        ]
+
+        from detector_svc.worker import _handoff_signal_from_events
+        from dunetrace.detectors import HandoffContextLossDetector
+
+        sig = _handoff_signal_from_events(
+            child_events,
+            parent_events,
+            "run-child",
+            "billing-agent",
+            "v1",
+            HandoffContextLossDetector(),
+        )
+        self.assertIsNone(
+            sig
+        )  # the only parent content is post-handoff — excluded, nothing to compare
+
+
 class TestCooccurrenceBoost(unittest.TestCase):
     """Unit tests for _apply_cooccurrence_boost."""
 
@@ -734,6 +971,99 @@ class TestShardConfig(unittest.IsolatedAsyncioTestCase):
                 reload(cfg_mod)
 
         reload(cfg_mod)  # restore
+
+
+class TestPluginDetectorSignalRouting(unittest.IsolatedAsyncioTestCase):
+    """A3: a signal from a registered Python-class custom detector must go
+    through write_custom_signal() (TEXT failure_type), never write_signals()
+    (enum-constrained, LIVE_DETECTORS-gated) — neither applies to a plugin
+    class the built-in allowlist has never heard of."""
+
+    async def test_plugin_signal_routed_to_write_custom_signal(self):
+        from dunetrace.detectors import BaseDetector
+        from dunetrace.models import FailureSignal, Severity
+
+        class _FakePlugin(BaseDetector):
+            name = "FAKE_PLUGIN_DETECTOR"
+            SHADOW_BY_DEFAULT = False
+
+            def on_run_completion(self, state):
+                return FailureSignal(
+                    failure_type=FailureType.CUSTOM,
+                    severity=Severity.HIGH,
+                    run_id=state.run_id,
+                    agent_id=state.agent_id,
+                    agent_version=state.agent_version,
+                    step_index=0,
+                    confidence=0.9,
+                    evidence={"detector_name": "FAKE_PLUGIN_DETECTOR"},
+                )
+
+        events = [run_started(tools=[]), run_completed(1)]
+        custom_signal_mock = AsyncMock()
+        builtin_signal_mock = AsyncMock(return_value=0)
+
+        with (
+            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)),
+            patch("detector_svc.worker.get_detectors", return_value=[_FakePlugin()]),
+            patch(
+                "detector_svc.worker.CUSTOM_DETECTOR_REGISTRY",
+                {"_FakePlugin": _FakePlugin},
+            ),
+            patch("detector_svc.worker.write_custom_signal", custom_signal_mock),
+            patch("detector_svc.worker.write_signals", builtin_signal_mock),
+            patch("detector_svc.worker.mark_run_processed", AsyncMock()),
+        ):
+            from detector_svc.worker import process_run
+
+            count = await process_run("run-1", "agent-1", "v1", "completed", "org-1")
+
+        self.assertEqual(count, 1)
+        custom_signal_mock.assert_called_once()
+        builtin_signal_mock.assert_not_called()
+        call_kwargs = custom_signal_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["failure_type"], "FAKE_PLUGIN_DETECTOR")
+        self.assertEqual(call_kwargs["shadow"], False)  # SHADOW_BY_DEFAULT on the class
+
+    async def test_plugin_signal_defaults_to_shadow_true_when_class_unregistered(self):
+        """If the registry lookup by name fails (e.g. detector_name doesn't
+        match any registered class's .name), the safe default is shadow=True —
+        never silently going live for a plugin we can't actually identify."""
+        from dunetrace.detectors import BaseDetector
+        from dunetrace.models import FailureSignal, Severity
+
+        class _FakePlugin(BaseDetector):
+            name = "FAKE_PLUGIN_DETECTOR"
+            SHADOW_BY_DEFAULT = False
+
+            def on_run_completion(self, state):
+                return FailureSignal(
+                    failure_type=FailureType.CUSTOM,
+                    severity=Severity.HIGH,
+                    run_id=state.run_id,
+                    agent_id=state.agent_id,
+                    agent_version=state.agent_version,
+                    step_index=0,
+                    confidence=0.9,
+                    evidence={"detector_name": "SOME_OTHER_NAME_NOT_IN_REGISTRY"},
+                )
+
+        events = [run_started(tools=[]), run_completed(1)]
+        custom_signal_mock = AsyncMock()
+
+        with (
+            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=events)),
+            patch("detector_svc.worker.get_detectors", return_value=[_FakePlugin()]),
+            patch("detector_svc.worker.CUSTOM_DETECTOR_REGISTRY", {}),  # empty -> lookup fails
+            patch("detector_svc.worker.write_custom_signal", custom_signal_mock),
+            patch("detector_svc.worker.mark_run_processed", AsyncMock()),
+        ):
+            from detector_svc.worker import process_run
+
+            await process_run("run-1", "agent-1", "v1", "completed", "org-1")
+
+        call_kwargs = custom_signal_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["shadow"], True)
 
 
 if __name__ == "__main__":

@@ -991,7 +991,7 @@ class TestGetInstrumentationGuide(unittest.TestCase):
         if doc_path.exists():
             out = srv.get_instrumentation_guide("langchain")
             # The full doc contains sections not in the inline snippet
-            self.assertIn("## How It Works", out)
+            self.assertIn("## Advanced", out)
 
     def test_degrades_gracefully_without_docs(self):
         # Patch the docs path to a non-existent directory — should still return inline guide
@@ -1081,7 +1081,7 @@ class TestResources(unittest.TestCase):
 
     def test_typescript_resource_returns_content(self):
         content = srv.doc_integrate_typescript()
-        self.assertIn("tool.called", content)
+        self.assertIn("toolCalled", content)
 
     def test_missing_doc_returns_error_string(self):
         import pathlib
@@ -1407,13 +1407,12 @@ class TestTriggerExplain(unittest.TestCase):
 
     EXPLAIN_RESULT = {
         "signal_id": 42,
-        "source": "langfuse",
+        "source": "native",
         "root_cause": "The agent repeats web_search with identical args.",
+        "fix_category": "customer_code",
         "fix_content": "Track all tool calls you've made. Never repeat with identical args.",
         "fix_type": "prompt_addition",
-        "apply_blocked": False,
-        "langfuse_prompt_name": "research-agent-prompt",
-        "langfuse_prompt_version": 3,
+        "apply_blocked": True,
     }
 
     def test_shows_root_cause(self):
@@ -1428,15 +1427,29 @@ class TestTriggerExplain(unittest.TestCase):
         self.assertIn("Fix", out)
         self.assertIn("Track all tool calls", out)
 
-    def test_shows_apply_instructions_when_not_blocked(self):
-        with patch("dunetrace_mcp.client.post", return_value=self.EXPLAIN_RESULT):
+    def test_shows_open_pr_instructions_for_unblocked_code_change(self):
+        unblocked = {**self.EXPLAIN_RESULT, "fix_type": "code_change", "apply_blocked": False}
+        with patch("dunetrace_mcp.client.post", return_value=unblocked):
             out = srv.trigger_explain(42)
-        self.assertIn("Apply instructions", out)
-        self.assertIn("research-agent-prompt", out)
-        self.assertIn("3", out)  # langfuse_prompt_version
+        self.assertIn("open-pr", out)
+
+    def test_dunetrace_native_shows_suggested_policy(self):
+        native_result = {
+            "signal_id": 42,
+            "source": "native",
+            "root_cause": "Tool loop detected.",
+            "fix_category": "dunetrace_native",
+            "suggested_policy": {"name": "cap-tool-calls", "agent_id": "agent-1"},
+            "fix_type": "policy",
+            "apply_blocked": False,
+        }
+        with patch("dunetrace_mcp.client.post", return_value=native_result):
+            out = srv.trigger_explain(42)
+        self.assertIn("runtime policy", out)
+        self.assertIn("POST /v1/policies", out)
 
     def test_blocked_shows_blocked_message(self):
-        blocked = {**self.EXPLAIN_RESULT, "fix_type": "code_change", "apply_blocked": True}
+        blocked = {**self.EXPLAIN_RESULT, "fix_type": "prompt_addition", "apply_blocked": True}
         with patch("dunetrace_mcp.client.post", return_value=blocked):
             out = srv.trigger_explain(42)
         self.assertIn("Apply blocked", out)

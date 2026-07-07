@@ -1,6 +1,6 @@
 """
 Tests for native_explain.py — builds the root-cause explain prompt from
-Dunetrace's own events, no Langfuse trace needed.
+Dunetrace's own events.
 
 No DB, no network.
 """

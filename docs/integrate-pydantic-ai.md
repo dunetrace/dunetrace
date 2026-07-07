@@ -1,104 +1,46 @@
 # Integrating a Pydantic AI Agent with Dunetrace
 
-`Pydantic AI` provides the `Agent.iter()` API, which exposes the execution lifecycle of an agent. This allows Dunetrace to observe agent execution, capture token usage from the agent's final result, and emit LLM events for tracing.
-
-Wrap the agent execution with `dt.run()` to group all events under a single Dunetrace run.
-
----
-
-## Prerequisites
-
-- Dunetrace backend running (`docker compose up -d`)
-- Python 3.11+
-- Pydantic AI
-
-> **Local dev — no API key needed.** The backend accepts requests without any API key when running locally.
-
----
-
-## Install
+## Quick Start
 
 ```bash
-pip install dunetrace pydantic-ai python-dotenv
+pip install dunetrace pydantic-ai
 ```
-
----
-
-## How it works
-
-Pydantic AI exposes agent execution through `Agent.iter()`, allowing applications to observe the lifecycle of an agent run.
-
-Within a Dunetrace run:
-
-- Start the agent using `Agent.iter()`.
-- Observe the execution as the agent progresses through its graph.
-- Read token usage from the final result using `final_result.usage()`.
-- Emit `run.llm_responded()` using the collected usage information.
-
-This groups the complete agent execution under a single Dunetrace run, making it easier to trace LLM activity and monitor usage.
-
-## Integration
 
 ```python
 from pydantic_ai import Agent
 from dunetrace import Dunetrace
 
-dt = Dunetrace(endpoint="http://localhost:8001")
+dt = Dunetrace()   # local dev, no API key needed
+agent = Agent("openai:gpt-4o-mini", instructions="You are a helpful AI assistant.")
 
-agent = Agent(
-    "openai:gpt-4o-mini",
-    instructions="You are a helpful AI assistant.",
-)
-
-with dt.run(
-    "pydantic-ai-agent",
-    user_input="Explain what Retrieval-Augmented Generation is.",
-    model="gpt-4o-mini",
-) as run:
+with dt.run("my-agent", user_input="Explain RAG.", model="gpt-4o-mini") as run:
     run.llm_called("gpt-4o-mini")
 
-    async with agent.iter(
-        "Explain what Retrieval-Augmented Generation is."
-    ) as agent_run:
+    async with agent.iter("Explain RAG.") as agent_run:
         async for _ in agent_run:
             pass
-
-        final_result = agent_run.result
-        usage = final_result.usage()
+        usage = agent_run.result.usage()
 
     run.llm_responded(
         prompt_tokens=usage.request_tokens,
         completion_tokens=usage.response_tokens,
         finish_reason="stop",
     )
-
     run.final_answer()
 
 dt.shutdown()
 ```
 
----
+Start the backend once, locally, before running this: `docker compose up -d`.
 
-## API notes
+## What this does
 
-- `Agent.iter()` exposes the execution lifecycle of an agent, allowing applications to observe agent execution.
-- Token usage is available from the final result via `final_result.usage()`.
-- Wrap agent execution with `dt.run()` to group all LLM activity under a single Dunetrace run.
+Pydantic AI exposes agent execution through `Agent.iter()`, which lets you observe the run as it happens rather than just getting a final result. Wrap the whole thing in `dt.run()` so `llm_called()`/`llm_responded()` around the iteration groups it as one Dunetrace run, with token usage read from `agent_run.result.usage()` once the agent finishes.
 
----
-
-## Verify
-
-1. Start the Dunetrace backend:
+## Verification
 
 ```bash
 docker compose up -d
 ```
 
-2. Run your Pydantic AI application that has been instrumented with Dunetrace.
-
-3. Open the dashboard at `http://localhost:3000`.
-
-The agent run should appear in the dashboard with its associated LLM events and usage information.
-
----
+Run your instrumented Pydantic AI application, then open the dashboard at `http://localhost:3000` — the run should appear with its LLM events and usage information.

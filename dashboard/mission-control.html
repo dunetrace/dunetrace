@@ -1042,14 +1042,14 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <div class="explain-title">Why this triggered</div>
       <div class="explain-text" id="detail-explain-text">—</div>
       <div class="explain-list" id="detail-explain-list"></div>
-      <div id="langfuse-explain-row" style="display:none;margin-top:.75rem;align-items:center;gap:.75rem;flex-wrap:wrap">
-        <button class="act-btn act-secondary" id="langfuse-explain-btn" onclick="explainWithLangfuse()" style="font-size:12px;padding:5px 12px">Explain with Langfuse ↗</button>
-        <span id="langfuse-explain-status" style="display:none;font-size:12px;color:var(--chalk3)">analyzing…</span>
-        <button class="act-btn" id="langfuse-open-pr-btn" onclick="openPROnGitHub()" style="display:none;font-size:12px;padding:5px 12px">Open PR on GitHub ↗</button>
-        <span id="langfuse-pr-status" style="display:none;font-size:12px;color:var(--chalk3)">creating PR…</span>
-        <a id="langfuse-pr-link" style="display:none;font-size:12px;color:var(--green);text-decoration:none" target="_blank" rel="noopener">View PR ↗</a>
+      <div id="explain-row" style="display:none;margin-top:.75rem;align-items:center;gap:.75rem;flex-wrap:wrap">
+        <button class="act-btn act-secondary" id="explain-btn" onclick="explainSignal()" style="font-size:12px;padding:5px 12px">Dunetrace Root Cause Analysis</button>
+        <span id="explain-status" style="display:none;font-size:12px;color:var(--chalk3)">analyzing…</span>
+        <button class="act-btn" id="open-pr-btn" onclick="openPROnGitHub()" style="display:none;font-size:12px;padding:5px 12px">Open PR on GitHub ↗</button>
+        <span id="pr-status" style="display:none;font-size:12px;color:var(--chalk3)">creating PR…</span>
+        <a id="pr-link" style="display:none;font-size:12px;color:var(--green);text-decoration:none" target="_blank" rel="noopener">View PR ↗</a>
       </div>
-      <div id="langfuse-explain-result" style="display:none;margin-top:1rem;font-size:13px;color:var(--chalk2);line-height:1.8;border-top:1px solid var(--wire);padding-top:1rem"></div>
+      <div id="explain-result" style="display:none;margin-top:1rem;font-size:13px;color:var(--chalk2);line-height:1.8;border-top:1px solid var(--wire);padding-top:1rem"></div>
     </div>
     <div class="replay-card" id="detail-replay" style="display:none">
       <div class="replay-title">
@@ -2455,12 +2455,11 @@ function renderTimeline(events, signals) {
     Object.assign(stepMap[s].payload, e.payload || {});
   });
 
-  const loopTools = detectLoops(events);
+  const loopSteps = detectLoops(events, signals);
   const steps = Object.values(stepMap).sort((a, b) => a.step - b.step);
 
   const html = steps.map((st, i) => {
-    const isLoop   = st.types.includes('tool.called') &&
-      loopTools.has(st.payload?.tool_name + ':' + st.payload?.args);
+    const isLoop   = st.types.includes('tool.called') && loopSteps.has(st.step);
     const isLLM    = st.types.some(t => t.startsWith('llm.'));
     const isFail   = st.types.includes('tool.responded') && st.payload?.success === false;
     const isStart  = st.types.includes('run.started');
@@ -2517,19 +2516,19 @@ let _explainStaticLang = 'python';
 let _explainLastData   = null;   // last explain API response, used by openPROnGitHub()
 
 function renderExplain(signals) {
-  const explainRow    = document.getElementById('langfuse-explain-row');
-  const explainResult = document.getElementById('langfuse-explain-result');
+  const explainRow    = document.getElementById('explain-row');
+  const explainResult = document.getElementById('explain-result');
 
-  // Reset Langfuse panel on each run load
+  // Reset the explain panel on each run load
   explainRow.style.display = 'none';
   explainResult.style.display = 'none';
   explainResult.innerHTML = '';
   _explainSignalId   = null;
   _explainStaticCode = null;
   _explainLastData   = null;
-  const prBtn  = document.getElementById('langfuse-open-pr-btn');
-  const prLink = document.getElementById('langfuse-pr-link');
-  const prStat = document.getElementById('langfuse-pr-status');
+  const prBtn  = document.getElementById('open-pr-btn');
+  const prLink = document.getElementById('pr-link');
+  const prStat = document.getElementById('pr-status');
   if (prBtn)  prBtn.style.display  = 'none';
   if (prLink) prLink.style.display = 'none';
   if (prStat) prStat.style.display = 'none';
@@ -2648,11 +2647,11 @@ async function runReplay() {
   }
 }
 
-async function explainWithLangfuse() {
+async function explainSignal() {
   if (!_explainSignalId) return;
-  const btn    = document.getElementById('langfuse-explain-btn');
-  const status = document.getElementById('langfuse-explain-status');
-  const result = document.getElementById('langfuse-explain-result');
+  const btn    = document.getElementById('explain-btn');
+  const status = document.getElementById('explain-status');
+  const result = document.getElementById('explain-result');
 
   btn.disabled = true;
   status.style.display = '';
@@ -2672,10 +2671,10 @@ async function explainWithLangfuse() {
       const fixContent = data.fix_content || '';
       const fixPatch   = data.fix_patch   || '';
       const fixType    = data.fix_type    || 'prompt_addition';
-      const source     = data.source      || 'langfuse';
+      const source     = data.source      || 'native';
 
       const sourceNote = source === 'signal_only'
-        ? `<div style="font-size:11px;color:var(--chalk4);margin-top:4px;font-style:italic">No Langfuse trace found — analysis based on signal evidence only.</div>`
+        ? `<div style="font-size:11px;color:var(--chalk4);margin-top:4px;font-style:italic">No detailed event trace found — analysis based on signal evidence only.</div>`
         : '';
 
       const fixLabel = fixType === 'code_change'    ? 'CODE CHANGE NEEDED'
@@ -2736,9 +2735,9 @@ async function explainWithLangfuse() {
 
       // Store for PR creation and show "Open PR" button for code-change types
       _explainLastData = { root_cause: rootCause, fix_content: fixContent, fix_patch: fixPatch, fix_type: fixType };
-      const prBtn  = document.getElementById('langfuse-open-pr-btn');
-      const prLink = document.getElementById('langfuse-pr-link');
-      const prStat = document.getElementById('langfuse-pr-status');
+      const prBtn  = document.getElementById('open-pr-btn');
+      const prLink = document.getElementById('pr-link');
+      const prStat = document.getElementById('pr-status');
       if (prBtn)  prBtn.style.display  = fixType === 'code_change' ? '' : 'none';
       if (prLink) prLink.style.display = 'none';
       if (prStat) prStat.style.display = 'none';
@@ -2754,9 +2753,9 @@ async function explainWithLangfuse() {
 
 async function openPROnGitHub() {
   if (!_explainSignalId || !_explainLastData) return;
-  const prBtn  = document.getElementById('langfuse-open-pr-btn');
-  const prStat = document.getElementById('langfuse-pr-status');
-  const prLink = document.getElementById('langfuse-pr-link');
+  const prBtn  = document.getElementById('open-pr-btn');
+  const prStat = document.getElementById('pr-status');
+  const prLink = document.getElementById('pr-link');
 
   prBtn.disabled        = true;
   prStat.style.display  = '';
@@ -2889,7 +2888,7 @@ function drawGraph() {
     Object.assign(stepMap[s].payload, e.payload || {});
   });
   const steps = Object.values(stepMap).sort((a, b) => a.step - b.step);
-  const loopSet = detectLoops(events);
+  const loopSteps = detectLoops(events, signals);
 
   const R = 22;
   const total = steps.length;
@@ -2899,8 +2898,7 @@ function drawGraph() {
 
   // Map step → node position
   const nodes = steps.map((st, i) => {
-    const isLoop = st.types.includes('tool.called') &&
-      loopSet.has(st.payload?.tool_name + ':' + st.payload?.args);
+    const isLoop = st.types.includes('tool.called') && loopSteps.has(st.step);
     const isLLM   = st.types.some(t => t.startsWith('llm.'));
     const isStart = st.types.includes('run.started');
     const isEnd   = st.types.includes('run.completed') || st.types.includes('run.final_answer');
@@ -3002,14 +3000,34 @@ function drawGraph() {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function detectLoops(events) {
-  // Returns Set of "tool_name:args" combos that appear 3+ times
+function detectLoops(events, signals) {
+  // Returns a Set of step_index values that are part of a tool-call loop.
+  // Prefers the backend's real TOOL_LOOP signal(s) — evidence.step_indices
+  // covers every call of the looping tool, including near-identical (not just
+  // byte-identical) args the exact-match fallback below would miss.
+  const loopSignals = (signals || []).filter(s => s.failure_type === 'TOOL_LOOP');
+  if (loopSignals.length) {
+    const steps = new Set();
+    loopSignals.forEach(s => (s.evidence?.step_indices || []).forEach(i => steps.add(i)));
+    return steps;
+  }
+
+  // Fallback for when no signal is available yet (e.g. events viewed before
+  // the run finished detecting): approximate via byte-identical tool_name:args
+  // appearing 3+ times.
   const counts = {};
+  const stepsByKey = {};
   events.filter(e => e.event_type === 'tool.called').forEach(e => {
     const key = (e.payload?.tool_name || '') + ':' + (e.payload?.args || '');
     counts[key] = (counts[key] || 0) + 1;
+    stepsByKey[key] = stepsByKey[key] || [];
+    stepsByKey[key].push(e.step_index);
   });
-  return new Set(Object.entries(counts).filter(([,v]) => v >= 3).map(([k]) => k));
+  const steps = new Set();
+  Object.entries(counts)
+    .filter(([, v]) => v >= 3)
+    .forEach(([k]) => stepsByKey[k].forEach(i => steps.add(i)));
+  return steps;
 }
 
 function statusCell(e) {
@@ -4447,15 +4465,17 @@ async function previewCustomDetector() {
     if (data.requires_content) {
       content.innerHTML = `
         <div style="padding:1rem;background:rgba(255,200,0,0.07);border:1px solid rgba(255,200,0,0.2);border-radius:6px">
-          <div style="font-size:12px;color:var(--amber);font-weight:600;margin-bottom:.4rem">Cannot be detected from metadata</div>
+          <div style="font-size:12px;color:var(--amber);font-weight:600;margin-bottom:.4rem">Can't be expressed with available metrics/fields</div>
           <div style="font-size:12px;color:var(--chalk3)">${esc(data.reason)}</div>
-          <div style="font-size:11px;color:var(--chalk4);margin-top:.75rem">Custom detector conditions don't support content matching yet. For semantic quality checks, connect Langfuse via Settings → Integrations.</div>
+          <div style="font-size:11px;color:var(--chalk4);margin-top:.75rem">Try rephrasing with a specific value to look for (e.g. "when a tool error mentions 'timeout'") — see docs/detectors.md for supported metrics and content fields.</div>
         </div>`;
       document.getElementById('cd-save-row').style.display = 'none';
     } else {
       _cdPreviewConfig = data;
       const conditions = (data.conditions || []).map(c =>
-        `<span class="mono" style="font-size:11px;color:var(--chalk2)">${esc(c.metric)} ${esc(c.operator)} ${c.threshold}</span>`
+        'field' in c
+          ? `<span class="mono" style="font-size:11px;color:var(--chalk2)">${esc(c.field)} ${esc(c.operator)} "${esc(String(c.value))}"${c.case_sensitive === false ? ' (any case)' : ''}</span>`
+          : `<span class="mono" style="font-size:11px;color:var(--chalk2)">${esc(c.metric)} ${esc(c.operator)} ${c.threshold}</span>`
       ).join(' <span style="color:var(--chalk4)">AND</span> ');
       content.innerHTML = `
         <div style="display:grid;grid-template-columns:120px 1fr;gap:.5rem .75rem;font-size:12px">
@@ -4524,7 +4544,9 @@ function renderCustomDetectorCard(d) {
   const statusColor = d.status === 'active' ? 'var(--green)' : d.status === 'shadow' ? 'var(--amber)' : 'var(--chalk4)';
   const statusLabel = d.status === 'shadow' ? 'shadow mode' : d.status;
   const conditions = (d.config.conditions || []).map(c =>
-    `<code style="font-size:11px">${esc(c.metric)} ${esc(c.operator)} ${c.threshold}</code>`
+    'field' in c
+      ? `<code style="font-size:11px">${esc(c.field)} ${esc(c.operator)} "${esc(String(c.value))}"</code>`
+      : `<code style="font-size:11px">${esc(c.metric)} ${esc(c.operator)} ${c.threshold}</code>`
   ).join(' AND ');
   const shadowNote = d.status === 'shadow' && d.total_runs > 0
     ? `<div style="font-size:11px;color:var(--chalk4);margin-top:.4rem">Evaluated on ${d.total_runs} runs — would have fired ${d.shadow_fire_count} times${fireRate !== null ? ` (${fireRate}%)` : ''}</div>`

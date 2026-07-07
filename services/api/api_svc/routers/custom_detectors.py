@@ -9,7 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
 from api_svc.auth import require_org
-from api_svc.custom_detector_translator import translate_description, SUPPORTED_METRICS
+from api_svc.custom_detector_translator import (
+    translate_description,
+    SUPPORTED_METRICS,
+    CONTENT_FIELDS,
+    CONTENT_OPERATORS,
+)
 from api_svc.db.queries import (
     create_custom_detector,
     delete_custom_detector,
@@ -58,38 +63,82 @@ class StatusUpdate(BaseModel):
         return v
 
 
+def _validate_metric_condition(cond: dict, i: int) -> None:
+    for field in ("metric", "operator", "threshold"):
+        if field not in cond:
+            raise HTTPException(422, f"conditions[{i}] is missing required field '{field}'")
+    if cond["metric"] not in SUPPORTED_METRICS:
+        raise HTTPException(
+            422,
+            f"conditions[{i}].metric '{cond['metric']}' is not a supported metric. "
+            f"Valid values: {sorted(SUPPORTED_METRICS)}",
+        )
+    if cond["operator"] not in _VALID_OPERATORS:
+        raise HTTPException(
+            422,
+            f"conditions[{i}].operator '{cond['operator']}' is invalid. "
+            f"Valid operators: {sorted(_VALID_OPERATORS)}",
+        )
+    try:
+        float(cond["threshold"])
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"conditions[{i}].threshold must be a number")
+
+
+def _validate_content_condition(cond: dict, i: int) -> None:
+    for field in ("field", "operator", "value"):
+        if field not in cond:
+            raise HTTPException(422, f"conditions[{i}] is missing required field '{field}'")
+    if cond["field"] not in CONTENT_FIELDS:
+        raise HTTPException(
+            422,
+            f"conditions[{i}].field '{cond['field']}' is not a supported content field. "
+            f"Valid values: {sorted(CONTENT_FIELDS)}",
+        )
+    if cond["operator"] not in CONTENT_OPERATORS:
+        raise HTTPException(
+            422,
+            f"conditions[{i}].operator '{cond['operator']}' is not a supported content operator. "
+            f"Valid values: {sorted(CONTENT_OPERATORS)}",
+        )
+    if cond["operator"] in ("length_gt", "length_lt"):
+        try:
+            float(cond["value"])
+        except (TypeError, ValueError):
+            raise HTTPException(
+                422, f"conditions[{i}].value must be a number for operator '{cond['operator']}'"
+            )
+    if "case_sensitive" in cond and not isinstance(cond["case_sensitive"], bool):
+        raise HTTPException(422, f"conditions[{i}].case_sensitive must be a boolean")
+
+
 def _validate_config(config: dict) -> None:
     """Raise HTTPException(422) if the detector config is structurally invalid."""
     name = config.get("detector_name")
     if not name or not name.startswith("CUSTOM_"):
         raise HTTPException(422, "config.detector_name must start with CUSTOM_")
     if config.get("requires_content"):
-        raise HTTPException(422, "Cannot save a detector that requires content access")
+        raise HTTPException(
+            422,
+            "This description needs something outside the supported metrics/content "
+            "fields — see the 'reason' from /preview.",
+        )
 
     conditions = config.get("conditions")
     if not isinstance(conditions, list) or len(conditions) == 0:
         raise HTTPException(422, "config.conditions must be a non-empty list")
 
     for i, cond in enumerate(conditions):
-        for field in ("metric", "operator", "threshold"):
-            if field not in cond:
-                raise HTTPException(422, f"conditions[{i}] is missing required field '{field}'")
-        if cond["metric"] not in SUPPORTED_METRICS:
+        if not isinstance(cond, dict):
+            raise HTTPException(422, f"conditions[{i}] must be an object")
+        if "field" in cond:
+            _validate_content_condition(cond, i)
+        elif "metric" in cond:
+            _validate_metric_condition(cond, i)
+        else:
             raise HTTPException(
-                422,
-                f"conditions[{i}].metric '{cond['metric']}' is not a supported metric. "
-                f"Valid values: {sorted(SUPPORTED_METRICS)}",
+                422, f"conditions[{i}] must have either 'metric' (numeric) or 'field' (content)"
             )
-        if cond["operator"] not in _VALID_OPERATORS:
-            raise HTTPException(
-                422,
-                f"conditions[{i}].operator '{cond['operator']}' is invalid. "
-                f"Valid operators: {sorted(_VALID_OPERATORS)}",
-            )
-        try:
-            float(cond["threshold"])
-        except (TypeError, ValueError):
-            raise HTTPException(422, f"conditions[{i}].threshold must be a number")
 
 
 @router.post("/preview")

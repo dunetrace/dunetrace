@@ -396,7 +396,7 @@ List all fixes that have been applied for an agent's signals, with type, deliver
 
 ### `trigger_explain`
 
-Trigger root-cause analysis for a signal, built natively from the run's own stored events — no Langfuse required. Returns a `fix_category`: `dunetrace_native` (a runtime policy Dunetrace can apply directly) or `customer_code` (a prompt/code diff you apply yourself, or push to a connected external store like Langfuse).
+Trigger root-cause analysis for a signal, built natively from the run's own stored events — no external tracing system required. Returns a `fix_category`: `dunetrace_native` (a runtime policy Dunetrace can apply directly) or `customer_code` (a prompt/code diff you apply yourself, or via a GitHub PR for `code_change` fixes).
 
 **Note:** Makes an LLM call — may take 5–15 seconds.
 

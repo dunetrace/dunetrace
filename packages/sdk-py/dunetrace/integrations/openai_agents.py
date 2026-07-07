@@ -22,7 +22,7 @@ Usage::
     result = Runner.run_sync(agent, "What is the capital of France?")
 
 ``add_dunetrace_processor`` registers the processor alongside any existing ones
-(e.g. the default OpenAI exporter), so it composes with Langfuse, Logfire, etc.
+(e.g. the default OpenAI exporter), so it composes with other trace processors.
 To run it as the *only* processor, build a ``DunetraceTracingProcessor`` and
 pass it to ``agents.set_trace_processors([...])`` yourself.
 

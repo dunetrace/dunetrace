@@ -2,7 +2,7 @@
 
 Runtime observability for AI agents. Detects tool loops, cost spikes, context bloat, and 14 more failure patterns — automatically, on every run.
 
-Zero runtime dependencies. Works with any Node.js AI framework. Node 22+.
+Zero runtime dependencies by default. Works with any Node.js AI framework. Node 22+. (Durable retry is opt-in and adds one optional peer dependency — see [Durable retry](#durable-retry).)
 
 ## Install
 
@@ -114,10 +114,6 @@ function myHelper() {
 dt.markDeploy("my-agent", "v1.4.2", { env: "production", commit: "abc1234" });
 ```
 
-## Langfuse integration (optional)
-
-Pass a shared UUID as `runId` so a Dunetrace run and a Langfuse trace share one ID — jump straight from a detected signal to the full Langfuse trace, and push fixes to a Langfuse-managed prompt in one click. Root-cause analysis itself doesn't require this — it's native. Full example: [examples/langfuse_agent.ts](examples/langfuse_agent.ts) · [docs/integrate-langfuse.md](../../docs/integrate-langfuse.md).
-
 ## Vercel AI SDK integration
 
 Wrap `generateText` / `streamText` from the `ai` package — LLM steps and tool calls are tracked automatically inside `dt.run()`:
@@ -152,6 +148,36 @@ See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, N
 | `apiKey` | `""` | API key (required for production) |
 | `flushIntervalMs` | `200` | Background buffer drain interval (ms) |
 | `emitAsJson` | `false` | Loki NDJSON mode |
+| `emitter` | `HttpBatchEmitter` | Custom batch-shipping strategy — see [Durable retry](#durable-retry) |
+
+## Durable retry
+
+By default, a batch that fails to ship (backend down, network error) is dropped — same behavior as before this was made pluggable. `DurableRetryEmitter` wraps the default emitter to persist failed batches to a local SQLite queue instead, surviving a backend outage across process restarts:
+
+```ts
+import { Dunetrace, DurableRetryEmitter, HttpBatchEmitter } from "dunetrace";
+
+const dt = new Dunetrace({
+  endpoint: "https://ingest.dunetrace.com",
+  apiKey:   "dt_live_...",
+  emitter:  new DurableRetryEmitter(
+    new HttpBatchEmitter("https://ingest.dunetrace.com", "dt_live_...")
+  ),
+});
+```
+
+Requires the optional peer dependency `better-sqlite3` (`npm install better-sqlite3`) — its synchronous API matches this emitter's own single-threaded access pattern. If it isn't installed, or the queue file can't be created, `DurableRetryEmitter` degrades to "failed batches are dropped" (a warning is logged once) rather than crashing the host application.
+
+| Option | Default | Description |
+|---|---|---|
+| `queuePath` | `~/.dunetrace/queue-ts.db` | Also configurable via `DUNETRACE_QUEUE_PATH` env var. Deliberately a different filename from the Python SDK's `queue.db` — a mixed-language deployment sharing `~/.dunetrace/` can't have one SDK corrupt the other's queue file. |
+| `maxQueueEvents` | `100_000` | Oldest batches are evicted first once exceeded |
+| `maxQueueBytes` | `100 * 1024 * 1024` (100MB) | Whichever cap (events or bytes) is hit first triggers eviction |
+| `retryIntervalMs` | `30_000` | How often the backlog is retried, ± jitter |
+| `retryJitterMs` | `5_000` | Prevents a thundering herd if many instances reconnect together |
+| `maxBatchesPerRetry` | `50` | Backlog batches retried per `ship()` call, oldest first — stops at the first failure rather than skipping ahead, since order matters more than exhausting the backlog in one pass |
+
+Node.js only — there is no browser build of this SDK today (`engines.node >= 22`, CommonJS, no bundler target), so there's no IndexedDB fallback to reach for.
 
 ## Run API
 
@@ -160,39 +186,25 @@ See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, N
 | `run.llmCalled(model, promptTokens?)` | Before each LLM API call |
 | `run.llmResponded({ completionTokens?, latencyMs?, finishReason?, outputText? })` | After LLM responds |
 | `run.toolCalled(toolName, args?)` | Before each tool execution |
-| `run.toolResponded(toolName, success, outputLength?, latencyMs?, error?)` | After tool returns |
+| `run.toolResponded(toolName, success, outputLength?, latencyMs?, error?, output?)` | After tool returns |
 | `run.retrievalCalled(indexName, query?)` | Before vector search |
-| `run.retrievalResponded(indexName, resultCount, topScore?, latencyMs?)` | After retrieval returns |
+| `run.retrievalResponded(indexName, resultCount, topScore?, latencyMs?, content?)` | After retrieval returns |
 | `run.externalSignal(signalName, source?, meta?)` | Rate limits, cache misses, upstream errors |
 | `run.finalAnswer()` | When agent produces its final output |
-| `run.runId` | Read-only UUID — pass to Langfuse as the trace ID for correlation |
-
-## Data handling
-
-Content fields are sent to the backend over TLS as-is — content-aware
-detectors need to see what the agent actually said and did.
-
-| Field | Transmitted as |
-|---|---|
-| User input | `input_text` |
-| Tool arguments | `args` |
-| LLM outputs | `output` |
-| Error messages | `error` |
-| Retrieval queries | `query` |
-
-Token counts, latencies, step counts, and model names are sent as plain metadata.
+| `run.runId` | Read-only UUID — use to correlate with an external tracing system |
 
 ## What it detects
 
-17 structural detectors run on every completed run — no LLM, no configuration required.
+23 structural detectors run on every completed run — no LLM, no configuration required. Detection runs server-side (the same detector worker processes every agent's events regardless of source SDK), so additions here apply to TypeScript agents automatically. A few of the main ones:
 
 | Category | Detectors |
 |---|---|
-| Loops | `TOOL_LOOP` `TOOL_THRASHING` `RETRY_STORM` `LLM_TRUNCATION_LOOP` |
-| Cost & latency | `COST_SPIKE` `SESSION_LATENCY` `CONTEXT_BLOAT` `SLOW_STEP` |
-| Goal failures | `GOAL_ABANDONMENT` `TOOL_AVOIDANCE` `FIRST_STEP_FAILURE` `STEP_COUNT_INFLATION` |
-| Quality | `REASONING_STALL` `EMPTY_LLM_RESPONSE` `RAG_EMPTY_RETRIEVAL` `CASCADING_TOOL_FAILURE` |
+| Loops | `TOOL_LOOP` `RETRY_STORM` |
+| Cost & latency | `COST_SPIKE` `SESSION_LATENCY` |
 | Security | `PROMPT_INJECTION_SIGNAL` |
+| Silent degradation | `PREMATURE_TERMINATION` `RUNAWAY_ITERATION` |
+
+→ [docs/detectors.md](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md) for the full list of 23 detectors
 
 You can also define **custom detectors** in plain English from the dashboard or API. They run in shadow mode on every run and accumulate results before any alert fires. → [Custom detectors](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md#custom-detectors)
 
@@ -211,7 +223,7 @@ Dashboard → `http://localhost:3000` · Ingest → `http://localhost:8001`
 npm test
 ```
 
-101 tests, all offline — no running stack required.
+123 tests, all offline — no running stack required.
 
 ## Links
 

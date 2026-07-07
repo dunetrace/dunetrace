@@ -305,8 +305,8 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             # A real RunContext — the same object dt.run(...) yields. Routing
             # LLM/tool events through it below (instead of emitting AgentEvents
             # directly) is what makes add_policy()'d policies actually evaluate.
-            # Use the LangChain run_id as the Dunetrace run_id so it matches the
-            # Langfuse trace_id for the same run.
+            # Use the LangChain run_id as the Dunetrace run_id so it matches any
+            # other tracing system correlated to the same run.
             from dunetrace.run_context import RunContext
 
             dt_ctx = RunContext(

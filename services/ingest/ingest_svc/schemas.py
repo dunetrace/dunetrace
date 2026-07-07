@@ -70,3 +70,25 @@ class KeyCreateResponse(BaseModel):
     org_id: str
     org_name: str
     created_at: float = Field(default_factory=time.time)
+
+
+class PruneEventsRequest(BaseModel):
+    admin_key: str = Field(min_length=1)
+    retention_days: Optional[int] = None  # defaults to EVENT_RETENTION_DAYS if omitted
+
+
+class PruneEventsResponse(BaseModel):
+    partitions_dropped: int
+    retention_days: int
+
+
+class QuotaSetRequest(BaseModel):
+    admin_key: str = Field(min_length=1)
+    quota_pct: float = Field(gt=0, le=1)  # fraction of the key's rpm, e.g. 0.2 = 20%
+
+
+class QuotaResponse(BaseModel):
+    key_id: int
+    agent_id: str
+    quota_pct: float
+    is_override: bool  # False when quota_pct is the default, not an explicit override

@@ -1,6 +1,6 @@
 # Dunetrace SDK
 
-Runtime observability for AI agents. Detects tool loops, context bloat, prompt injection, and 14 other failure patterns in real-time — with a Slack alert while the run is still live.
+Runtime observability for AI agents. Detects tool loops, context bloat, prompt injection, and 20 other failure patterns in real-time — with a Slack alert while the run is still live.
 
 Zero external dependencies.
 
@@ -60,26 +60,18 @@ LangChain/LangGraph and CrewAI agents need zero manual callback wiring — see [
 
 ## What it detects
 
+23 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Detector                  | What it catches                                            | Severity    |
 | ------------------------- | ---------------------------------------------------------- | ----------- |
 | `TOOL_LOOP`               | Same tool called 3+ times in a 5-call window               | HIGH        |
-| `TOOL_THRASHING`          | Agent alternates between exactly two tools                 | HIGH        |
 | `RETRY_STORM`             | Same tool fails 3+ times in a row                          | HIGH        |
-| `LLM_TRUNCATION_LOOP`     | `finish_reason=length` fires 2+ times                      | HIGH        |
-| `EMPTY_LLM_RESPONSE`      | Zero-length output with `finish_reason=stop`               | HIGH        |
-| `CASCADING_TOOL_FAILURE`  | 3+ consecutive failures across 2+ distinct tools           | HIGH        |
-| `SLOW_STEP`               | Tool call >15s or LLM call >30s                            | MEDIUM/HIGH |
-| `TOOL_AVOIDANCE`          | Final answer without using available tools                 | MEDIUM      |
-| `GOAL_ABANDONMENT`        | Tool use stops, then 4+ consecutive LLM calls with no exit | MEDIUM      |
-| `CONTEXT_BLOAT`           | Prompt tokens grow 3× from first to last LLM call          | MEDIUM      |
-| `STEP_COUNT_INFLATION`    | Run used >2× the P75 step count for this agent             | MEDIUM      |
-| `FIRST_STEP_FAILURE`      | Error or empty output at step ≤2                           | MEDIUM      |
-| `REASONING_STALL`         | LLM:tool-call ratio ≥4× — reasoning without acting         | MEDIUM      |
-| `RAG_EMPTY_RETRIEVAL`     | Retrieval returned 0 results but agent answered anyway     | MEDIUM      |
 | `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns         | CRITICAL    |
 | `COST_SPIKE`              | Total tokens 3× above per-agent P75 baseline               | MEDIUM      |
-| `SESSION_LATENCY`         | Wall-clock run duration 3× above per-agent P75 baseline    | MEDIUM      |
+| `PREMATURE_TERMINATION`   | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
+| `RUNAWAY_ITERATION`       | Step or cost ceiling crossed with no completion signal      | HIGH/CRITICAL |
+
+→ [docs/detectors.md](../../docs/detectors.md) for the full list of 23 detectors
 
 
 ## Output modes

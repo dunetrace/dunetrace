@@ -19,6 +19,8 @@ from ingest_svc.db import (
     verify_api_key,
     create_api_key,
     fetch_policies,
+    get_agent_quota,
+    set_agent_quota,
 )
 from ingest_svc.schemas import (
     IngestRequest,
@@ -27,6 +29,10 @@ from ingest_svc.schemas import (
     DeployResponse,
     KeyCreateRequest,
     KeyCreateResponse,
+    PruneEventsRequest,
+    PruneEventsResponse,
+    QuotaSetRequest,
+    QuotaResponse,
 )
 
 logger = logging.getLogger("dunetrace.ingest")
@@ -43,8 +49,7 @@ async def _resolve_org_id(request: Request, api_key: str) -> str:
 
     Untrusted path (self-hosted): resolves org_id from the OSS api_keys table.
     Keys are org-scoped, not agent-scoped — a valid key may submit events for
-    any agent_id under its org, discovered on first ingest. See
-    docs/migrations/multi-tenancy-v0.5.0.md.
+    any agent_id under its org, discovered on first ingest.
     """
     if is_trusted(request):
         org_id = request.headers.get("x-org-id") or request.headers.get("x-customer-id", "")
@@ -131,6 +136,14 @@ async def mark_deploy(request: Request, body: DeployRequest) -> DeployResponse:
     )
 
 
+def _check_admin_key(supplied: str) -> None:
+    """Raises 403 unless `supplied` matches the ADMIN_API_KEY env var (which must
+    itself be set — an unset/empty env var never matches, closed by default)."""
+    admin_key = os.getenv("ADMIN_API_KEY", "")
+    if not admin_key or not secrets.compare_digest(supplied, admin_key):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
+
+
 @router.post(
     "/v1/keys",
     response_model=KeyCreateResponse,
@@ -140,15 +153,83 @@ async def mark_deploy(request: Request, body: DeployRequest) -> DeployResponse:
 )
 async def create_key(body: KeyCreateRequest) -> KeyCreateResponse:
     """Admin-only endpoint. Requires ADMIN_API_KEY env var to match body.admin_key."""
-    admin_key = os.getenv("ADMIN_API_KEY", "")
-    if not admin_key or not secrets.compare_digest(body.admin_key, admin_key):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
+    _check_admin_key(body.admin_key)
     name = body.org_name or body.org_id
     key = await create_api_key(body.org_id, org_name=name, rate_limit_rpm=body.rate_limit_rpm)
     logger.info(
         "API key created. org_id=%s org_name=%s rpm=%d", body.org_id, name, body.rate_limit_rpm
     )
     return KeyCreateResponse(key=key, org_id=body.org_id, org_name=name)
+
+
+@router.post(
+    "/admin/prune-events",
+    response_model=PruneEventsResponse,
+    summary="Manually run a retention pass (drop event partitions older than retention_days)",
+    include_in_schema=False,
+)
+async def prune_events(body: PruneEventsRequest) -> PruneEventsResponse:
+    """Admin-only endpoint. Requires ADMIN_API_KEY env var to match body.admin_key.
+
+    Runs the same retention pass as the daily background loop (see main.py's
+    _prune_loop) — for confirming a fix after the startup staleness warning, or
+    reclaiming space immediately rather than waiting for the next scheduled tick.
+    """
+    _check_admin_key(body.admin_key)
+    from ingest_svc.config import settings
+
+    retention_days = (
+        body.retention_days if body.retention_days is not None else settings.EVENT_RETENTION_DAYS
+    )
+    dropped = await get_event_store().prune_old_events(retention_days)
+    logger.info("Manual retention pass (via /admin/prune-events): %d partition(s) dropped", dropped)
+    return PruneEventsResponse(partitions_dropped=dropped, retention_days=retention_days)
+
+
+@router.get(
+    "/admin/keys/{key_id}/agents/{agent_id}/quota",
+    response_model=QuotaResponse,
+    summary="View this agent's rate-limit quota within its key's budget",
+    include_in_schema=False,
+)
+async def get_quota(key_id: int, agent_id: str, admin_key: str = Query(...)) -> QuotaResponse:
+    """Admin-only. key_id (not the raw key string — see /v1/keys's response) scopes
+    this to a single key, matching how the rate limiter itself enforces per-agent
+    sub-limits (see rate_limiter.py's module docstring)."""
+    _check_admin_key(admin_key)
+    from ingest_svc.rate_limiter import _DEFAULT_AGENT_QUOTA_PCT
+
+    override = await get_agent_quota(key_id, agent_id)
+    return QuotaResponse(
+        key_id=key_id,
+        agent_id=agent_id,
+        quota_pct=override if override is not None else _DEFAULT_AGENT_QUOTA_PCT,
+        is_override=override is not None,
+    )
+
+
+@router.put(
+    "/admin/keys/{key_id}/agents/{agent_id}/quota",
+    response_model=QuotaResponse,
+    summary="Set this agent's rate-limit quota within its key's budget",
+    include_in_schema=False,
+)
+async def set_quota(key_id: int, agent_id: str, body: QuotaSetRequest) -> QuotaResponse:
+    """Admin-only. Overrides the default 20% share (see rate_limiter.py's
+    _DEFAULT_AGENT_QUOTA_PCT) for this one (key_id, agent_id) pair. Takes effect
+    within _CACHE_TTL seconds — the rate limiter caches quota lookups the same
+    way it caches rate_limit_rpm, not read fresh on every request."""
+    _check_admin_key(body.admin_key)
+    try:
+        await set_agent_quota(key_id, agent_id, body.quota_pct)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    logger.info(
+        "Agent quota set. key_id=%d agent_id=%s quota_pct=%s", key_id, agent_id, body.quota_pct
+    )
+    return QuotaResponse(
+        key_id=key_id, agent_id=agent_id, quota_pct=body.quota_pct, is_override=True
+    )
 
 
 async def _persist(events: list, batch_id: str, org_id: str) -> None:

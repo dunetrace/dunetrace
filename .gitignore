@@ -12,6 +12,7 @@ build/
 pip-log.txt
 pip-delete-this-directory.txt
 .installed.cfg
+config
 
 # Virtual environments
 .venv/

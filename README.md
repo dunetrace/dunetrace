@@ -96,7 +96,6 @@ cd packages/sdk-py
 python examples/basic_agent.py                          # No LLM calls
 SCENARIO=tool_loop python examples/langchain_agent.py   # TOOL_LOOP via LangChain
 SCENARIO=failures python examples/decorator_agent.py    # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
-SCENARIO=tool_loop python examples/langfuse_agent.py    # TOOL_LOOP + Langfuse trace correlation
 ```
 
 Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
@@ -105,31 +104,20 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ## Detectors
 
-17 detectors run on every completed run — no configuration, no LLM.
+23 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Signal | What it catches |
 |---|---|
 | `TOOL_LOOP` | Same tool called repeatedly with identical args |
-| `TOOL_THRASHING` | Oscillating between two tools, unable to commit |
 | `RETRY_STORM` | Tool failing, agent retrying it repeatedly |
-| `CASCADING_TOOL_FAILURE` | Multiple different tools failing in sequence |
-| `CONTEXT_BLOAT` | Prompt tokens growing unsustainably across LLM calls |
-| `LLM_TRUNCATION_LOOP` | Model output truncated repeatedly |
-| `GOAL_ABANDONMENT` | Agent stopped using tools before finishing |
-| `REASONING_STALL` | Too many LLM calls per tool call — agent deliberating in circles |
-| `TOOL_AVOIDANCE` | Agent answered without using any tools |
-| `RAG_EMPTY_RETRIEVAL` | Retrieval returned nothing, agent answered anyway |
-| `EMPTY_LLM_RESPONSE` | Model returned an empty response |
-| `FIRST_STEP_FAILURE` | Failed on the first step — config or setup issue |
-| `SLOW_STEP` | Single step latency well above threshold |
-| `STEP_COUNT_INFLATION` | Far more steps than the agent's baseline |
-| `SESSION_LATENCY` | Wall-clock run time anomalously long vs per-agent baseline |
 | `COST_SPIKE` | Total token consumption unusually high vs per-agent baseline |
 | `PROMPT_INJECTION_SIGNAL` | Input matched adversarial injection patterns |
+| `PREMATURE_TERMINATION` | Agent claims success right after a tool call it made actually failed |
+| `RUNAWAY_ITERATION` | Step or cost ceiling crossed with no completion signal |
 
 Each alert includes: what fired, why it matters, a concrete fix, and a rate context line (first occurrence / recurring / systemic).
 
-→ [docs/detectors.md](docs/detectors.md)
+→ [docs/detectors.md](docs/detectors.md) for the full list of 23 detectors
 
 **Custom detectors** — write a detector in plain English. Dunetrace translates it to a structured condition set, runs it in shadow mode against real traffic, and lets you review the fire rate before any alert fires. In the dashboard: **Config → Custom detectors → Add detector**.
 
@@ -165,11 +153,9 @@ A weekly digest (Monday 9am UTC) summarises top failure types and systemic patte
 Root-cause analysis is native — no third-party tracer required. Click **Explain +** on any alert and Dunetrace analyzes the run's own stored events and returns a specific cause and fix. Every fix is one of two kinds:
 
 - **Policy fixes** (tool loops, retry storms, runaway step counts) → Dunetrace applies a runtime guardrail directly, no code change needed
-- **Prompt / code fixes** → a diff you copy in, or push in one click to a connected prompt store (Langfuse today)
+- **Prompt / code fixes** → a diff you copy in, or a one-click draft PR on GitHub for code/infra changes
 
 Fix effectiveness is tracked automatically.
-
-connect Langfuse: [docs/integrate-langfuse.md](docs/integrate-langfuse.md)
 
 ---
 
@@ -244,27 +230,13 @@ pip install dunetrace-mcp
 
 ---
 
-## Data handling
-
-Prompts, tool arguments, and model outputs are sent to the backend over TLS and
-stored there — content-aware detectors (prompt injection in retrieved documents,
-tool argument fabrication, silent failures) need to see what the agent actually
-said and did. Trust is handled the way any SaaS handles it: encryption in
-transit and at rest, SOC2, no training on customer data. If you need an
-air-gapped deployment, self-host — same code, same detectors, your
-infrastructure.
-
-→ [docs/architecture.md](docs/architecture.md)
-
----
-
 ## Architecture
 
 ```
 Agent Code
   └─► Dunetrace SDK        (raw content → ingest events)
         └─► Ingest API      (POST /v1/ingest → Postgres)
-                ├─► Detector       (poll → 17 detectors → signals)
+                ├─► Detector       (poll → 23 detectors → signals)
                 ├─► Alerts         (poll → explain → Slack / webhook)
                 └─► Customer API   (runs, signals, explanations → dashboard)
 ```
@@ -288,7 +260,6 @@ Agent Code
 - [smolagents (Hugging Face)](docs/integrate-smolagents.md)
 - [TypeScript / JavaScript](docs/integrate-typescript-agent.md)
 - [Langdock](docs/integrate-langdock.md)
-- [Langfuse](docs/integrate-langfuse.md)
 - [Policies](docs/policies.md)
 - [MCP server (Claude Code, Cursor, Codex)](docs/mcp-server.md)
 

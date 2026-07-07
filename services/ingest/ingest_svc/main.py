@@ -28,6 +28,7 @@ from ingest_svc.db import (
     get_event_store,
     get_pool,
     init_pool,
+    retention_looks_stale,
     verify_api_key,
 )
 from ingest_svc.rate_limiter import _HEARTBEAT_INTERVAL, get_limiter
@@ -61,16 +62,27 @@ async def _rate_limit_heartbeat_loop() -> None:
         await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
 
-async def _run_prune_once() -> None:
+async def _run_prune_once() -> int:
     """One retention pass. A DB error here must not kill the loop — retention
     is enforced on a best-effort basis, and a transient failure just means
-    it's retried on the next tick."""
+    it's retried on the next tick. Returns partitions dropped (0 on failure) —
+    used by the manual /admin/prune-events endpoint to report back to the caller.
+
+    Row-count and per-partition detail are logged inside prune_old_events()
+    itself, where the data is already at hand (see db/postgres.py) — this
+    wrapper only adds wall-clock timing, since that's specific to how often
+    this loop runs, not to the prune logic itself.
+    """
+    t0 = time.monotonic()
     try:
         dropped = await get_event_store().prune_old_events(settings.EVENT_RETENTION_DAYS)
+        elapsed_s = time.monotonic() - t0
         if dropped:
-            logger.info("Pruned %d stale event partition(s)", dropped)
+            logger.info("Retention pass took %.2fs, dropped %d partition(s)", elapsed_s, dropped)
+        return dropped
     except Exception as exc:
         logger.warning("prune_old_events failed: %s", exc)
+        return 0
 
 
 async def _prune_loop() -> None:
@@ -91,6 +103,20 @@ async def lifespan(app: FastAPI):
     logger.info("Starting — auth_mode=%s", settings.AUTH_MODE)
     await init_pool()
     await ensure_schema()
+
+    try:
+        if await retention_looks_stale(settings.EVENT_RETENTION_DAYS):
+            logger.warning(
+                "Retention check: a partition already exceeds EVENT_RETENTION_DAYS=%d at "
+                "startup — either this is the first startup after enabling retention on "
+                "older data (harmless, the prune loop below will catch up momentarily), or "
+                "the retention loop has been silently failing across restarts. Watch for "
+                "'Retention pass' log lines after startup to confirm it catches up.",
+                settings.EVENT_RETENTION_DAYS,
+            )
+    except Exception as exc:
+        logger.warning("Retention staleness check failed (non-fatal): %s", exc)
+
     evict_task = asyncio.create_task(_evict_loop())
     heartbeat_task = asyncio.create_task(_rate_limit_heartbeat_loop())
     prune_task = asyncio.create_task(_prune_loop())
@@ -132,8 +158,7 @@ def create_app() -> FastAPI:
     # Dev/direct path: resolves api_key from body → org_id via DB lookup.
     #
     # x-org-id is the current header name; x-customer-id is accepted as a fallback
-    # for callers running an older cloud gateway build (pre-v0.5.0 naming) — see
-    # docs/migrations/multi-tenancy-v0.5.0.md.
+    # for callers running an older cloud gateway build (pre-v0.5.0 naming).
     @app.middleware("http")
     async def set_org_context(request: Request, call_next):
         if is_trusted(request):
@@ -217,19 +242,27 @@ def create_app() -> FastAPI:
         import json as _json
 
         api_key = ""
+        agent_id: str | None = None
         if request.method == "POST" and request.url.path in ("/v1/ingest", "/v1/deploy"):
             try:
                 body_bytes = await request.body()
                 data = _json.loads(body_bytes) if body_bytes else {}
                 api_key = data.get("api_key", "") or ""
+                agent_id = data.get("agent_id") or None
             except Exception:
                 pass
         elif request.method == "POST" and request.url.path == "/v1/otlp/traces":
             # OTLP auth is a Bearer header, not a JSON body field — and the
             # body may be gzip-compressed protobuf, which there's no reason
-            # to read/decode here just to find the rate-limit bucket.
+            # to read/decode here just to find the rate-limit bucket. Agent
+            # identity for per-agent sub-limiting is the same story: the
+            # X-Dunetrace-Agent-Id header override (see otlp.py/CLAUDE.md) is
+            # free to read, but the service.name resource-attribute fallback
+            # would require decoding the body — skipped here, so an OTLP
+            # trace relying on service.name alone only gets key-level limiting.
             auth = request.headers.get("Authorization", "")
             api_key = auth[7:].strip() if auth.startswith("Bearer ") else ""
+            agent_id = request.headers.get("X-Dunetrace-Agent-Id") or None
 
         if request.url.path in ("/v1/ingest", "/v1/deploy", "/v1/otlp/traces"):
             bucket = (
@@ -238,13 +271,19 @@ def create_app() -> FastAPI:
                 else (request.client.host if request.client else "unknown")
             )
             limiter = get_limiter()
-            allowed, retry_after = await limiter.is_allowed(bucket)
-            if not allowed:
-                logger.warning("Rate limit exceeded. retry_after=%ds", retry_after)
+            result = await limiter.is_allowed(bucket, agent_id)
+            if not result.allowed:
+                logger.warning("Rate limit exceeded. retry_after=%ds", result.retry_after)
+                headers = {
+                    "Retry-After": str(result.retry_after),
+                    "X-RateLimit-Key-Remaining": str(result.key_remaining),
+                }
+                if result.agent_remaining is not None:
+                    headers["X-RateLimit-Agent-Remaining"] = str(result.agent_remaining)
                 return JSONResponse(
                     status_code=429,
                     content={"detail": "Rate limit exceeded."},
-                    headers={"Retry-After": str(retry_after)},
+                    headers=headers,
                 )
 
         t = time.monotonic()

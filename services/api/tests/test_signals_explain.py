@@ -1,11 +1,11 @@
 """
-Endpoint-level tests for explain_signal and apply_fix (services/api/api_svc/
-routers/signals.py) — the D10 rewrite that made root-cause analysis native
-(no Langfuse required) and split fix handling into dunetrace_native
-(policy, auto-apply) vs customer_code (diff, optional external-store push).
+Endpoint-level tests for explain_signal (services/api/api_svc/routers/signals.py)
+— root-cause analysis is fully native, and fix handling splits into
+dunetrace_native (policy, always auto-applicable) vs customer_code (diff,
+manual apply except code_change fixes which can open a GitHub PR).
 
 Calls the route functions directly (this codebase's established pattern —
-see test_api.py) with mocked DB/LLM/Langfuse calls. No network, no DB.
+see test_api.py) with mocked DB/LLM calls. No network, no DB.
 """
 
 from __future__ import annotations
@@ -15,7 +15,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import HTTPException
 
-from api_svc.routers.signals import ApplyFixRequest, ExplainRequest, apply_fix, explain_signal
+from api_svc.routers.signals import (
+    OpenPRRequest,
+    RecordCopyRequest,
+    explain_signal,
+    open_pr,
+    record_copy,
+)
 
 
 def _signal(
@@ -46,11 +52,11 @@ def _llm_result(root_cause="because X", fix_content="add this", fix_patch="+ add
     return {"root_cause": root_cause, "fix_content": fix_content, "fix_patch": fix_patch}
 
 
-def _settings_mock(*, anthropic_key="key", langfuse_configured=False):
+def _settings_mock(*, anthropic_key="key", github_configured=False):
     s = MagicMock()
     s.ANTHROPIC_API_KEY = anthropic_key
     s.OPENAI_API_KEY = None
-    s.langfuse_configured = langfuse_configured
+    s.github_configured = github_configured
     return s
 
 
@@ -58,7 +64,7 @@ class TestExplainSignalGating(unittest.IsolatedAsyncioTestCase):
     async def test_no_llm_key_returns_503(self):
         with patch("api_svc.routers.signals.settings", _settings_mock(anthropic_key=None)):
             with self.assertRaises(HTTPException) as ctx:
-                await explain_signal(1, ExplainRequest(), org_id="org-1")
+                await explain_signal(1, org_id="org-1")
         self.assertEqual(ctx.exception.status_code, 503)
 
     async def test_signal_not_found_returns_404(self):
@@ -67,20 +73,21 @@ class TestExplainSignalGating(unittest.IsolatedAsyncioTestCase):
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=None)),
         ):
             with self.assertRaises(HTTPException) as ctx:
-                await explain_signal(1, ExplainRequest(), org_id="org-1")
+                await explain_signal(1, org_id="org-1")
         self.assertEqual(ctx.exception.status_code, 404)
 
-    async def test_no_langfuse_configured_does_not_block_explain(self):
-        """The core D10 behavior change: explain works with zero Langfuse setup."""
+    async def test_explain_works_with_no_events(self):
+        """Root-cause analysis never depends on any external system — only on
+        this run's own stored events, which may be sparse or absent."""
         with (
-            patch("api_svc.routers.signals.settings", _settings_mock(langfuse_configured=False)),
+            patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=_signal())),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
             patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
         ):
-            result = await explain_signal(1, ExplainRequest(), org_id="org-1")
+            result = await explain_signal(1, org_id="org-1")
         self.assertEqual(result["root_cause"], "because X")
-        self.assertIsNone(result["langfuse_prompt_name"])
+        self.assertNotIn("langfuse_prompt_name", result)
 
 
 class TestExplainSignalDunetraceNative(unittest.IsolatedAsyncioTestCase):
@@ -94,7 +101,7 @@ class TestExplainSignalDunetraceNative(unittest.IsolatedAsyncioTestCase):
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
             patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
         ):
-            result = await explain_signal(1, ExplainRequest(), org_id="org-1")
+            result = await explain_signal(1, org_id="org-1")
 
         self.assertEqual(result["fix_category"], "dunetrace_native")
         self.assertEqual(result["fix_type"], "policy")
@@ -105,83 +112,82 @@ class TestExplainSignalDunetraceNative(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["suggested_policy"]["agent_id"], "agent-1")
 
-    async def test_dunetrace_native_never_blocked_regardless_of_langfuse(self):
-        """A Policy is Dunetrace's own config — apply_blocked must be False
-        even when no external store is connected at all."""
+    async def test_dunetrace_native_always_unblocked(self):
+        """A Policy is Dunetrace's own config — apply_blocked must be False,
+        no external system involved at all."""
         signal = _signal(failure_type="STEP_COUNT_INFLATION", evidence={"current_steps": 12})
         with (
-            patch("api_svc.routers.signals.settings", _settings_mock(langfuse_configured=False)),
+            patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
             patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
         ):
-            result = await explain_signal(1, ExplainRequest(), org_id="org-1")
+            result = await explain_signal(1, org_id="org-1")
         self.assertFalse(result["apply_blocked"])
 
 
 class TestExplainSignalCustomerCode(unittest.IsolatedAsyncioTestCase):
-    async def test_prompt_addition_blocked_when_no_store_connected(self):
-        # get_connected_prompt_store() reads api_svc.config.settings via its
-        # own deferred import — a separate reference from
-        # api_svc.routers.signals.settings (bound at that module's import
-        # time), and NOT patched by mocking the latter alone. Both must be
-        # patched or this test is at the mercy of the real environment's
-        # .env (which has real Langfuse credentials configured for this
-        # repo's dev stack).
+    async def test_prompt_addition_is_always_apply_blocked(self):
+        """No external prompt store exists — a prompt_addition fix is always
+        a diff to copy in manually."""
         signal = _signal(failure_type="TOOL_AVOIDANCE")
         with (
-            patch("api_svc.routers.signals.settings", _settings_mock(langfuse_configured=False)),
-            patch("api_svc.config.settings", _settings_mock(langfuse_configured=False)),
+            patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
             patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
         ):
-            result = await explain_signal(1, ExplainRequest(), org_id="org-1")
+            result = await explain_signal(1, org_id="org-1")
 
         self.assertEqual(result["fix_category"], "customer_code")
         self.assertEqual(result["fix_type"], "prompt_addition")
-        self.assertTrue(result["apply_blocked"])  # no store connected
+        self.assertTrue(result["apply_blocked"])
 
-    async def test_prompt_addition_unblocked_when_store_connected(self):
-        signal = _signal(failure_type="TOOL_AVOIDANCE")
-        with (
-            patch("api_svc.routers.signals.settings", _settings_mock(langfuse_configured=True)),
-            patch("api_svc.config.settings", _settings_mock(langfuse_configured=True)),
-            patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
-            patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
-            patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
-            patch(
-                "api_svc.langfuse_client.fetch_langfuse_trace",
-                AsyncMock(return_value={"observations": []}),
-            ),
-        ):
-            result = await explain_signal(1, ExplainRequest(), org_id="org-1")
-
-        self.assertFalse(result["apply_blocked"])
-
-    async def test_code_change_type_always_blocked_even_with_store_connected(self):
+    async def test_code_change_blocked_when_github_not_configured(self):
         signal = _signal(failure_type="CONTEXT_BLOAT")
         with (
-            patch("api_svc.routers.signals.settings", _settings_mock(langfuse_configured=True)),
+            patch("api_svc.routers.signals.settings", _settings_mock(github_configured=False)),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
             patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
-            patch(
-                "api_svc.langfuse_client.fetch_langfuse_trace",
-                AsyncMock(return_value={"observations": []}),
-            ),
         ):
-            result = await explain_signal(1, ExplainRequest(), org_id="org-1")
+            result = await explain_signal(1, org_id="org-1")
 
         self.assertEqual(result["fix_type"], "code_change")
         self.assertTrue(result["apply_blocked"])
 
-    async def test_langfuse_trace_not_found_degrades_gracefully(self):
-        """A missing Langfuse trace must not fail the whole request — explain
-        already has native events regardless."""
+    async def test_code_change_unblocked_when_github_configured(self):
+        """code_change has its own one-click path — POST .../open-pr — gated
+        only on GitHub being configured."""
+        signal = _signal(failure_type="CONTEXT_BLOAT")
+        with (
+            patch("api_svc.routers.signals.settings", _settings_mock(github_configured=True)),
+            patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
+            patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
+            patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
+        ):
+            result = await explain_signal(1, org_id="org-1")
+
+        self.assertEqual(result["fix_type"], "code_change")
+        self.assertFalse(result["apply_blocked"])
+
+    async def test_no_auto_apply_always_blocked(self):
+        signal = _signal(failure_type="PROMPT_INJECTION_SIGNAL")
+        with (
+            patch("api_svc.routers.signals.settings", _settings_mock(github_configured=True)),
+            patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
+            patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
+            patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
+        ):
+            result = await explain_signal(1, org_id="org-1")
+
+        self.assertEqual(result["fix_type"], "no_auto_apply")
+        self.assertTrue(result["apply_blocked"])
+
+    async def test_source_is_native_when_events_exist(self):
         signal = _signal(failure_type="TOOL_AVOIDANCE")
         with (
-            patch("api_svc.routers.signals.settings", _settings_mock(langfuse_configured=True)),
+            patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch(
                 "api_svc.routers.signals.get_run_detail",
@@ -192,15 +198,9 @@ class TestExplainSignalCustomerCode(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
             patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
-            patch(
-                "api_svc.langfuse_client.fetch_langfuse_trace",
-                AsyncMock(side_effect=LookupError("not found")),
-            ),
         ):
-            result = await explain_signal(1, ExplainRequest(), org_id="org-1")
-
+            result = await explain_signal(1, org_id="org-1")
         self.assertEqual(result["source"], "native")
-        self.assertIsNone(result["langfuse_prompt_name"])
 
     async def test_source_is_signal_only_when_no_native_events(self):
         signal = _signal(failure_type="TOOL_AVOIDANCE")
@@ -210,50 +210,83 @@ class TestExplainSignalCustomerCode(unittest.IsolatedAsyncioTestCase):
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value=None)),
             patch("api_svc.routers.signals._call_llm", AsyncMock(return_value=_llm_result())),
         ):
-            result = await explain_signal(1, ExplainRequest(), org_id="org-1")
+            result = await explain_signal(1, org_id="org-1")
         self.assertEqual(result["source"], "signal_only")
 
 
-class TestApplyFix(unittest.IsolatedAsyncioTestCase):
-    async def test_no_store_connected_returns_503(self):
-        req = ApplyFixRequest(fix_content="x", langfuse_prompt_name="p")
+class TestRecordCopy(unittest.IsolatedAsyncioTestCase):
+    async def test_signal_not_found_returns_404(self):
+        with patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=None)):
+            with self.assertRaises(HTTPException) as ctx:
+                await record_copy(1, RecordCopyRequest(fix_content="x"), org_id="org-1")
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    async def test_records_fix_with_clipboard_applied_via(self):
         with (
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=_signal())),
-            patch("api_svc.prompt_stores.get_connected_prompt_store", return_value=None),
+            patch("api_svc.routers.signals.record_fix", AsyncMock(return_value=7)) as record_mock,
         ):
+            result = await record_copy(1, RecordCopyRequest(fix_content="new text"), org_id="org-1")
+
+        record_mock.assert_awaited_once_with(
+            org_id="org-1",
+            signal_id=1,
+            run_id="run-1",
+            fix_content="new text",
+            applied_via="clipboard",
+        )
+        self.assertEqual(result["fix_id"], 7)
+
+
+def _pr_settings_mock(*, github_configured=True):
+    s = MagicMock()
+    s.github_configured = github_configured
+    return s
+
+
+def _open_pr_body():
+    return OpenPRRequest(root_cause="because X", fix_content="add this", fix_patch="+ add this")
+
+
+class TestOpenPR(unittest.IsolatedAsyncioTestCase):
+    async def test_github_not_configured_returns_503(self):
+        with patch("api_svc.routers.signals.settings", _pr_settings_mock(github_configured=False)):
             with self.assertRaises(HTTPException) as ctx:
-                await apply_fix(1, req, org_id="org-1")
+                await open_pr(1, _open_pr_body(), org_id="org-1")
         self.assertEqual(ctx.exception.status_code, 503)
 
-    async def test_prompt_injection_blocked_regardless_of_store(self):
-        signal = _signal(failure_type="PROMPT_INJECTION_SIGNAL")
-        req = ApplyFixRequest(fix_content="x", langfuse_prompt_name="p")
-        with patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)):
+    async def test_signal_not_found_returns_404(self):
+        with (
+            patch("api_svc.routers.signals.settings", _pr_settings_mock()),
+            patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=None)),
+        ):
             with self.assertRaises(HTTPException) as ctx:
-                await apply_fix(1, req, org_id="org-1")
+                await open_pr(1, _open_pr_body(), org_id="org-1")
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    async def test_prompt_injection_blocked_even_when_github_configured(self):
+        """open-pr is now the only auto-apply endpoint left — it must carry
+        the same no_auto_apply guard the removed apply-fix endpoint used to."""
+        signal = _signal(failure_type="PROMPT_INJECTION_SIGNAL")
+        with (
+            patch("api_svc.routers.signals.settings", _pr_settings_mock()),
+            patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                await open_pr(1, _open_pr_body(), org_id="org-1")
         self.assertEqual(ctx.exception.status_code, 403)
 
-    async def test_store_connected_pushes_fix_and_records_it(self):
-        req = ApplyFixRequest(fix_content="new text", langfuse_prompt_name="my-prompt")
-        fake_store = MagicMock()
-        fake_store.push_fix = AsyncMock(
-            return_value={
-                "new_version": 4,
-                "prompt_url": "https://x/prompts/my-prompt",
-                "old_text": "old",
-                "new_text": "old\n\nnew text",
-            }
-        )
+    async def test_creates_pr_and_records_fix(self):
+        signal = _signal(failure_type="CONTEXT_BLOAT")
+        pr_result = {"pr_url": "https://github.com/o/r/pull/1", "pr_number": 1, "branch": "b"}
         with (
-            patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=_signal())),
-            patch("api_svc.prompt_stores.get_connected_prompt_store", return_value=fake_store),
-            patch("api_svc.routers.signals.record_fix", AsyncMock(return_value=99)),
+            patch("api_svc.routers.signals.settings", _pr_settings_mock()),
+            patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
+            patch("api_svc.github_client.create_fix_pr", AsyncMock(return_value=pr_result)),
+            patch("api_svc.routers.signals.record_fix", AsyncMock(return_value=5)),
         ):
-            result = await apply_fix(1, req, org_id="org-1")
-
-        fake_store.push_fix.assert_awaited_once_with("my-prompt", "new text")
-        self.assertEqual(result["fix_id"], 99)
-        self.assertEqual(result["new_version"], 4)
+            result = await open_pr(1, _open_pr_body(), org_id="org-1")
+        self.assertEqual(result["pr_number"], 1)
 
 
 if __name__ == "__main__":

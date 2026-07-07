@@ -28,7 +28,7 @@ export interface RunOptions {
   userInput?:    string;
   parentRunId?:  string;
   /** Pre-set the run UUID. Use this to correlate a Dunetrace run with an external
-   *  tracing system (e.g. Langfuse) that was given the same ID. */
+   *  tracing system that was given the same ID. */
   runId?:        string;
 }
 
@@ -50,4 +50,9 @@ export interface ClientOptions {
   emitAsJson?:      boolean;
   bufferSize?:      number;
   timeoutMs?:       number;
+  /** Custom batch-shipping strategy — see emitters.ts. Defaults to
+   *  HttpBatchEmitter (same POST-to-ingest-API behavior as before this was
+   *  made pluggable). Pass a DurableRetryEmitter wrapping HttpBatchEmitter to
+   *  survive a backend outage across process restarts. */
+  emitter?: import("./emitters.js").BatchEmitter;
 }

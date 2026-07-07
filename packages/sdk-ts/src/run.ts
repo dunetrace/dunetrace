@@ -55,12 +55,14 @@ export class DunetraceRun {
     outputLength = 0,
     latencyMs    = 0,
     error?:      string,
+    output       = "",
   ): void {
     const payload: Record<string, unknown> = {
       tool_name:     toolName,
       success,
       output_length: outputLength,
       latency_ms:    latencyMs,
+      output,
     };
     if (error) payload["error"] = error;
     this._emit("tool.responded", payload, false);
@@ -80,12 +82,14 @@ export class DunetraceRun {
     resultCount: number,
     topScore?:   number,
     latencyMs    = 0,
+    content      = "",
   ): void {
     this._emit("retrieval.responded", {
       index_name:   indexName,
       result_count: resultCount,
       top_score:    topScore ?? null,
       latency_ms:   latencyMs,
+      content,
     }, false);
   }
 

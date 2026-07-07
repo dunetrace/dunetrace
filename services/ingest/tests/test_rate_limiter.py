@@ -32,14 +32,14 @@ class TestRateLimiterAllow(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_request_always_allowed(self):
         limiter = RateLimiter(default_rpm=10)
-        allowed, retry_after = await limiter.is_allowed("key1")
+        allowed, retry_after, *_ = await limiter.is_allowed("key1")
         self.assertTrue(allowed)
         self.assertEqual(retry_after, 0)
 
     async def test_requests_within_limit_are_allowed(self):
         limiter = RateLimiter(default_rpm=5)
         for _ in range(5):
-            allowed, _ = await limiter.is_allowed("key1")
+            allowed, *_ = await limiter.is_allowed("key1")
             self.assertTrue(allowed)
 
     async def test_request_exceeding_limit_is_denied(self):
@@ -47,27 +47,27 @@ class TestRateLimiterAllow(unittest.IsolatedAsyncioTestCase):
         for _ in range(3):
             await limiter.is_allowed("key1")
         # 4th request should be denied
-        allowed, retry_after = await limiter.is_allowed("key1")
+        allowed, retry_after, *_ = await limiter.is_allowed("key1")
         self.assertFalse(allowed)
         self.assertGreater(retry_after, 0)
 
     async def test_retry_after_is_positive_when_denied(self):
         limiter = RateLimiter(default_rpm=1)
         await limiter.is_allowed("key1")
-        _, retry_after = await limiter.is_allowed("key1")
+        _, retry_after, *_ = await limiter.is_allowed("key1")
         self.assertGreaterEqual(retry_after, 1)
 
     async def test_different_keys_are_independent(self):
         limiter = RateLimiter(default_rpm=1)
         await limiter.is_allowed("key1")
         # key1 is now exhausted, but key2 should still be allowed
-        allowed, _ = await limiter.is_allowed("key2")
+        allowed, *_ = await limiter.is_allowed("key2")
         self.assertTrue(allowed)
 
     async def test_single_rpm_limits_to_one_per_window(self):
         limiter = RateLimiter(default_rpm=1)
-        ok1, _ = await limiter.is_allowed("k")
-        ok2, _ = await limiter.is_allowed("k")
+        ok1, *_ = await limiter.is_allowed("k")
+        ok2, *_ = await limiter.is_allowed("k")
         self.assertTrue(ok1)
         self.assertFalse(ok2)
 
@@ -87,7 +87,7 @@ class TestRateLimiterSlidingWindow(unittest.IsolatedAsyncioTestCase):
         # Back to real time — window should have slid, requests should be allowed again
         with patch("ingest_svc.rate_limiter.time") as mock_time:
             mock_time.monotonic.return_value = now
-            allowed, _ = await limiter.is_allowed("key1")
+            allowed, *_ = await limiter.is_allowed("key1")
             self.assertTrue(allowed)
 
     async def test_window_exactly_60_seconds(self):
@@ -103,7 +103,7 @@ class TestRateLimiterSlidingWindow(unittest.IsolatedAsyncioTestCase):
         # At current time, the 60s-old request sits at the boundary and is NOT evicted
         with patch("ingest_svc.rate_limiter.time") as mock_time:
             mock_time.monotonic.return_value = now
-            allowed, _ = await limiter.is_allowed("key1")
+            allowed, *_ = await limiter.is_allowed("key1")
             self.assertFalse(allowed)  # still counted — boundary is inclusive
 
     async def test_request_just_inside_window_counts(self):
@@ -118,7 +118,7 @@ class TestRateLimiterSlidingWindow(unittest.IsolatedAsyncioTestCase):
         # At current time, 59s-old request is still in window — should be denied
         with patch("ingest_svc.rate_limiter.time") as mock_time:
             mock_time.monotonic.return_value = now
-            allowed, _ = await limiter.is_allowed("key1")
+            allowed, *_ = await limiter.is_allowed("key1")
             self.assertFalse(allowed)
 
 
@@ -186,7 +186,7 @@ class TestRateLimiterConcurrency(unittest.IsolatedAsyncioTestCase):
         """10 concurrent coroutines hitting a limit of 5 — exactly 5 should pass."""
         limiter = RateLimiter(default_rpm=5)
         results = await asyncio.gather(*[limiter.is_allowed("shared") for _ in range(10)])
-        allowed_count = sum(1 for ok, _ in results if ok)
+        allowed_count = sum(1 for ok, *_ in results if ok)
         self.assertEqual(allowed_count, 5)
 
     async def test_concurrent_different_keys_do_not_interfere(self):
@@ -198,7 +198,7 @@ class TestRateLimiterConcurrency(unittest.IsolatedAsyncioTestCase):
                 tasks.append(limiter.is_allowed(f"key{i}"))
         results = await asyncio.gather(*tasks)
         # All 5*3 = 15 requests should be allowed (each key gets its own 3)
-        allowed_count = sum(1 for ok, _ in results if ok)
+        allowed_count = sum(1 for ok, *_ in results if ok)
         self.assertEqual(allowed_count, 15)
 
     async def test_high_concurrency_no_crash(self):
@@ -379,18 +379,18 @@ class TestEffectiveRpmScalesWithActiveWorkers(unittest.IsolatedAsyncioTestCase):
         """active_workers defaults to 1 — identical to pre-coordination behavior."""
         limiter = RateLimiter(default_rpm=10)
         for _ in range(10):
-            allowed, _ = await limiter.is_allowed("key1")
+            allowed, *_ = await limiter.is_allowed("key1")
             self.assertTrue(allowed)
-        allowed, _ = await limiter.is_allowed("key1")
+        allowed, *_ = await limiter.is_allowed("key1")
         self.assertFalse(allowed)
 
     async def test_two_workers_each_get_half_rpm(self):
         limiter = RateLimiter(default_rpm=10)
         limiter._active_workers = 2
         for _ in range(5):
-            allowed, _ = await limiter.is_allowed("key1")
+            allowed, *_ = await limiter.is_allowed("key1")
             self.assertTrue(allowed)
-        allowed, _ = await limiter.is_allowed("key1")
+        allowed, *_ = await limiter.is_allowed("key1")
         self.assertFalse(allowed)
 
     async def test_effective_rpm_never_floors_below_one(self):
@@ -398,10 +398,132 @@ class TestEffectiveRpmScalesWithActiveWorkers(unittest.IsolatedAsyncioTestCase):
         not zero."""
         limiter = RateLimiter(default_rpm=3)
         limiter._active_workers = 100
-        allowed, _ = await limiter.is_allowed("key1")
+        allowed, *_ = await limiter.is_allowed("key1")
         self.assertTrue(allowed)
-        allowed, _ = await limiter.is_allowed("key1")
+        allowed, *_ = await limiter.is_allowed("key1")
         self.assertFalse(allowed)
+
+
+class TestPerAgentSubLimit(unittest.IsolatedAsyncioTestCase):
+    """B6: one runaway agent under a key must not starve its siblings' share
+    of the same key's budget."""
+
+    async def test_agent_remaining_is_none_without_agent_id(self):
+        limiter = RateLimiter(default_rpm=10)
+        result = await limiter.is_allowed("key1")
+        self.assertIsNone(result.agent_remaining)
+
+    async def test_one_agent_hitting_its_quota_does_not_affect_a_sibling(self):
+        # default_rpm=10, default quota 20% -> agent_rpm = max(1, int(10*0.2)) = 2
+        limiter = RateLimiter(default_rpm=10)
+        r1 = await limiter.is_allowed("key1", "agent-a")
+        r2 = await limiter.is_allowed("key1", "agent-a")
+        self.assertTrue(r1.allowed)
+        self.assertTrue(r2.allowed)
+        # agent-a is now at its 2-request quota — a third request must be denied
+        # even though the key overall (10 rpm) has plenty of room left.
+        r3 = await limiter.is_allowed("key1", "agent-a")
+        self.assertFalse(r3.allowed)
+
+        # agent-b, same key, must be unaffected — it has its own quota.
+        r4 = await limiter.is_allowed("key1", "agent-b")
+        self.assertTrue(r4.allowed)
+
+    async def test_key_level_limit_still_fires_when_total_exceeded(self):
+        # Many distinct agents, each well under their own quota, must still
+        # collectively trip the key-level cap once the key's own rpm is hit.
+        limiter = RateLimiter(default_rpm=3)
+        results = [await limiter.is_allowed("key1", f"agent-{i}") for i in range(3)]
+        self.assertTrue(all(r.allowed for r in results))
+        # 4th request, a brand-new agent under its own fresh quota, must still
+        # be denied — the key-level 3 rpm is exhausted regardless of agent.
+        r4 = await limiter.is_allowed("key1", "agent-new")
+        self.assertFalse(r4.allowed)
+
+    async def test_default_quota_is_20_percent_of_effective_rpm(self):
+        limiter = RateLimiter(default_rpm=10)
+        for _ in range(2):
+            r = await limiter.is_allowed("key1", "agent-a")
+            self.assertTrue(r.allowed)
+        r = await limiter.is_allowed("key1", "agent-a")
+        self.assertFalse(r.allowed)
+
+    async def test_quota_override_widens_the_agents_share(self):
+        limiter = RateLimiter(default_rpm=10)
+        with patch(
+            "ingest_svc.rate_limiter.RateLimiter._get_agent_quota_pct",
+            AsyncMock(return_value=0.5),
+        ):
+            # override -> agent_rpm = max(1, int(10*0.5)) = 5
+            for _ in range(5):
+                r = await limiter.is_allowed("key1", "agent-a")
+                self.assertTrue(r.allowed)
+            r = await limiter.is_allowed("key1", "agent-a")
+            self.assertFalse(r.allowed)
+
+    async def test_key_remaining_reported_correctly(self):
+        limiter = RateLimiter(default_rpm=10)
+        result = await limiter.is_allowed("key1")
+        self.assertEqual(result.key_remaining, 9)  # 10 - the 1 just recorded
+
+    async def test_agent_remaining_reported_correctly(self):
+        limiter = RateLimiter(default_rpm=10)
+        result = await limiter.is_allowed("key1", "agent-a")
+        self.assertEqual(result.agent_remaining, 1)  # quota 2 - the 1 just recorded
+
+    async def test_evict_stale_also_clears_agent_windows_and_quota_cache(self):
+        limiter = RateLimiter(default_rpm=10)
+        await limiter.is_allowed("stale_key", "stale_agent")
+        self.assertIn(("stale_key", "stale_agent"), limiter._agent_windows)
+
+        # Backdate the agent window's only entry past the 2-minute cutoff.
+        limiter._agent_windows[("stale_key", "stale_agent")][0] -= 200
+        limiter.evict_stale()
+
+        self.assertNotIn(("stale_key", "stale_agent"), limiter._agent_windows)
+        self.assertNotIn(("stale_key", "stale_agent"), limiter._quota_cache)
+
+
+class TestAgentQuotaCache(unittest.IsolatedAsyncioTestCase):
+    async def test_defaults_to_20_percent_with_no_pool(self):
+        limiter = RateLimiter()
+        pct = await limiter._get_agent_quota_pct("key1", "agent-a")
+        self.assertEqual(pct, 0.20)
+
+    async def test_db_override_used_when_present(self):
+        limiter = RateLimiter()
+        with patch("ingest_svc.db.postgres.get_agent_quota_by_key", AsyncMock(return_value=0.5)):
+            pct = await limiter._get_agent_quota_pct("key1", "agent-a")
+        self.assertEqual(pct, 0.5)
+
+    async def test_result_is_cached_within_ttl(self):
+        limiter = RateLimiter()
+        mock_lookup = AsyncMock(return_value=0.5)
+        with patch("ingest_svc.db.postgres.get_agent_quota_by_key", mock_lookup):
+            await limiter._get_agent_quota_pct("key1", "agent-a")
+            await limiter._get_agent_quota_pct("key1", "agent-a")
+        mock_lookup.assert_called_once()
+
+    async def test_lookup_failure_falls_back_to_default(self):
+        limiter = RateLimiter()
+        with patch(
+            "ingest_svc.db.postgres.get_agent_quota_by_key",
+            side_effect=RuntimeError("boom"),
+        ):
+            pct = await limiter._get_agent_quota_pct("key1", "agent-a")
+        self.assertEqual(pct, 0.20)
+
+    async def test_different_agents_under_the_same_key_cached_independently(self):
+        limiter = RateLimiter()
+
+        async def fake_lookup(api_key, agent_id):
+            return 0.5 if agent_id == "agent-a" else None
+
+        with patch("ingest_svc.db.postgres.get_agent_quota_by_key", fake_lookup):
+            pct_a = await limiter._get_agent_quota_pct("key1", "agent-a")
+            pct_b = await limiter._get_agent_quota_pct("key1", "agent-b")
+        self.assertEqual(pct_a, 0.5)
+        self.assertEqual(pct_b, 0.20)
 
 
 if __name__ == "__main__":

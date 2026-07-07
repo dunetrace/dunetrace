@@ -258,8 +258,7 @@ class TestAuth:
     async def test_org_scoped_key_accepts_any_agent_id(self, client):
         # v0.5.0 multi-tenancy: keys are org-scoped, not agent-scoped. A valid
         # key may submit events for any agent_id under its org — agents are
-        # discovered on first ingest, not fixed at key-creation time. See
-        # docs/migrations/multi-tenancy-v0.5.0.md ("Security posture change").
+        # discovered on first ingest, not fixed at key-creation time.
         r = await client.post("/v1/ingest", json=make_batch(agent_id="a-brand-new-agent"))
         assert r.status_code == 202
 
@@ -276,9 +275,8 @@ class TestAuth:
 # dunetrace-cloud's tenancy middleware validates the caller against its own
 # org_api_keys table, then proxies here with x-internal-token set plus an
 # x-org-id header carrying the already-authenticated org identity (x-customer-id
-# is accepted as a fallback for older gateway builds — see
-# docs/migrations/multi-tenancy-v0.5.0.md). These routes must accept that trust
-# signal and skip the OSS-only api_keys lookup entirely — that table has no
+# is accepted as a fallback for older gateway builds). These routes must accept
+# that trust signal and skip the OSS-only api_keys lookup entirely — that table has no
 # rows in production (org auth lives in dunetrace-cloud now), so any request
 # that ran the DB check would 401 regardless of key validity. See
 # ingest_svc/auth.py::is_trusted.
@@ -420,8 +418,15 @@ def fresh_limiter(monkeypatch):
 
 class TestRateLimitMiddleware:
     async def test_requests_within_limit_succeed(self, client, fresh_limiter):
-        for _ in range(3):
-            r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_a"))
+        # Distinct agent_id per request — this tests key-level exhaustion
+        # specifically; a shared agent_id would additionally trip the new
+        # per-agent sub-limit (default 20% of key rpm) before the key-level
+        # cap is reached, which is a different behavior with its own tests.
+        for i in range(3):
+            r = await client.post(
+                "/v1/ingest",
+                json=make_batch(api_key="dt_live_ratelimit_a", agent_id=f"agent-{i}"),
+            )
             assert r.status_code == 202
 
     async def test_request_exceeding_limit_returns_429(self, client, fresh_limiter):
@@ -443,6 +448,60 @@ class TestRateLimitMiddleware:
         r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_ratelimit_d"))
         assert "detail" in r.json()
 
+    async def test_429_has_key_remaining_header(self, client, fresh_limiter):
+        for i in range(3):
+            await client.post(
+                "/v1/ingest",
+                json=make_batch(api_key="dt_live_ratelimit_key_hdr", agent_id=f"agent-{i}"),
+            )
+        r = await client.post(
+            "/v1/ingest",
+            json=make_batch(api_key="dt_live_ratelimit_key_hdr", agent_id="agent-final"),
+        )
+        assert r.status_code == 429
+        assert r.headers["X-RateLimit-Key-Remaining"] == "0"
+
+    async def test_429_has_agent_remaining_header_when_agent_quota_exhausted(
+        self, client, fresh_limiter
+    ):
+        # default_rpm=3, default agent quota 20% -> agent_rpm = max(1, int(3*0.2)) = 1
+        await client.post(
+            "/v1/ingest",
+            json=make_batch(api_key="dt_live_ratelimit_agent_hdr", agent_id="agent-a"),
+        )
+        r = await client.post(
+            "/v1/ingest",
+            json=make_batch(api_key="dt_live_ratelimit_agent_hdr", agent_id="agent-a"),
+        )
+        assert r.status_code == 429
+        assert r.headers["X-RateLimit-Agent-Remaining"] == "0"
+
+    async def test_no_agent_remaining_header_when_no_agent_id_resolvable(
+        self, client, fresh_limiter, monkeypatch
+    ):
+        # OTLP without X-Dunetrace-Agent-Id is the one real "agent_id
+        # unresolvable" case — the middleware deliberately doesn't decode the
+        # OTLP body just to find an agent_id (see main.py's rate_limit_and_log).
+        # agent_remaining must be genuinely absent from the response, not the
+        # header present with value "None".
+        monkeypatch.setattr(
+            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+        )
+        for _ in range(3):
+            await client.post(
+                "/v1/otlp/traces",
+                json=_json_otlp_body(),
+                headers={"Authorization": "Bearer dt_live_ratelimit_no_agent"},
+            )
+        r = await client.post(
+            "/v1/otlp/traces",
+            json=_json_otlp_body(),
+            headers={"Authorization": "Bearer dt_live_ratelimit_no_agent"},
+        )
+        assert r.status_code == 429
+        assert "X-RateLimit-Key-Remaining" in r.headers
+        assert "X-RateLimit-Agent-Remaining" not in r.headers
+
     async def test_real_api_keys_are_bucketed_independently(self, client, fresh_limiter):
         """A different (non-dev) key must get its own quota — exhausting one
         real key's limit must not affect another."""
@@ -458,8 +517,11 @@ class TestRateLimitMiddleware:
         """dt_dev_* keys share the IP-address bucket rather than a per-key
         one — two *different* dev keys from the same client must share one
         quota, unlike two different real keys (see test above)."""
-        for _ in range(3):
-            r = await client.post("/v1/ingest", json=make_batch(api_key="dt_dev_test_1"))
+        for i in range(3):
+            r = await client.post(
+                "/v1/ingest",
+                json=make_batch(api_key="dt_dev_test_1", agent_id=f"agent-{i}"),
+            )
             assert r.status_code == 202
         # A *different* dev key, same client — must already be exhausted,
         # because dev keys are bucketed by IP, not by the key string.
@@ -488,11 +550,18 @@ class TestRateLimitMiddleware:
             assert r.status_code == 202
 
     async def test_deploy_endpoint_is_also_rate_limited(self, client, fresh_limiter):
-        body = {"api_key": "dt_live_ratelimit_g", "agent_id": "agent-xyz", "version": "v1.0.0"}
-        for _ in range(3):
+        for i in range(3):
+            body = {
+                "api_key": "dt_live_ratelimit_g",
+                "agent_id": f"agent-{i}",
+                "version": "v1.0.0",
+            }
             r = await client.post("/v1/deploy", json=body)
             assert r.status_code == 202
-        r = await client.post("/v1/deploy", json=body)
+        r = await client.post(
+            "/v1/deploy",
+            json={"api_key": "dt_live_ratelimit_g", "agent_id": "agent-final", "version": "v1.0.0"},
+        )
         assert r.status_code == 429
 
     async def test_other_endpoints_are_not_rate_limited(self, client, fresh_limiter):
@@ -577,6 +646,86 @@ class TestVerifyApiKeyDevMode:
         assert "_LeakyError" in caplog.text
 
 
+class TestAgentQuotaDbFunctions:
+    """postgres.py's get_agent_quota_by_key / get_agent_quota / set_agent_quota
+    — the DB layer under rate_limiter.py's per-agent sub-limit (B6) and the
+    /admin/keys/{key_id}/agents/{agent_id}/quota endpoint."""
+
+    async def test_get_by_key_returns_none_when_no_pool(self, monkeypatch):
+        from ingest_svc.db.postgres import get_agent_quota_by_key
+
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
+        assert await get_agent_quota_by_key("dt_live_x", "agent-a") is None
+
+    async def test_get_by_key_returns_override(self, monkeypatch):
+        pool, conn = _make_pool(fetchval_return=None)
+        conn.fetchrow = AsyncMock(return_value=_FakeRecord(quota_pct=0.35))
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import get_agent_quota_by_key
+
+        result = await get_agent_quota_by_key("dt_live_x", "agent-a")
+        assert result == 0.35
+
+    async def test_get_by_key_returns_none_when_no_row(self, monkeypatch):
+        pool, conn = _make_pool(fetchval_return=None)
+        conn.fetchrow = AsyncMock(return_value=None)
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import get_agent_quota_by_key
+
+        assert await get_agent_quota_by_key("dt_live_x", "agent-a") is None
+
+    async def test_get_by_key_query_failure_returns_none_not_raised(self, monkeypatch):
+        pool, conn = _make_pool(fetchval_return=None)
+        conn.fetchrow = AsyncMock(side_effect=RuntimeError("db down"))
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import get_agent_quota_by_key
+
+        assert await get_agent_quota_by_key("dt_live_x", "agent-a") is None
+
+    async def test_get_by_id_returns_override(self, monkeypatch):
+        pool, conn = _make_pool(fetchval_return=None)
+        conn.fetchrow = AsyncMock(return_value=_FakeRecord(quota_pct=0.4))
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import get_agent_quota
+
+        assert await get_agent_quota(1, "agent-a") == 0.4
+
+    async def test_get_by_id_returns_none_when_no_row(self, monkeypatch):
+        pool, conn = _make_pool(fetchval_return=None)
+        conn.fetchrow = AsyncMock(return_value=None)
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import get_agent_quota
+
+        assert await get_agent_quota(1, "agent-a") is None
+
+    async def test_set_raises_when_key_id_does_not_exist(self, monkeypatch):
+        pool, conn = _make_pool(fetchval_return=None)  # SELECT 1 FROM api_keys -> no row
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import set_agent_quota
+
+        with pytest.raises(RuntimeError, match="No api_keys row"):
+            await set_agent_quota(999, "agent-a", 0.3)
+        conn.execute.assert_not_called()  # never attempted the upsert
+
+    async def test_set_upserts_when_key_id_exists(self, monkeypatch):
+        pool, conn = _make_pool(fetchval_return=1)  # SELECT 1 FROM api_keys -> found
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import set_agent_quota
+
+        await set_agent_quota(1, "agent-a", 0.3)
+        conn.execute.assert_called_once()
+        call_args = conn.execute.call_args[0]
+        assert "INSERT INTO agent_rate_quotas" in call_args[0]
+        assert call_args[1:] == (1, "agent-a", 0.3)
+
+    async def test_set_raises_when_no_pool(self, monkeypatch):
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
+        from ingest_svc.db.postgres import set_agent_quota
+
+        with pytest.raises(RuntimeError, match="pool not ready"):
+            await set_agent_quota(1, "agent-a", 0.3)
+
+
 # ── Health ─────────────────────────────────────────────────────────────────────
 
 
@@ -648,7 +797,7 @@ class TestPruneOldEvents:
         # events_202001 ends 2020-02-01 — always older than any reasonable retention
         pool, conn = _make_pool(
             fetchval_return=1,
-            fetch_return=[_FakeRecord(relname="events_202001")],
+            fetch_return=[_FakeRecord(relname="events_202001", reltuples=100)],
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
@@ -663,7 +812,7 @@ class TestPruneOldEvents:
         # events_209912 ends 2100-01-01 — always in the future
         pool, conn = _make_pool(
             fetchval_return=1,
-            fetch_return=[_FakeRecord(relname="events_209912")],
+            fetch_return=[_FakeRecord(relname="events_209912", reltuples=100)],
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
@@ -676,8 +825,8 @@ class TestPruneOldEvents:
         pool, conn = _make_pool(
             fetchval_return=1,
             fetch_return=[
-                _FakeRecord(relname="events_202001"),  # old → drop
-                _FakeRecord(relname="events_209901"),  # future → keep
+                _FakeRecord(relname="events_202001", reltuples=100),  # old → drop
+                _FakeRecord(relname="events_209901", reltuples=100),  # future → keep
             ],
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
@@ -690,7 +839,7 @@ class TestPruneOldEvents:
         # events_202012 ends 2021-01-01 — should be treated as old
         pool, conn = _make_pool(
             fetchval_return=1,
-            fetch_return=[_FakeRecord(relname="events_202012")],
+            fetch_return=[_FakeRecord(relname="events_202012", reltuples=100)],
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
@@ -701,13 +850,87 @@ class TestPruneOldEvents:
     async def test_malformed_partition_name_skipped(self, monkeypatch):
         pool, conn = _make_pool(
             fetchval_return=1,
-            fetch_return=[_FakeRecord(relname="events_badname")],
+            fetch_return=[_FakeRecord(relname="events_badname", reltuples=100)],
         )
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
 
         dropped = await prune_old_events(retention_days=30)
         assert dropped == 0
+        conn.execute.assert_not_called()
+
+    async def test_reltuples_estimate_is_logged(self, monkeypatch, caplog):
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[_FakeRecord(relname="events_202001", reltuples=54321)],
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import prune_old_events
+
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="dunetrace.ingest.db"):
+            await prune_old_events(retention_days=30)
+
+        assert any("54321 rows" in r.message for r in caplog.records)
+        assert any("rows freed" in r.message for r in caplog.records)
+
+    async def test_null_reltuples_treated_as_zero(self, monkeypatch):
+        # A brand-new partition can have reltuples=NULL before its first ANALYZE.
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[_FakeRecord(relname="events_202001", reltuples=None)],
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import prune_old_events
+
+        dropped = await prune_old_events(retention_days=30)
+        assert dropped == 1  # must not raise on a None reltuples
+
+
+class TestRetentionLooksStale:
+    async def test_false_when_no_pool(self, monkeypatch):
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
+        from ingest_svc.db.postgres import retention_looks_stale
+
+        assert await retention_looks_stale(retention_days=90) is False
+
+    async def test_false_when_table_not_partitioned(self, monkeypatch):
+        pool, conn = _make_pool(fetchval_return=0)
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import retention_looks_stale
+
+        assert await retention_looks_stale(retention_days=90) is False
+
+    async def test_true_when_a_partition_exceeds_retention(self, monkeypatch):
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[_FakeRecord(relname="events_202001")],  # long past any retention window
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import retention_looks_stale
+
+        assert await retention_looks_stale(retention_days=30) is True
+
+    async def test_false_when_all_partitions_within_retention(self, monkeypatch):
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[_FakeRecord(relname="events_209912")],  # always in the future
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import retention_looks_stale
+
+        assert await retention_looks_stale(retention_days=30) is False
+
+    async def test_is_read_only_never_drops_anything(self, monkeypatch):
+        pool, conn = _make_pool(
+            fetchval_return=1,
+            fetch_return=[_FakeRecord(relname="events_202001")],
+        )
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        from ingest_svc.db.postgres import retention_looks_stale
+
+        await retention_looks_stale(retention_days=30)
         conn.execute.assert_not_called()
 
 
@@ -791,7 +1014,197 @@ class TestPruneScheduling:
         with caplog.at_level(logging.INFO, logger="dunetrace.ingest"):
             await _run_prune_once()
 
-        assert any("Pruned 3 stale event partition" in r.message for r in caplog.records)
+        assert any("dropped 3 partition" in r.message for r in caplog.records)
+
+    async def test_returns_partitions_dropped_count(self, monkeypatch):
+        from ingest_svc.db.event_store import EventStore, set_event_store
+        from ingest_svc.main import _run_prune_once
+
+        class _DroppingStore(EventStore):
+            async def insert_events(self, events, batch_id, org_id):
+                raise NotImplementedError
+
+            async def prune_old_events(self, retention_days):
+                return 3
+
+        set_event_store(_DroppingStore())
+        assert await _run_prune_once() == 3
+
+    async def test_returns_zero_on_failure(self, monkeypatch):
+        from ingest_svc.db.event_store import EventStore, set_event_store
+        from ingest_svc.main import _run_prune_once
+
+        class _FailingStore(EventStore):
+            async def insert_events(self, events, batch_id, org_id):
+                raise NotImplementedError
+
+            async def prune_old_events(self, retention_days):
+                raise RuntimeError("db unreachable")
+
+        set_event_store(_FailingStore())
+        assert await _run_prune_once() == 0
+
+
+class TestAdminPruneEventsEndpoint:
+    """POST /admin/prune-events — manual retention invocation. Same admin-key
+    pattern as the existing POST /v1/keys endpoint."""
+
+    async def test_wrong_admin_key_rejected(self, client, monkeypatch):
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        resp = await client.post("/admin/prune-events", json={"admin_key": "wrong-key"})
+        assert resp.status_code == 403
+
+    async def test_no_admin_key_configured_rejects_everything(self, client, monkeypatch):
+        monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+        resp = await client.post("/admin/prune-events", json={"admin_key": "anything"})
+        assert resp.status_code == 403
+
+    async def test_correct_admin_key_runs_prune_and_returns_count(self, client, monkeypatch):
+        from ingest_svc.db.event_store import EventStore, set_event_store
+
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+
+        class _DroppingStore(EventStore):
+            async def insert_events(self, events, batch_id, org_id):
+                raise NotImplementedError
+
+            async def prune_old_events(self, retention_days):
+                self.called_with = retention_days
+                return 2
+
+        store = _DroppingStore()
+        set_event_store(store)
+        try:
+            resp = await client.post(
+                "/admin/prune-events", json={"admin_key": "correct-key", "retention_days": 45}
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["partitions_dropped"] == 2
+            assert body["retention_days"] == 45
+            assert store.called_with == 45
+        finally:
+            import ingest_svc.db.event_store as es_mod
+
+            es_mod._store = None
+
+    async def test_omitted_retention_days_falls_back_to_configured_default(
+        self, client, monkeypatch
+    ):
+        from ingest_svc.db.event_store import EventStore, set_event_store
+
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        monkeypatch.setattr("ingest_svc.config.settings.EVENT_RETENTION_DAYS", 77)
+
+        class _DroppingStore(EventStore):
+            async def insert_events(self, events, batch_id, org_id):
+                raise NotImplementedError
+
+            async def prune_old_events(self, retention_days):
+                self.called_with = retention_days
+                return 0
+
+        store = _DroppingStore()
+        set_event_store(store)
+        try:
+            resp = await client.post("/admin/prune-events", json={"admin_key": "correct-key"})
+            assert resp.status_code == 200
+            assert resp.json()["retention_days"] == 77
+            assert store.called_with == 77
+        finally:
+            import ingest_svc.db.event_store as es_mod
+
+            es_mod._store = None
+
+
+class TestAdminAgentQuotaEndpoint:
+    """GET/PUT /admin/keys/{key_id}/agents/{agent_id}/quota — B6's admin
+    surface for adjusting a per-agent rate-limit sub-quota."""
+
+    async def test_get_wrong_admin_key_rejected(self, client, monkeypatch):
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        resp = await client.get(
+            "/admin/keys/1/agents/agent-a/quota", params={"admin_key": "wrong-key"}
+        )
+        assert resp.status_code == 403
+
+    async def test_put_wrong_admin_key_rejected(self, client, monkeypatch):
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        resp = await client.put(
+            "/admin/keys/1/agents/agent-a/quota",
+            json={"admin_key": "wrong-key", "quota_pct": 0.3},
+        )
+        assert resp.status_code == 403
+
+    async def test_get_returns_default_when_no_override_set(self, client, monkeypatch):
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.get_agent_quota", AsyncMock(return_value=None)
+        )
+        resp = await client.get(
+            "/admin/keys/1/agents/agent-a/quota", params={"admin_key": "correct-key"}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["quota_pct"] == 0.20
+        assert body["is_override"] is False
+
+    async def test_get_returns_override_when_set(self, client, monkeypatch):
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.get_agent_quota", AsyncMock(return_value=0.5)
+        )
+        resp = await client.get(
+            "/admin/keys/1/agents/agent-a/quota", params={"admin_key": "correct-key"}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["quota_pct"] == 0.5
+        assert body["is_override"] is True
+
+    async def test_put_sets_override_and_returns_it(self, client, monkeypatch):
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        mock_set = AsyncMock(return_value=None)
+        monkeypatch.setattr("ingest_svc.routers.ingest.set_agent_quota", mock_set)
+        resp = await client.put(
+            "/admin/keys/42/agents/agent-a/quota",
+            json={"admin_key": "correct-key", "quota_pct": 0.35},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["key_id"] == 42
+        assert body["agent_id"] == "agent-a"
+        assert body["quota_pct"] == 0.35
+        assert body["is_override"] is True
+        mock_set.assert_called_once_with(42, "agent-a", 0.35)
+
+    async def test_put_unknown_key_id_returns_404(self, client, monkeypatch):
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        monkeypatch.setattr(
+            "ingest_svc.routers.ingest.set_agent_quota",
+            AsyncMock(side_effect=RuntimeError("No api_keys row with id=999")),
+        )
+        resp = await client.put(
+            "/admin/keys/999/agents/agent-a/quota",
+            json={"admin_key": "correct-key", "quota_pct": 0.3},
+        )
+        assert resp.status_code == 404
+
+    async def test_put_quota_pct_out_of_range_rejected_422(self, client, monkeypatch):
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        resp = await client.put(
+            "/admin/keys/1/agents/agent-a/quota",
+            json={"admin_key": "correct-key", "quota_pct": 1.5},
+        )
+        assert resp.status_code == 422
+
+    async def test_put_zero_quota_pct_rejected_422(self, client, monkeypatch):
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+        resp = await client.put(
+            "/admin/keys/1/agents/agent-a/quota",
+            json={"admin_key": "correct-key", "quota_pct": 0},
+        )
+        assert resp.status_code == 422
 
 
 # ── OTLP receiver (D11 — production-readiness gaps) ────────────────────────────

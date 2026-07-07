@@ -19,8 +19,8 @@ form).
 - **customer_code**: the fix touches the customer's system prompt, tool
   schema, or actual code — Dunetrace has no write access to any of that, so
   it only ever produces a diff (fix_content/fix_patch, from _call_llm) for
-  the customer to apply manually, or to push to a connected external store
-  (see prompt_stores.py) if one exists.
+  the customer to apply manually. The one exception is `code_change` fixes,
+  which can open a draft GitHub PR directly (see routers/signals.py::open_pr).
 """
 
 from __future__ import annotations

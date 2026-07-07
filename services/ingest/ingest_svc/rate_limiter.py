@@ -35,20 +35,38 @@ import logging
 import time
 import uuid
 from collections import defaultdict, deque
-from typing import Optional
+from typing import NamedTuple, Optional
 
 logger = logging.getLogger("dunetrace.ingest.ratelimit")
 
-_CACHE_TTL = 300  # seconds before re-fetching rpm from DB
+_CACHE_TTL = 300  # seconds before re-fetching rpm/quota from DB
 _HEARTBEAT_INTERVAL = 10.0  # how often each worker reports itself alive
 _HEARTBEAT_STALE_AFTER = 30.0  # 3x the interval — tolerates a couple of missed beats
+
+# Default share of a key's sustained rpm any single agent_id under that key
+# may consume, absent an explicit per-agent override (see
+# db/postgres.py::get_agent_quota / set_agent_quota, and the
+# /admin/keys/{key_id}/agents/{agent_id}/quota endpoint). Solves one runaway
+# agent under a shared key starving its siblings' share of the same budget.
+_DEFAULT_AGENT_QUOTA_PCT = 0.20
+
+
+class RateLimitResult(NamedTuple):
+    allowed: bool
+    retry_after: int  # seconds; 0 when allowed
+    key_remaining: int  # requests left in the key-level window this minute
+    agent_remaining: Optional[int]  # None when no agent_id was given to is_allowed()
 
 
 class RateLimiter:
     def __init__(self, default_rpm: int = 600):
         self._default_rpm = default_rpm
         self._windows: dict[str, deque] = defaultdict(deque)
+        self._agent_windows: dict[tuple[str, str], deque] = defaultdict(deque)
         self._rpm_cache: dict[str, tuple[int, float]] = {}  # key → (rpm, fetched_at)
+        self._quota_cache: dict[
+            tuple[str, str], tuple[float, float]
+        ] = {}  # (key, agent) → (pct, fetched_at)
         self._lock = asyncio.Lock()
         self._worker_id = str(uuid.uuid4())
         self._active_workers = 1  # updated periodically by _heartbeat; 1 == today's exact behavior
@@ -83,13 +101,45 @@ class RateLimiter:
         self._rpm_cache[api_key] = (rpm, now)
         return rpm
 
-    async def is_allowed(self, api_key: str) -> tuple[bool, int]:
+    async def _get_agent_quota_pct(self, api_key: str, agent_id: str) -> float:
+        """Return this agent's share of the key's rpm — cached, with DB fallback
+        to _DEFAULT_AGENT_QUOTA_PCT. Same cache-then-DB-on-miss shape as _get_rpm."""
+        cache_key = (api_key, agent_id)
+        now = time.monotonic()
+        cached = self._quota_cache.get(cache_key)
+        if cached and now - cached[1] < _CACHE_TTL:
+            return cached[0]
+
+        quota_pct = _DEFAULT_AGENT_QUOTA_PCT
+        try:
+            from ingest_svc.db.postgres import get_agent_quota_by_key
+
+            override = await get_agent_quota_by_key(api_key, agent_id)
+            if override is not None:
+                quota_pct = override
+        except Exception as exc:
+            logger.debug("agent quota lookup failed: %s", type(exc).__name__)
+
+        self._quota_cache[cache_key] = (quota_pct, now)
+        return quota_pct
+
+    async def is_allowed(self, api_key: str, agent_id: Optional[str] = None) -> RateLimitResult:
         """
-        Returns (allowed, retry_after_seconds).
-        retry_after is 0 when allowed, else seconds until the oldest request leaves the window.
+        Checks the key-level limit first — always, regardless of agent_id — then,
+        if agent_id is given, an additional per-(key, agent) sub-limit within it.
+        Both windows share the same 60s sliding window and are recorded together
+        on success; either one denying denies the request as a whole.
+
+        agent_remaining is None (not 0) when agent_id wasn't given — distinguishes
+        "no agent-level check happened" from "the agent's quota is exhausted."
         """
         rpm = await self._get_rpm(api_key)
         effective_rpm = max(1, rpm // self._active_workers)
+        agent_rpm: Optional[int] = None
+        if agent_id:
+            quota_pct = await self._get_agent_quota_pct(api_key, agent_id)
+            agent_rpm = max(1, int(effective_rpm * quota_pct))
+
         now = time.monotonic()
         window_start = now - 60.0
 
@@ -97,19 +147,39 @@ class RateLimiter:
             dq = self._windows[api_key]
             while dq and dq[0] < window_start:
                 dq.popleft()
+            key_remaining = max(0, effective_rpm - len(dq))
+
             if len(dq) >= effective_rpm:
                 retry_after = max(1, int(60.0 - (now - dq[0])) + 1)
-                return False, retry_after
+                return RateLimitResult(False, retry_after, key_remaining, None)
+
+            agent_remaining: Optional[int] = None
+            if agent_id and agent_rpm is not None:
+                adq = self._agent_windows[(api_key, agent_id)]
+                while adq and adq[0] < window_start:
+                    adq.popleft()
+                agent_remaining = max(0, agent_rpm - len(adq))
+                if len(adq) >= agent_rpm:
+                    retry_after = max(1, int(60.0 - (now - adq[0])) + 1)
+                    return RateLimitResult(False, retry_after, key_remaining, agent_remaining)
+                adq.append(now)
+                agent_remaining -= 1
+
             dq.append(now)
-            return True, 0
+            return RateLimitResult(True, 0, key_remaining - 1, agent_remaining)
 
     def evict_stale(self) -> None:
-        """Discard windows for keys idle for more than 2 minutes (called periodically)."""
+        """Discard windows for keys/agents idle for more than 2 minutes (called periodically)."""
         cutoff = time.monotonic() - 120.0
         stale = [k for k, dq in self._windows.items() if not dq or dq[-1] < cutoff]
         for k in stale:
             del self._windows[k]
             self._rpm_cache.pop(k, None)
+
+        stale_agents = [k for k, dq in self._agent_windows.items() if not dq or dq[-1] < cutoff]
+        for k in stale_agents:
+            del self._agent_windows[k]
+            self._quota_cache.pop(k, None)
 
     async def _heartbeat(self) -> None:
         """Report this worker alive, reap stale workers, and refresh

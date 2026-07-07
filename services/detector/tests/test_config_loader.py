@@ -24,7 +24,7 @@ for _p in [
         sys.path.insert(0, _p)
 
 from dunetrace.models import Severity
-from detector_svc.config_loader import load_detector_kwargs
+from detector_svc.config_loader import load_detector_kwargs, load_custom_detector_budget
 
 
 def _write_yaml(content: str) -> str:
@@ -148,6 +148,154 @@ web-research:
             result = load_detector_kwargs(path)
             self.assertEqual(result["default"]["tool_loop"]["SEVERITY"], Severity.HIGH)
             self.assertEqual(result["web-research"]["tool_loop"]["SEVERITY"], Severity.LOW)
+        finally:
+            os.unlink(path)
+
+
+class TestMaxCostNsOverride(unittest.TestCase):
+    """max_cost_ns is accepted for every detector regardless of _PARAM_MAP, same
+    cross-cutting treatment as severity — see A2 in BACKLOG.md's Done section."""
+
+    def test_max_cost_ns_parsed_for_a_detector_with_other_tunables(self):
+        path = _write_yaml("""
+default:
+  tool_loop:
+    threshold: 5
+    max_cost_ns: 500000
+""")
+        try:
+            result = load_detector_kwargs(path)
+            kwargs = result["default"]["tool_loop"]
+            self.assertEqual(kwargs["THRESHOLD"], 5)
+            self.assertEqual(kwargs["MAX_COST_NS"], 500000)
+        finally:
+            os.unlink(path)
+
+    def test_max_cost_ns_parsed_for_a_detector_with_no_other_tunables(self):
+        path = _write_yaml("""
+default:
+  empty_llm_response:
+    max_cost_ns: 250000
+""")
+        try:
+            result = load_detector_kwargs(path)
+            self.assertEqual(result["default"]["empty_llm_response"], {"MAX_COST_NS": 250000})
+        finally:
+            os.unlink(path)
+
+    def test_non_numeric_max_cost_ns_is_ignored_not_raised(self):
+        path = _write_yaml("""
+default:
+  tool_loop:
+    threshold: 5
+    max_cost_ns: "fast please"
+""")
+        try:
+            result = load_detector_kwargs(path)
+            kwargs = result["default"]["tool_loop"]
+            self.assertEqual(kwargs["THRESHOLD"], 5)
+            self.assertNotIn("MAX_COST_NS", kwargs)
+        finally:
+            os.unlink(path)
+
+    def test_negative_max_cost_ns_is_ignored_not_raised(self):
+        path = _write_yaml("""
+default:
+  tool_loop:
+    max_cost_ns: -1
+""")
+        try:
+            result = load_detector_kwargs(path)
+            self.assertNotIn("MAX_COST_NS", result["default"].get("tool_loop", {}))
+        finally:
+            os.unlink(path)
+
+    def test_no_max_cost_ns_key_means_no_override(self):
+        path = _write_yaml("""
+default:
+  tool_loop:
+    threshold: 5
+""")
+        try:
+            result = load_detector_kwargs(path)
+            self.assertNotIn("MAX_COST_NS", result["default"]["tool_loop"])
+        finally:
+            os.unlink(path)
+
+
+class TestCustomDetectorBudget(unittest.TestCase):
+    def test_missing_file_returns_defaults(self):
+        result = load_custom_detector_budget("/nonexistent/path/detectors.yml")
+        self.assertEqual(result, {"evaluation_budget_ms": 10.0, "regex_timeout_ms": 5.0})
+
+    def test_missing_section_returns_defaults(self):
+        path = _write_yaml("""
+default:
+  tool_loop:
+    threshold: 5
+""")
+        try:
+            result = load_custom_detector_budget(path)
+            self.assertEqual(result, {"evaluation_budget_ms": 10.0, "regex_timeout_ms": 5.0})
+        finally:
+            os.unlink(path)
+
+    def test_custom_values_parsed(self):
+        path = _write_yaml("""
+custom_detectors:
+  evaluation_budget_ms: 25
+  regex_timeout_ms: 8
+""")
+        try:
+            result = load_custom_detector_budget(path)
+            self.assertEqual(result, {"evaluation_budget_ms": 25.0, "regex_timeout_ms": 8.0})
+        finally:
+            os.unlink(path)
+
+    def test_partial_override_keeps_other_default(self):
+        path = _write_yaml("""
+custom_detectors:
+  evaluation_budget_ms: 25
+""")
+        try:
+            result = load_custom_detector_budget(path)
+            self.assertEqual(result["evaluation_budget_ms"], 25.0)
+            self.assertEqual(result["regex_timeout_ms"], 5.0)
+        finally:
+            os.unlink(path)
+
+    def test_non_numeric_value_falls_back_to_default(self):
+        path = _write_yaml("""
+custom_detectors:
+  evaluation_budget_ms: "not a number"
+""")
+        try:
+            result = load_custom_detector_budget(path)
+            self.assertEqual(result["evaluation_budget_ms"], 10.0)
+        finally:
+            os.unlink(path)
+
+    def test_negative_value_falls_back_to_default(self):
+        path = _write_yaml("""
+custom_detectors:
+  evaluation_budget_ms: -5
+""")
+        try:
+            result = load_custom_detector_budget(path)
+            self.assertEqual(result["evaluation_budget_ms"], 10.0)
+        finally:
+            os.unlink(path)
+
+    def test_regex_timeout_capped_to_evaluation_budget_if_larger(self):
+        path = _write_yaml("""
+custom_detectors:
+  evaluation_budget_ms: 5
+  regex_timeout_ms: 20
+""")
+        try:
+            result = load_custom_detector_budget(path)
+            self.assertEqual(result["evaluation_budget_ms"], 5.0)
+            self.assertEqual(result["regex_timeout_ms"], 5.0)
         finally:
             os.unlink(path)
 

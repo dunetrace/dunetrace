@@ -13,10 +13,12 @@ from dunetrace.models import Severity
 
 logger = logging.getLogger("dunetrace.config_loader")
 
-# "severity" is accepted for every detector, independent of _PARAM_MAP below —
-# it's a cross-cutting BaseDetector attribute (see packages/sdk-py/dunetrace/
-# detectors.py), not a detector-specific tunable like THRESHOLD/WINDOW.
+# "severity" and "max_cost_ns" are accepted for every detector, independent of
+# _PARAM_MAP below — both are cross-cutting BaseDetector attributes (see
+# packages/sdk-py/dunetrace/detectors.py), not detector-specific tunables like
+# THRESHOLD/WINDOW.
 _SEVERITY_KEY = "severity"
+_MAX_COST_NS_KEY = "max_cost_ns"
 
 # Maps YAML section key -> detector constructor kwarg names (all uppercase).
 # Only detectors with tunable params need an entry here.
@@ -53,7 +55,108 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
         "static_threshold_secs": "STATIC_THRESHOLD_SECS",
         "min_events": "MIN_EVENTS",
     },
+    "premature_termination": {
+        "completion_terms": "COMPLETION_TERMS",
+        "error_acknowledgment_terms": "ERROR_ACKNOWLEDGMENT_TERMS",
+        "error_markers": "ERROR_MARKERS",
+        "case_sensitive": "CASE_SENSITIVE",
+        "min_message_length": "MIN_MESSAGE_LENGTH",
+    },
+    "unread_tool_error": {
+        "error_acknowledgment_terms": "ERROR_ACKNOWLEDGMENT_TERMS",
+        "error_markers": "ERROR_MARKERS",
+        "case_sensitive": "CASE_SENSITIVE",
+    },
+    "tool_argument_fabrication": {
+        "allowlist": "ALLOWLIST",
+        "destructive_tool_patterns": "DESTRUCTIVE_TOOL_PATTERNS",
+        "small_int_min": "SMALL_INT_MIN",
+        "small_int_max": "SMALL_INT_MAX",
+        "case_sensitive": "CASE_SENSITIVE",
+    },
+    "retrieved_content_injection": {
+        "injection_phrases": "INJECTION_PHRASES",
+        "case_sensitive": "CASE_SENSITIVE",
+        "detect_behavior_deviation": "DETECT_BEHAVIOR_DEVIATION",
+    },
+    "handoff_context_loss": {
+        "size_drop_threshold": "SIZE_DROP_THRESHOLD",
+        "entity_loss_threshold": "ENTITY_LOSS_THRESHOLD",
+    },
+    "runaway_iteration": {
+        "step_threshold": "STEP_THRESHOLD",
+        "cost_threshold_usd": "COST_THRESHOLD_USD",
+        "completion_patterns": "COMPLETION_PATTERNS",
+        "lookback_messages": "LOOKBACK_MESSAGES",
+        "case_sensitive": "CASE_SENSITIVE",
+    },
 }
+
+
+_DEFAULT_CUSTOM_DETECTOR_BUDGET_MS = 10.0
+_DEFAULT_CUSTOM_DETECTOR_REGEX_TIMEOUT_MS = 5.0
+
+
+def load_custom_detector_budget(config_path: str | None = None) -> dict[str, float]:
+    """Parse detectors.yml's top-level custom_detectors: section (global, not
+    per-agent-category — see the comment above `default:` in detectors.yml).
+
+    Returns {"evaluation_budget_ms": ..., "regex_timeout_ms": ...}, falling back
+    to defaults for a missing file, missing section, or invalid values.
+    """
+    path = config_path or os.environ.get("DETECTOR_CONFIG", "/app/detectors.yml")
+    defaults = {
+        "evaluation_budget_ms": _DEFAULT_CUSTOM_DETECTOR_BUDGET_MS,
+        "regex_timeout_ms": _DEFAULT_CUSTOM_DETECTOR_REGEX_TIMEOUT_MS,
+    }
+
+    try:
+        import yaml  # type: ignore[import]
+    except ImportError:
+        return defaults
+
+    if not os.path.exists(path):
+        return defaults
+
+    try:
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+    except Exception as exc:
+        logger.warning("Failed to parse detectors.yml for custom_detectors config: %s", exc)
+        return defaults
+
+    section = raw.get("custom_detectors")
+    if not isinstance(section, dict):
+        return defaults
+
+    result = dict(defaults)
+    for key in defaults:
+        if key not in section:
+            continue
+        try:
+            value = float(section[key])
+            if value <= 0:
+                raise ValueError("must be positive")
+            result[key] = value
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "detectors.yml: custom_detectors.%s=%r is invalid (%s) — using default %s",
+                key,
+                section[key],
+                exc,
+                defaults[key],
+            )
+
+    if result["regex_timeout_ms"] > result["evaluation_budget_ms"]:
+        logger.warning(
+            "detectors.yml: custom_detectors.regex_timeout_ms (%s) exceeds "
+            "evaluation_budget_ms (%s) — capping to evaluation_budget_ms.",
+            result["regex_timeout_ms"],
+            result["evaluation_budget_ms"],
+        )
+        result["regex_timeout_ms"] = result["evaluation_budget_ms"]
+
+    return result
 
 
 def load_detector_kwargs(
@@ -111,6 +214,21 @@ def load_detector_kwargs(
                         det_key,
                         params[_SEVERITY_KEY],
                         [s.value for s in Severity],
+                    )
+
+            if _MAX_COST_NS_KEY in params:
+                try:
+                    max_cost_ns = int(params[_MAX_COST_NS_KEY])
+                    if max_cost_ns <= 0:
+                        raise ValueError("must be positive")
+                    kwargs["MAX_COST_NS"] = max_cost_ns
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        "detectors.yml: %s.%s has invalid max_cost_ns %r (%s). Ignoring override.",
+                        category,
+                        det_key,
+                        params[_MAX_COST_NS_KEY],
+                        exc,
                     )
 
             if kwargs:

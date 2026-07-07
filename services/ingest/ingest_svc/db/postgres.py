@@ -174,6 +174,22 @@ CREATE TABLE IF NOT EXISTS rate_limit_workers (
     worker_id  TEXT             PRIMARY KEY,
     last_seen  DOUBLE PRECISION NOT NULL
 );
+
+-- Per-agent rate-limit sub-quotas within a key's overall budget (see
+-- rate_limiter.py's module docstring for the "one runaway agent starves its
+-- siblings" problem this solves). key_id references api_keys.id, added by
+-- api_svc's own migration (services/api/api_svc/db/queries.py's _KEYS_DDL) —
+-- not enforced as a DB foreign key here, since that column may not exist yet
+-- if ingest_svc starts before api_svc ever has (same cross-service ordering
+-- rate_limiter.py's rate_limit_rpm lookup already tolerates). Referential
+-- integrity is checked at the admin endpoint's write time instead.
+CREATE TABLE IF NOT EXISTS agent_rate_quotas (
+    key_id     BIGINT      NOT NULL,
+    agent_id   TEXT        NOT NULL,
+    quota_pct  REAL        NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (key_id, agent_id)
+);
 """
 
 # ── Multi-tenancy unification (v0.5.0) ──────────────────────────────────────────
@@ -181,7 +197,7 @@ CREATE TABLE IF NOT EXISTS rate_limit_workers (
 # `organizations` replaces `companies`; `org_id` replaces `api_keys.customer_id`.
 # Renamed (not recreated) so existing data survives. `company_id` is dropped —
 # it was always redundant with customer_id (create_api_key wrote the same value
-# to both). See docs/migrations/multi-tenancy-v0.5.0.md.
+# to both).
 #
 # Every other org_id-bearing table below is nullable until _backfill_org_id()
 # populates it from the (now-renamed) api_keys.org_id, then NOT NULL is applied.
@@ -220,6 +236,35 @@ END $$;
 
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS org_id TEXT;
 ALTER TABLE api_keys DROP COLUMN IF EXISTS company_id;
+
+-- Installs where org_id was added by some path other than the rename above (so the
+-- rename's "org_id does not exist yet" guard never fired) are left with both columns
+-- permanently: customer_id stranded with its real value, org_id NULL. Recover it here,
+-- before customer_id is dropped, for any row where org_id never got a value at all.
+-- Guarded on column existence — a fresh install past the rename never had customer_id
+-- at all, and referencing a nonexistent column fails to parse, not just fails at runtime.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'api_keys' AND column_name = 'customer_id'
+    ) THEN
+        -- organizations rows must exist first — org_id gets an FK to organizations(id)
+        -- below, and a bare customer_id value (e.g. 'acme-corp') was never registered as
+        -- one. Scoped to rows actually being backfilled (org_id IS NULL) — an install
+        -- whose org_id is already resolved (however it got there) shouldn't gain orphan
+        -- organizations rows for customer_id values nothing will ever point at.
+        INSERT INTO organizations (id, name)
+            SELECT DISTINCT customer_id, customer_id FROM api_keys
+            WHERE customer_id IS NOT NULL AND org_id IS NULL
+        ON CONFLICT (id) DO NOTHING;
+
+        UPDATE api_keys SET org_id = customer_id
+            WHERE org_id IS NULL AND customer_id IS NOT NULL;
+
+        ALTER TABLE api_keys DROP COLUMN customer_id;
+    END IF;
+END $$;
 
 -- api_keys.agent_id is NOT dropped here — _backfill_org_id() below still needs it
 -- to join events/signals/etc to the org that issued the key. It's dropped by
@@ -260,7 +305,7 @@ async def _backfill_org_id(conn) -> None:
     agent_ids that map to more than one distinct org_id in api_keys (only possible if
     a self-hosted install issued keys for the same agent_id under different customer_ids
     pre-migration) can't be safely auto-resolved. They're logged and fall back to
-    'default' — see docs/migrations/multi-tenancy-v0.5.0.md to reconcile by hand.
+    'default'.
     """
     agent_id_column_exists = await conn.fetchval(
         """
@@ -287,8 +332,7 @@ async def _backfill_org_id(conn) -> None:
     if ambiguous:
         logger.warning(
             "Multi-tenancy backfill: %d agent_id(s) map to multiple orgs in api_keys and "
-            "cannot be auto-assigned — defaulting to org_id='default': %s. "
-            "See docs/migrations/multi-tenancy-v0.5.0.md to reconcile manually.",
+            "cannot be auto-assigned — defaulting to org_id='default': %s.",
             len(ambiguous),
             [r["agent_id"] for r in ambiguous],
         )
@@ -320,9 +364,25 @@ async def _backfill_org_id(conn) -> None:
                 WHERE t.agent_id = ak.agent_id AND t.org_id IS NULL
                 """
             )
+        defaulted = await conn.fetchval(f"SELECT COUNT(*) FROM {table} WHERE org_id IS NULL")
+        if defaulted:
+            logger.warning(
+                "Multi-tenancy backfill: %d row(s) in %s had no resolvable org_id "
+                "(no matching api_keys.agent_id) — defaulting to org_id='default'.",
+                defaulted,
+                table,
+            )
         await conn.execute(f"UPDATE {table} SET org_id = 'default' WHERE org_id IS NULL")
         await conn.execute(f"ALTER TABLE {table} ALTER COLUMN org_id SET NOT NULL")
 
+    defaulted_keys = await conn.fetchval("SELECT COUNT(*) FROM api_keys WHERE org_id IS NULL")
+    if defaulted_keys:
+        logger.warning(
+            "Multi-tenancy backfill: %d row(s) in api_keys had no resolvable org_id "
+            "(customer_id present but no matching organizations row, or neither "
+            "column populated) — defaulting to org_id='default'.",
+            defaulted_keys,
+        )
     await conn.execute("UPDATE api_keys SET org_id = 'default' WHERE org_id IS NULL")
     await conn.execute("ALTER TABLE api_keys ALTER COLUMN org_id SET NOT NULL")
 
@@ -364,6 +424,54 @@ async def _ensure_event_partitions(conn, months_ahead: int = 3) -> None:
         logger.debug("Ensured partition %s (%s–%s)", name, start, end)
 
 
+async def retention_looks_stale(retention_days: int = 90) -> bool:
+    """True if any events_YYYYMM partition already exceeds retention_days.
+
+    There's no persisted "last successful prune" timestamp anywhere — in-memory
+    state wouldn't survive a restart, which is exactly the failure mode this
+    exists to catch (the retention asyncio task silently dying and nobody
+    noticing across a redeploy). This checks the same partition-age condition
+    prune_old_events() acts on, read-only, as a DB-state-derived proxy: if a
+    partition this old still exists, pruning hasn't kept up, whether that's
+    because it's never run, is broken, or this is the very first startup after
+    enabling retention on old data (a one-time, non-alarming catch-up case
+    that looks identical from here — the caller decides how to react).
+    """
+    from datetime import date, timedelta
+
+    if not _pool:
+        return False
+
+    cutoff = date.today() - timedelta(days=retention_days)
+    async with _pool.acquire() as conn:
+        is_partitioned = await conn.fetchval(
+            "SELECT COUNT(*) FROM pg_class WHERE relname = 'events' AND relkind = 'p'"
+        )
+        if not is_partitioned:
+            return False
+
+        rows = await conn.fetch("""
+            SELECT c.relname
+            FROM pg_class c
+            JOIN pg_inherits i ON i.inhrelid = c.oid
+            JOIN pg_class p ON p.oid = i.inhparent
+            WHERE p.relname = 'events'
+              AND c.relname ~ '^events_[0-9]{6}$'
+            """)
+        for row in rows:
+            name = row["relname"]
+            try:
+                year, month = int(name[7:11]), int(name[11:13])
+                end_year = year + (1 if month == 12 else 0)
+                end_month = month % 12 + 1
+                partition_end = date(end_year, end_month, 1)
+                if partition_end <= cutoff:
+                    return True
+            except (ValueError, IndexError):
+                pass
+        return False
+
+
 async def prune_old_events(retention_days: int = 90) -> int:
     """Drop monthly event partitions whose data is entirely older than retention_days.
 
@@ -387,7 +495,7 @@ async def prune_old_events(retention_days: int = 90) -> int:
             return 0
 
         rows = await conn.fetch("""
-            SELECT c.relname
+            SELECT c.relname, c.reltuples
             FROM pg_class c
             JOIN pg_inherits i ON i.inhrelid = c.oid
             JOIN pg_class p ON p.oid = i.inhparent
@@ -396,6 +504,7 @@ async def prune_old_events(retention_days: int = 90) -> int:
             """)
 
         dropped = 0
+        approx_rows_freed = 0
         for row in rows:
             name = row["relname"]
             try:
@@ -404,15 +513,29 @@ async def prune_old_events(retention_days: int = 90) -> int:
                 end_month = month % 12 + 1
                 partition_end = date(end_year, end_month, 1)
                 if partition_end <= cutoff:
+                    # reltuples is a planner estimate (updated by autovacuum/analyze),
+                    # not an exact count — a full COUNT(*) before every drop would
+                    # scan the whole partition just for a log line. Good enough for
+                    # "how much did this actually free" at operator-log granularity.
+                    partition_rows = max(0, int(row["reltuples"] or 0))
                     await conn.execute(f'DROP TABLE IF EXISTS "{name}"')
                     logger.info(
-                        "Pruned event partition %s (data before %s)",
+                        "Pruned event partition %s (data before %s, ~%d rows)",
                         name,
                         partition_end,
+                        partition_rows,
                     )
                     dropped += 1
+                    approx_rows_freed += partition_rows
             except (ValueError, IndexError):
                 pass
+
+        if dropped:
+            logger.info(
+                "Retention pass complete: %d partition(s) dropped, ~%d rows freed",
+                dropped,
+                approx_rows_freed,
+            )
 
         return dropped
 
@@ -556,8 +679,7 @@ async def create_api_key(
     """Generate a new API key for an org, upsert the organization, store the key, and return it.
 
     Keys are org-scoped, not agent-scoped: this key can submit events for any
-    agent_id under org_id, discovered on first ingest. See
-    docs/migrations/multi-tenancy-v0.5.0.md.
+    agent_id under org_id, discovered on first ingest.
     """
     import secrets
 
@@ -580,6 +702,69 @@ async def create_api_key(
                 rate_limit_rpm,
             )
     return key
+
+
+async def get_agent_quota_by_key(api_key: str, agent_id: str) -> Optional[float]:
+    """Look up a per-agent rate-limit quota override (fraction of the key's
+    sustained rpm) by the raw key string — the rate limiter's hot path only
+    has this, never the numeric key_id. Returns None if no override is set
+    (caller applies its own default)."""
+    if not _pool:
+        return None
+    try:
+        async with _pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT q.quota_pct FROM agent_rate_quotas q
+                JOIN api_keys k ON k.id = q.key_id
+                WHERE k.key = $1 AND q.agent_id = $2
+                """,
+                api_key,
+                agent_id,
+            )
+        return float(row["quota_pct"]) if row else None
+    except Exception as exc:
+        logger.debug("agent quota lookup failed: %s", type(exc).__name__)
+        return None
+
+
+async def get_agent_quota(key_id: int, agent_id: str) -> Optional[float]:
+    """Admin-facing lookup by key_id (the id the admin endpoint deals in —
+    never the raw secret key itself)."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT quota_pct FROM agent_rate_quotas WHERE key_id = $1 AND agent_id = $2",
+            key_id,
+            agent_id,
+        )
+    return float(row["quota_pct"]) if row else None
+
+
+async def set_agent_quota(key_id: int, agent_id: str, quota_pct: float) -> None:
+    """Upsert a per-agent quota override. Raises RuntimeError if key_id
+    doesn't reference a real api_keys row — checked here rather than via a DB
+    foreign key, since api_keys.id is added by a separate service's migration
+    (see the agent_rate_quotas table comment in _SCHEMA) and may not exist yet
+    on a fresh ingest_svc-only deployment."""
+    if not _pool:
+        raise RuntimeError("DB pool not ready")
+    async with _pool.acquire() as conn:
+        key_exists = await conn.fetchval("SELECT 1 FROM api_keys WHERE id = $1", key_id)
+        if not key_exists:
+            raise RuntimeError(f"No api_keys row with id={key_id}")
+        await conn.execute(
+            """
+            INSERT INTO agent_rate_quotas (key_id, agent_id, quota_pct, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (key_id, agent_id) DO UPDATE
+              SET quota_pct = EXCLUDED.quota_pct, updated_at = NOW()
+            """,
+            key_id,
+            agent_id,
+            quota_pct,
+        )
 
 
 async def verify_api_key(api_key: str) -> Optional[str]:

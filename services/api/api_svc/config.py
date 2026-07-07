@@ -43,11 +43,6 @@ class Settings:
     PAGE_SIZE_DEFAULT: int = int(os.getenv("PAGE_SIZE_DEFAULT", "50"))
     PAGE_SIZE_MAX: int = int(os.getenv("PAGE_SIZE_MAX", "500"))
 
-    # Langfuse integration
-    LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-    LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
-    LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
-
     # LLM for explain endpoint (Anthropic preferred; falls back to OpenAI)
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
@@ -65,10 +60,6 @@ class Settings:
     # Set POLICY_SIGNING_SECRET to the same value in both environments.
     # If empty, signatures are not verified (dev/test only).
     POLICY_SIGNING_SECRET: str = os.getenv("POLICY_SIGNING_SECRET", "")
-
-    @property
-    def langfuse_configured(self) -> bool:
-        return bool(self.LANGFUSE_PUBLIC_KEY and self.LANGFUSE_SECRET_KEY)
 
     @property
     def github_configured(self) -> bool:

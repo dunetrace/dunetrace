@@ -37,6 +37,7 @@ class RunContext:
         agent_version: str,
         available_tools: list,
         input_text: str,
+        system_prompt: str = "",
         parent_run_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> None:
@@ -54,6 +55,7 @@ class RunContext:
             agent_version=agent_version,
             available_tools=available_tools,
             input_text=input_text,
+            system_prompt=system_prompt or None,
         )
 
         # Policy enforcement state
@@ -164,15 +166,17 @@ class RunContext:
         output_length: int = 0,
         latency_ms: int = 0,
         error: Optional[str] = None,
+        output: str = "",
     ) -> None:
         error_text = error if (not success and error) else None
-        # Back-fill success and error on the most recent matching ToolCall.
+        # Back-fill success, error, and output on the most recent matching ToolCall.
         # _error_count increments only when a ToolCall is actually found and back-filled
         # so the running total stays in sync with the full-scan baseline in build_metrics.
         for tc in reversed(self.state.tool_calls):
             if tc.tool_name == tool_name and tc.success is None:
                 tc.success = success
                 tc.error = error_text
+                tc.output = output or None
                 if not success:
                     self._error_count += 1
                 break
@@ -181,6 +185,7 @@ class RunContext:
             "success": success,
             "output_length": output_length,
             "latency_ms": latency_ms,
+            "output": output,
         }
         if error_text:
             payload["error"] = error_text
@@ -203,6 +208,7 @@ class RunContext:
         result_count: int,
         top_score: Optional[float] = None,
         latency_ms: int = 0,
+        content: str = "",
     ) -> None:
         self.state.retrievals.append(
             RetrievalResult(
@@ -210,6 +216,7 @@ class RunContext:
                 result_count=result_count,
                 top_score=top_score,
                 step_index=self.step,
+                content=content or None,
             )
         )
         self._emit(
@@ -219,6 +226,7 @@ class RunContext:
                 "result_count": result_count,
                 "top_score": top_score,
                 "latency_ms": latency_ms,
+                "content": content,
             },
             advance=False,
         )
@@ -312,7 +320,7 @@ class RunContext:
             from dunetrace.detectors import run_detectors
 
             if self.step != self._detector_cache_step:
-                self._detector_cache_signals = run_detectors(self.state)
+                self._detector_cache_signals = run_detectors(self.state, context="runtime")
                 self._detector_cache_step = self.step
             sigs = self._detector_cache_signals
             metrics["signal"] = [s.failure_type.value for s in sigs] if sigs else []

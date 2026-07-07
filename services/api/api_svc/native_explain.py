@@ -1,19 +1,10 @@
 """
-Native root-cause context builder — no Langfuse required.
+Native root-cause context builder.
 
-Builds the same shape of "what happened" prompt section that
-langfuse_client.py's build_explain_prompt() builds from a Langfuse trace, but
-from Dunetrace's own events table (the same data the dashboard's Event Log
-tab renders — see db/queries.py::get_run_detail). This is the default/
-required-nothing path: it works for every signal regardless of whether the
-customer has ever configured Langfuse.
-
-Langfuse is not being replaced everywhere — apply-fix (writing a fix back to
-a managed Langfuse prompt) still needs an actual Langfuse trace lookup to
-detect which managed prompt to update, and keeps doing so independently (see
-routers/signals.py::explain_signal, which now runs both this and a
-best-effort Langfuse prompt-name detection, side by side, neither blocking
-the other).
+Builds the "what happened" prompt section from Dunetrace's own events table
+(the same data the dashboard's Event Log tab renders — see
+db/queries.py::get_run_detail). This is the only root-cause path — it works
+for every signal, with no external tracing system involved.
 """
 
 from __future__ import annotations
@@ -29,20 +20,15 @@ _TRACE_INPUT_LIMIT = 400
 
 
 def _extract_system_prompt(events: List[dict]) -> Optional[str]:
-    """Pull the system prompt out of the run.started event's payload, if a
-    future SDK version ever adds one there.
+    """Pull the system prompt out of the run.started event's payload.
 
-    Known, disclosed gap: the SDK's run.started payload today only carries
-    input_text/model/tools (see dunetrace.client.Dunetrace.run) — the raw
-    system prompt text itself is never transmitted, only its hash (folded
-    into agent_version via dunetrace.models.agent_version). So this
-    currently always returns None for native explain; Langfuse traces don't
-    have this gap since Langfuse's own SDK integration captures the full
-    message list, including the system message, directly from the LLM call.
-    Logged in BACKLOG.md as a candidate SDK change (Engagement 1 already
-    established that raw content is fine to transmit — hashing was removed
-    as a privacy mechanism), not fixed here since it's an SDK wire-format
-    change, out of scope for the API-side explain work in this pass.
+    dunetrace.client.Dunetrace.run's system_prompt param is sent as-is in
+    run.started's payload (still also folded into agent_version's hash for
+    grouping — see dunetrace.models.agent_version). This is instrumentation-
+    dependent, not guaranteed: callers of dt.run() that omit system_prompt
+    (or SDK versions predating this field) still produce a run.started event
+    with no system_prompt key, so this returns None for those — same as
+    before for events ingested prior to this change.
     """
     for e in events:
         if e.get("event_type") == "run.started":
@@ -60,8 +46,7 @@ def _format_events(
     last_step: int,
     signal_steps: Optional[List[int]] = None,
 ) -> str:
-    """Format native events for the explain prompt — the native equivalent of
-    langfuse_client.py's _format_observations()."""
+    """Format native events for the explain prompt."""
     if not events:
         return "(no events recorded)"
 
@@ -90,12 +75,9 @@ def _format_events(
 async def build_native_explain_prompt(signal_dict: dict, events: List[dict]) -> str:
     """
     Compose the analysis prompt from a Dunetrace signal dict and this run's
-    own native events — no Langfuse trace needed. async to match
-    langfuse_client.py::build_explain_prompt()'s signature (it awaits
-    nothing itself either — this is purely deterministic string work — but
-    matching the signature means callers never need to remember which
-    builder needs awaiting). Mirrors that function's structure so _call_llm()
-    (which is source-agnostic already) needs no changes.
+    own native events. async even though this is purely deterministic string
+    work — callers await it either way, so _call_llm() (which builds on this)
+    needs no special-casing.
     """
     evidence = signal_dict.get("evidence", {})
     failure_type = signal_dict.get("failure_type", "UNKNOWN")

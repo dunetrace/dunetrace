@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 import unittest
+import unittest.mock
 from typing import Optional
 
 from dunetrace.models import (
@@ -23,11 +24,13 @@ from dunetrace.models import (
     Severity,
     ToolCall,
 )
+import dunetrace.detectors as detectors_module
 from dunetrace.detectors import (
     BaseDetector,
     ToolLoopDetector,
     SlowStepDetector,
     ReasoningSpinDetector,
+    reset_cost_downgrade,
     run_detectors,
 )
 
@@ -168,6 +171,9 @@ class _NormalDetector(BaseDetector):
 
 
 class TestMaxCostBudget(unittest.TestCase):
+    def setUp(self):
+        detectors_module._cost_trackers.clear()
+
     def test_max_cost_ns_default(self):
         self.assertEqual(BaseDetector.MAX_COST_NS, 1_000_000)
 
@@ -184,6 +190,108 @@ class TestMaxCostBudget(unittest.TestCase):
     def test_normal_detector_does_not_warn(self):
         with self.assertNoLogs("dunetrace.detectors", level="WARNING"):
             run_detectors(make_state(), detectors=[_NormalDetector()])
+
+
+class TestCostBudgetTracking(unittest.TestCase):
+    """Rate-limited warnings, P50/P95/P99 tracking, and runtime-path downgrade.
+    _cost_trackers is module-level state keyed by detector name, so every test
+    clears it first for isolation from other tests (and from each other)."""
+
+    def setUp(self):
+        detectors_module._cost_trackers.clear()
+
+    def test_warning_is_rate_limited_to_once_per_minute(self):
+        detector = _SlowDetector()
+        with self.assertLogs("dunetrace.detectors", level="WARNING") as cm:
+            run_detectors(make_state(), detectors=[detector])
+        self.assertTrue(any("exceeded its cost budget" in msg for msg in cm.output))
+
+        # Second call immediately after — same minute, should NOT log again.
+        with self.assertNoLogs("dunetrace.detectors", level="WARNING"):
+            run_detectors(make_state(), detectors=[detector])
+
+    def test_warning_fires_again_after_rate_limit_window(self):
+        detector = _SlowDetector()
+        with self.assertLogs("dunetrace.detectors", level="WARNING"):
+            run_detectors(make_state(), detectors=[detector])
+
+        tracker = detectors_module._get_cost_tracker(detector.name)
+        # Simulate 61 real seconds having passed since the last warning.
+        tracker.last_warning_at = time.monotonic() - 61.0
+
+        with self.assertLogs("dunetrace.detectors", level="WARNING") as cm:
+            run_detectors(make_state(), detectors=[detector])
+        self.assertTrue(any("exceeded its cost budget" in msg for msg in cm.output))
+
+    def test_cost_stats_logged_alongside_rate_limited_warning(self):
+        with self.assertLogs("dunetrace.detectors", level="INFO") as cm:
+            run_detectors(make_state(), detectors=[_SlowDetector()])
+        self.assertTrue(any("cost stats" in msg for msg in cm.output))
+
+    def test_downgrade_after_sustained_p99_over_budget(self):
+        detector = _SlowDetector()
+        tracker = detectors_module._get_cost_tracker(detector.name)
+
+        # Feed enough over-budget samples directly to cross the minimum-sample
+        # floor without needing real rate-limit-window timing gymnastics.
+        now = time.monotonic()
+        for _ in range(10):
+            tracker.samples.append((now, 999_999_999))
+
+        with self.assertLogs("dunetrace.detectors", level="WARNING") as cm:
+            run_detectors(make_state(), detectors=[detector])
+        self.assertTrue(any("downgrading to analytics-only" in msg for msg in cm.output))
+        self.assertIsNotNone(tracker.downgraded_at)
+
+    def test_downgraded_detector_is_skipped_in_runtime_context_only(self):
+        detector = _SlowDetector()
+        tracker = detectors_module._get_cost_tracker(detector.name)
+        tracker.downgraded_at = time.monotonic()
+
+        # context="runtime" (default is "analytics") skips it entirely — no call,
+        # no signal, no fresh cost sample recorded.
+        sample_count_before = len(tracker.samples)
+        run_detectors(make_state(), detectors=[detector], context="runtime")
+        self.assertEqual(len(tracker.samples), sample_count_before)
+
+    def test_analytics_context_never_skips_a_downgraded_detector(self):
+        detector = _SlowDetector()
+        tracker = detectors_module._get_cost_tracker(detector.name)
+        tracker.downgraded_at = time.monotonic()
+
+        sample_count_before = len(tracker.samples)
+        run_detectors(make_state(), detectors=[detector], context="analytics")
+        self.assertEqual(len(tracker.samples), sample_count_before + 1)
+
+    def test_reset_cost_downgrade_re_enables_the_detector(self):
+        detector = _SlowDetector()
+        tracker = detectors_module._get_cost_tracker(detector.name)
+        tracker.downgraded_at = time.monotonic()
+
+        reset_cost_downgrade(detector.name)
+        self.assertIsNone(tracker.downgraded_at)
+
+        sample_count_before = len(tracker.samples)
+        run_detectors(make_state(), detectors=[detector], context="runtime")
+        self.assertEqual(len(tracker.samples), sample_count_before + 1)
+
+    def test_reset_cost_downgrade_on_unknown_name_is_a_safe_no_op(self):
+        reset_cost_downgrade("NEVER_SEEN_THIS_DETECTOR")  # must not raise
+
+    def test_percentiles_only_include_samples_within_the_window(self):
+        tracker = detectors_module._DetectorCostTracker()
+        now = time.monotonic()
+        tracker.samples.append((now - 400.0, 1))  # outside the 300s window
+        tracker.samples.append((now, 100))
+        stats = tracker.percentiles()
+        self.assertIsNotNone(stats)
+        p50, p95, p99, n = stats
+        self.assertEqual(n, 1)
+        self.assertEqual(p50, 100)
+
+    def test_percentiles_returns_none_when_no_samples_in_window(self):
+        tracker = detectors_module._DetectorCostTracker()
+        self.assertIsNone(tracker.percentiles())
 
 
 # ── Evidence validation ──────────────────────────────────────────────────────
@@ -217,6 +325,76 @@ class TestEvidenceValidation(unittest.TestCase):
         signals = run_detectors(_looping_state(), detectors=[ToolLoopDetector()])
         self.assertEqual(len(signals), 1)
         self.assertIsInstance(signals[0].evidence, dict)
+
+
+class TestCustomDetectorRegistration(unittest.TestCase):
+    """A3: BaseDetector.__init_subclass__ auto-registers third-party detector
+    classes into CUSTOM_DETECTOR_REGISTRY — the plugin surface
+    detector_svc/custom_python_detectors.py loads from disk and merges into
+    get_detectors(). CUSTOM_DETECTOR_REGISTRY is module-level shared state, so
+    every test here patches it to a fresh dict rather than mutating the real
+    one (which detector_svc's own tests, and this file's later tests, also
+    read from)."""
+
+    def setUp(self):
+        self._registry_patcher = unittest.mock.patch.dict(
+            detectors_module.CUSTOM_DETECTOR_REGISTRY, clear=True
+        )
+        self._registry_patcher.start()
+
+    def tearDown(self):
+        self._registry_patcher.stop()
+
+    def test_subclass_defined_outside_detectors_module_registers(self):
+        # __module__ is this test file, not dunetrace.detectors — must register.
+        class _MyPlugin(BaseDetector):
+            name = "MY_PLUGIN"
+
+        self.assertIn("_MyPlugin", detectors_module.CUSTOM_DETECTOR_REGISTRY)
+        self.assertIs(detectors_module.CUSTOM_DETECTOR_REGISTRY["_MyPlugin"], _MyPlugin)
+
+    def test_builtin_detectors_do_not_register(self):
+        # ToolLoopDetector etc. are defined inside dunetrace.detectors itself —
+        # they're wired into detector_svc._DETECTOR_CLASSES explicitly, not
+        # via this registry, and must not show up here.
+        self.assertNotIn("ToolLoopDetector", detectors_module.CUSTOM_DETECTOR_REGISTRY)
+
+    def test_default_category_and_shadow_metadata(self):
+        class _MyPlugin(BaseDetector):
+            name = "MY_PLUGIN"
+
+        self.assertEqual(_MyPlugin.CATEGORY, "custom")
+        self.assertTrue(_MyPlugin.SHADOW_BY_DEFAULT)
+
+    def test_metadata_overridable_on_subclass(self):
+        class _MyPlugin(BaseDetector):
+            name = "MY_PLUGIN"
+            CATEGORY = "security"
+            SHADOW_BY_DEFAULT = False
+
+        self.assertEqual(_MyPlugin.CATEGORY, "security")
+        self.assertFalse(_MyPlugin.SHADOW_BY_DEFAULT)
+
+    def test_metadata_fields_are_constructor_tunable(self):
+        # CATEGORY/SHADOW_BY_DEFAULT are UPPERCASE class attributes, so the
+        # existing BaseDetector.__init__ override mechanism already accepts
+        # them — same as SEVERITY/MAX_COST_NS.
+        class _MyPlugin(BaseDetector):
+            name = "MY_PLUGIN"
+
+        instance = _MyPlugin(CATEGORY="security", SHADOW_BY_DEFAULT=False)
+        self.assertEqual(instance.CATEGORY, "security")
+        self.assertFalse(instance.SHADOW_BY_DEFAULT)
+
+    def test_nested_subclass_of_a_third_party_class_also_registers(self):
+        class _MyPlugin(BaseDetector):
+            name = "MY_PLUGIN"
+
+        class _MyPluginV2(_MyPlugin):
+            name = "MY_PLUGIN_V2"
+
+        self.assertIn("_MyPlugin", detectors_module.CUSTOM_DETECTOR_REGISTRY)
+        self.assertIn("_MyPluginV2", detectors_module.CUSTOM_DETECTOR_REGISTRY)
 
 
 if __name__ == "__main__":

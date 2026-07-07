@@ -22,13 +22,24 @@ Tuned values belong in the detector service config, not here.
 
 from __future__ import annotations
 
+import ast
+import json
 import logging
 import re
 import time
-from collections import Counter
-from typing import List, Optional
+from collections import Counter, deque
+from typing import Deque, List, Optional, Tuple
 
-from dunetrace.models import AgentEvent, EventType, FailureSignal, FailureType, RunState, Severity
+from dunetrace.models import (
+    AgentEvent,
+    EventType,
+    FailureSignal,
+    FailureType,
+    RunState,
+    Severity,
+    ToolCall,
+)
+from dunetrace.policies import compute_run_cost
 
 logger = logging.getLogger("dunetrace.detectors")
 
@@ -45,6 +56,14 @@ def _scale_confidence(ratio: float) -> float:
 
 # ── Base ──────────────────────────────────────────────────────────────────────
 
+# Third-party detector classes register here automatically (see
+# BaseDetector.__init_subclass__ below) — the plugin surface detector_svc's
+# custom_python_detectors.py loads from disk and merges into get_detectors().
+# Keyed by class name; a name collision is last-write-wins (matches how
+# accidentally defining two classes with the same name in one module would
+# already behave — no additional surprise introduced here).
+CUSTOM_DETECTOR_REGISTRY: dict[str, type["BaseDetector"]] = {}
+
 
 class BaseDetector:
     name: str = "base"
@@ -59,6 +78,29 @@ class BaseDetector:
     # not raise, does not drop the signal) when a single on_run_completion() call
     # exceeds this. Default matches this module's design goal of <1ms/check.
     MAX_COST_NS: int = 1_000_000
+
+    # Metadata for third-party subclasses only (built-ins defined in this module
+    # don't need these — they're wired into detector_svc's own _DETECTOR_CLASSES
+    # dict directly, and their shadow/live status is decided by the curated
+    # LIVE_DETECTORS allowlist, not by a per-class default). CATEGORY groups
+    # plugin detectors for reporting/UI purposes, distinct from a built-in
+    # detector's identity. SHADOW_BY_DEFAULT mirrors JSON-config custom
+    # detectors always starting in shadow mode — a plugin author can set this
+    # False if they've already validated precision and want to go live
+    # immediately, though the safe default is True.
+    CATEGORY: str = "custom"
+    SHADOW_BY_DEFAULT: bool = True
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        # Only third-party subclasses register — built-in Tier 1 detectors are
+        # defined in this same module and are wired into detector_svc's
+        # _DETECTOR_CLASSES dict explicitly, not via this registry. Checking
+        # __module__ (rather than requiring plugin authors to opt in with a
+        # flag) means zero extra ceremony for the common case: subclass
+        # BaseDetector anywhere outside dunetrace.detectors and it just works.
+        if cls.__module__ != BaseDetector.__module__:
+            CUSTOM_DETECTOR_REGISTRY[cls.__name__] = cls
 
     def __init__(self, **overrides: object) -> None:
         """Accept keyword overrides for UPPERCASE class attributes. Unknown keys raise TypeError at startup, not at runtime.
@@ -98,8 +140,7 @@ class BaseDetector:
 
         This is what every Tier 1 detector implements. Must return either None or
         a FailureSignal with a populated `evidence: dict` — evidence is what
-        downstream root-cause consumers (the Langfuse-backed LLM analysis today,
-        any native root-cause pipeline later) read to explain *why* the signal
+        the native root-cause LLM analysis reads to explain *why* the signal
         fired. run_detectors() logs a warning if evidence isn't a dict, but does
         not drop the signal.
         """
@@ -867,7 +908,7 @@ class StepCountInflationDetector(BaseDetector):
     """
     Current run exceeded INFLATION_FACTOR × the P75 step count for this (agent_id,
     agent_version) over the last 50 successful runs. Skips silently when baseline is absent
-    — needs at least 10 historical runs to be meaningful.
+    — needs at least 20 historical runs to be meaningful.
 
     Tunable: INFLATION_FACTOR (default 2.0). Lower to catch moderate inflation earlier;
     raise for research agents with high step variance (2.5–3.0) or lower for coding agents
@@ -1251,6 +1292,918 @@ class SessionLatencyDetector(BaseDetector):
         )
 
 
+# ── PREMATURE_TERMINATION ───────────────────────────────────────────────────────
+
+
+class PrematureTerminationDetector(BaseDetector):
+    """
+    A tool call failed, then the agent's next LLM response claims success anyway,
+    without acknowledging the failure. The flagship "silent degradation" detector —
+    the agent didn't just fail to notice an error, it actively told the user the
+    opposite of what happened.
+
+    Data-availability note: `tool_responded`'s `success` (bool) and `error` (str,
+    only ever populated when success=False — see run_context.py::tool_responded)
+    is the primary "tool had a problem" signal. The wire format can also carry
+    the tool's raw response body via `tool_responded(..., output=...)`, but only
+    when the calling code passes it — most auto-instrumentation doesn't (see
+    docs/detectors.md's Tool Argument Fabrication section for which integrations
+    do). When that text is present, `ERROR_MARKERS` is also checked against it, so
+    a tool that self-reports `success=True` but whose own body reads like an
+    error (a real pattern: HTTP 200 with `{"error": "not found"}`) still counts as
+    a problem. There is still no HTTP status code or tool schema (nullability)
+    in the wire format either way.
+
+    Fires once per run, on the first (failed tool call, completion claim) pair
+    found, matching every other Tier 1 detector's one-signal-per-run contract.
+
+    Severity: HIGH, or CRITICAL if the completion claim is also the last
+    llm.responded event in the run (no further attempt to notice or fix it).
+
+    Tunable: COMPLETION_TERMS, ERROR_ACKNOWLEDGMENT_TERMS, ERROR_MARKERS (word
+    lists, case-insensitive substring match unless CASE_SENSITIVE=True).
+    MIN_MESSAGE_LENGTH (default 20) — skip LLM outputs too short to carry
+    real claim-of-success context (e.g. a bare "Done.").
+    """
+
+    name = "PREMATURE_TERMINATION"
+    SEVERITY = None  # computed per-signal: HIGH or CRITICAL
+
+    ERROR_MARKERS = [
+        "error",
+        "exception",
+        "traceback",
+        "failed",
+        "not found",
+        "unavailable",
+        "timeout",
+    ]
+    COMPLETION_TERMS = [
+        "scheduled",
+        "booked",
+        "completed",
+        "successfully",
+        "done",
+        "sent",
+        "created",
+        "updated",
+        "confirmed",
+        "processed",
+        "finished",
+        "saved",
+        "deleted",
+        "resolved",
+    ]
+    ERROR_ACKNOWLEDGMENT_TERMS = [
+        "however",
+        "unable",
+        "couldn't",
+        "failed",
+        "error",
+        "issue",
+        "problem",
+        "unfortunately",
+        "sorry",
+    ]
+    CASE_SENSITIVE = False
+    MIN_MESSAGE_LENGTH = 20
+
+    def _contains_any(self, text: str, terms: list) -> Optional[str]:
+        haystack = text if self.CASE_SENSITIVE else text.lower()
+        for term in terms:
+            needle = term if self.CASE_SENSITIVE else term.lower()
+            if needle in haystack:
+                return term
+        return None
+
+    def _tool_problem_text(self, tc: ToolCall) -> Optional[str]:
+        """Text to run ERROR_MARKERS against for this call, or None if it shows
+        no sign of failure. success=False is the primary gate; a call that
+        self-reports success but whose raw output body (when instrumented)
+        contains an error marker is also treated as a problem."""
+        if tc.success is False:
+            return tc.error or ""
+        if tc.output and self._contains_any(tc.output, self.ERROR_MARKERS):
+            return tc.output
+        return None
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        problem_calls = [
+            (tc, text)
+            for tc in state.tool_calls
+            for text in [self._tool_problem_text(tc)]
+            if text is not None
+        ]
+        if not problem_calls:
+            return None
+
+        llm_responses = [
+            e
+            for e in state.events
+            if e.event_type == EventType.LLM_RESPONDED and e.payload.get("output")
+        ]
+        if not llm_responses:
+            return None
+        last_llm_step = max(e.step_index for e in llm_responses)
+
+        for tc, problem_text in problem_calls:
+            claim = next((e for e in llm_responses if e.step_index > tc.step_index), None)
+            if claim is None:
+                continue
+
+            output = claim.payload["output"]
+            if len(output) < self.MIN_MESSAGE_LENGTH:
+                continue
+
+            matched_completion = self._contains_any(output, self.COMPLETION_TERMS)
+            if not matched_completion:
+                continue
+
+            matched_ack = self._contains_any(output, self.ERROR_ACKNOWLEDGMENT_TERMS)
+            if matched_ack:
+                continue
+
+            matched_error_marker = self._contains_any(problem_text, self.ERROR_MARKERS)
+            is_final = claim.step_index >= last_llm_step
+
+            return FailureSignal(
+                failure_type=FailureType.PREMATURE_TERMINATION,
+                severity=Severity.CRITICAL if is_final else Severity.HIGH,
+                run_id=state.run_id,
+                agent_id=state.agent_id,
+                agent_version=state.agent_version,
+                step_index=claim.step_index,
+                confidence=0.85 if is_final else 0.75,
+                evidence={
+                    "failed_tool": tc.tool_name,
+                    "failed_tool_step": tc.step_index,
+                    "tool_error": tc.error,
+                    "matched_error_marker": matched_error_marker,
+                    "failure_source": "declared" if tc.success is False else "output_text",
+                    "claim_step": claim.step_index,
+                    "matched_completion_term": matched_completion,
+                    "is_final_message": is_final,
+                    "output_snippet": output[:200],
+                },
+            )
+
+        return None
+
+
+# ── UNREAD_TOOL_ERROR ────────────────────────────────────────────────────────────
+
+
+class UnreadToolErrorDetector(BaseDetector):
+    """
+    A tool call failed, and the agent's very next action either ignores it
+    entirely (proceeds straight to another tool call) or responds without
+    acknowledging anything went wrong. The leading indicator for
+    PREMATURE_TERMINATION — this fires on absence of acknowledgment alone,
+    with no requirement that the agent go on to positively claim success.
+    A run that fires PREMATURE_TERMINATION usually fires this one too; a run
+    can fire this one without ever firing PREMATURE_TERMINATION (the agent
+    silently moves on without claiming anything either way).
+
+    Same data-availability note as PrematureTerminationDetector: `success is
+    False` is the primary "tool_result has error markers" gate. When the
+    caller also passes raw output text to `tool_responded()`, ERROR_MARKERS is
+    additionally checked against it, so a call that self-reports success but
+    whose own body reads like an error also counts. Still no HTTP status or
+    tool schema info in the wire format either way.
+
+    Counts every failed tool call in the run whose next action (by step
+    index) is either another tool call, or an LLM response containing no
+    error-acknowledgment term. Fires once per run if that count is >= 1 (one
+    signal, matching every other Tier 1 detector's contract) — MEDIUM by
+    default, HIGH if the count is >= 2 (chained silent errors).
+
+    Tunable: ERROR_ACKNOWLEDGMENT_TERMS (shared word list with
+    PrematureTerminationDetector — override both together if you tune one).
+    """
+
+    name = "UNREAD_TOOL_ERROR"
+    SEVERITY = None  # computed per-signal: MEDIUM or HIGH
+
+    ERROR_MARKERS = [
+        "error",
+        "exception",
+        "traceback",
+        "failed",
+        "not found",
+        "unavailable",
+        "timeout",
+    ]
+    ERROR_ACKNOWLEDGMENT_TERMS = [
+        "however",
+        "unable",
+        "couldn't",
+        "failed",
+        "error",
+        "issue",
+        "problem",
+        "unfortunately",
+        "sorry",
+    ]
+    CASE_SENSITIVE = False
+
+    def _contains_any(self, text: str, terms: list) -> Optional[str]:
+        haystack = text if self.CASE_SENSITIVE else text.lower()
+        for term in terms:
+            needle = term if self.CASE_SENSITIVE else term.lower()
+            if needle in haystack:
+                return term
+        return None
+
+    def _tool_problem_text(self, tc: ToolCall) -> Optional[str]:
+        """Text to run ERROR_MARKERS against for this call, or None if it shows
+        no sign of failure. success=False is the primary gate; a call that
+        self-reports success but whose raw output body (when instrumented)
+        contains an error marker is also treated as a problem."""
+        if tc.success is False:
+            return tc.error or ""
+        if tc.output and self._contains_any(tc.output, self.ERROR_MARKERS):
+            return tc.output
+        return None
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        problem_calls = [
+            (tc, text)
+            for tc in state.tool_calls
+            for text in [self._tool_problem_text(tc)]
+            if text is not None
+        ]
+        if not problem_calls:
+            return None
+
+        next_actionable = [
+            e
+            for e in state.events
+            if e.event_type in (EventType.TOOL_CALLED, EventType.LLM_RESPONDED)
+        ]
+
+        unread: list = []
+        for tc, problem_text in problem_calls:
+            nxt = next((e for e in next_actionable if e.step_index > tc.step_index), None)
+            if nxt is None:
+                continue  # run ended right after the failure — no next action to judge
+
+            if nxt.event_type == EventType.TOOL_CALLED:
+                unread.append((tc, nxt, "tool_call", problem_text))
+                continue
+
+            output = nxt.payload.get("output", "")
+            if self._contains_any(output, self.ERROR_ACKNOWLEDGMENT_TERMS):
+                continue  # agent addressed it — not unread
+
+            unread.append((tc, nxt, "llm_response", problem_text))
+
+        if not unread:
+            return None
+
+        tc, nxt, next_action_type, problem_text = unread[0]
+        severity = Severity.HIGH if len(unread) >= 2 else Severity.MEDIUM
+        matched_error_marker = self._contains_any(problem_text, self.ERROR_MARKERS)
+
+        return FailureSignal(
+            failure_type=FailureType.UNREAD_TOOL_ERROR,
+            severity=severity,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=nxt.step_index,
+            confidence=0.80 if len(unread) >= 2 else 0.65,
+            evidence={
+                "failed_tool": tc.tool_name,
+                "failed_tool_step": tc.step_index,
+                "tool_error": tc.error,
+                "matched_error_marker": matched_error_marker,
+                "failure_source": "declared" if tc.success is False else "output_text",
+                "next_action_step": nxt.step_index,
+                "next_action_type": next_action_type,
+                "unread_count": len(unread),
+            },
+        )
+
+
+# ── TOOL_ARGUMENT_FABRICATION ─────────────────────────────────────────────────
+
+
+class ToolArgumentFabricationDetector(BaseDetector):
+    """
+    A tool call's arguments reference a specific entity (a UUID, an email
+    address, a file path, an integer ID, a quoted string) that never appears
+    anywhere the agent could plausibly have gotten it from: the user's input,
+    the system prompt, or the raw output of any tool call earlier in the run.
+    Provenance-only — this does NOT check whether the value is *correct*, only
+    whether the agent could have had it from context. A correct-but-ungrounded
+    guess still fires; the point is catching invention, not verification.
+
+    Data-availability note: system_prompt and a tool call's raw output text are
+    both optional, instrumentation-dependent fields (see
+    dunetrace.client.Dunetrace.run's system_prompt param and
+    run_context.py::tool_responded's output param) — most auto-instrumentation
+    doesn't populate them yet (dt.tool() and the CrewAI integration do; the
+    generic httpx/requests patches deliberately don't, since reading a
+    response body there risks consuming a stream the caller still needs).
+    Consequences:
+
+    - Missing system_prompt: an entity sourced only from the system prompt
+      (e.g. a fixed account ID baked into the agent's instructions) can read
+      as fabricated. Not fully compensable — documented, not solved.
+    - Missing tool output for an EARLIER call in the run: from that point on,
+      an entity could legitimately have come from that invisible result, so
+      this detector stops evaluating further calls in the run entirely rather
+      than risk false-firing on the single most common real pattern (chaining
+      an ID from one tool's result into the next tool's arguments).
+
+    Small integers (1-100) are excluded from extraction outright — they
+    recur constantly by coincidence (page numbers, counts, retries) and a
+    substring check against them is too easy to satisfy by accident either
+    way. Common recurring words (user, admin, dates, etc.) are allowlisted.
+
+    Args parsing: `tc.args` is a string (the wire format never carries
+    structured args — see ToolCall.args), but in practice it's almost always
+    `str(a_dict)` (this SDK's own tool_called()) or `JSON.stringify(args)`
+    (the TS SDK) — both parseable. Entities are extracted from parsed dict/
+    list VALUES only, never keys, and only string values with no whitespace
+    are treated as identifier candidates outright (a free-text value like a
+    search query is exactly as "unverifiable" as an identifier under a naive
+    reading of the spec, but flagging every query/message argument would
+    swamp real signal — see the false-positive-averse mandate this detector
+    was built under). When args_text isn't parseable as either format, this
+    falls back to scanning the raw text directly (quoted substrings, still
+    filtered to no-whitespace tokens) — a real but rare degradation, since an
+    unparsed fallback can't distinguish a dict key from a value.
+
+    Fires once per run, on the first tool call with a fabricated entity,
+    matching every other Tier 1 detector's one-signal-per-run contract.
+
+    Severity: HIGH by default, CRITICAL if the tool name matches a
+    destructive-sounding pattern (delete_*, remove_*, drop_*, transfer_*,
+    send_*, pay_*) — a fabricated argument to one of these is a materially
+    bigger blast radius than to a read-only lookup.
+
+    Tunable: ALLOWLIST, DESTRUCTIVE_TOOL_PATTERNS, SMALL_INT_MIN/MAX,
+    CASE_SENSITIVE.
+    """
+
+    name = "TOOL_ARGUMENT_FABRICATION"
+    SEVERITY = None  # computed per-signal: HIGH or CRITICAL
+
+    UUID_RE = re.compile(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+    )
+    EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+    URL_RE = re.compile(r"\bhttps?://[^\s\"'<>]+")
+    FILE_PATH_RE = re.compile(r"\b[\w.\-]+(?:/[\w.\-]+)+\b")
+    QUOTED_STRING_RE = re.compile(r"\"([^\"]{3,})\"|'([^']{3,})'")
+    INTEGER_ID_RE = re.compile(r"\b\d+\b")
+
+    ALLOWLIST = [
+        "user",
+        "admin",
+        "system",
+        "root",
+        "guest",
+        "test",
+        "hello",
+        "world",
+        "today",
+        "tomorrow",
+        "yesterday",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ]
+    DESTRUCTIVE_TOOL_PATTERNS = [
+        "delete_",
+        "remove_",
+        "drop_",
+        "transfer_",
+        "send_",
+        "pay_",
+    ]
+    SMALL_INT_MIN = 1
+    SMALL_INT_MAX = 100
+    CASE_SENSITIVE = False
+
+    def _try_parse_args(self, args_text: str):
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                return parser(args_text)
+            except Exception:
+                continue
+        return None
+
+    def _collect_leaf_texts(self, value) -> List[Tuple[str, bool]]:
+        """Walk a parsed args structure to its leaves. Returns (text,
+        is_string_value) pairs — is_string_value gates the whole-value
+        identifier check; numeric leaves go through INTEGER_ID_RE's
+        small-int-aware path instead of bypassing it."""
+        leaves: List[Tuple[str, bool]] = []
+        if isinstance(value, dict):
+            for v in value.values():
+                leaves += self._collect_leaf_texts(v)
+        elif isinstance(value, (list, tuple, set)):
+            for v in value:
+                leaves += self._collect_leaf_texts(v)
+        elif isinstance(value, str):
+            leaves.append((value, True))
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            leaves.append((str(value), False))
+        return leaves
+
+    def _looks_like_identifier(self, s: str) -> bool:
+        return len(s) >= 3 and not any(ch.isspace() for ch in s)
+
+    def _extract_entities(self, args_text: str) -> List[str]:
+        parsed = self._try_parse_args(args_text)
+        leaves = self._collect_leaf_texts(parsed) if parsed is not None else [(args_text, False)]
+
+        candidates: List[str] = []
+        for text, is_string_value in leaves:
+            candidates += self.UUID_RE.findall(text)
+            candidates += self.EMAIL_RE.findall(text)
+            candidates += self.URL_RE.findall(text)
+            candidates += self.FILE_PATH_RE.findall(text)
+            for m in self.INTEGER_ID_RE.finditer(text):
+                n = int(m.group(0))
+                if self.SMALL_INT_MIN <= n <= self.SMALL_INT_MAX:
+                    continue  # coincidental small integers — see class docstring
+                candidates.append(m.group(0))
+
+            if parsed is not None:
+                if is_string_value and self._looks_like_identifier(text):
+                    candidates.append(text)
+            else:
+                for m in self.QUOTED_STRING_RE.finditer(text):
+                    val = m.group(1) or m.group(2)
+                    if val and self._looks_like_identifier(val):
+                        candidates.append(val)
+
+        seen = set()
+        entities = []
+        for c in candidates:
+            key = c if self.CASE_SENSITIVE else c.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            entities.append(c)
+        return entities
+
+    def _is_allowlisted(self, entity: str) -> bool:
+        return entity.lower() in self.ALLOWLIST
+
+    def _is_destructive_tool(self, tool_name: str) -> bool:
+        name = tool_name if self.CASE_SENSITIVE else tool_name.lower()
+        return any(name.startswith(p) for p in self.DESTRUCTIVE_TOOL_PATTERNS)
+
+    def _in_corpus(self, entity: str, corpus: str) -> bool:
+        needle = entity if self.CASE_SENSITIVE else entity.lower()
+        haystack = corpus if self.CASE_SENSITIVE else corpus.lower()
+        return needle in haystack
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        if not state.tool_calls:
+            return None
+
+        static_parts = []
+        if state.input_text:
+            static_parts.append(state.input_text)
+        if state.system_prompt:
+            static_parts.append(state.system_prompt)
+        static_corpus = "\n".join(static_parts)
+
+        prior_outputs: List[str] = []
+        visibility_complete = True
+
+        for tc in state.tool_calls:
+            if visibility_complete:
+                corpus = static_corpus
+                if prior_outputs:
+                    corpus = corpus + "\n" + "\n".join(prior_outputs)
+
+                fabricated = None
+                for entity in self._extract_entities(tc.args):
+                    if self._is_allowlisted(entity):
+                        continue
+                    if self._in_corpus(entity, corpus):
+                        continue
+                    fabricated = entity
+                    break
+
+                if fabricated is not None:
+                    destructive = self._is_destructive_tool(tc.tool_name)
+                    return FailureSignal(
+                        failure_type=FailureType.TOOL_ARGUMENT_FABRICATION,
+                        severity=Severity.CRITICAL if destructive else Severity.HIGH,
+                        run_id=state.run_id,
+                        agent_id=state.agent_id,
+                        agent_version=state.agent_version,
+                        step_index=tc.step_index,
+                        confidence=0.85 if destructive else 0.7,
+                        evidence={
+                            "tool_name": tc.tool_name,
+                            "tool_step": tc.step_index,
+                            "fabricated_entity": fabricated,
+                            "is_destructive_tool": destructive,
+                            "args_snippet": tc.args[:200],
+                        },
+                    )
+
+            # This call's own result becomes valid grounding for LATER calls.
+            # If it isn't recorded, we can no longer rule out that a later
+            # entity came from it — stop evaluating rather than risk a false
+            # positive on ID-chaining, the single most common legitimate
+            # pattern this detector would otherwise misfire on.
+            if tc.output:
+                prior_outputs.append(tc.output)
+            elif tc.success is not None:
+                visibility_complete = False
+
+        return None
+
+
+# ── RETRIEVED_CONTENT_INJECTION ───────────────────────────────────────────────
+
+
+class RetrievedContentInjectionDetector(BaseDetector):
+    """
+    Content the agent pulled in from a retrieval or tool call — search
+    results, a fetched web page, an MCP response — contains text that reads
+    as an instruction directed at the agent itself, rather than data about
+    the world. Indirect prompt injection: the attacker never talks to the
+    agent directly, they plant the instruction somewhere the agent will read
+    it back to itself. Distinct from `PROMPT_INJECTION_SIGNAL`, which checks
+    the user's own input at run-start — this one checks content the agent
+    retrieves *during* the run, a completely different attack surface with a
+    completely different author (a third party controlling a web page or
+    document, not the end user).
+
+    Data-availability note: both content sources this detector reads are
+    optional, instrumentation-dependent fields. `RetrievalResult.content`
+    exists only when the caller passes `content=` to `retrieval_responded()`
+    — the RAG retrieval pipeline transmits no document text at all otherwise
+    (only `result_count`/`top_score`). `ToolCall.output` is the same
+    optional field `TOOL_ARGUMENT_FABRICATION` and the wire-format extension
+    for `PREMATURE_TERMINATION`/`UNREAD_TOOL_ERROR` rely on. A run whose
+    instrumentation surfaces neither simply gives this detector nothing to
+    check — it does not fire on absence of data, only on a positive pattern
+    match in data that is present.
+
+    Fires once per run, on the first retrieval or tool result whose content
+    matches an injection marker — matching every other Tier 1 detector's
+    one-signal-per-run contract.
+
+    Severity: HIGH on any match. CRITICAL if, after the matching content was
+    read, the agent goes on to call a tool it had never called before in
+    this run AND whose name doesn't appear anywhere in the user's own input
+    — the strongest available proxy for "the injected instruction actually
+    changed what the agent did," since we have no ground truth for intent,
+    only for whether the *shape* of tool use changed in a way the user's own
+    request doesn't explain.
+
+    Tunable: INJECTION_PHRASES, CASE_SENSITIVE, DETECT_BEHAVIOR_DEVIATION.
+    """
+
+    name = "RETRIEVED_CONTENT_INJECTION"
+    SEVERITY = None  # computed per-signal: HIGH or CRITICAL
+
+    INJECTION_PHRASES = [
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "disregard previous instructions",
+        "disregard all previous instructions",
+        "your new task is",
+        "you must",
+        "you should now",
+        "you are now",
+    ]
+    ROLE_MARKER_RE = re.compile(r"(?:^|\n)\s*(system|assistant)\s*:", re.IGNORECASE)
+    DELIMITER_RE = re.compile(r"\[/?INST\]|<<SYS>>|<</SYS>>", re.IGNORECASE)
+    BASE64_BLOCK_RE = re.compile(r"[A-Za-z0-9+/]{100,}={0,2}")
+    CASE_SENSITIVE = False
+    DETECT_BEHAVIOR_DEVIATION = True
+
+    def _match_injection_marker(self, text: str) -> Optional[str]:
+        haystack = text if self.CASE_SENSITIVE else text.lower()
+        for phrase in self.INJECTION_PHRASES:
+            needle = phrase if self.CASE_SENSITIVE else phrase.lower()
+            if needle in haystack:
+                return phrase
+        if self.ROLE_MARKER_RE.search(text):
+            return "embedded role marker"
+        if self.DELIMITER_RE.search(text):
+            return "instruction delimiter"
+        if self.BASE64_BLOCK_RE.search(text):
+            return "long base64 block"
+        return None
+
+    def _is_behavior_deviation(self, state: RunState, after_step: int) -> bool:
+        if not self.DETECT_BEHAVIOR_DEVIATION:
+            return False
+        prior_tools = {tc.tool_name for tc in state.tool_calls if tc.step_index <= after_step}
+        input_text = (state.input_text or "").lower()
+        for tc in state.tool_calls:
+            if tc.step_index <= after_step:
+                continue
+            if tc.tool_name in prior_tools:
+                continue
+            if tc.tool_name.lower() in input_text:
+                continue
+            return True
+        return False
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        candidates: List[Tuple[int, str, str, str]] = []  # (step, source_type, source_name, text)
+        for r in state.retrievals:
+            if r.content:
+                candidates.append((r.step_index, "retrieval", r.index_name, r.content))
+        for tc in state.tool_calls:
+            if tc.output:
+                candidates.append((tc.step_index, "tool", tc.tool_name, tc.output))
+        candidates.sort(key=lambda c: c[0])
+
+        for step_index, source_type, source_name, text in candidates:
+            marker = self._match_injection_marker(text)
+            if marker is None:
+                continue
+
+            deviated = self._is_behavior_deviation(state, step_index)
+            return FailureSignal(
+                failure_type=FailureType.RETRIEVED_CONTENT_INJECTION,
+                severity=Severity.CRITICAL if deviated else Severity.HIGH,
+                run_id=state.run_id,
+                agent_id=state.agent_id,
+                agent_version=state.agent_version,
+                step_index=step_index,
+                confidence=0.85 if deviated else 0.7,
+                evidence={
+                    "source_type": source_type,
+                    "source_name": source_name,
+                    "source_step": step_index,
+                    "matched_marker": marker,
+                    "behavior_deviation": deviated,
+                    "content_snippet": text[:200],
+                },
+            )
+
+        return None
+
+
+# ── HANDOFF_CONTEXT_LOSS ──────────────────────────────────────────────────────
+
+
+class HandoffContextLossDetector(BaseDetector):
+    """
+    Multi-agent state loss: when one agent run hands off to another (agent A
+    invokes agent B as a distinct `dt.run()`, linked via `parent_run_id`),
+    a meaningful chunk of what A had learned doesn't make it into B's input.
+
+    This detector is NOT evaluated via `on_run_completion` like every other
+    Tier 1 detector — `on_run_completion(state: RunState)` only ever sees
+    one run, and comparing a handoff fundamentally requires two. Changing
+    that shared contract to thread a second RunState through was explicitly
+    out of scope (the six-detector brief's own hard constraint: preserve the
+    existing detector base class API, don't touch it for one detector's
+    benefit). Instead this follows the exact precedent `PromptInjectionDetector`
+    already set: `on_run_completion` always returns None here too, and the
+    real logic lives in `evaluate_handoff()`, called explicitly from
+    `services/detector/detector_svc/worker.py::process_run()` — the one
+    place that already has both sides' data. Still registered normally in
+    `_DETECTOR_CLASSES` so `SIZE_DROP_THRESHOLD`/`ENTITY_LOSS_THRESHOLD`
+    get the same per-agent-category YAML tuning every other detector gets.
+
+    How the worker gets the parent's data: `parent_run_id` is already a
+    real, plumbed-through field (SDK → events table → OTel span attribute)
+    but was never queried anywhere before this. Since `parent_run_id` IS the
+    parent run's own `run_id`, the worker fetches it via the same, already-
+    indexed `fetch_run_events()` every run uses — no new event type, no new
+    database index. Parent events are filtered to those at or before the
+    child's own `run.started` timestamp, so parent activity that happens
+    later (concurrently or after the handoff) can't leak into "what A knew
+    at the moment of handoff." "A's output state" is approximated as A's
+    `input_text` plus every recorded `llm.responded`/`tool.responded`
+    output up to that point — everything text-visible that A had accumulated.
+    "B's input state" is simply B's own `input_text`.
+
+    Known, disclosed limitations (matching the original spec):
+    - Only fires when `parent_run_id` is actually set. No auto-instrumentation
+      in this repo sets it today for LangGraph or CrewAI hierarchical
+      multi-agent crews — that requires framework-specific hooks recognizing
+      a handoff and threading the parent's run_id through, which is its own
+      scope, not built here. A single-agent run, or a multi-agent run whose
+      integration doesn't set `parent_run_id`, silently never fires — that's
+      expected, not a bug.
+    - No entity-loss detection at all if the parent's output text was never
+      instrumented either (same optional/instrumentation-dependent caveat
+      as `TOOL_ARGUMENT_FABRICATION` and `RETRIEVED_CONTENT_INJECTION`).
+
+    Fires HIGH when both: the child's input is more than `SIZE_DROP_THRESHOLD`
+    (default 0.5, i.e. 50%) smaller than the parent's accumulated context,
+    AND at least `ENTITY_LOSS_THRESHOLD` (default 1) entities (UUIDs, emails,
+    URLs, integer IDs of 3+ digits) present in the parent's context are
+    missing from the child's input entirely.
+
+    Tunable: SIZE_DROP_THRESHOLD, ENTITY_LOSS_THRESHOLD.
+    """
+
+    name = "HANDOFF_CONTEXT_LOSS"
+    SEVERITY = Severity.HIGH
+
+    SIZE_DROP_THRESHOLD = 0.5
+    ENTITY_LOSS_THRESHOLD = 1
+
+    UUID_RE = re.compile(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+    )
+    EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+    URL_RE = re.compile(r"\bhttps?://[^\s\"'<>]+")
+    INTEGER_ID_RE = re.compile(r"\b\d{3,}\b")  # 3+ digits — shorter numbers too coincidental
+
+    def _extract_entities(self, text: str) -> List[str]:
+        candidates: List[str] = []
+        candidates += self.UUID_RE.findall(text)
+        candidates += self.EMAIL_RE.findall(text)
+        candidates += self.URL_RE.findall(text)
+        candidates += self.INTEGER_ID_RE.findall(text)
+        seen = set()
+        entities = []
+        for c in candidates:
+            key = c.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            entities.append(c)
+        return entities
+
+    def evaluate_handoff(
+        self,
+        parent_context: str,
+        child_input: str,
+        run_id: str,
+        agent_id: str,
+        agent_version: str,
+    ) -> Optional[FailureSignal]:
+        if not parent_context:
+            return None
+        size_before = len(parent_context)
+        size_after = len(child_input or "")
+        if size_before == 0:
+            return None
+
+        drop_ratio = (size_before - size_after) / size_before
+        if drop_ratio <= self.SIZE_DROP_THRESHOLD:
+            return None
+
+        entities_before = self._extract_entities(parent_context)
+        child_lower = (child_input or "").lower()
+        missing = [e for e in entities_before if e.lower() not in child_lower]
+        if len(missing) < self.ENTITY_LOSS_THRESHOLD:
+            return None
+
+        return FailureSignal(
+            failure_type=FailureType.HANDOFF_CONTEXT_LOSS,
+            severity=self.SEVERITY,
+            run_id=run_id,
+            agent_id=agent_id,
+            agent_version=agent_version,
+            step_index=0,
+            confidence=min(1.0, 0.5 + len(missing) * 0.15),
+            evidence={
+                "parent_context_length": size_before,
+                "child_input_length": size_after,
+                "size_drop_ratio": round(drop_ratio, 2),
+                "missing_entities": missing[:5],
+                "missing_entity_count": len(missing),
+            },
+        )
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        return None
+
+
+# ── RUNAWAY_ITERATION ─────────────────────────────────────────────────────────
+
+
+class RunawayIterationDetector(BaseDetector):
+    """
+    A run crosses its step count or cost budget with no sign it's actually
+    concluding — the agent just keeps going. Distinct from
+    STEP_COUNT_INFLATION (which compares against this agent's own learned
+    baseline) and COST_SPIKE (token count vs. baseline): this one uses fixed,
+    absolute ceilings, and specifically requires the *absence* of any
+    completion signal in the agent's own recent output — a run that legitimately
+    needed 80 steps and said so along the way isn't runaway, it's just a big
+    job that finished on its own terms.
+
+    Cost is computed via dunetrace.policies.compute_run_cost(state.llm_calls)
+    — the same USD-estimation logic runtime policies already use for the
+    cost_usd trigger. No wire-format gap here: prompt/completion token counts
+    and model names have always been part of llm.responded's payload and
+    RunState.llm_calls, both client- and server-side.
+
+    Strongest completion signal available is structural, not textual:
+    state.exit_reason == "final_answer" (set by an explicit run.final_answer()
+    call) means the agent itself declared the run done — that overrides the
+    text-pattern check entirely and this detector never fires on such a run,
+    regardless of step count or cost. Absent that, it falls back to scanning
+    the last LOOKBACK_MESSAGES llm.responded outputs for completion language
+    (final answer markers, "task complete", etc.) — the same kind of raw-text
+    scan PREMATURE_TERMINATION/UNREAD_TOOL_ERROR already do, always available
+    since llm.responded's output text is not optional.
+
+    Fires HIGH when either the step or cost ceiling is crossed with no
+    completion signal; CRITICAL when both are crossed simultaneously.
+
+    Tunable: STEP_THRESHOLD, COST_THRESHOLD_USD, COMPLETION_PATTERNS,
+    LOOKBACK_MESSAGES, CASE_SENSITIVE.
+    """
+
+    name = "RUNAWAY_ITERATION"
+    SEVERITY = None  # computed per-signal: HIGH or CRITICAL
+
+    STEP_THRESHOLD = 50
+    COST_THRESHOLD_USD = 1.0
+    LOOKBACK_MESSAGES = 3
+    COMPLETION_PATTERNS = [
+        "final answer",
+        "task complete",
+        "task is complete",
+        "i'm done",
+        "that completes",
+        "in conclusion",
+        "to summarize",
+        "here is the final",
+        "all done",
+        "completed successfully",
+    ]
+    CASE_SENSITIVE = False
+
+    def _contains_completion_pattern(self, text: str) -> bool:
+        haystack = text if self.CASE_SENSITIVE else text.lower()
+        for pattern in self.COMPLETION_PATTERNS:
+            needle = pattern if self.CASE_SENSITIVE else pattern.lower()
+            if needle in haystack:
+                return True
+        return False
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        step_exceeded = state.current_step > self.STEP_THRESHOLD
+        cost = compute_run_cost(state.llm_calls)
+        cost_exceeded = cost > self.COST_THRESHOLD_USD
+        if not step_exceeded and not cost_exceeded:
+            return None
+
+        if state.exit_reason == "final_answer":
+            return None  # the agent itself declared the run done
+
+        llm_outputs = [
+            e
+            for e in state.events
+            if e.event_type == EventType.LLM_RESPONDED and e.payload.get("output")
+        ]
+        recent = llm_outputs[-self.LOOKBACK_MESSAGES :]
+        if any(self._contains_completion_pattern(e.payload["output"]) for e in recent):
+            return None  # a completion signal exists — not runaway
+
+        both_exceeded = step_exceeded and cost_exceeded
+        return FailureSignal(
+            failure_type=FailureType.RUNAWAY_ITERATION,
+            severity=Severity.CRITICAL if both_exceeded else Severity.HIGH,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=state.current_step,
+            confidence=0.9 if both_exceeded else 0.75,
+            evidence={
+                "step_count": state.current_step,
+                "step_threshold": self.STEP_THRESHOLD,
+                "step_exceeded": step_exceeded,
+                "estimated_cost_usd": round(cost, 4),
+                "cost_threshold_usd": self.COST_THRESHOLD_USD,
+                "cost_exceeded": cost_exceeded,
+                "recent_messages_checked": len(recent),
+            },
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TIER1_DETECTORS: List[BaseDetector] = [
@@ -1270,40 +2223,185 @@ TIER1_DETECTORS: List[BaseDetector] = [
     ReasoningSpinDetector(),
     CostSpikeDetector(),
     SessionLatencyDetector(),
-    # PromptInjectionDetector is handled separately (needs raw input)
+    PrematureTerminationDetector(),
+    UnreadToolErrorDetector(),
+    ToolArgumentFabricationDetector(),
+    RetrievedContentInjectionDetector(),
+    RunawayIterationDetector(),
+    # PromptInjectionDetector and HandoffContextLossDetector are handled
+    # separately — the former needs raw input, the latter needs a second
+    # run's data, which no detector in this list ever gets (see their
+    # docstrings)
 ]
 
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
 
 
+# ── Cost budget tracking ────────────────────────────────────────────────────────
+#
+# Soft enforcement of BaseDetector.MAX_COST_NS. A single detector call exceeding
+# its budget already logs a warning (see run_detectors() below); this adds three
+# things on top, scoped as a stopgap rather than a full metrics pipeline:
+#   1. that warning is rate-limited (once per detector per minute) instead of
+#      firing on every single over-budget call
+#   2. a rolling P50/P95/P99 (last _COST_WINDOW_S) is tracked per detector name
+#      and logged alongside the rate-limited warning
+#   3. a detector whose P99 stays over budget for the full window is downgraded:
+#      run_detectors(..., context="runtime") skips it, so a detector that grew
+#      from O(1) to O(n) stops silently degrading the SDK's per-step hot path
+#      (see run_context.py's signal-trigger policy check). context="analytics"
+#      (the default — the server-side detector worker, replay, and the OTel
+#      integration's once-per-run call all use this) never skips a downgraded
+#      detector; the run is still fully evaluated there.
+#
+# time.monotonic()'s epoch is unspecified (often time-since-boot on Linux), so
+# "not yet warned"/"not yet downgraded" is tracked with None, never a 0.0
+# sentinel — comparing now - 0.0 >= threshold silently fails on a freshly
+# booted host where monotonic() itself is still small.
+
+_COST_WINDOW_S = 300.0  # 5 minutes
+_COST_SAMPLE_CAP = 1000  # bounds memory regardless of call frequency
+_COST_WARNING_RATE_LIMIT_S = 60.0
+_COST_MIN_SAMPLES_FOR_DOWNGRADE = 5  # avoid downgrading off one or two slow calls
+
+
+class _DetectorCostTracker:
+    """Per-detector-name rolling cost history. One instance per name, shared
+    across every run_detectors() call in this process (not per RunState)."""
+
+    __slots__ = ("samples", "last_warning_at", "downgraded_at")
+
+    def __init__(self) -> None:
+        self.samples: Deque[tuple[float, int]] = deque(maxlen=_COST_SAMPLE_CAP)
+        self.last_warning_at: Optional[float] = None
+        self.downgraded_at: Optional[float] = None  # None = not downgraded
+
+    def record(self, elapsed_ns: int) -> None:
+        self.samples.append((time.monotonic(), elapsed_ns))
+
+    def percentiles(self, window_s: float = _COST_WINDOW_S):
+        """Return (p50, p95, p99, count) in ns over the last window_s, or None if empty."""
+        cutoff = time.monotonic() - window_s
+        recent = sorted(ns for ts, ns in self.samples if ts >= cutoff)
+        if not recent:
+            return None
+        n = len(recent)
+
+        def pct(p: float) -> int:
+            return recent[min(n - 1, int(n * p))]
+
+        return pct(0.50), pct(0.95), pct(0.99), n
+
+
+_cost_trackers: dict[str, _DetectorCostTracker] = {}
+
+
+def _get_cost_tracker(name: str) -> _DetectorCostTracker:
+    tracker = _cost_trackers.get(name)
+    if tracker is None:
+        tracker = _DetectorCostTracker()
+        _cost_trackers[name] = tracker
+    return tracker
+
+
+def reset_cost_downgrade(name: str) -> None:
+    """Manually re-enable a detector auto-downgraded to analytics-only after its
+    P99 stayed over MAX_COST_NS for a full _COST_WINDOW_S. See run_detectors()."""
+    tracker = _cost_trackers.get(name)
+    if tracker is not None:
+        tracker.downgraded_at = None
+
+
+def _record_cost_and_maybe_warn(detector: BaseDetector, elapsed_ns: int, run_id: str) -> None:
+    tracker = _get_cost_tracker(detector.name)
+    tracker.record(elapsed_ns)
+    if elapsed_ns <= detector.MAX_COST_NS:
+        return
+
+    now = time.monotonic()
+    if (
+        tracker.last_warning_at is not None
+        and now - tracker.last_warning_at < _COST_WARNING_RATE_LIMIT_S
+    ):
+        return
+    tracker.last_warning_at = now
+
+    logger.warning(
+        "Detector %s exceeded its cost budget: %dns > %dns (run_id=%s)",
+        detector.name,
+        elapsed_ns,
+        detector.MAX_COST_NS,
+        run_id,
+    )
+
+    stats = tracker.percentiles()
+    if stats is None:
+        return
+    p50, p95, p99, n = stats
+    logger.info(
+        "Detector %s cost stats (last %ds, n=%d): p50=%dns p95=%dns p99=%dns budget=%dns",
+        detector.name,
+        int(_COST_WINDOW_S),
+        n,
+        p50,
+        p95,
+        p99,
+        detector.MAX_COST_NS,
+    )
+    if (
+        p99 > detector.MAX_COST_NS
+        and n >= _COST_MIN_SAMPLES_FOR_DOWNGRADE
+        and tracker.downgraded_at is None
+    ):
+        tracker.downgraded_at = now
+        logger.warning(
+            "Detector %s P99 (%dns) has exceeded its cost budget (%dns) for the last %ds "
+            "— downgrading to analytics-only. It will be skipped by run_detectors(context="
+            "'runtime') until manually re-enabled via dunetrace.detectors.reset_cost_downgrade(%r).",
+            detector.name,
+            p99,
+            detector.MAX_COST_NS,
+            int(_COST_WINDOW_S),
+            detector.name,
+        )
+
+
 def run_detectors(
     state: RunState,
     detectors: Optional[List[BaseDetector]] = None,
+    context: str = "analytics",
 ) -> List[FailureSignal]:
     """Run all detectors against a run state. Pass a custom list to use production-tuned
     parameters; defaults to TIER1_DETECTORS if omitted. Returns one FailureSignal per
     triggered detector, or an empty list if nothing fired.
 
+    context distinguishes the SDK's per-step runtime hot path ("runtime" — see
+    run_context.py, only reachable when a trigger="signal" policy is configured)
+    from every other call site ("analytics" — the server-side detector worker,
+    on-demand replay, and the OTel integration's once-per-run call). A detector
+    auto-downgraded for exceeding its cost budget (see _record_cost_and_maybe_warn)
+    is skipped only under context="runtime" — analytics calls always evaluate
+    every detector, since they aren't the repeated-per-step path this protects.
+
     Each detector's on_run_completion() is timed against its MAX_COST_NS budget —
-    exceeding it logs a warning but never raises or drops the signal. Signals
-    with non-dict evidence are similarly logged (not dropped) — evidence is what
-    root-cause consumers downstream read, so a malformed shape there is worth
+    exceeding it logs a rate-limited warning but never raises or drops the signal.
+    Signals with non-dict evidence are similarly logged (not dropped) — evidence is
+    what root-cause consumers downstream read, so a malformed shape there is worth
     surfacing even though it isn't this function's job to fix.
     """
     active = detectors if detectors is not None else TIER1_DETECTORS
     signals = []
     for detector in active:
+        if context == "runtime":
+            tracker = _cost_trackers.get(detector.name)
+            if tracker is not None and tracker.downgraded_at is not None:
+                continue
+
         t0 = time.perf_counter_ns()
         signal = detector.on_run_completion(state)
         elapsed_ns = time.perf_counter_ns() - t0
-        if elapsed_ns > detector.MAX_COST_NS:
-            logger.warning(
-                "Detector %s exceeded its cost budget: %dns > %dns (run_id=%s)",
-                detector.name,
-                elapsed_ns,
-                detector.MAX_COST_NS,
-                state.run_id,
-            )
+        _record_cost_and_maybe_warn(detector, elapsed_ns, state.run_id)
+
         if signal:
             if not isinstance(signal.evidence, dict):
                 logger.warning(

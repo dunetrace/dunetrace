@@ -132,6 +132,22 @@ describe("DunetraceRun — event payloads", () => {
     expect(ev.payload).not.toHaveProperty("error");
   });
 
+  it("toolResponded transmits raw output text", () => {
+    const { run, emitted } = makeRun();
+    run.toolCalled("search");
+    run.toolResponded("search", true, 20, 50, undefined, "search result body");
+    const ev = emitted.find(e => e.event_type === "tool.responded")!;
+    expect(ev.payload["output"]).toBe("search result body");
+  });
+
+  it("toolResponded defaults output to empty string", () => {
+    const { run, emitted } = makeRun();
+    run.toolCalled("search");
+    run.toolResponded("search", true);
+    const ev = emitted.find(e => e.event_type === "tool.responded")!;
+    expect(ev.payload["output"]).toBe("");
+  });
+
   it("retrievalCalled transmits raw query", () => {
     const { run, emitted } = makeRun();
     run.retrievalCalled("docs", "sensitive query");
@@ -155,6 +171,22 @@ describe("DunetraceRun — event payloads", () => {
     expect(ev.payload["result_count"]).toBe(3);
     expect(ev.payload["top_score"]).toBe(0.92);
     expect(ev.payload["latency_ms"]).toBe(45);
+  });
+
+  it("retrievalResponded transmits raw content", () => {
+    const { run, emitted } = makeRun();
+    run.retrievalCalled("docs", "q");
+    run.retrievalResponded("docs", 1, 0.9, 10, "the retrieved text");
+    const ev = emitted.find(e => e.event_type === "retrieval.responded")!;
+    expect(ev.payload["content"]).toBe("the retrieved text");
+  });
+
+  it("retrievalResponded defaults content to empty string", () => {
+    const { run, emitted } = makeRun();
+    run.retrievalCalled("docs", "q");
+    run.retrievalResponded("docs", 1);
+    const ev = emitted.find(e => e.event_type === "retrieval.responded")!;
+    expect(ev.payload["content"]).toBe("");
   });
 
   it("externalSignal emits signal_name and source", () => {

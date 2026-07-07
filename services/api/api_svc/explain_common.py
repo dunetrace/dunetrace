@@ -1,7 +1,6 @@
 """
-Shared helpers for building a root-cause explain prompt, independent of
-where the "what happened" context comes from (native Dunetrace events or a
-Langfuse trace) — see native_explain.py and langfuse_client.py respectively.
+Shared helpers for building a root-cause explain prompt from Dunetrace's own
+stored events — see native_explain.py.
 """
 
 from __future__ import annotations

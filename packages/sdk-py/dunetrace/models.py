@@ -64,6 +64,12 @@ class FailureType(str, Enum):
     POLICY_VIOLATION = "POLICY_VIOLATION"
     COST_SPIKE = "COST_SPIKE"
     SESSION_LATENCY = "SESSION_LATENCY"
+    PREMATURE_TERMINATION = "PREMATURE_TERMINATION"
+    UNREAD_TOOL_ERROR = "UNREAD_TOOL_ERROR"
+    TOOL_ARGUMENT_FABRICATION = "TOOL_ARGUMENT_FABRICATION"
+    RETRIEVED_CONTENT_INJECTION = "RETRIEVED_CONTENT_INJECTION"
+    HANDOFF_CONTEXT_LOSS = "HANDOFF_CONTEXT_LOSS"
+    RUNAWAY_ITERATION = "RUNAWAY_ITERATION"
     CUSTOM = "CUSTOM"  # sentinel for user-defined custom detectors
 
 
@@ -107,6 +113,9 @@ class ToolCall:
     timestamp: float
     success: Optional[bool] = None
     error: Optional[str] = None  # raw error message when success=False
+    output: Optional[str] = (
+        None  # raw tool response body, when the caller passes output= to tool_responded()
+    )
 
 
 @dataclass
@@ -146,6 +155,9 @@ class RetrievalResult:
     result_count: int
     top_score: Optional[float]
     step_index: int
+    content: Optional[str] = (
+        None  # raw retrieved text, when the caller passes content= to retrieval_responded()
+    )
 
 
 @dataclass
@@ -165,6 +177,7 @@ class RunState:
     current_step: int = 0
     exit_reason: Optional[str] = None
     input_text: Optional[str] = None
+    system_prompt: Optional[str] = None
     # Cross-run baselines populated by the server before detectors run.
     # None = insufficient history. Local self-hosted mode may leave these None.
     baseline_p75_steps: Optional[float] = None

@@ -157,6 +157,7 @@ class Dunetrace:
             agent_version=version,
             available_tools=tools,
             input_text=user_input,
+            system_prompt=system_prompt,
             parent_run_id=parent_run_id,
         )
 
@@ -172,6 +173,7 @@ class Dunetrace:
 
         payload: dict = {
             "input_text": user_input,
+            "system_prompt": system_prompt,
             "model": model,
             "tools": tools,
         }
@@ -448,7 +450,8 @@ class Dunetrace:
         :param agent_id:     Name passed to ``dt.run()``.
         :param model:        Model name recorded on the run.
         :param tools:        Tool list recorded on the run.
-        :param system_prompt: Used for agent version hashing.
+        :param system_prompt: Sent as-is to the backend (content-aware detectors need
+                             it) and folded into the agent version hash for grouping.
         :param input_from:   Name of the parameter to use as ``user_input``.
                              Defaults to the first positional argument.
 
@@ -606,11 +609,13 @@ class Dunetrace:
                             )
                         raise
                     if run:
+                        result_text = str(result)
                         run.tool_responded(
                             tool_name,
                             success=True,
-                            output_length=len(str(result)),
+                            output_length=len(result_text),
                             latency_ms=int((time.time() - t0) * 1000),
+                            output=result_text,
                         )
                     return result
 
@@ -636,11 +641,13 @@ class Dunetrace:
                             )
                         raise
                     if run:
+                        result_text = str(result)
                         run.tool_responded(
                             tool_name,
                             success=True,
-                            output_length=len(str(result)),
+                            output_length=len(result_text),
                             latency_ms=int((time.time() - t0) * 1000),
+                            output=result_text,
                         )
                     return result
 

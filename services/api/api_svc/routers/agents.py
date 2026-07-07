@@ -73,8 +73,8 @@ async def get_agent_fixes(
     org_id: str = Depends(require_org),
 ) -> FixListResponse:
     """
-    Returns all fixes applied via the dashboard for this agent — both Langfuse prompt
-    applications and clipboard copies — with recurrence status since each fix was applied.
+    Returns all fixes applied via the dashboard for this agent — GitHub PRs and
+    clipboard copies — with recurrence status since each fix was applied.
 
     `verdict` is one of:
     - **verified** — ≥10 runs after fix with zero recurrences
