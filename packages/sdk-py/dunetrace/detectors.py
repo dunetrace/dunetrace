@@ -624,6 +624,11 @@ class SlowStepDetector(BaseDetector):
     Tunable: THRESHOLDS is an ordered list of (event_type_prefix, threshold_ms, label). First
     matching prefix wins; the empty-string entry is a catch-all and must stay last.
     Default: [("tool.called", 15_000, ...), ("llm.called", 30_000, ...), ("", 60_000, ...)].
+    MIN_THRESHOLD_MS (default 500) — floor on the baseline-derived threshold. Without it, an
+    agent whose historical calls are all near-instant (e.g. mocked tools in a demo agent) learns
+    a P75 baseline of a few ms, and any real call — even a fast, unremarkable 300ms one — reads
+    as a huge multiple of that baseline and fires. The floor keeps the threshold meaningful in
+    absolute terms regardless of how degenerate the learned baseline is.
     """
 
     name = "SLOW_STEP"
@@ -637,6 +642,7 @@ class SlowStepDetector(BaseDetector):
         ("", 60_000, "step"),
     ]
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
+    MIN_THRESHOLD_MS = 500  # floor for baseline-derived thresholds — see class docstring
 
     def _threshold_for(self, event_type: str, state: Optional[RunState] = None) -> tuple[int, str]:
         for prefix, static_ms, label in self.THRESHOLDS:
@@ -644,12 +650,18 @@ class SlowStepDetector(BaseDetector):
                 if state is not None:
                     if prefix == "tool.called" and state.baseline_p75_latency_tool is not None:
                         return (
-                            int(state.baseline_p75_latency_tool * self.INFLATION_FACTOR),
+                            max(
+                                int(state.baseline_p75_latency_tool * self.INFLATION_FACTOR),
+                                self.MIN_THRESHOLD_MS,
+                            ),
                             label,
                         )
                     if prefix == "llm.called" and state.baseline_p75_latency_llm is not None:
                         return (
-                            int(state.baseline_p75_latency_llm * self.INFLATION_FACTOR),
+                            max(
+                                int(state.baseline_p75_latency_llm * self.INFLATION_FACTOR),
+                                self.MIN_THRESHOLD_MS,
+                            ),
                             label,
                         )
                 return static_ms, label
@@ -1097,6 +1109,12 @@ class ReasoningSpinDetector(BaseDetector):
     Tunable: MIN_LLM_CALLS (default 5) prevents false positives on short runs.
     RATIO_THRESHOLD (default 4.0) — LLM calls / tool calls. Raise for agents with intentional
     multi-step chain-of-thought designs where high ratios are expected.
+    MIN_THRESHOLD_RATIO (default 2.0) — floor on the baseline-derived threshold. Without it, an
+    agent whose historical runs are consistently tool-heavy (e.g. baseline ratio 0.1) learns an
+    effective threshold of 0.2 after INFLATION_FACTOR — so almost any run with even one or two
+    LLM calls per tool call reads as a huge multiple of that baseline and fires, even though
+    that ratio is unremarkable in absolute terms. See SlowStepDetector.MIN_THRESHOLD_MS for the
+    same rationale applied to a different detector.
     """
 
     name = "REASONING_STALL"
@@ -1106,6 +1124,7 @@ class ReasoningSpinDetector(BaseDetector):
     MIN_LLM_CALLS = 5
     RATIO_THRESHOLD = 4.0
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
+    MIN_THRESHOLD_RATIO = 2.0  # floor for baseline-derived threshold — see class docstring
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         # Skip errored runs — FIRST_STEP_FAILURE and RETRY_STORM cover those.
@@ -1121,7 +1140,10 @@ class ReasoningSpinDetector(BaseDetector):
         ratio = llm_count / max(tool_count, 1)
 
         if state.baseline_p75_llm_tool_ratio is not None:
-            effective_threshold = state.baseline_p75_llm_tool_ratio * self.INFLATION_FACTOR
+            effective_threshold = max(
+                state.baseline_p75_llm_tool_ratio * self.INFLATION_FACTOR,
+                self.MIN_THRESHOLD_RATIO,
+            )
         else:
             effective_threshold = self.RATIO_THRESHOLD
 
@@ -1183,6 +1205,11 @@ class CostSpikeDetector(BaseDetector):
     Tunable: INFLATION_FACTOR (default 3.0) — how many times over P75 before firing.
     STATIC_THRESHOLD_TOKENS (default 50 000) — fallback when no baseline is available.
     MIN_LLM_CALLS (default 1) — skip runs with no LLM activity.
+    MIN_THRESHOLD_TOKENS (default 2000) — floor on the baseline-derived threshold. Without it,
+    an agent whose historical runs are all tiny (e.g. short mocked/demo runs) learns a
+    baseline of a few hundred tokens, and any real run — even one using an unremarkable few
+    thousand tokens — reads as a huge multiple of that baseline and fires. Matches
+    ContextBloatDetector.MIN_LAST_TOKENS in both value and rationale.
     """
 
     name = "COST_SPIKE"
@@ -1190,6 +1217,7 @@ class CostSpikeDetector(BaseDetector):
     INFLATION_FACTOR = 3.0
     STATIC_THRESHOLD_TOKENS = 50_000
     MIN_LLM_CALLS = 1
+    MIN_THRESHOLD_TOKENS = 2000  # floor for baseline-derived threshold — see class docstring
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.llm_calls) < self.MIN_LLM_CALLS:
@@ -1203,7 +1231,10 @@ class CostSpikeDetector(BaseDetector):
             return None
 
         if state.baseline_p75_total_tokens is not None:
-            threshold = state.baseline_p75_total_tokens * self.INFLATION_FACTOR
+            threshold = max(
+                state.baseline_p75_total_tokens * self.INFLATION_FACTOR,
+                self.MIN_THRESHOLD_TOKENS,
+            )
         else:
             threshold = float(self.STATIC_THRESHOLD_TOKENS)
 
@@ -1245,6 +1276,11 @@ class SessionLatencyDetector(BaseDetector):
     Tunable: INFLATION_FACTOR (default 3.0) — how many times over P75 before firing.
     STATIC_THRESHOLD_SECS (default 300) — fallback threshold when no baseline exists (5 min).
     MIN_EVENTS (default 2) — need at least two events to compute a duration.
+    MIN_THRESHOLD_S (default 5.0) — floor on the baseline-derived threshold. Without it, an
+    agent whose historical runs are all near-instant (e.g. short degenerate runs, or events
+    batched with near-identical timestamps) learns a P75 baseline of a fraction of a second,
+    and any real run — even one taking well under a second — reads as a huge multiple of that
+    baseline and fires with a nonsensical "0s" duration/threshold in the alert text.
     """
 
     name = "SESSION_LATENCY"
@@ -1252,6 +1288,7 @@ class SessionLatencyDetector(BaseDetector):
     INFLATION_FACTOR = 3.0
     STATIC_THRESHOLD_SECS = 300
     MIN_EVENTS = 2
+    MIN_THRESHOLD_S = 5.0  # floor for baseline-derived threshold — see class docstring
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         if len(state.events) < self.MIN_EVENTS:
@@ -1264,7 +1301,9 @@ class SessionLatencyDetector(BaseDetector):
             return None
 
         if state.baseline_p75_duration_s is not None:
-            threshold = state.baseline_p75_duration_s * self.INFLATION_FACTOR
+            threshold = max(
+                state.baseline_p75_duration_s * self.INFLATION_FACTOR, self.MIN_THRESHOLD_S
+            )
         else:
             threshold = float(self.STATIC_THRESHOLD_SECS)
 

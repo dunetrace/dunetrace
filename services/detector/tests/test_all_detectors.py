@@ -679,6 +679,22 @@ class TestSlowStepDetector(unittest.TestCase):
         self.assertEqual(ev["threshold_ms"], 15_000)
         self.assertAlmostEqual(ev["ratio"], 2.0)
 
+    def test_does_not_fire_when_baseline_collapsed_to_near_zero(self):
+        # baseline=2ms (e.g. an agent whose historical tool calls are all mocked/instant)
+        # × INFLATION_FACTOR=2.0 would be a 4ms threshold without the MIN_THRESHOLD_MS=500
+        # floor — a genuinely fast, unremarkable 300ms call would then read as a 75× spike.
+        state = self._state_with_durations([(EventType.TOOL_CALLED, 300)])
+        state.baseline_p75_latency_tool = 2.0
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_fires_above_floor_when_baseline_collapsed(self):
+        # Same degenerate baseline, but the call genuinely exceeds the 500ms floor.
+        state = self._state_with_durations([(EventType.TOOL_CALLED, 600)])
+        state.baseline_p75_latency_tool = 2.0
+        sig = self.d.on_run_completion(state)
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.evidence["threshold_ms"], 500)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 10. RETRY_STORM
@@ -1074,6 +1090,22 @@ class TestReasoningStallDetector(unittest.TestCase):
         self.assertEqual(ev["llm_calls"], 20)
         self.assertEqual(ev["tool_calls"], 4)
 
+    def test_does_not_fire_when_baseline_collapsed_to_near_zero(self):
+        # baseline=0.1 (e.g. a consistently tool-heavy agent) × INFLATION_FACTOR=2.0 would be
+        # a 0.2 threshold without the MIN_THRESHOLD_RATIO=2.0 floor — a run with even 6 LLM
+        # calls to 5 tool calls (ratio=1.2, unremarkable) would then read as a 6x spike.
+        state = self._state(6, 5)
+        state.baseline_p75_llm_tool_ratio = 0.1
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_fires_above_floor_when_baseline_collapsed(self):
+        # Same degenerate baseline, but the ratio genuinely exceeds the 2.0 floor.
+        state = self._state(10, 4)  # ratio = 2.5
+        state.baseline_p75_llm_tool_ratio = 0.1
+        sig = self.d.on_run_completion(state)
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.evidence["threshold"], 2.0)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 16. COST_SPIKE
@@ -1160,6 +1192,18 @@ class TestCostSpikeDetector(unittest.TestCase):
         self.assertIsNone(d.on_run_completion(self._state(19_000, baseline=10_000.0)))
         self.assertIsNotNone(d.on_run_completion(self._state(21_000, baseline=10_000.0)))
 
+    def test_does_not_fire_when_baseline_collapsed_to_near_zero(self):
+        # baseline=100 tokens (e.g. tiny mocked/demo runs) × INFLATION_FACTOR=3.0 would be a
+        # 300-token threshold without the MIN_THRESHOLD_TOKENS=2000 floor — an unremarkable
+        # 1000-token run would then read as a 3x spike.
+        self.assertIsNone(self.d.on_run_completion(self._state(1000, baseline=100.0)))
+
+    def test_fires_above_floor_when_baseline_collapsed(self):
+        # Same degenerate baseline, but total_tokens genuinely exceeds the 2000 floor.
+        sig = self.d.on_run_completion(self._state(2500, baseline=100.0))
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.evidence["threshold"], 2000)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 17. SESSION_LATENCY
@@ -1235,6 +1279,18 @@ class TestSessionLatencyDetector(unittest.TestCase):
         # baseline=60s, threshold=120s; 130s fires; 110s does not
         self.assertIsNone(d.on_run_completion(self._state(110, baseline=60.0)))
         self.assertIsNotNone(d.on_run_completion(self._state(130, baseline=60.0)))
+
+    def test_does_not_fire_when_baseline_collapsed_to_near_zero(self):
+        # baseline=0.01s (e.g. degenerate near-instant historical runs) × INFLATION_FACTOR=3.0
+        # would be a 0.03s threshold without the MIN_THRESHOLD_S=5.0 floor — any real run,
+        # even a fast one, would then read as a huge multiple of a meaningless baseline.
+        self.assertIsNone(self.d.on_run_completion(self._state(0.5, baseline=0.01)))
+
+    def test_fires_above_floor_when_baseline_collapsed(self):
+        # Same degenerate baseline, but the run genuinely exceeds the 5.0s floor.
+        sig = self.d.on_run_completion(self._state(6.0, baseline=0.01))
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.evidence["threshold_s"], 5.0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
