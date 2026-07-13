@@ -34,6 +34,16 @@ from api_svc.routers import (
     replay,
     slack,
     keys,
+    orgs,
+    integrations,
+    external_signals,
+    conversations,
+    alert_integrations,
+    linear_webhook,
+    github_integration,
+    performance_trends,
+    packs,
+    approvals,
 )
 from api_svc.schemas import HealthResponse
 
@@ -56,7 +66,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Dunetrace Customer API",
-        version="0.1.0",
+        version=settings.APP_VERSION,
         description=(
             "Query your agent observability data: runs, events, failure signals, "
             "and AI-generated explanations."
@@ -92,16 +102,37 @@ def create_app() -> FastAPI:
     app.include_router(replay.router, dependencies=_auth)
     app.include_router(signals.router, dependencies=_auth)
     app.include_router(insights.router, dependencies=_auth)
+    app.include_router(performance_trends.router, dependencies=_auth)
+    # No dependencies=_auth here, matching github_integration.router above —
+    # GET /v1/packs is a static catalog with no org context, so it must stay
+    # unauthenticated; the other three pack endpoints each declare their own
+    # Depends(require_org) individually.
+    app.include_router(packs.router)
+    app.include_router(approvals.router, dependencies=_auth)
     app.include_router(issues.router, dependencies=_auth)
     app.include_router(failure_patterns.router, dependencies=_auth)
     app.include_router(patterns.router, dependencies=_auth)
     app.include_router(policies.router, dependencies=_auth)
     app.include_router(slack.router)  # uses Slack signature verification, not API key auth
+    app.include_router(
+        linear_webhook.router
+    )  # uses Linear signature verification, not API key auth
     app.include_router(keys.router, dependencies=_auth)
+    app.include_router(orgs.router, dependencies=_auth)
+    app.include_router(integrations.router, dependencies=_auth)
+    app.include_router(external_signals.router, dependencies=_auth)
+    app.include_router(conversations.router, dependencies=_auth)
+    app.include_router(alert_integrations.router, dependencies=_auth)
+    # No router-level _auth here — /callback is GitHub's own browser
+    # redirect (no Dunetrace API key on that request at all); the other
+    # four endpoints in this router each declare their own
+    # Depends(require_org) explicitly instead. See github_integration.py's
+    # module docstring.
+    app.include_router(github_integration.router)
 
     @app.get("/health", response_model=HealthResponse, include_in_schema=False)
     async def health() -> HealthResponse:
-        return HealthResponse(db=await check_db())
+        return HealthResponse(db=await check_db(), version=settings.APP_VERSION)
 
     @app.get("/v1/config", include_in_schema=False)
     async def config():

@@ -70,6 +70,8 @@ def make_event(**overrides) -> dict:
         "timestamp": 1708934400.0,
         "payload": {"tool_name": "web_search", "args": "aabb"},
         "parent_run_id": None,
+        "trace_id": None,
+        "conversation_id": None,
     }
     e.update(overrides)
     return e
@@ -129,6 +131,36 @@ class TestHappyPath:
             "/v1/ingest",
             json=make_batch(events=[make_event(parent_run_id="parent-abc")]),
         )
+        assert r.status_code == 202
+
+    async def test_event_with_trace_id(self, client):
+        r = await client.post(
+            "/v1/ingest",
+            json=make_batch(events=[make_event(trace_id="langfuse-trace-abc")]),
+        )
+        assert r.status_code == 202
+
+    async def test_event_without_trace_id_still_accepted(self, client):
+        """trace_id is optional — omitting it entirely (not just null) must
+        not break existing SDK clients that predate this field."""
+        event = make_event()
+        del event["trace_id"]
+        r = await client.post("/v1/ingest", json=make_batch(events=[event]))
+        assert r.status_code == 202
+
+    async def test_event_with_conversation_id(self, client):
+        r = await client.post(
+            "/v1/ingest",
+            json=make_batch(events=[make_event(conversation_id="conv_123")]),
+        )
+        assert r.status_code == 202
+
+    async def test_event_without_conversation_id_still_accepted(self, client):
+        """conversation_id is optional — omitting it entirely (not just null)
+        must not break existing SDK clients that predate this field."""
+        event = make_event()
+        del event["conversation_id"]
+        r = await client.post("/v1/ingest", json=make_batch(events=[event]))
         assert r.status_code == 202
 
     async def test_empty_payload_accepted(self, client):
@@ -784,14 +816,18 @@ class TestPruneOldEvents:
         result = await prune_old_events(retention_days=90)
         assert result == 0
 
-    async def test_returns_zero_on_non_partitioned_table(self, monkeypatch):
-        pool, conn = _make_pool(fetchval_return=0)  # relkind != 'p'
+    async def test_runs_batched_delete_on_non_partitioned_table(self, monkeypatch):
+        # audit Finding 13: a non-partitioned events table no longer no-ops — it
+        # falls back to a batched DELETE so retention actually runs. asyncpg's
+        # execute() returns a "DELETE <n>" status string; with no old rows the
+        # first batch deletes 0 and the loop stops. Returns rows deleted (0 here).
+        pool, conn = _make_pool(fetchval_return=0, execute_side_effect=["DELETE 0"])
         monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
         from ingest_svc.db.postgres import prune_old_events
 
         result = await prune_old_events(retention_days=90)
         assert result == 0
-        conn.execute.assert_not_called()
+        conn.execute.assert_called_once()  # the batched DELETE ran
 
     async def test_drops_old_partition(self, monkeypatch):
         # events_202001 ends 2020-02-01 — always older than any reasonable retention

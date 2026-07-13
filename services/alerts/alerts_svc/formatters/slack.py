@@ -217,6 +217,16 @@ def format_slack(
                     "value": _btn_val,
                     "style": "danger",
                 },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Snooze 24h",
+                        "emoji": True,
+                    },
+                    "action_id": "snooze",
+                    "value": _btn_val,
+                },
             ],
         }
     )

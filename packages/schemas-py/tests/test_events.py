@@ -66,6 +66,18 @@ class TestAgentEventSchema(unittest.TestCase):
         ev2 = AgentEventSchema(**self._base(parent_run_id="parent-run"))
         self.assertEqual(ev2.parent_run_id, "parent-run")
 
+    def test_trace_id_optional(self):
+        ev = AgentEventSchema(**self._base())
+        self.assertIsNone(ev.trace_id)
+        ev2 = AgentEventSchema(**self._base(trace_id="langfuse-trace-abc"))
+        self.assertEqual(ev2.trace_id, "langfuse-trace-abc")
+
+    def test_conversation_id_optional(self):
+        ev = AgentEventSchema(**self._base())
+        self.assertIsNone(ev.conversation_id)
+        ev2 = AgentEventSchema(**self._base(conversation_id="conv_123"))
+        self.assertEqual(ev2.conversation_id, "conv_123")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

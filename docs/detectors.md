@@ -2,6 +2,22 @@
 
 Dunetrace runs 23 structural detectors against every completed agent run — 16 Tier 1 detectors, prompt injection signal detection, plus the additional detectors below. All thresholds are configurable i.e. no code changes required.
 
+**This page is structural detectors only.** Structural detectors are
+zero-LLM, zero-cost, always-on regex/arithmetic checks — the ones that can
+trigger a [policy](policies.md). Dunetrace also has a separate, LLM-based
+**semantic evaluation** layer (disabled by default, sampling-based, strictly
+post-hoc — see [docs/semantic-evaluation.md](semantic-evaluation.md)) for
+judgment calls no structural check can make:
+
+| Semantic evaluator | What it catches |
+|---|---|
+| `HALLUCINATION` | Agent stated something as fact its own context doesn't support |
+| `TASK_COMPLETION` | Agent didn't actually do what it was asked, despite a plausible-sounding response |
+| `USER_FRUSTRATION` | Cross-turn conversation signals of user frustration (evaluates a whole conversation, not a single run) |
+
+Semantic findings never trigger a policy — see
+[policies.md's "Structural signals only"](policies.md#structural-signals-only).
+
 ---
 
 ## What each detector catches

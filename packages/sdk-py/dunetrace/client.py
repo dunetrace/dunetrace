@@ -13,6 +13,8 @@ import logging
 import os
 import sys
 import time
+from types import FrameType
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
@@ -34,10 +36,59 @@ from dunetrace.models import (
     Exporter,
     CallableExporter,
 )
-from dunetrace.policies import Policy, PolicyAction, PolicyCondition, PolicyEngine, PolicyViolation
+from dunetrace.policies import (
+    EvaluationRateLimiter,
+    Policy,
+    PolicyAction,
+    PolicyCondition,
+    PolicyEngine,
+    PolicyViolation,
+)
 from dunetrace.run_context import RunContext
 
 logger = logging.getLogger("dunetrace")
+
+_SDK_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _capture_caller_source_file() -> Optional[str]:
+    """Phase 4.3 tier-2 source mapping: best-effort local file path of
+    whatever code actually called dt.run(). Walks the stack past this SDK's
+    own package directory AND Python's contextlib (dt.run() is
+    @contextmanager-decorated, so a naive "caller is one frame up" would
+    land inside contextlib's own __enter__ machinery, not the user's code)
+    to find the first frame that's genuinely outside both.
+
+    Deliberately file-path-only, no git SHA/version capture — see
+    BACKLOG.md's Phase 4.3 entry for why: git plumbing inside an SDK is
+    fragile across real deployment environments (Docker images without
+    .git, serverless, CI checkouts), so a half-implemented version field
+    was rejected in favor of fully disclosing the gap.
+
+    Returns None (never raises) if the stack can't be walked for any
+    reason — this must never break dt.run() itself.
+
+    Uses sys._getframe() rather than inspect.stack(): the latter reads and
+    caches surrounding source-code context for every frame by default,
+    measurably slow enough to fail this SDK's own per-event overhead
+    benchmark (test_client.py) when called on every dt.run(). Raw frame
+    objects avoid that cost entirely — this only ever reads
+    frame.f_code.co_filename, never source lines.
+    """
+    try:
+        frame: "Optional[FrameType]" = sys._getframe(1)
+        while frame is not None:
+            filename = os.path.abspath(frame.f_code.co_filename)
+            if (
+                filename.startswith(_SDK_PACKAGE_DIR)
+                or os.path.basename(filename) == "contextlib.py"
+            ):
+                frame = frame.f_back
+                continue
+            return filename
+    except Exception:
+        pass
+    return None
 
 
 class Dunetrace:
@@ -74,6 +125,8 @@ class Dunetrace:
         policy_secret: str = "",
         emitter: Optional[BatchingEmitter] = None,
         debug: bool = False,
+        api_url: Optional[str] = None,
+        policy_evaluation_reporting: Optional[bool] = None,
     ) -> None:
         # is not None, not `endpoint or ...` — an explicit endpoint="" is taken
         # literally rather than silently falling back. To disable HTTP shipping,
@@ -86,6 +139,18 @@ class Dunetrace:
         )
         self._ingest_url = _endpoint.rstrip("/") + "/v1/ingest"
         self._api_key = api_key or os.environ.get("DUNETRACE_API_KEY", "")
+        # Customer API base URL (port 8002 in local docker-compose) — a
+        # different service from the ingest endpoint above (port 8001), not
+        # derivable from it (a real deployment may put them on entirely
+        # different hostnames). Same DUNETRACE_API_URL name the MCP server
+        # already uses for this exact concept (see docs/mcp-server.md).
+        # Only needed for pack activation (enable_pack/disable_pack/
+        # enabled_packs) — every other SDK call goes through _ingest_url.
+        self._api_url = (
+            api_url
+            if api_url is not None
+            else os.environ.get("DUNETRACE_API_URL", "http://localhost:8002")
+        ).rstrip("/")
         self._emitter: BatchingEmitter = emitter or HttpBatchingEmitter(_endpoint, self._api_key)
         self._policy_secret = policy_secret
         self._buffer = RingBuffer[AgentEvent](maxsize=buffer_size)
@@ -98,6 +163,19 @@ class Dunetrace:
         self._exporters: List[Exporter] = list(exporters or [])
         self._default_agent_id = ""  # set by init()
         self._policy_engine = PolicyEngine()
+
+        # Policy evaluation observability (Phase 5). Opt-in dashboard reporting
+        # ships one rate-limited policy.evaluated event per evaluation; default
+        # off (env DUNETRACE_POLICY_EVAL_REPORTING=1 to enable) to protect the
+        # SDK's per-event overhead budget. Structured DEBUG logging on the
+        # "dunetrace.policies.evaluation" logger is always available, independent
+        # of this flag. The rate limiter is shared across all runs (per process).
+        if policy_evaluation_reporting is None:
+            policy_evaluation_reporting = os.environ.get(
+                "DUNETRACE_POLICY_EVAL_REPORTING", ""
+            ).lower() in ("1", "true", "yes")
+        self._policy_evaluation_reporting = bool(policy_evaluation_reporting)
+        self._policy_eval_rate_limiter = EvaluationRateLimiter()
 
         if debug:
             logging.basicConfig(level=logging.DEBUG)
@@ -142,12 +220,27 @@ class Dunetrace:
         model: str = "unknown",
         tools: Optional[List[str]] = None,
         parent_run_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
     ):
         """
         Context manager wrapping a single agent run.
 
         Emits ``run.started`` on enter, ``run.completed`` on clean exit,
         and ``run.errored`` if an exception escapes the block.
+
+        trace_id: optional correlation key for external evaluation
+        integrations (Langfuse/LangSmith/Braintrust) — pass the same trace
+        id your own instrumentation of that provider's SDK uses, and
+        Dunetrace can match its evaluation results back to this run. Not
+        folded into agent_version's hash — it identifies this run to an
+        external system, not the agent's own identity/config.
+
+        conversation_id: optional grouping key for multi-turn conversations —
+        pass the same id across every dt.run() call belonging to the same
+        end-user interaction/session, and Dunetrace groups the runs into one
+        conversation for cross-turn analysis. Also not folded into
+        agent_version's hash, same rationale as trace_id.
         """
         tools = tools or []
         version = agent_version(system_prompt, model, tools)
@@ -159,6 +252,8 @@ class Dunetrace:
             input_text=user_input,
             system_prompt=system_prompt,
             parent_run_id=parent_run_id,
+            trace_id=trace_id,
+            conversation_id=conversation_id,
         )
 
         # In-process content inspection: the injection detector runs here, against
@@ -179,6 +274,9 @@ class Dunetrace:
         }
         if _injection_evidence:
             payload["injection_signal"] = _injection_evidence
+        _source_file = _capture_caller_source_file()
+        if _source_file:
+            payload["source_file"] = _source_file
 
         self._emit(
             AgentEvent(
@@ -188,6 +286,8 @@ class Dunetrace:
                 agent_version=version,
                 step_index=0,
                 parent_run_id=parent_run_id,
+                trace_id=trace_id,
+                conversation_id=conversation_id,
                 payload=payload,
             )
         )
@@ -199,6 +299,7 @@ class Dunetrace:
         _token = _current_run.set(ctx)
         try:
             yield ctx
+            ctx._warn_unread_advisory()  # audit Finding 25
             # Sync RunState fields detectors read before notifying the OTel exporter.
             ctx.state.current_step = ctx.step
             if self._otel_exporter is not None:
@@ -210,6 +311,8 @@ class Dunetrace:
                     agent_id=agent_id,
                     agent_version=version,
                     step_index=ctx.step,
+                    trace_id=trace_id,
+                    conversation_id=conversation_id,
                     payload={
                         "total_steps": ctx.step,
                         "exit_reason": ctx.exit_reason or "completed",
@@ -229,6 +332,8 @@ class Dunetrace:
                     agent_id=agent_id,
                     agent_version=version,
                     step_index=ctx.step,
+                    trace_id=trace_id,
+                    conversation_id=conversation_id,
                     payload={
                         "error_type": "PolicyViolation",
                         "error": str(exc),
@@ -251,6 +356,8 @@ class Dunetrace:
                     agent_id=agent_id,
                     agent_version=version,
                     step_index=ctx.step,
+                    trace_id=trace_id,
+                    conversation_id=conversation_id,
                     payload={
                         "error_type": type(exc).__name__,
                         "error": str(exc),
@@ -595,7 +702,13 @@ class Dunetrace:
                     run = _current_run.get(None)
                     args_dict = _bind_args(fn, args, kwargs)
                     if run:
-                        run.tool_called(tool_name, args_dict)
+                        # Suppress the sync approval gate in tool_called and
+                        # await the async one instead, so a require_approval
+                        # policy doesn't block the event loop while waiting on a
+                        # human. Raises ApprovalDenied on deny/timeout, before
+                        # the tool runs.
+                        run.tool_called(tool_name, args_dict, _enforce_approval=False)
+                        await run._enforce_tool_approval_async(tool_name, args_dict)
                     t0 = time.time()
                     try:
                         result = await fn(*args, **kwargs)
@@ -693,6 +806,153 @@ class Dunetrace:
             daemon=True,
             name="dunetrace-deploy",
         ).start()
+
+    def enable_pack(self, pack_name: str) -> None:
+        """
+        Activate a detector pack (e.g. "voice") for this org, so
+        detector_svc includes its detectors when evaluating this org's
+        runs. Built-in detectors run regardless — packs are additive.
+
+        Unlike mark_deploy(), this call is synchronous and raises on
+        failure: it's a setup-time action (typically run once from a
+        script or at process startup), not a per-run hot-path call, so
+        there's no reason to swallow an error the caller would want to
+        know about immediately (e.g. an unknown pack name).
+
+        Requires api_key and api_url (or DUNETRACE_API_URL) to be
+        configured — this hits the Customer API, not the ingest endpoint.
+        """
+        self._pack_request("POST", pack_name)
+
+    def disable_pack(self, pack_name: str) -> None:
+        """Deactivate a previously-activated pack for this org. See
+        enable_pack() for the sync/error-raising rationale."""
+        self._pack_request("DELETE", pack_name)
+
+    def enabled_packs(self) -> List[str]:
+        """Returns this org's currently-activated pack names, fetched from
+        the Customer API. See enable_pack() for the sync/error-raising
+        rationale."""
+        if not self._api_url or not self._api_key:
+            raise RuntimeError(
+                "enabled_packs() requires api_key and api_url (or DUNETRACE_API_URL) "
+                "to be configured — this reads from the Customer API."
+            )
+        req = urllib.request.Request(
+            f"{self._api_url}/v1/orgs/packs",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+                **self._auth_headers(),
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        return [row["pack_name"] for row in data]
+
+    def _pack_request(self, method: str, pack_name: str) -> None:
+        if not self._api_url or not self._api_key:
+            raise RuntimeError(
+                f"{'enable_pack' if method == 'POST' else 'disable_pack'}() requires "
+                "api_key and api_url (or DUNETRACE_API_URL) to be configured — this "
+                "calls the Customer API, not the ingest endpoint."
+            )
+        req = urllib.request.Request(
+            f"{self._api_url}/v1/orgs/packs/{urllib.parse.quote(pack_name, safe='')}",
+            method=method,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+                **self._auth_headers(),
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+
+    # ── Approval flow HTTP (Capability 2) ─────────────────────────────────────
+    # These hit the Customer API, not the ingest endpoint. Each call is a quick
+    # synchronous request; the *waiting* between polls is done by the caller
+    # (RunContext.request_approval / arequest_approval), which is what makes a
+    # sync-blocking and an async-non-blocking variant possible over the same
+    # HTTP helpers.
+
+    def _require_customer_api(self, what: str) -> None:
+        if not self._api_url or not self._api_key:
+            raise RuntimeError(
+                f"{what} requires api_key and api_url (or DUNETRACE_API_URL) to be "
+                "configured — approvals use the Customer API, not the ingest endpoint."
+            )
+
+    def _create_approval_request(
+        self,
+        run_id: str,
+        agent_id: str,
+        tool_name: str,
+        tool_args: Optional[str],
+        timeout_seconds: int,
+    ) -> dict:
+        self._require_customer_api("request_approval()")
+        body = json.dumps(
+            {
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "timeout_seconds": timeout_seconds,
+            }
+        ).encode()
+        req = urllib.request.Request(
+            f"{self._api_url}/v1/approvals",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+                **self._auth_headers(),
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+
+    def _get_approval(self, approval_id: int) -> dict:
+        self._require_customer_api("request_approval()")
+        req = urllib.request.Request(
+            f"{self._api_url}/v1/approvals/{approval_id}",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+                **self._auth_headers(),
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+
+    def _decide_approval(self, approval_id: int, decision: str) -> Optional[dict]:
+        """Record a decision (the SDK uses this only to mark its own 'timeout').
+        Returns the updated approval, or None on a 409 — meaning a real human
+        decision won the race with our timeout, and the caller should re-read
+        and honor that instead."""
+        self._require_customer_api("request_approval()")
+        body = json.dumps({"decision": decision, "decision_channel": "sdk"}).encode()
+        req = urllib.request.Request(
+            f"{self._api_url}/v1/approvals/{approval_id}/decision",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+                **self._auth_headers(),
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409:  # already decided — human won the race
+                return None
+            raise
 
     def _ship_deploy(self, agent_id: str, version: str, meta: dict) -> None:
         base = self._ingest_url.replace("/v1/ingest", "")

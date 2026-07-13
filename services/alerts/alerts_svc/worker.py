@@ -28,8 +28,11 @@ from dunetrace.models import FailureSignal, FailureType, Severity
 from explainer_svc.explainer import explain
 from explainer_svc.models import Explanation
 from alerts_svc.formatters.slack import format_slack
-from alerts_svc.formatters.webhook import build_signed_request  # type: ignore
-from alerts_svc.sender import send_slack, send_webhook, SendResult
+from alerts_svc.formatters.webhook import build_signed_request, sign_payload  # type: ignore
+from alerts_svc.formatters.linear import format_linear_issue
+from alerts_svc.formatters.approval import format_slack_approval, format_webhook_approval
+from alerts_svc.sender import send_slack, send_webhook, send_linear, SendResult
+from alerts_svc.crypto import decrypt_credentials
 from alerts_svc.db import (
     init_pool,
     close_pool,
@@ -39,13 +42,26 @@ from alerts_svc.db import (
     fetch_run_tokens,
     ensure_digest_schema,
     ensure_dedup_schema,
+    ensure_semantic_signal_column,
+    ensure_alert_integrations_schema,
     fetch_dedup_states,
     record_alert_sent,
     increment_suppressed_count,
     evaluate_alert_policy,
     fetch_agent_overrides,
+    fetch_org_alert_integration,
+    record_linear_issue_mapping,
+    fetch_undelivered_approvals,
+    mark_approval_delivered,
 )
-from alerts_svc.config import load_alert_policies, get_alert_policy
+from alerts_svc.config import (
+    load_alert_policies,
+    get_alert_policy,
+    load_semantic_confidence_floors,
+    get_semantic_confidence_floor,
+    load_detector_destinations,
+    get_detector_destinations,
+)
 from explainer_svc.cost import estimate_cost
 from alerts_svc.digest import send_weekly_digest
 from alerts_svc.config import settings, SEVERITY_ORDER
@@ -113,12 +129,33 @@ def deliver(
     suppressed_count: int = 0,
     signal_id: int | None = None,
     org_id: str | None = None,
+    destinations: list[str] | None = None,
+    slack_webhook_url: str | None = None,
+    linear_config: dict | None = None,
 ) -> dict[str, SendResult]:
-    """Send an explanation to all configured destinations. Returns {destination: SendResult}. Synchronous — called via asyncio.to_thread to avoid blocking the event loop."""
+    """Send an explanation to configured destinations. Returns {destination: SendResult}.
+    Synchronous — called via asyncio.to_thread to avoid blocking the event loop.
+
+    destinations: per-detector routing override (Phase 4.1, from detectors.yml)
+    — when given, only destinations in this list are attempted, even if
+    others are globally enabled. None means no override — behave exactly as
+    before 4.1 (send to every globally-enabled destination).
+
+    slack_webhook_url: Phase 4.1 — the caller's already-resolved per-org (or
+    global-fallback) destination; see worker.py's _resolve_slack_destination.
+    None here just means "no override," same as before this param existed —
+    send_slack() itself still falls back to the global settings value.
+
+    linear_config: Phase 4.1 — {api_key, webhook_secret, team_id, project_id},
+    already decrypted by the caller (_resolve_linear_config). None means
+    this org has no Linear integration configured — Linear is skipped
+    entirely, not attempted with empty credentials.
+    """
     results = {}
 
     # Slack
-    if settings.slack_enabled:
+    slack_configured = bool(slack_webhook_url) or settings.slack_enabled
+    if slack_configured and (destinations is None or "slack" in destinations):
         if _meets_slack_threshold(explanation.severity):
             payload = format_slack(
                 explanation,
@@ -127,7 +164,7 @@ def deliver(
                 signal_id=signal_id,
                 org_id=org_id,
             )
-            results["slack"] = send_slack(payload)
+            results["slack"] = send_slack(payload, webhook_url=slack_webhook_url)
         else:
             logger.debug(
                 "Severity %s below Slack threshold %s — skipping Slack. run_id=%s",
@@ -137,14 +174,125 @@ def deliver(
             )
 
     # Generic webhook
-    if settings.webhook_enabled:
+    if settings.webhook_enabled and (destinations is None or "webhook" in destinations):
         body, headers = build_signed_request(explanation, settings.WEBHOOK_SECRET)
         results["webhook"] = send_webhook(body, headers)
+
+    # Linear (Phase 4.1) — org-configured only, no global fallback (Linear
+    # has no self-hosted single-tenant precedent to preserve the way Slack's
+    # SLACK_WEBHOOK_URL does).
+    if linear_config and (destinations is None or "linear" in destinations):
+        title, description = format_linear_issue(explanation)
+        results["linear"] = send_linear(
+            api_key=linear_config["api_key"],
+            team_id=linear_config["team_id"],
+            project_id=linear_config.get("project_id") or None,
+            title=title,
+            description=description,
+        )
 
     return results
 
 
+# ── Per-org destination resolution (Phase 4.1) ────────────────────────────────
+
+
+async def _resolve_slack_destination(org_id: str) -> str | None:
+    """Per-org Slack webhook URL if configured, else None (deliver() itself
+    falls back to the global .env SLACK_WEBHOOK_URL when this is None —
+    preserves today's self-hosted single-tenant behavior for any org that
+    hasn't configured its own destination)."""
+    integration = await fetch_org_alert_integration(org_id, "slack")
+    if integration is None:
+        return None
+    try:
+        creds = decrypt_credentials(integration["encrypted_credentials"])
+    except Exception as exc:
+        logger.error("Failed to decrypt Slack credentials for org=%s: %s", org_id, exc)
+        return None
+    return creds.get("webhook_url")
+
+
+async def _resolve_linear_config(org_id: str) -> dict | None:
+    """Per-org Linear config (decrypted api_key/webhook_secret + team_id/
+    project_id from config_json), or None if not configured. No global
+    fallback — Linear has no self-hosted single-tenant precedent to
+    preserve the way Slack's SLACK_WEBHOOK_URL does."""
+    integration = await fetch_org_alert_integration(org_id, "linear")
+    if integration is None:
+        return None
+    try:
+        creds = decrypt_credentials(integration["encrypted_credentials"])
+    except Exception as exc:
+        logger.error("Failed to decrypt Linear credentials for org=%s: %s", org_id, exc)
+        return None
+    return {
+        "api_key": creds.get("api_key"),
+        "webhook_secret": creds.get("webhook_secret"),
+        "team_id": integration["config"].get("team_id"),
+        "project_id": integration["config"].get("project_id"),
+    }
+
+
 # Poll cycle
+
+
+async def deliver_pending_approvals() -> int:
+    """Notify a human about each pending, not-yet-delivered approval
+    (Capability 2, Phase 2.3). Runs each poll cycle alongside signal alerts.
+    Delivers over Slack (interactive Approve/Deny buttons) and/or the generic
+    webhook, whichever the org has configured. Marks each approval delivered
+    afterward so it's notified exactly once — including the no-channel case,
+    where marking it delivered stops a hot re-attempt loop and the SDK's own
+    fail-closed timeout takes over. Returns how many were delivered/handled."""
+    approvals = await fetch_undelivered_approvals()
+    if not approvals:
+        return 0
+
+    handled = 0
+    for approval in approvals:
+        org_id = approval["org_id"]
+        slack_dest = await _resolve_slack_destination(org_id)
+        slack_available = bool(slack_dest) or settings.slack_enabled
+        webhook_available = settings.webhook_enabled
+
+        if not slack_available and not webhook_available:
+            logger.warning(
+                "Approval %s for org=%s has no delivery channel configured — "
+                "marking delivered; the SDK will fall back to its fail-closed timeout.",
+                approval["id"],
+                org_id,
+            )
+            await mark_approval_delivered(approval["id"])
+            handled += 1
+            continue
+
+        if slack_available:
+            try:
+                send_slack(format_slack_approval(approval), webhook_url=slack_dest)
+            except Exception as exc:
+                logger.error("Approval %s Slack delivery failed: %s", approval["id"], exc)
+
+        if webhook_available:
+            try:
+                payload = format_webhook_approval(approval)
+                body = json.dumps(payload, separators=(",", ":")).encode()
+                headers = {
+                    "Content-Type": "application/json",
+                    "X-Dunetrace-Event": "approval_request",
+                    "X-Dunetrace-Version": "1.0",
+                }
+                sig = sign_payload(body, settings.WEBHOOK_SECRET)
+                if sig:
+                    headers["X-Dunetrace-Signature"] = sig
+                send_webhook(body, headers)
+            except Exception as exc:
+                logger.error("Approval %s webhook delivery failed: %s", approval["id"], exc)
+
+        await mark_approval_delivered(approval["id"])
+        handled += 1
+
+    return handled
 
 
 async def poll_once() -> tuple[int, int]:
@@ -173,6 +321,8 @@ async def poll_once() -> tuple[int, int]:
 
     # Load alert policies from detectors.yml (fast — file read, no DB)
     alert_policies = load_alert_policies()
+    semantic_confidence_floors = load_semantic_confidence_floors()
+    detector_destinations = load_detector_destinations()
 
     # Batch-fetch false-positive overrides for all groups
     agent_overrides = await fetch_agent_overrides(list(groups.keys()))
@@ -238,6 +388,36 @@ async def poll_once() -> tuple[int, int]:
                     failure_type,
                     agent_id,
                     override["fp_count"],
+                )
+                silent_ids.extend(r["id"] for r in group_rows)
+                continue
+
+            snoozed_until = override.get("snoozed_until")
+            if snoozed_until and snoozed_until.timestamp() > now:
+                logger.info(
+                    "Snoozed until %s — %s on %s",
+                    snoozed_until.isoformat(),
+                    failure_type,
+                    agent_id,
+                )
+                silent_ids.extend(r["id"] for r in group_rows)
+                continue
+
+        # ── Step 2.5: Semantic evaluator confidence floor ─────────────────────
+        # Structural signals (source="structural") are unaffected — this only
+        # gates semantic ones, per-evaluator, via docs/config/semantic-evaluators.yml.
+        # Below-floor signals are still stored/visible in the dashboard, just
+        # never alerted — distinct from the FP-override mechanism above, which
+        # only kicks in after real human feedback accumulates.
+        if best.get("source") == "semantic":
+            floor = get_semantic_confidence_floor(semantic_confidence_floors, failure_type)
+            if best["confidence"] < floor:
+                logger.info(
+                    "Semantic confidence %.2f below floor %.1f — %s on %s",
+                    best["confidence"],
+                    floor,
+                    failure_type,
+                    agent_id,
                 )
                 silent_ids.extend(r["id"] for r in group_rows)
                 continue
@@ -331,6 +511,8 @@ async def poll_once() -> tuple[int, int]:
         signal_id: int, explanation: Explanation, suppressed_count: int
     ) -> int | None:
         org_id = org_by_signal_id.get(signal_id)
+        slack_webhook_url = await _resolve_slack_destination(org_id) if org_id else None
+        linear_config = await _resolve_linear_config(org_id) if org_id else None
         if suppressed_count > 0:
             logger.info(
                 "[%s] %s — run_id=%s agent_id=%s confidence=%s (+%d suppressed)",
@@ -350,13 +532,27 @@ async def poll_once() -> tuple[int, int]:
                 explanation.agent_id,
                 explanation.confidence_pct(),
             )
+        destinations = get_detector_destinations(detector_destinations, explanation.failure_type)
         try:
             results = await asyncio.to_thread(
-                deliver, explanation, suppressed_count, signal_id, org_id
+                deliver,
+                explanation,
+                suppressed_count,
+                signal_id,
+                org_id,
+                destinations,
+                slack_webhook_url,
+                linear_config,
             )
         except Exception as exc:
             logger.error("Delivery error for signal_id=%d: %s", signal_id, exc)
             return None
+
+        linear_result = results.get("linear")
+        if linear_result and linear_result.success and linear_result.metadata:
+            await record_linear_issue_mapping(
+                org_id, signal_id, linear_result.metadata["linear_issue_id"]
+            )
 
         any_success = any(r.success for r in results.values()) if results else False
         no_destinations = not results
@@ -403,6 +599,8 @@ async def run_worker() -> None:
     await init_pool()
     await ensure_digest_schema()
     await ensure_dedup_schema()
+    await ensure_semantic_signal_column()
+    await ensure_alert_integrations_schema()
 
     enabled = []
     if settings.slack_enabled:
@@ -431,6 +629,14 @@ async def run_worker() -> None:
     else:
         logger.info("No alert policies found in detectors.yml — using immediate for all detectors")
 
+    detector_destinations = load_detector_destinations()
+    if detector_destinations:
+        logger.info(
+            "Detector destination routing loaded: %d detectors with a custom destination list "
+            "(from detectors.yml)",
+            len(detector_destinations),
+        )
+
     if settings.ALERT_DEDUP_WINDOW > 0:
         logger.info(
             "Alert dedup enabled: silence window=%ds per (agent, failure_type)",
@@ -448,6 +654,13 @@ async def run_worker() -> None:
                     logger.info("Cycle: found=%d delivered=%d", found, delivered)
             except Exception as exc:
                 logger.error("Poll cycle error: %s", exc)
+
+            try:
+                approvals_delivered = await deliver_pending_approvals()
+                if approvals_delivered:
+                    logger.info("Approvals delivered: %d", approvals_delivered)
+            except Exception as exc:
+                logger.error("Approval delivery cycle error: %s", exc)
 
             try:
                 sent = await send_weekly_digest()

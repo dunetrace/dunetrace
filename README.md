@@ -2,7 +2,7 @@
 
 ![Dunetrace](dunetrace.png)
 
-**Real-time failure detection for production AI agents - Slack alert within 15 seconds.**
+**Runtime reliability for AI agents. Structural and semantic detection, runtime prevention, native root cause, and one-click fixes.**
 
 [![PyPI version](https://img.shields.io/pypi/v/dunetrace.svg)](https://pypi.org/project/dunetrace/)
 [![Python versions](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/dunetrace/)
@@ -14,9 +14,13 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/yxFjATwHW4)
 
-**If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
-
 ![Slack alert](slack-alert.png)
+
+---
+
+## Star us
+
+**If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
 
 ---
 
@@ -27,19 +31,37 @@ AI agents fail silently:
 - ✓ API returns 200 &nbsp; ✓ Logs are clean
 - ✗ Agent called the same tool 12 times, burned $10, and gave the user a wrong answer
 
-Langfuse and LangSmith answer "what happened?" — after you already know it broke.
-Dunetrace answers **"is something breaking right now?"** and fires an alert in 15 seconds.
+Tracers answer "what happened?" — after you already know it broke.
+Dunetrace answers **"is something breaking right now?"** and fires an alert in 15 seconds,
+using zero-LLM structural checks that run in-path with sub-500μs overhead.
 
 ---
 
-## Why it's different
+## Five pillars, one platform
 
-| | Dunetrace | Langfuse / LangSmith |
+Dunetrace covers the full agent reliability lifecycle, not just one slice of it:
+
+| | Pillar | What it does |
 |---|---|---|
-| **When it fires** | Within 15s of run completion | You query it after you notice a problem |
-| **What it watches** | Structural failure patterns | Raw trace data |
+| 1 | **Sessions & Events** | Every run, every tool call, every LLM exchange — the raw data everything else is built on |
+| 2 | **Structural Detection** | 23 zero-LLM detectors, in-path, sub-500μs — the always-on first line |
+| 3 | **Semantic Evaluation** | LLM-based judgment (hallucination, task completion, cross-turn frustration) — post-hoc, sampling-based, opt-in → [docs/semantic-evaluation.md](docs/semantic-evaluation.md) |
+| 4 | **Runtime Prevention** | Policies that stop, redirect, or downgrade a run *while it's happening* — the differentiator no tracer offers → [docs/policies.md](docs/policies.md) |
+| 5 | **Root Cause & Fix** | Native root-cause analysis, auto-applied policy fixes, or a one-click draft PR → [Diagnose & fix](#diagnose--fix) |
+
+**Where tracers fit in:** if you already run Langfuse, LangSmith, or Braintrust,
+Dunetrace pulls their evaluation results in alongside its own (pillar 3) rather
+than asking you to switch — see [docs/integrations/external-evaluation.md](docs/integrations/external-evaluation.md).
+What no tracer does is pillar 4: none of them can stop a run mid-flight, because
+none of them run in-path.
+
+| | Dunetrace | A tracer (Langfuse / LangSmith / etc.) |
+|---|---|---|
+| **When it fires** | Within 15s of run completion (structural); can also stop a run *while it's happening* (policies) | You query it after you notice a problem |
+| **What it watches** | Structural patterns (always) + LLM-based semantic judgment (opt-in) | Raw trace data |
 | **Alert channel** | Slack / webhook / Dashboard | Dashboard only |
-| **Fix path** | Auto-apply a policy, or one-click push to a connected prompt store | Manual |
+| **Fix path** | Auto-apply a policy, one-click draft PR, or push to a connected prompt store | Manual |
+| **Your existing tracer** | Pull its evaluations in, use alongside Dunetrace's own | — |
 
 ---
 
@@ -121,6 +143,28 @@ Each alert includes: what fired, why it matters, a concrete fix, and a rate cont
 
 **Custom detectors** — write a detector in plain English. Dunetrace translates it to a structured condition set, runs it in shadow mode against real traffic, and lets you review the fire rate before any alert fires. In the dashboard: **Config → Custom detectors → Add detector**.
 
+**Detector packs** — opt-in detector bundles for a specific class of agent, activated per org. The **voice pack** adds 9 detectors for real-time voice agents (`dt.enable_pack("voice")`). Built-in detectors always run; packs only add to them and start in shadow mode.
+
+→ [detector packs](docs/detector-packs/index.md) · [voice pack](docs/detector-packs/voice.md) · [wiring a voice framework](docs/integrations/voice-frameworks.md)
+
+---
+
+## Semantic evaluation
+
+For failure modes no structural check can catch — did the agent hallucinate,
+did it actually finish the task, is the user getting frustrated across a
+conversation. Post-hoc (never in your agent's request path), sampling-based,
+disabled by default. Ships three [DeepEval](https://github.com/confident-ai/deepeval)-backed
+evaluators (hallucination, task completion, cross-turn user frustration) plus
+false-positive management (confidence floors, grouping, feedback loop,
+second-opinion for high-stakes findings).
+
+```bash
+SEMANTIC_WORKER_ENABLED=true
+```
+
+→ [docs/semantic-evaluation.md](docs/semantic-evaluation.md)
+
 ---
 
 ## Dashboard
@@ -178,7 +222,17 @@ dt.add_policy(
 
 Policies can also be created in the dashboard and fetched automatically by the SDK (60s TTL).
 
-→ [docs/policies.md](docs/policies.md)
+**Human-in-the-loop approvals** — gate a risky tool (wiring money, deleting data) behind human approval. A `require_approval` policy blocks the tool call until someone approves in Slack or the dashboard, or it times out (fail-closed: a timeout blocks the tool). No agent code changes — the gate fires on the existing tool-call hook.
+
+```python
+dt.add_policy(
+    name="approve-wires",
+    condition={"trigger": "before_tool_call", "operator": "eq", "value": "wire_money"},
+    action={"type": "require_approval", "params": {"timeout_s": 300}},
+)
+```
+
+→ [docs/policies.md](docs/policies.md) · [docs/approvals.md](docs/approvals.md)
 
 ---
 
@@ -191,7 +245,7 @@ pip install dunetrace-mcp
 ```
 
 <details>
-<summary>10 tools — ask your editor things like "what failed in the last 24 hours?"</summary>
+<summary>29 tools for signals, runs, policies, and custom detectors. Ask your editor things like "what failed in the last 24 hours?" A representative 10:</summary>
 
 | Tool | What you can ask |
 |---|---|
@@ -236,17 +290,30 @@ pip install dunetrace-mcp
 Agent Code
   └─► Dunetrace SDK        (raw content → ingest events)
         └─► Ingest API      (POST /v1/ingest → Postgres)
-                ├─► Detector       (poll → 23 detectors → signals)
-                ├─► Alerts         (poll → explain → Slack / webhook)
-                └─► Customer API   (runs, signals, explanations → dashboard)
+                ├─► Detector          (poll → 23 detectors → signals)
+                ├─► Semantic Worker   (optional — poll → DeepEval → signals)
+                ├─► Integrations      (optional — pull Langfuse/LangSmith/Braintrust)
+                ├─► Alerts            (poll → explain → Slack / webhook)
+                └─► Customer API      (runs, signals, explanations → dashboard)
 ```
+
+→ [docs/architecture.md](docs/architecture.md) for the full service breakdown
 
 ---
 
 ## Integrations
 
+**Evaluation & tracing**
+- [External evaluation (Langfuse, LangSmith, Braintrust, generic push)](docs/integrations/external-evaluation.md)
+- [Semantic evaluation (Dunetrace's own DeepEval-backed layer)](docs/semantic-evaluation.md)
+
+**Fix & workflow**
+- [GitHub App (automated draft PRs)](docs/integrations/github-app.md)
+- [Slack & Linear alerts](docs/alerts.md)
+- [Coding agents — Claude Code, Cursor, Codex (MCP)](docs/integrations/coding-agents.md)
+
 <details>
-<summary>LangChain, CrewAI, AutoGen, Haystack, LlamaIndex, TypeScript, and more</summary>
+<summary>Agent frameworks: LangChain, CrewAI, AutoGen, Haystack, LlamaIndex, TypeScript, and more</summary>
 
 - [Custom Python agent](docs/integrate-custom-python-agent.md)
 - [LangChain / LangGraph](docs/integrate-langchain-agent.md)
@@ -261,7 +328,8 @@ Agent Code
 - [TypeScript / JavaScript](docs/integrate-typescript-agent.md)
 - [Langdock](docs/integrate-langdock.md)
 - [Policies](docs/policies.md)
-- [MCP server (Claude Code, Cursor, Codex)](docs/mcp-server.md)
+- [Human-in-the-loop approvals](docs/approvals.md)
+- [Agent state machine](docs/state-machine.md)
 
 </details>
 
@@ -273,7 +341,7 @@ Fork, branch, change, `make test`, PR. For larger changes (new detectors, archit
 
 Requires Python 3.11+, Node.js 18+, Docker + Docker Compose.
 
-## ⭐ Star this if it saves you debugging time
+## Star history
 
 [![Star History Chart](https://api.star-history.com/svg?repos=dunetrace/dunetrace&type=Date)](https://star-history.com/#dunetrace/dunetrace&Date)
 

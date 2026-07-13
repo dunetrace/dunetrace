@@ -27,6 +27,7 @@ from detector_svc.db import (
     fetch_latency_baseline,
     fetch_llm_tool_ratio_baseline,
     fetch_run_events,
+    fetch_run_state,
     fetch_stalled_runs,
     fetch_step_count_baseline,
     fetch_token_growth_baseline,
@@ -38,7 +39,10 @@ from detector_svc.db import (
     write_signals,
     upsert_fired_issues,
     advance_clean_runs,
+    upsert_run_and_conversation,
+    write_run_state_metrics,
 )
+from detector_svc.state_metrics import summarize_states
 from detector_svc.run_builder import build_run_state
 
 logging.basicConfig(
@@ -52,6 +56,30 @@ logger = logging.getLogger("dunetrace.detector")
 _CUSTOM_DETECTOR_BUDGET = load_custom_detector_budget()
 
 _COOCCURRENCE_MULTIPLIERS = {1: 1.0, 2: 1.15, 3: 1.30}
+
+
+def _resolve_custom_detector_class(detector_name: str):
+    """Find the class behind a TEXT-failure-type signal so its
+    SHADOW_BY_DEFAULT can be honored. Searches BOTH sources of such signals:
+    CUSTOM_DETECTOR_REGISTRY (customer Python-class plugins) and PACK_REGISTRY
+    (first-party pack detectors). Pack detectors are deliberately kept out of
+    CUSTOM_DETECTOR_REGISTRY (see BaseDetector.__init_subclass__), so a
+    registry-only lookup would never find them and would silently fall back to
+    shadow=True — coincidentally the voice pack's own default, but that would
+    ignore a pack author who set SHADOW_BY_DEFAULT=False. Returns None if no
+    class matches (the caller then defaults to shadow=True)."""
+    for cls in CUSTOM_DETECTOR_REGISTRY.values():
+        if cls.name == detector_name:
+            return cls
+    try:
+        from dunetrace.packs import PACK_REGISTRY
+    except Exception:
+        return None
+    for pack in PACK_REGISTRY.values():
+        for cls in pack.detectors:
+            if cls.name == detector_name:
+                return cls
+    return None
 
 
 def _apply_cooccurrence_boost(signals: list[FailureSignal]) -> None:
@@ -162,6 +190,14 @@ async def process_run(
         await mark_run_processed(run_id, agent_id, agent_version, trigger, 0, org_id)
         return 0
 
+    # audit Finding 15: if this run was already processed and new events have since
+    # arrived, re-detect ADDITIVELY — write only failure types not already recorded
+    # for the run (so a benign run that later turns out to have looped gets its
+    # signal, without duplicating existing signals or re-alerting them).
+    prior = await fetch_run_state(run_id)
+    is_reprocess = prior is not None
+    existing_types: set = prior["signal_types"] if prior else set()
+
     try:
         state = build_run_state(events)
         (
@@ -181,7 +217,7 @@ async def process_run(
             fetch_total_tokens_baseline(org_id, agent_id, agent_version, run_id),
             fetch_duration_baseline(org_id, agent_id, agent_version, run_id),
         )
-        detectors = get_detectors(agent_id)
+        detectors = await get_detectors(agent_id, org_id)
         signals = run_detectors(state, detectors=detectors)
         inj = _injection_signal_from_events(events, run_id, agent_id, agent_version)
         if inj:
@@ -215,7 +251,9 @@ async def process_run(
         _apply_cooccurrence_boost(signals)
     except Exception:
         logger.exception("Run processing failed. run_id=%s", run_id)
-        await mark_run_processed(run_id, agent_id, agent_version, trigger, 0, org_id)
+        await mark_run_processed(
+            run_id, agent_id, agent_version, trigger, 0, org_id, event_count=len(events)
+        )
         return 0
 
     count = 0
@@ -225,6 +263,12 @@ async def process_run(
             if signal.failure_type == FailureType.CUSTOM
             else None
         )
+        # audit Finding 15: dedup writes by (run_id, failure_type). Skip a type
+        # already recorded for this run — makes re-detection additive and
+        # idempotent (no duplicate signals, no re-alert of an existing one).
+        stored_type = plugin_name if plugin_name else signal.failure_type.value
+        if stored_type in existing_types:
+            continue
         if plugin_name:
             # A third-party Python-class custom detector (see
             # custom_python_detectors.py) — FailureType is a closed enum, so
@@ -234,9 +278,7 @@ async def process_run(
             # write_signals() (which is enum-constrained and LIVE_DETECTORS-gated,
             # neither of which apply to a plugin the built-in allowlist has never
             # heard of).
-            plugin_cls = next(
-                (c for c in CUSTOM_DETECTOR_REGISTRY.values() if c.name == plugin_name), None
-            )
+            plugin_cls = _resolve_custom_detector_class(plugin_name)
             shadow = plugin_cls.SHADOW_BY_DEFAULT if plugin_cls else True
             await write_custom_signal(
                 failure_type=plugin_name,
@@ -257,18 +299,46 @@ async def process_run(
         written = await write_signals([signal], shadow=not is_live, org_id=org_id)
         count += written
 
-    # Issue persistence: track open/resolved lifecycle per (org_id, agent_id, failure_type)
-    fired_types = [s.failure_type.value for s in signals if s.failure_type.value in LIVE_DETECTORS]
+    # Issue persistence: track open/resolved lifecycle per (org_id, agent_id, failure_type).
+    # audit Finding 15: on a reprocess, only NEW fired types matter, and the
+    # consecutive-clean-runs counter must NOT be advanced again for a run it already
+    # counted — so advance_clean_runs runs on first-process only.
+    fired_types = [
+        s.failure_type.value
+        for s in signals
+        if s.failure_type.value in LIVE_DETECTORS and s.failure_type.value not in existing_types
+    ]
     try:
         if fired_types:
             await upsert_fired_issues(org_id, agent_id, fired_types)
-        await advance_clean_runs(org_id, agent_id, fired_types)
+        if not is_reprocess:
+            await advance_clean_runs(org_id, agent_id, fired_types)
     except Exception as exc:
         logger.warning("Issue tracking failed for run_id=%s: %s", run_id, exc)
 
-    # Custom detectors — run after built-ins, tracked separately
+    # Conversation modeling (Phase 3.1): register this run in the runs
+    # registry, and — when the SDK's dt.run(conversation_id=...) was set —
+    # its owning conversation. Isolated in its own try/except, same as issue
+    # tracking above, so a bug here never blocks built-in detection.
     try:
-        custom_defs = await fetch_custom_detectors(org_id, agent_id)
+        conversation_external_id = next(
+            (e.get("conversation_id") for e in events if e.get("conversation_id")), None
+        )
+        started_at = next(
+            (e["timestamp"] for e in events if e["event_type"] == "run.started"),
+            events[0]["timestamp"],
+        )
+        await upsert_run_and_conversation(
+            run_id, org_id, agent_id, agent_version, started_at, conversation_external_id
+        )
+    except Exception as exc:
+        logger.warning("Conversation registry update failed for run_id=%s: %s", run_id, exc)
+
+    # Custom detectors — run after built-ins, tracked separately.
+    # audit Finding 15: skip on reprocess — the custom signal is already deduped by
+    # the type-filter above, and re-running would duplicate custom_detector_results.
+    try:
+        custom_defs = await fetch_custom_detectors(org_id, agent_id) if not is_reprocess else None
         if custom_defs:
             cdr_records = []
             for cd in custom_defs:
@@ -305,7 +375,20 @@ async def process_run(
     except Exception as exc:
         logger.warning("Custom detector processing failed for run_id=%s: %s", run_id, exc)
 
-    await mark_run_processed(run_id, agent_id, agent_version, trigger, count, org_id)
+    # State metrics (Capability 3, Phase 3.3): precompute per-state time totals
+    # for this run so api_svc can build cross-run analytics without re-reading
+    # raw events. Own try/except — a bug here never blocks detection.
+    try:
+        summary = summarize_states(events)
+        await write_run_state_metrics(
+            run_id, org_id, agent_id, summary["run_started_ts"], summary["states"]
+        )
+    except Exception as exc:
+        logger.warning("State metrics failed for run_id=%s: %s", run_id, exc)
+
+    await mark_run_processed(
+        run_id, agent_id, agent_version, trigger, count, org_id, event_count=len(events)
+    )
     return count
 
 

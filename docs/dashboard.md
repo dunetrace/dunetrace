@@ -90,7 +90,7 @@ Click any run row to open the detail panel. Three tabs:
 
 - **Analysis** — execution timeline (one node per step, loop detection), signal score cards with confidence bars, plain-English explanation + suggested fix. Failure type labels show a plain-English tooltip on hover. When multiple signals fire, each card shows an amber **"confidence boosted · N co-occurring signals"** badge. A **"Dunetrace Root Cause Analysis"** button triggers native root-cause analysis (no external tracing system required — just `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` on the server). After explaining:
   - **Prompt-fix signals** (TOOL_LOOP, GOAL_ABANDONMENT, etc.) — shown as a diff to copy into your system prompt manually; there's no one-click apply for these.
-  - **Code-change signals** (CONTEXT_BLOAT, SLOW_STEP, etc.) — **Open PR on GitHub ↗** button creates a draft PR in your repo containing the LLM-generated unified diff. Requires `GITHUB_TOKEN` and `GITHUB_REPO` in `.env`.
+  - **Code-change signals** (CONTEXT_BLOAT, SLOW_STEP, etc.) — **Open PR on GitHub ↗** button creates a draft PR. When source mapping resolves a real file, the PR edits it directly; otherwise it's a summary file documenting the suggested fix. Requires either a per-org GitHub App installation or the legacy `GITHUB_TOKEN`/`GITHUB_REPO` in `.env` — see [docs/integrations/github-app.md](integrations/github-app.md).
 - **Run graph** — SVG node graph: green = LLM call, orange = tool call (ok), red = looping tool call, blue = start/end.
 - **Event log** — every event in chronological order, expandable to show full payload. A filter input narrows by step index or event type (e.g. `tool.called`). A **copy ID** button in the header copies the full run ID to the clipboard.
 

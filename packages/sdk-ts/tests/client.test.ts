@@ -206,6 +206,76 @@ describe("Dunetrace.run() — lifecycle events", () => {
     });
     await dt.shutdown();
   });
+
+  it("run.started carries traceId as a top-level field (external evaluation correlation)", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", { traceId: "langfuse-trace-abc123" }, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.trace_id).toBe("langfuse-trace-abc123");
+    await dt.shutdown();
+  });
+
+  it("trace_id defaults to null when traceId omitted", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", {}, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.trace_id).toBeNull();
+    await dt.shutdown();
+  });
+
+  it("traceId does not affect agent_version (unlike systemPrompt)", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", { model: "gpt-4o", traceId: "trace-1" }, async () => {});
+    await dt.run("agent", { model: "gpt-4o", traceId: "trace-2" }, async () => {});
+
+    const started = events.filter(e => e.event_type === "run.started");
+    expect(started[0].agent_version).toBe(started[1].agent_version);
+    await dt.shutdown();
+  });
+
+  it("run.started carries conversationId as a top-level field (conversation modeling)", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", { conversationId: "conv_123" }, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.conversation_id).toBe("conv_123");
+    await dt.shutdown();
+  });
+
+  it("conversation_id defaults to null when conversationId omitted", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", {}, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.conversation_id).toBeNull();
+    await dt.shutdown();
+  });
+
+  it("conversationId does not affect agent_version (unlike systemPrompt)", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", { model: "gpt-4o", conversationId: "conv-1" }, async () => {});
+    await dt.run("agent", { model: "gpt-4o", conversationId: "conv-2" }, async () => {});
+
+    const started = events.filter(e => e.event_type === "run.started");
+    expect(started[0].agent_version).toBe(started[1].agent_version);
+    await dt.shutdown();
+  });
 });
 
 // ── tool() wrapper ────────────────────────────────────────────────────────────

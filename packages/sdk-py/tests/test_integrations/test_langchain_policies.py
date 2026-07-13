@@ -199,9 +199,11 @@ class TestNonStopPolicies(unittest.TestCase):
         triggered_at = []
 
         class _RecordingEngine(PolicyEngine):
-            def evaluate(self, agent_id, metrics, triggered):
+            # *args/**kwargs forwards the evaluator's context arg (added when
+            # expression conditions landed) without re-coupling to the signature.
+            def evaluate(self, agent_id, metrics, triggered, *args, **kwargs):
                 triggered_at.append(metrics["tool_call_count"])
-                return super().evaluate(agent_id, metrics, triggered)
+                return super().evaluate(agent_id, metrics, triggered, *args, **kwargs)
 
         client = _FakeClient()
         client._policy_engine = _RecordingEngine()

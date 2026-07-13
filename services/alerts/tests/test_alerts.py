@@ -176,6 +176,22 @@ class TestSlackFormatter(unittest.TestCase):
         buttons = [e for e in actions[0]["elements"] if e["type"] == "button"]
         self.assertGreater(len(buttons), 0)
 
+    def test_snooze_button_present(self):
+        blocks = format_slack(self.exp)["attachments"][0]["blocks"]
+        actions = [b for b in blocks if b["type"] == "actions"][0]
+        action_ids = [e.get("action_id") for e in actions["elements"]]
+        self.assertIn("snooze", action_ids)
+
+    def test_snooze_button_value_matches_other_action_buttons(self):
+        """Snooze must carry the same signal_id/agent_id/failure_type/org_id
+        payload the other action buttons use — the callback handler parses
+        it identically regardless of which button was clicked."""
+        blocks = format_slack(self.exp, signal_id=42, org_id="org-1")["attachments"][0]["blocks"]
+        actions = [b for b in blocks if b["type"] == "actions"][0]
+        snooze_btn = next(e for e in actions["elements"] if e.get("action_id") == "snooze")
+        resolved_btn = next(e for e in actions["elements"] if e.get("action_id") == "mark_resolved")
+        self.assertEqual(snooze_btn["value"], resolved_btn["value"])
+
     def test_is_json_serialisable(self):
         payload = format_slack(self.exp)
         serialised = json.dumps(payload)
@@ -391,6 +407,65 @@ class TestSeverityThreshold(unittest.TestCase):
         for threshold in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]:
             meets = SEVERITY_ORDER.get("CRITICAL", 0) >= SEVERITY_ORDER.get(threshold, 0)
             self.assertTrue(meets, f"CRITICAL should meet {threshold} threshold")
+
+
+class TestLoadDetectorDestinations(unittest.TestCase):
+    """Phase 4.1 — per-detector destinations parsed from detectors.yml."""
+
+    def _write(self, contents: str) -> str:
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".yml")
+        with os.fdopen(fd, "w") as f:
+            f.write(contents)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_missing_file_returns_empty(self):
+        from alerts_svc.config import load_detector_destinations
+
+        destinations = load_detector_destinations(yml_path="/nonexistent/path.yml")
+        self.assertEqual(destinations, {})
+
+    def test_detector_with_destinations_parsed(self):
+        from alerts_svc.config import load_detector_destinations
+
+        path = self._write("default:\n  tool_loop:\n    destinations: [slack]\n")
+        destinations = load_detector_destinations(yml_path=path)
+        self.assertEqual(destinations["TOOL_LOOP"], ["slack"])
+
+    def test_detector_without_destinations_absent_from_result(self):
+        from alerts_svc.config import load_detector_destinations
+
+        path = self._write("default:\n  tool_loop:\n    threshold: 3\n")
+        destinations = load_detector_destinations(yml_path=path)
+        self.assertNotIn("TOOL_LOOP", destinations)
+
+    def test_invalid_destination_names_filtered_out(self):
+        from alerts_svc.config import load_detector_destinations
+
+        path = self._write("default:\n  tool_loop:\n    destinations: [slack, pagerduty, linear]\n")
+        destinations = load_detector_destinations(yml_path=path)
+        self.assertEqual(destinations["TOOL_LOOP"], ["slack", "linear"])
+
+    def test_all_invalid_destinations_excludes_detector_entirely(self):
+        from alerts_svc.config import load_detector_destinations
+
+        path = self._write("default:\n  tool_loop:\n    destinations: [pagerduty]\n")
+        destinations = load_detector_destinations(yml_path=path)
+        self.assertNotIn("TOOL_LOOP", destinations)
+
+    def test_get_detector_destinations_returns_none_for_unconfigured(self):
+        from alerts_svc.config import get_detector_destinations
+
+        result = get_detector_destinations({"TOOL_LOOP": ["slack"]}, "RETRY_STORM")
+        self.assertIsNone(result)
+
+    def test_get_detector_destinations_case_insensitive(self):
+        from alerts_svc.config import get_detector_destinations
+
+        result = get_detector_destinations({"TOOL_LOOP": ["slack"]}, "tool_loop")
+        self.assertEqual(result, ["slack"])
 
 
 # Worker pipeline
@@ -730,7 +805,15 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
     async def _run(self, token_map: dict, captured: list) -> tuple:
         rows = [self._make_row()]
 
-        def fake_deliver(explanation, suppressed_count=0, signal_id=None, org_id=None):
+        def fake_deliver(
+            explanation,
+            suppressed_count=0,
+            signal_id=None,
+            org_id=None,
+            destinations=None,
+            slack_webhook_url=None,
+            linear_config=None,
+        ):
             captured.append(explanation)
             return {"slack": SendResult(True, "slack", 1, 200)}
 
@@ -930,6 +1013,195 @@ class TestDedupWindowHandling(unittest.IsolatedAsyncioTestCase):
         # Lower-confidence duplicate (id=1) must also be marked
         self.assertIn(1, delivered_ids)
         self.assertIn(2, delivered_ids)
+
+
+class TestSnoozeHandling(unittest.IsolatedAsyncioTestCase):
+    """Phase 4.1 — 'Snooze this pattern' suppresses delivery until snoozed_until."""
+
+    def _make_row(self, signal_id=1):
+        return {
+            "id": signal_id,
+            "failure_type": "TOOL_LOOP",
+            "severity": "HIGH",
+            "run_id": "run-1",
+            "agent_id": "agent-1",
+            "org_id": "org-1",
+            "agent_version": "v1",
+            "step_index": 5,
+            "confidence": 0.9,
+            "evidence": {"tool": "search", "count": 5},
+            "detected_at": time.time(),
+        }
+
+    async def test_snoozed_until_future_suppresses_delivery(self):
+        from datetime import datetime, timezone, timedelta
+        import alerts_svc.worker as wm
+
+        row = self._make_row()
+        override = {
+            ("org-1", "agent-1", "TOOL_LOOP"): {
+                "fp_count": 0,
+                "confidence_floor": 0.0,
+                "silenced": False,
+                "snoozed_until": datetime.now(timezone.utc) + timedelta(hours=12),
+            }
+        }
+
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
+            patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value=override)),
+            patch("alerts_svc.worker.deliver") as mock_deliver,
+            patch("alerts_svc.worker.settings") as mock_s,
+        ):
+            mock_s.BATCH_SIZE = 50
+            mock_s.ALERT_DEDUP_WINDOW = 0
+            found, delivered = await wm.poll_once()
+
+        self.assertEqual(found, 1)
+        self.assertEqual(delivered, 0)
+        mock_mark.assert_called_once_with([1])
+        mock_deliver.assert_not_called()
+
+    async def test_snoozed_until_past_delivers_normally(self):
+        from datetime import datetime, timezone, timedelta
+        import alerts_svc.worker as wm
+
+        row = self._make_row()
+        override = {
+            ("org-1", "agent-1", "TOOL_LOOP"): {
+                "fp_count": 0,
+                "confidence_floor": 0.0,
+                "silenced": False,
+                "snoozed_until": datetime.now(timezone.utc) - timedelta(hours=1),
+            }
+        }
+
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
+            patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value=override)),
+            patch(
+                "alerts_svc.worker.deliver",
+                return_value={"slack": SendResult(True, "slack", 1, 200)},
+            ),
+            patch("alerts_svc.worker.settings") as mock_s,
+        ):
+            mock_s.BATCH_SIZE = 50
+            mock_s.ALERT_DEDUP_WINDOW = 0
+            found, delivered = await wm.poll_once()
+
+        self.assertEqual(found, 1)
+        self.assertEqual(delivered, 1)
+
+    async def test_no_snoozed_until_key_delivers_normally(self):
+        """Overrides fetched before this column existed (or with no snooze set)
+        must not break — .get() on a missing key, not a KeyError."""
+        import alerts_svc.worker as wm
+
+        row = self._make_row()
+        override = {
+            ("org-1", "agent-1", "TOOL_LOOP"): {
+                "fp_count": 0,
+                "confidence_floor": 0.0,
+                "silenced": False,
+                # no "snoozed_until" key at all
+            }
+        }
+
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
+            patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value=override)),
+            patch(
+                "alerts_svc.worker.deliver",
+                return_value={"slack": SendResult(True, "slack", 1, 200)},
+            ),
+            patch("alerts_svc.worker.settings") as mock_s,
+        ):
+            mock_s.BATCH_SIZE = 50
+            mock_s.ALERT_DEDUP_WINDOW = 0
+            found, delivered = await wm.poll_once()
+
+        self.assertEqual(found, 1)
+        self.assertEqual(delivered, 1)
+
+
+class TestDetectorDestinationsRouting(unittest.IsolatedAsyncioTestCase):
+    """Phase 4.1 — poll_once() threads the per-failure_type destinations
+    override through to deliver()."""
+
+    def _make_row(self, signal_id=1, failure_type="TOOL_LOOP"):
+        return {
+            "id": signal_id,
+            "failure_type": failure_type,
+            "severity": "HIGH",
+            "run_id": "run-1",
+            "agent_id": "agent-1",
+            "org_id": "org-1",
+            "agent_version": "v1",
+            "step_index": 5,
+            "confidence": 0.9,
+            "evidence": {"tool": "search", "count": 5},
+            "detected_at": time.time(),
+        }
+
+    async def test_configured_destinations_passed_to_deliver(self):
+        import alerts_svc.worker as wm
+
+        row = self._make_row()
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
+            patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value={})),
+            patch(
+                "alerts_svc.worker.load_detector_destinations",
+                return_value={"TOOL_LOOP": ["slack"]},
+            ),
+            patch(
+                "alerts_svc.worker.deliver",
+                return_value={"slack": SendResult(True, "slack", 1, 200)},
+            ) as mock_deliver,
+            patch("alerts_svc.worker.settings") as mock_s,
+        ):
+            mock_s.BATCH_SIZE = 50
+            mock_s.ALERT_DEDUP_WINDOW = 0
+            await wm.poll_once()
+
+        mock_deliver.assert_called_once()
+        self.assertEqual(mock_deliver.call_args.args[4], ["slack"])
+
+    async def test_unconfigured_failure_type_passes_none(self):
+        """A failure_type with no destinations override in detectors.yml
+        must pass destinations=None through — deliver()'s pre-4.1 fallback."""
+        import alerts_svc.worker as wm
+
+        row = self._make_row(failure_type="RETRY_STORM")
+        with (
+            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
+            patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
+            patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value={})),
+            patch(
+                "alerts_svc.worker.load_detector_destinations",
+                return_value={"TOOL_LOOP": ["slack"]},
+            ),
+            patch(
+                "alerts_svc.worker.deliver",
+                return_value={"slack": SendResult(True, "slack", 1, 200)},
+            ) as mock_deliver,
+            patch("alerts_svc.worker.settings") as mock_s,
+        ):
+            mock_s.BATCH_SIZE = 50
+            mock_s.ALERT_DEDUP_WINDOW = 0
+            await wm.poll_once()
+
+        mock_deliver.assert_called_once()
+        self.assertIsNone(mock_deliver.call_args.args[4])
 
 
 if __name__ == "__main__":

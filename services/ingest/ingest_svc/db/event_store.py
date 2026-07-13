@@ -37,6 +37,13 @@ class EventStore(ABC):
         depend on its exact unit."""
         ...
 
+    async def insert_policy_evaluations(self, events: list, batch_id: str, org_id: str) -> int:
+        """Persist policy-evaluation observability records (Phase 5) into the
+        policy_evaluations table. Concrete (not abstract) with a no-op default so
+        existing EventStore implementations keep working unchanged; only the
+        stores that care override it. Returns rows written."""
+        return 0
+
 
 class PostgresEventStore(EventStore):
     """Delegates to ingest_svc.db.postgres — the actual SQL/partition logic
@@ -54,6 +61,13 @@ class PostgresEventStore(EventStore):
 
         return await _prune_old_events(retention_days)
 
+    async def insert_policy_evaluations(self, events: list, batch_id: str, org_id: str) -> int:
+        from ingest_svc.db.postgres import (
+            insert_policy_evaluations as _insert_policy_evaluations,
+        )
+
+        return await _insert_policy_evaluations(events, batch_id, org_id)
+
 
 class InMemoryEventStore(EventStore):
     """Fully in-process fake — no Postgres, no asyncpg, no partitions. Lets a
@@ -62,6 +76,7 @@ class InMemoryEventStore(EventStore):
 
     def __init__(self) -> None:
         self.batches: list[dict] = []  # {"batch_id", "org_id", "events", "inserted_at"}
+        self.policy_evaluations: list[dict] = []  # {"batch_id", "org_id", "events"}
 
     async def insert_events(self, events: list, batch_id: str, org_id: str) -> int:
         import time
@@ -84,10 +99,20 @@ class InMemoryEventStore(EventStore):
         self.batches = [b for b in self.batches if b["inserted_at"] >= cutoff]
         return before - len(self.batches)
 
+    async def insert_policy_evaluations(self, events: list, batch_id: str, org_id: str) -> int:
+        self.policy_evaluations.append(
+            {"batch_id": batch_id, "org_id": org_id, "events": list(events)}
+        )
+        return len(events)
+
     @property
     def all_events(self) -> list:
         """Flattened convenience view for assertions."""
         return [e for batch in self.batches for e in batch["events"]]
+
+    @property
+    def all_policy_evaluations(self) -> list:
+        return [e for batch in self.policy_evaluations for e in batch["events"]]
 
 
 _store: Optional[EventStore] = None

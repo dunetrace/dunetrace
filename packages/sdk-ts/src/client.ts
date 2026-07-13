@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { agentVersion } from "./hash.js";
 import { DunetraceRun } from "./run.js";
 import { resultLength as _resultLength, resultText as _resultText } from "./util.js";
@@ -60,6 +61,8 @@ export class Dunetrace {
         tools,
       },
       parent_run_id: opts.parentRunId ?? null,
+      trace_id:      opts.traceId ?? null,
+      conversation_id: opts.conversationId ?? null,
     });
 
     let result: T;
@@ -278,6 +281,9 @@ export class Dunetrace {
   // ── Internal ───────────────────────────────────────────────────────────────
 
   _emit(event: AgentEvent): void {
+    // audit Finding 14: stamp a stable id once, at buffer entry, so a retry of
+    // the same buffered event ships the same id and the ingest side dedups it.
+    if (!event.event_id) event.event_id = randomUUID();
     if (this._emitJson) this._writeJsonLine(event);
     if (this._buffer.length >= this._bufferSize) return;
     this._buffer.push(event);

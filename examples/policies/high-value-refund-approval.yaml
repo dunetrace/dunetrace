@@ -1,0 +1,28 @@
+# High-value refund approval
+#
+# Require a human approval before refund_customer runs, but ONLY when the refund
+# amount exceeds $10,000. Smaller refunds pass through untouched.
+#
+# This is the headline expression-condition use case: the `before_tool_call`
+# gate has the raw tool arguments available, so `args.amount` is live and the
+# call is blocked before it executes. A deny or timeout raises ApprovalDenied.
+#
+# POST this body to /v1/policies, or pass the same shape to dt.add_policy(...).
+# See docs/policies/condition-expressions.md and docs/approvals.md.
+
+name: require-approval-high-value-refund
+agent_id: billing-agent          # or "*" for all agents
+priority: 10                     # safety policies: give them high priority (low number)
+enabled: true
+
+condition:
+  trigger: before_tool_call      # gate a specific tool, before it runs
+  operator: eq
+  value: refund_customer         # the tool name to guard
+  match:
+    args.amount: {gt: 10000}     # ...only when the argument amount exceeds 10k
+
+action:
+  type: require_approval
+  params:
+    timeout_s: 300               # deny (fail-closed) if no human decides in 5 min

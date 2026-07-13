@@ -6,6 +6,8 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from api_svc.auth import require_org
 from api_svc.config import settings
+from pydantic import BaseModel
+
 from api_svc.db.queries import (
     list_agents,
     agent_signal_sparklines,
@@ -13,6 +15,9 @@ from api_svc.db.queries import (
     get_agent_health_score,
     list_agent_fixes,
     agent_token_stats,
+    delete_agent_source_config,
+    get_agent_source_config,
+    upsert_agent_source_config,
 )
 from api_svc.schemas import (
     AgentListResponse,
@@ -135,3 +140,60 @@ async def get_health_score(
     """
     result = await get_agent_health_score(org_id, agent_id)
     return AgentHealthScore(agent_id=agent_id, **result)
+
+
+# ── Source mapping, tier 1 (Phase 4.3) ─────────────────────────────────────────
+
+
+class SourceConfigRequest(BaseModel):
+    repo: str
+    file_path: Optional[str] = None
+
+
+class SourceConfigResponse(BaseModel):
+    configured: bool
+    repo: Optional[str] = None
+    file_path: Optional[str] = None
+
+
+@router.post(
+    "/{agent_id}/source-config",
+    response_model=SourceConfigResponse,
+    summary="Set this agent's explicit repo/file source mapping (tier 1)",
+    status_code=201,
+)
+async def set_source_config(
+    agent_id: str,
+    body: SourceConfigRequest,
+    org_id: str = Depends(require_org),
+) -> SourceConfigResponse:
+    """file_path is optional — a repo-only mapping still helps: Phase 4.3's
+    source resolution combines it with the SDK's own auto-detected file
+    path (tier 2) when the file isn't declared explicitly here."""
+    await upsert_agent_source_config(org_id, agent_id, body.repo, body.file_path)
+    return SourceConfigResponse(configured=True, repo=body.repo, file_path=body.file_path)
+
+
+@router.get(
+    "/{agent_id}/source-config",
+    response_model=SourceConfigResponse,
+    summary="Get this agent's explicit source mapping",
+)
+async def get_source_config(
+    agent_id: str, org_id: str = Depends(require_org)
+) -> SourceConfigResponse:
+    config = await get_agent_source_config(org_id, agent_id)
+    if config is None:
+        return SourceConfigResponse(configured=False)
+    return SourceConfigResponse(configured=True, repo=config["repo"], file_path=config["file_path"])
+
+
+@router.delete(
+    "/{agent_id}/source-config",
+    summary="Remove this agent's explicit source mapping",
+    status_code=204,
+)
+async def remove_source_config(agent_id: str, org_id: str = Depends(require_org)):
+    deleted = await delete_agent_source_config(org_id, agent_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No source config for this agent.")

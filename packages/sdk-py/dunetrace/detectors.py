@@ -91,6 +91,16 @@ class BaseDetector:
     CATEGORY: str = "custom"
     SHADOW_BY_DEFAULT: bool = True
 
+    # None = built-in Tier 1 detector, always runs for every org (every
+    # detector in this module leaves this at the default). A non-None value
+    # (e.g. "voice") marks this as belonging to a first-party detector pack
+    # (packages/sdk-py/dunetrace/packs/) — detector_svc only evaluates it for
+    # an org that has activated that pack (see detector_svc/packs.py). This is
+    # a distinct concern from CUSTOM_DETECTOR_REGISTRY/SHADOW_BY_DEFAULT above:
+    # packs are Dunetrace-owned feature modules a customer opts into wholesale,
+    # not user-defined detector logic dropped in via a plugin file.
+    pack: Optional[str] = None
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         # Only third-party subclasses register — built-in Tier 1 detectors are
@@ -99,7 +109,21 @@ class BaseDetector:
         # __module__ (rather than requiring plugin authors to opt in with a
         # flag) means zero extra ceremony for the common case: subclass
         # BaseDetector anywhere outside dunetrace.detectors and it just works.
-        if cls.__module__ != BaseDetector.__module__:
+        #
+        # Pack detectors (cls.pack is not None) are the one deliberate
+        # exception: they live outside this module too (packages/sdk-py/
+        # dunetrace/packs/voice.py etc.), which would otherwise also match
+        # this condition. A pack detector registers explicitly via
+        # register_pack() (see dunetrace/packs/base.py) instead, and must
+        # NOT also land in CUSTOM_DETECTOR_REGISTRY — that registry's
+        # detectors run unconditionally for every org
+        # (detector_svc/detectors.py::_build_plugin_detectors), which would
+        # silently defeat per-org pack activation for exactly the classes
+        # that most need it gated. Caught via a real failing test
+        # (test_tenant_isolation_org_a_activation_does_not_affect_org_b)
+        # where a fake pack detector leaked into every org through this path
+        # before this check existed.
+        if cls.__module__ != BaseDetector.__module__ and cls.pack is None:
             CUSTOM_DETECTOR_REGISTRY[cls.__name__] = cls
 
     def __init__(self, **overrides: object) -> None:
@@ -1741,6 +1765,13 @@ class ToolArgumentFabricationDetector(BaseDetector):
     SMALL_INT_MIN = 1
     SMALL_INT_MAX = 100
     CASE_SENSITIVE = False
+    # audit Finding 21: characters that make a token "identifier-shaped".
+    ID_SEPARATORS = "_-./:@#"
+    # A pure-alphabetic value with no separator/digit is only treated as an
+    # identifier when it's at least this long (an opaque token). Below it, short
+    # unstructured alpha values — airport codes ("CDG"), category names, rephrased
+    # query terms — are legitimately agent-generated and must NOT be flagged.
+    MIN_OPAQUE_LEN = 12
 
     def _try_parse_args(self, args_text: str):
         for parser in (json.loads, ast.literal_eval):
@@ -1769,7 +1800,18 @@ class ToolArgumentFabricationDetector(BaseDetector):
         return leaves
 
     def _looks_like_identifier(self, s: str) -> bool:
-        return len(s) >= 3 and not any(ch.isspace() for ch in s)
+        # audit Finding 21: a whitespace-free string alone is NOT enough — that
+        # flagged legitimately agent-generated canonical values (e.g. an airport
+        # code "CDG" derived from "Paris") as fabricated, firing HIGH false
+        # positives. Require actual identifier structure: an ID separator, an
+        # embedded digit, or (for pure-alpha tokens) opaque length. Dedicated
+        # UUID/email/URL/path regexes in _extract_entities still catch those
+        # shapes independently.
+        if len(s) < 3 or any(ch.isspace() for ch in s):
+            return False
+        if any(ch in self.ID_SEPARATORS for ch in s) or any(ch.isdigit() for ch in s):
+            return True
+        return len(s) >= self.MIN_OPAQUE_LEN
 
     def _extract_entities(self, args_text: str) -> List[str]:
         parsed = self._try_parse_args(args_text)
@@ -2358,6 +2400,33 @@ def _record_cost_and_maybe_warn(detector: BaseDetector, elapsed_ns: int, run_id:
         return
 
     now = time.monotonic()
+
+    # audit Finding 29: evaluate the downgrade decision on EVERY over-budget call,
+    # BEFORE (and independent of) the rate-limited warning below. Previously this
+    # was nested inside the once-per-minute warning block, so after the very first
+    # warning (fired when n=1, too few samples to downgrade) the rate-limit
+    # short-circuited the check for ~60s — meaning a detector that blew its budget
+    # on the hot path was NOT downgraded promptly. Percentiles are only computed
+    # once enough samples exist and while not yet downgraded, so this adds no cost
+    # to well-behaved detectors or after a downgrade has fired.
+    if tracker.downgraded_at is None and len(tracker.samples) >= _COST_MIN_SAMPLES_FOR_DOWNGRADE:
+        stats = tracker.percentiles()
+        if stats is not None:
+            p50, p95, p99, n = stats
+            if p99 > detector.MAX_COST_NS and n >= _COST_MIN_SAMPLES_FOR_DOWNGRADE:
+                tracker.downgraded_at = now
+                logger.warning(
+                    "Detector %s P99 (%dns) has exceeded its cost budget (%dns) for the "
+                    "last %ds — downgrading to analytics-only. It will be skipped by "
+                    "run_detectors(context='runtime') until manually re-enabled via "
+                    "dunetrace.detectors.reset_cost_downgrade(%r).",
+                    detector.name,
+                    p99,
+                    detector.MAX_COST_NS,
+                    int(_COST_WINDOW_S),
+                    detector.name,
+                )
+
     if (
         tracker.last_warning_at is not None
         and now - tracker.last_warning_at < _COST_WARNING_RATE_LIMIT_S
@@ -2374,34 +2443,17 @@ def _record_cost_and_maybe_warn(detector: BaseDetector, elapsed_ns: int, run_id:
     )
 
     stats = tracker.percentiles()
-    if stats is None:
-        return
-    p50, p95, p99, n = stats
-    logger.info(
-        "Detector %s cost stats (last %ds, n=%d): p50=%dns p95=%dns p99=%dns budget=%dns",
-        detector.name,
-        int(_COST_WINDOW_S),
-        n,
-        p50,
-        p95,
-        p99,
-        detector.MAX_COST_NS,
-    )
-    if (
-        p99 > detector.MAX_COST_NS
-        and n >= _COST_MIN_SAMPLES_FOR_DOWNGRADE
-        and tracker.downgraded_at is None
-    ):
-        tracker.downgraded_at = now
-        logger.warning(
-            "Detector %s P99 (%dns) has exceeded its cost budget (%dns) for the last %ds "
-            "— downgrading to analytics-only. It will be skipped by run_detectors(context="
-            "'runtime') until manually re-enabled via dunetrace.detectors.reset_cost_downgrade(%r).",
+    if stats is not None:
+        p50, p95, p99, n = stats
+        logger.info(
+            "Detector %s cost stats (last %ds, n=%d): p50=%dns p95=%dns p99=%dns budget=%dns",
             detector.name,
+            int(_COST_WINDOW_S),
+            n,
+            p50,
+            p95,
             p99,
             detector.MAX_COST_NS,
-            int(_COST_WINDOW_S),
-            detector.name,
         )
 
 

@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from dunetrace.client import DunetraceClient  # noqa: E402
 from dunetrace.models import EventType  # noqa: E402
+from dunetrace.policies import ApprovalDenied  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
 
@@ -67,12 +68,25 @@ async def client(mock_db):
 
 
 def _record_a_full_run() -> list:
-    """Drive the real SDK through every kind of event it can emit — including
-    a run that errors out, since run.errored only fires on an exception — and
-    return the exact AgentEvent batch it would have shipped to /v1/ingest."""
+    """Drive the real SDK through every kind of event it can emit — base events, a
+    run that errors out (run.errored only fires on an exception), the voice-pack
+    events, the full approval lifecycle (requested/granted/denied/timeout), and a
+    shipped policy-evaluation record — and return the exact AgentEvent batch it
+    would have shipped to /v1/ingest.
+
+    The approval backend and its clock-bound polling are stubbed so the whole
+    lifecycle runs offline and instantly; policy_evaluation_reporting is on so a
+    policy.evaluated record is shipped alongside policy.triggered."""
     emitted = []
-    sdk_client = DunetraceClient(api_key="dt_dev_test")
+    sdk_client = DunetraceClient(api_key="dt_dev_test", policy_evaluation_reporting=True)
     sdk_client._ship = lambda batch: emitted.extend(batch)
+
+    # Stub the approval backend so request_approval runs fully offline. A mutable
+    # holder drives the outcome (granted → denied → timeout) without real polling.
+    approval = {"status": "granted"}
+    sdk_client._create_approval_request = lambda **kw: {"id": 1}
+    sdk_client._get_approval = lambda approval_id: {"status": approval["status"]}
+    sdk_client._decide_approval = lambda approval_id, status: {"id": approval_id, "status": status}
 
     sdk_client.add_policy(
         name="tool-call-log",
@@ -88,6 +102,27 @@ def _record_a_full_run() -> list:
         run.retrieval_called("docs")
         run.retrieval_responded("docs", result_count=3, top_score=0.9)
         run.external_signal("rate_limit", source="openai")
+
+        # Voice-pack events.
+        run.transcription_received("hello", confidence=0.95)
+        run.tts_generated("hi there", latency_ms=40)
+        run.voice_activity_detected("speech_start", duration_ms=100)
+        run.turn_taking("agent_speaking")
+
+        # Full approval lifecycle: granted, then denied, then timeout (the last
+        # two raise ApprovalDenied, which we swallow — we only want the events).
+        run.request_approval("wire_money", {"amt": 1}, timeout_s=300)  # granted
+        approval["status"] = "denied"
+        try:
+            run.request_approval("wire_money", {"amt": 1}, timeout_s=300)  # denied
+        except ApprovalDenied:
+            pass
+        approval["status"] = "pending"
+        try:
+            run.request_approval("wire_money", {"amt": 1}, timeout_s=0)  # times out at once
+        except ApprovalDenied:
+            pass
+
         run.final_answer()
 
     try:

@@ -232,17 +232,42 @@ async def set_quota(key_id: int, agent_id: str, body: QuotaSetRequest) -> QuotaR
     )
 
 
+def _is_policy_evaluation(e) -> bool:
+    """True for policy.evaluated observability records, which are routed to the
+    policy_evaluations table instead of being stored as run events."""
+    et = getattr(e, "event_type", None)
+    return getattr(et, "value", et) == "policy.evaluated"
+
+
 async def _persist(events: list, batch_id: str, org_id: str) -> None:
     try:
-        inserted = await get_event_store().insert_events(events, batch_id, org_id)
-        if inserted == len(events):
-            logger.debug("Persisted. batch_id=%s inserted=%d", batch_id, inserted)
+        store = get_event_store()
+        # Split observability records out of the run-event stream — they belong in
+        # policy_evaluations, not events (keeps run traces clean).
+        evals = [e for e in events if _is_policy_evaluation(e)]
+        trace_events = [e for e in events if not _is_policy_evaluation(e)]
+
+        if evals:
+            await store.insert_policy_evaluations(evals, batch_id, org_id)
+
+        if not trace_events:
+            logger.debug("Persisted. batch_id=%s policy_evals=%d", batch_id, len(evals))
+            return
+
+        inserted = await store.insert_events(trace_events, batch_id, org_id)
+        if inserted == len(trace_events):
+            logger.debug(
+                "Persisted. batch_id=%s inserted=%d policy_evals=%d",
+                batch_id,
+                inserted,
+                len(evals),
+            )
         else:
             logger.error(
                 "Persist shortfall. batch_id=%s inserted=%d expected=%d — events lost",
                 batch_id,
                 inserted,
-                len(events),
+                len(trace_events),
             )
     except Exception as exc:
         logger.error("Persist failed. batch_id=%s error=%s", batch_id, exc)

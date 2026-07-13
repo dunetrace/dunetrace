@@ -114,15 +114,48 @@ def _build_detectors(category: str) -> list[BaseDetector]:
     return detectors
 
 
-def get_detectors(agent_category: str = "default") -> list[BaseDetector]:
-    """Return the configured detector list for the given agent_category.
+def _build_pack_detectors(enabled_packs: set[str]) -> list[BaseDetector]:
+    """Instantiate every detector class belonging to a pack this org has
+    activated, with no overrides — same reasoning as _build_plugin_detectors:
+    pack detectors aren't part of the per-category detectors.yml tuning
+    system built-ins use. A pack author sets defaults directly on the class.
+    Imported here (not at module level) so importing detector_svc.detectors
+    doesn't require dunetrace.packs to exist yet at import time — mirrors
+    how _seed_packs in db.py defers the same import for the same reason."""
+    from dunetrace.packs import PACK_REGISTRY
+
+    detectors: list[BaseDetector] = []
+    for pack in PACK_REGISTRY.values():
+        if pack.name not in enabled_packs:
+            continue
+        for cls in pack.detectors:
+            try:
+                detectors.append(cls())
+            except Exception:
+                logger.exception(
+                    "Failed to instantiate pack detector %s (pack=%s) — skipping it.",
+                    cls.__name__,
+                    pack.name,
+                )
+    return detectors
+
+
+async def get_detectors(agent_category: str, org_id: str) -> list[BaseDetector]:
+    """Return the configured detector list for the given agent_category and org.
 
     Falls back to "default" if no category-specific config exists.
     Thresholds are loaded from detectors.yml — edit that file to tune.
     Always includes any registered custom Python-class detector plugins,
     regardless of category — they aren't part of the per-category tuning
-    system built-in detectors use.
+    system built-in detectors use. Additionally includes every detector
+    belonging to a pack this org has activated (see detector_svc/packs.py) —
+    org_enabled_packs is checked via a 60s TTL-cached read, not a DB hit on
+    every call.
     """
+    from detector_svc.packs import get_enabled_packs
+
+    enabled_packs = await get_enabled_packs(org_id)
+
     if agent_category in _CONFIG and agent_category != "default":
         # Merge: use category overrides on top of default kwargs
         default_cfg = _CONFIG.get("default", {})
@@ -132,6 +165,9 @@ def get_detectors(agent_category: str = "default") -> list[BaseDetector]:
             kwargs = {**default_cfg.get(key, {}), **category_cfg.get(key, {})}
             detectors.append(cls(**kwargs))
         detectors.extend(_build_plugin_detectors())
+        detectors.extend(_build_pack_detectors(enabled_packs))
         return detectors
 
-    return _build_detectors("default")
+    detectors = _build_detectors("default")
+    detectors.extend(_build_pack_detectors(enabled_packs))
+    return detectors

@@ -6,7 +6,39 @@ Retention, storage growth, and the manual controls available for both. Covers `s
 
 ## Event retention
 
-The `events` table is partitioned monthly (`events_YYYYMM`, see `CLAUDE.md`'s Database Schema section). `ingest_svc` runs a background retention pass that drops whole partitions once every one of their rows is older than the configured retention window — an instant DDL `DROP TABLE`, not a row-by-row `DELETE`, so it doesn't need a vacuum and doesn't compete with ingest traffic for locks.
+`ingest_svc` runs a background retention pass that deletes events older than the
+configured window. There are two paths, chosen automatically by whether the
+`events` table is partitioned:
+
+- **Partitioned table** (the intended form — monthly `events_YYYYMM` partitions):
+  the pass drops whole partitions once all their rows are older than the window —
+  an instant DDL `DROP TABLE`, no vacuum, no lock contention with ingest.
+- **Non-partitioned table** (a deployment whose `events` table predates
+  partitioning, i.e. it was created before the partitioning DDL and
+  `CREATE TABLE IF NOT EXISTS` therefore never converted it): the pass falls back
+  to a **batched `DELETE`** of old rows (10k per iteration). Retention still runs,
+  but `DELETE` is heavier than a partition drop and leaves dead tuples for
+  autovacuum to reclaim. On every pass the log carries a WARNING that the table
+  isn't partitioned.
+
+**Check which path you're on:**
+
+```sql
+SELECT relkind FROM pg_class WHERE relname = 'events';
+-- 'p' = partitioned (partition-drop path) | 'r' = plain table (DELETE fallback)
+```
+
+**To move an existing plain table onto the efficient partition-drop path**, run
+the opt-in offline migration (BACKUP + stop writers first; dry-run by default):
+
+```bash
+DATABASE_URL=postgres://... python scripts/migrate_events_to_partitioned.py        # dry run
+DATABASE_URL=postgres://... python scripts/migrate_events_to_partitioned.py --yes  # apply
+```
+
+> Historical note: earlier versions silently no-opped retention on a
+> non-partitioned table (it appeared configured but nothing was ever deleted).
+> The DELETE fallback above ensures retention now runs everywhere.
 
 ### Configuration
 

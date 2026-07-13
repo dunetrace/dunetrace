@@ -1,0 +1,35 @@
+# Business-hours-only actions
+#
+# Require human approval to send an outbound message OUTSIDE business hours
+# (09:00–17:00 UTC). During business hours the same call passes through — a human
+# is around to catch problems; off-hours, gate it.
+#
+# Uses event.hour — the UTC hour (0–23) the current event occurred, snapshotted
+# once when the evaluation context is built (deterministic per event, like
+# run.duration_ms). The two conditions on event.hour AND together to form the
+# off-hours window's complement... so we express "outside 09–17" as an OR of the
+# two outside ranges.
+#
+# event.hour is UTC. Adjust the numbers for your timezone, or gate on a business
+# timezone you convert upstream.
+#
+# See docs/policies/condition-expressions.md (Field paths → event.*).
+
+name: approve-outbound-off-hours
+agent_id: "*"
+priority: 30
+enabled: true
+
+condition:
+  trigger: before_tool_call
+  operator: eq
+  value: send_customer_message
+  match:
+    or:
+      - event.hour: {lt: 9}       # before 09:00 UTC
+      - event.hour: {gte: 17}     # 17:00 UTC or later
+
+action:
+  type: require_approval
+  params:
+    timeout_s: 600

@@ -55,6 +55,17 @@ jobs:
           - service: api
             pythonpath: packages/sdk-py:services/explainer:services/api
             requirements: services/api/requirements.txt
+          # audit Finding 35: semantic + integrations were EXCLUDED from CI, which
+          # is why a broken requirements pin (F3) and packaging (F17) shipped
+          # undetected. They are now tested like every other service.
+          - service: semantic
+            pythonpath: packages/sdk-py:services/explainer:services/semantic
+            requirements: services/semantic/requirements.txt
+            extra: pytest-asyncio
+          - service: integrations
+            pythonpath: packages/sdk-py:services/integrations
+            requirements: services/integrations/requirements.txt
+            extra: pytest-asyncio
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -98,3 +109,15 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
+
+  # audit Finding 35: build every service image on PR. Previously images were only
+  # built on release tags, so broken Dockerfiles / unsatisfiable requirements
+  # (F3 semantic pip conflict, F4 alerts missing dep, F17 semantic missing SDK)
+  # shipped undetected until deploy. A build failure here now blocks the PR.
+  docker-build:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build all service images (no push)
+        run: docker compose build

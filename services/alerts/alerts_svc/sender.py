@@ -23,10 +23,15 @@ logger = logging.getLogger("dunetrace.alerts.sender")
 @dataclass
 class SendResult:
     success: bool
-    destination: str  # "slack" | "webhook" | url
+    destination: str  # "slack" | "webhook" | "linear" | url
     attempts: int
     status_code: Optional[int] = None
     error: Optional[str] = None
+    # Phase 4.1 — carries the created Linear issue id back to worker.py's
+    # _deliver_one, which does the (async) linear_issue_signals write;
+    # deliver()/send_linear() are both sync, so this is the only channel
+    # for that id to reach the async caller.
+    metadata: Optional[dict] = None
 
     def __repr__(self) -> str:
         if self.success:
@@ -146,16 +151,25 @@ def send_with_retry(
 # ── Destination-specific senders ───────────────────────────────────────────────
 
 
-def send_slack(payload: dict) -> SendResult:
-    """POST a Block Kit payload to the Slack webhook URL."""
-    if not settings.slack_enabled:
+def send_slack(payload: dict, webhook_url: str | None = None) -> SendResult:
+    """POST a Block Kit payload to a Slack webhook URL.
+
+    webhook_url: Phase 4.1 — the caller's resolved destination (per-org
+    config if the org has one, else the global .env fallback — see
+    worker.py's _resolve_slack_destination). None (digest.py's existing
+    call, not yet made per-org-aware — see BACKLOG.md) falls back to the
+    global settings.SLACK_WEBHOOK_URL exactly as before this parameter
+    existed.
+    """
+    url = webhook_url or settings.SLACK_WEBHOOK_URL
+    if not url:
         logger.debug("Slack not configured — skipping")
         return SendResult(success=False, destination="slack", attempts=0, error="not_configured")
 
     body = json.dumps(payload, separators=(",", ":")).encode()
     headers = {"Content-Type": "application/json"}
     return send_with_retry(
-        url=settings.SLACK_WEBHOOK_URL,
+        url=url,
         body=body,
         headers=headers,
         destination="slack",
@@ -173,4 +187,29 @@ def send_webhook(body: bytes, headers: dict) -> SendResult:
         body=body,
         headers=headers,
         destination="webhook",
+    )
+
+
+def send_linear(
+    api_key: str,
+    team_id: str,
+    project_id: str | None,
+    title: str,
+    description: str,
+) -> SendResult:
+    """Create a Linear issue for this signal. Not a retry_with_backoff HTTP
+    POST like Slack/webhook — linear_client.create_issue already handles
+    its own request/error handling and returns None on any failure, so
+    there's nothing to retry here (a transient Linear outage just means
+    this signal doesn't get an issue this cycle; the next unrelated signal
+    isn't blocked waiting on retries)."""
+    from alerts_svc.linear_client import create_issue
+
+    issue_id = create_issue(api_key, team_id, title, description, project_id=project_id)
+    if issue_id is None:
+        return SendResult(
+            success=False, destination="linear", attempts=1, error="create_issue_failed"
+        )
+    return SendResult(
+        success=True, destination="linear", attempts=1, metadata={"linear_issue_id": issue_id}
     )

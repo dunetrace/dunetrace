@@ -396,6 +396,32 @@ class TestCustomDetectorRegistration(unittest.TestCase):
         self.assertIn("_MyPlugin", detectors_module.CUSTOM_DETECTOR_REGISTRY)
         self.assertIn("_MyPluginV2", detectors_module.CUSTOM_DETECTOR_REGISTRY)
 
+    def test_pack_detector_does_not_register_as_a_custom_plugin(self):
+        """Phase 1.0: a detector with `pack` set (e.g. "voice") is a
+        first-party pack detector, registered via dunetrace.packs.
+        register_pack() instead — it must NOT also land in
+        CUSTOM_DETECTOR_REGISTRY, whose contents detector_svc runs
+        unconditionally for every org regardless of pack activation. Found
+        via a real leaking-across-orgs test failure before this exclusion
+        existed (services/detector/tests/test_pack_activation.py)."""
+
+        class _FakePackDetector(BaseDetector):
+            name = "FAKE_PACK_DETECTOR"
+            pack = "voice"
+
+        self.assertNotIn("_FakePackDetector", detectors_module.CUSTOM_DETECTOR_REGISTRY)
+
+    def test_detector_without_pack_set_still_registers_as_before(self):
+        """Confirms the fix is scoped to pack is not None only — the
+        overwhelming majority of custom detectors (pack left at its None
+        default) are unaffected."""
+
+        class _MyPlugin(BaseDetector):
+            name = "MY_PLUGIN"
+
+        self.assertIsNone(_MyPlugin.pack)
+        self.assertIn("_MyPlugin", detectors_module.CUSTOM_DETECTOR_REGISTRY)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

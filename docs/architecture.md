@@ -1,6 +1,6 @@
 # Architecture
 
-Dunetrace is a pipeline of five independent services communicating through a shared Postgres database.
+Dunetrace is a pipeline of independent services communicating through a shared Postgres database — no message broker anywhere. The core pipeline (ingest, detector, alerts, customer API, dashboard) runs structural detection, always on. Two additional workers are optional and disabled by default: `semantic_worker` (LLM-based Tier 2 evaluation, see [Semantic Evaluation Layer](#semantic-evaluation-layer)) and `integrations_worker` (pulls evaluation results from Langfuse/LangSmith/Braintrust, see [External Integration Mode](#external-integration-mode)). Both write into the same `failure_signals` table the core pipeline already uses, so nothing downstream (dashboard, alerts, policies) needs to know which produced a given signal — except policies, which structurally cannot see anything either optional worker writes; see [Detection: Two Independent Paths](#detection-two-independent-paths) and [docs/policies.md](policies.md#structural-signals-only).
 
 ---
 
@@ -46,18 +46,21 @@ Dunetrace is a pipeline of five independent services communicating through a sha
 │                                                             │
 │   events           failure_signals   processed_runs         │
 │   api_keys         issues            digest_log             │
-└────────┬───────────────────────────────────────┬────────────┘
-         │  polls every 5s                        │  polls every 10s
-         ▼                                        ▼
-┌─────────────────────┐              ┌─────────────────────────┐
-│   Detector Worker   │              │    Alerts Worker        │
-│                     │              │                         │
-│  Reconstructs       │              │  Fetches unalerted      │
-│  RunState from      │              │  shadow=FALSE signals   │
-│  events             │              │  → explain()            │
-│  Runs 17 detectors  │              │  → format Slack/webhook │
-│  Writes signals     │              │  → HTTP POST with retry │
-└─────────────────────┘              └─────────────────────────┘
+│   conversations     signal_groups     agent_semantic_config  │
+└──┬──────────────────┬─────────────────────────┬───────────┬──┘
+   │ polls 5s          │ polls 10s                │ polls 5s   │ polls (interval)
+   ▼                   ▼                          ▼            ▼
+┌───────────┐  ┌───────────────┐  ┌────────────────────┐  ┌─────────────────────┐
+│ Detector  │  │ Alerts Worker │  │  Semantic Worker    │  │ Integrations Worker │
+│ Worker    │  │               │  │  (optional, off     │  │  (optional, off     │
+│           │  │ Fetches       │  │  by default)        │  │  by default)        │
+│ Reconstr. │  │ unalerted     │  │                      │  │                     │
+│ RunState  │  │ shadow=FALSE  │  │  Adaptive sampling   │  │  Pulls Langfuse /   │
+│ Runs 17   │  │ signals       │  │  → DeepEval          │  │  LangSmith /        │
+│ detectors │  │ → explain()   │  │  evaluators →        │  │  Braintrust results │
+│ Writes    │  │ → Slack /     │  │  failure_signals     │  │  → failure_signals  │
+│ signals   │  │ webhook       │  │  (source=semantic)   │  │  (source=provider)  │
+└───────────┘  └───────────────┘  └────────────────────┘  └─────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
 │                  Customer API  :8002                         │
@@ -149,6 +152,66 @@ override. A signal that fires in your Tempo trace may not fire in the dashboard,
 versa. **The server-side path (Path 2) is the source of truth** for anything user-facing
 — alerts, the dashboard, issue tracking. Treat Path 1 purely as a convenience for
 SDK-only / infra-correlation use cases, not as a second copy of the same detection result.
+
+---
+
+## Semantic Evaluation Layer
+
+A third detection path, architecturally distinct from both paths above:
+LLM-based judgment for failure modes no regex/arithmetic check can catch
+(hallucination, task completion, cross-turn user frustration). Full detail
+in [docs/semantic-evaluation.md](semantic-evaluation.md) — this section
+covers only how it fits into the system.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      Postgres                                │
+│   events   failure_signals (source='semantic')  ...          │
+└────────┬───────────────────────────────────────────────────────┘
+         │  polls every 5s (SEMANTIC_WORKER_ENABLED, default off)
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│   Semantic Worker                                            │
+│                                                               │
+│   Adaptive sampling (structural-signal runs 100%,            │
+│   semantic_critical agents 100%, retrieval runs 20%,         │
+│   baseline 5%) → DeepEval evaluators (Hallucination,         │
+│   Task Completion) → grouping/dedup → feedback-adjusted      │
+│   confidence → optional second opinion (different model)     │
+│   → org/agent quota check → failure_signals                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Runs entirely after a run completes — never in the SDK's request path, never
+adding latency to your agent. This is *why* [policies](policies.md) (runtime
+prevention) can only ever trigger on structural signals: by the time
+semantic evaluation sees a run, there's nothing left to prevent.
+
+---
+
+## External Integration Mode
+
+If you already run Langfuse, LangSmith, or Braintrust, `integrations_worker`
+pulls their evaluation results in and correlates them to Dunetrace runs via
+`trace_id`, writing them into the same `failure_signals` table tagged with
+the provider's name as `source`. A synchronous generic push endpoint
+(`POST /v1/semantic-signals/external`) covers evaluation tools without a
+dedicated poller. Full detail, including per-provider auth and failure
+handling, in [docs/integrations/external-evaluation.md](integrations/external-evaluation.md).
+
+---
+
+## Conversations
+
+`runs` and `conversations` tables (Phase 3.1) group multiple runs under one
+multi-turn conversation via an optional `dt.run(conversation_id=...)`
+parameter — fully backward compatible, omitting it behaves exactly as
+before. This unlocks conversation-level semantic evaluation
+(`USER_FRUSTRATION`, which reads the last N runs in a conversation rather
+than a single run) and the dashboard's conversation-detail view
+([docs/dashboard.md](dashboard.md)). See
+[docs/semantic-evaluation.md#conversation-level-evaluation](semantic-evaluation.md#conversation-level-evaluation)
+for the sampling/quota details.
 
 ---
 
@@ -278,6 +341,44 @@ Without resource attributes, spans appear as an anonymous service in Datadog, Ho
 
 ---
 
+## Runtime Policy Evaluation
+
+Policies are evaluated **in the SDK process**, synchronously, during a run — the
+only detection/prevention path that runs before a failure completes (see
+[docs/policies.md](policies.md)). The engine (`dunetrace.policies`) is split into
+three parts:
+
+- **`PolicyEngine` / `Policy`** (`policies/__init__.py`) — loading, HMAC signature
+  verification, priority ordering, and the flat `{trigger, operator, value}`
+  match (metric/signal/tool-name conditions).
+- **Expression conditions** (`policies/expressions.py`, `policies/evaluator.py`) —
+  an optional `condition.match` block adds structured comparisons on tool
+  arguments (`args.*`), run metadata (`run.*`), and event fields (`event.*`), with
+  a 14-operator whitelist, `AND`/`OR` composition (max depth 3), and deterministic
+  type coercion. The parser builds an immutable expression tree at load time
+  (rejecting unknown operators/paths up front); the evaluator is `eval`-free —
+  explicit dict lookups and a whitelist operator table — and runs in well under
+  100µs per policy. `matches` uses a ReDoS-safe `regex` engine with a per-call
+  timeout. `match` and the flat trigger **AND** together. Full reference:
+  [docs/policies/condition-expressions.md](policies/condition-expressions.md).
+- **Observability** (`policies/observability.py`) — each evaluation can produce a
+  structured record (the policy, whether the trigger matched, each condition's
+  compared-vs-expected value, the result). Surfaced as DEBUG logs on the
+  `dunetrace.policies.evaluation` logger, and — when
+  `policy_evaluation_reporting` is enabled — shipped (rate-limited to 100/policy/
+  min, sampled beyond) as `policy.evaluated` events through the normal transport.
+  Ingest routes these into the `policy_evaluations` table (not `events`), which
+  `GET /v1/policies/{id}/evaluations` reads for the "why did/didn't my policy
+  fire?" dashboard view.
+
+Raw tool `args` are only available at the `before_tool_call` approval gate
+(evaluated before the tool runs); the after-event metric path sees `run.*` /
+`event.*` but not `args.*`. Signatures cover the whole `condition` including
+`match`; policies using `match` sign under canonical-form version 2 while legacy
+policies stay byte-identical at version 1.
+
+---
+
 ## Service Responsibilities
 
 ### Ingest API (port 8001)
@@ -329,6 +430,49 @@ Signals are written with `shadow=TRUE` unless the detector is in `LIVE_DETECTORS
 
 ---
 
+### Semantic Worker (optional, disabled by default)
+
+A background polling loop, same shape as Detector Worker (poll `events` every
+5s, track handled runs in its own table) but for LLM-based Tier 2 evaluation.
+See [Semantic Evaluation Layer](#semantic-evaluation-layer) above and
+[docs/semantic-evaluation.md](semantic-evaluation.md) for full detail.
+
+1. Fetches completed/errored runs not yet seen (`semantic_processed_runs`)
+2. Adaptive sampling decides whether to evaluate this run at all — recorded
+   even when skipped, so a skipped run isn't re-considered every poll
+3. For sampled runs: runs configured evaluators, groups findings into
+   recurring patterns, applies accumulated false-positive feedback, gets a
+   second opinion for HIGH-severity findings where configured, enforces
+   per-agent and org-wide monthly quotas
+4. Writes findings to `failure_signals` tagged `source='semantic'`
+
+Enable with `SEMANTIC_WORKER_ENABLED=true`. Off by default — every other
+service behaves identically without it.
+
+---
+
+### Integrations Worker (optional, disabled by default)
+
+A background polling loop that pulls evaluation results from connected
+Langfuse/LangSmith/Braintrust integrations and correlates them to Dunetrace
+runs via `trace_id`. See [External Integration Mode](#external-integration-mode)
+above and [docs/integrations/external-evaluation.md](integrations/external-evaluation.md)
+for full detail, including the generic push endpoint
+(`POST /v1/semantic-signals/external`), which is served by the Customer API
+directly rather than this worker, since it's a synchronous customer-facing
+call, not a background poll.
+
+1. For each connected, due-for-poll integration: fetches new evaluation
+   results since the last successful poll
+2. Correlates each result to a run via `trace_id`
+3. Writes matched results to `failure_signals` tagged `source={provider}`
+4. Tracks `consecutive_failures` per integration; a provider down past 30
+   minutes writes an internal `EXTERNAL_INTEGRATION_DOWN` operational signal
+   (shadow-only) rather than failing silently or affecting any other
+   integration
+
+---
+
 ### Explain Layer (library, not a service)
 
 Not a separate process i.e. imported as a library by both the alerts worker and the customer API.
@@ -375,7 +519,9 @@ A read-only FastAPI service. Powers the dashboard and any customer integrations.
 | `GET /v1/agents/{id}/issues` | Open/resolved issue list for an agent. Accepts optional `status` filter (`open`, `resolved`, `reopened`). Returns id, failure_type, status, first_seen, last_seen, resolved_at, affected_runs, clean_runs_since |
 | `GET /v1/runs/{id}` | Full run detail — metadata, all events, all signals with explanations |
 | `POST /v1/signals/{id}/explain` | Root-cause analysis, fully native — built from Dunetrace's own events, no external tracing system involved. Returns `fix_category` (`dunetrace_native`, with a deterministic `suggested_policy`; or `customer_code`, with LLM-generated `fix_content`/`fix_patch`), plus `root_cause` and `apply_blocked`. Requires `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in env |
-| `POST /v1/signals/{id}/open-pr` | For `customer_code` / `code_change` fixes only: opens a draft GitHub PR with the fix diff. Records the fix in the `fixes` table. Blocked for `PROMPT_INJECTION_SIGNAL` (returns 403) and when GitHub isn't configured (503). `dunetrace_native` fixes (a `suggested_policy`) are applied via the existing `POST /v1/policies` instead, after user confirmation — no separate endpoint. `prompt_addition` fixes have no automated apply path — always a manual copy |
+| `POST /v1/signals/{id}/open-pr` | For `customer_code` / `code_change` fixes only: opens a draft GitHub PR. Auth resolves per-org GitHub App installation first, else the legacy global `GITHUB_TOKEN`/`GITHUB_REPO` — see [docs/integrations/github-app.md](integrations/github-app.md). When two-tier source mapping resolves a real file, the PR edits it directly (diff computed via `difflib` from real before/after content, not LLM-authored); otherwise falls back to a `dunetrace-fixes/signal-{id}.md` summary file. Records the fix in the `fixes` table. Blocked for `PROMPT_INJECTION_SIGNAL` (returns 403) and when GitHub isn't configured (503). `dunetrace_native` fixes (a `suggested_policy`) are applied via the existing `POST /v1/policies` instead, after user confirmation — no separate endpoint. `prompt_addition` fixes have no automated apply path — always a manual copy |
+| `GET /v1/orgs/integrations/github/install-url`, `.../callback`, `POST`/`GET`/`DELETE /v1/orgs/integrations/github` | Per-org GitHub App install flow and repos/reviewers config — see [docs/integrations/github-app.md](integrations/github-app.md) |
+| `POST`/`GET`/`DELETE /v1/agents/{agent_id}/source-config` | Tier-1 explicit source mapping (`repo`, optional `file_path`) for an agent — see [docs/integrations/github-app.md](integrations/github-app.md#source-mapping-which-repofile-does-a-signal-correspond-to) |
 | `POST /v1/signals/{id}/record-copy` | Record a clipboard-path fix in the `fixes` table |
 | `GET /v1/signals/{id}/fix-status` | Return fix history and recurrence verdict (`verified / likely_fixed / still_occurring / insufficient_data`) |
 | `GET /health` | Service health check — returns `{"status":"ok","db":"ok"}` |
@@ -691,7 +837,12 @@ This is a deliberate approximation, not a shortcut: an exact answer would mean a
 | Alerts poll cycle | 10s | 50 signals/cycle |
 | Customer API | ~10ms | ~500 req/sec |
 
-**Agent overhead:** The SDK adds less than 500μs to any agent run when using the default HTTP ingest path (`emit_as_json=False`, no OTel exporter). With `emit_as_json=True` or an OTel exporter, `_emit()` also serialises to JSON or creates spans synchronously — overhead increases accordingly. The drain thread is entirely background. Even under backpressure (ingest API down), the ring buffer drops the oldest events rather than blocking the agent.
+**Agent overhead:** On the default HTTP ingest path (`emit_as_json=False`, no OTel exporter, no signal-trigger policy) the SDK adds roughly **10–25μs per event** — well under 500μs for a typical run. Two things change this:
+
+- **Per-run, not per-event:** overhead scales with event count. A run emitting ~20 events stays under ~500μs total; a run with hundreds of events accumulates proportionally (still tens of µs each). The "sub-500μs" figure is a per-event/small-run guideline, not a per-run guarantee for arbitrarily large runs.
+- **Signal-trigger policies run detectors in-path.** If you configure a policy with `trigger: "signal"`, the SDK evaluates the detector suite on every step — measured ~130μs/event (~2.9ms for a 20-event run), roughly 10× the baseline. Latency-sensitive agents should prefer non-signal triggers (`tool_call_count`, `llm_latency_ms`, etc.) or accept the added in-path cost.
+
+With `emit_as_json=True` or an OTel exporter, `_emit()` also serialises to JSON or creates spans synchronously — overhead increases accordingly. The drain thread is entirely background. Even under backpressure (ingest API down), the ring buffer drops the oldest events rather than blocking the agent.
 
 ---
 

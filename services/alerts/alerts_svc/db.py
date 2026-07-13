@@ -39,6 +39,23 @@ async def close_pool() -> None:
         _pool = None
 
 
+async def ensure_semantic_signal_column() -> None:
+    """Defensively add failure_signals.source (owned by semantic_svc's own
+    schema migration — see services/semantic/semantic_svc/db.py). alerts_svc
+    must be able to SELECT this column regardless of whether the semantic
+    worker has ever run: SEMANTIC_WORKER_ENABLED defaults to false, and if it
+    stays false the column would otherwise never exist, and
+    fetch_unalerted_signals's SELECT would crash with UndefinedColumnError on
+    every install. IF NOT EXISTS makes this a no-op once semantic_svc (or a
+    prior run of this same check) has already created it."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'structural'"
+        )
+
+
 async def fetch_unalerted_signals(limit: int = 50) -> list[dict[str, Any]]:
     """Scan unalerted live signals across ALL orgs in one poll — mirrors
     detector_svc's fetch_completed_runs/fetch_stalled_runs, which also scan
@@ -60,7 +77,8 @@ async def fetch_unalerted_signals(limit: int = 50) -> list[dict[str, Any]]:
                 step_index,
                 confidence,
                 evidence,
-                detected_at
+                detected_at,
+                COALESCE(source, 'structural') AS source
             FROM failure_signals
             WHERE alerted = FALSE
               AND COALESCE(shadow, TRUE) = FALSE
@@ -83,6 +101,127 @@ async def mark_alerted_batch(signal_ids: list[int]) -> None:
             WHERE id = ANY($1::bigint[])
             """,
             signal_ids,
+        )
+
+
+async def ensure_alert_integrations_schema() -> None:
+    """Defensive copy of api_svc's org_alert_integrations/linear_issue_signals
+    DDL (Phase 4.1) — same "whichever service starts first wins" convention
+    as ensure_dedup_schema/ensure_digest_schema above. alerts_svc only ever
+    reads org_alert_integrations (via fetch_org_alert_integration) and
+    writes linear_issue_signals (via record_linear_issue_mapping)."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS org_alert_integrations (
+                id                    BIGSERIAL    PRIMARY KEY,
+                org_id                TEXT         NOT NULL,
+                provider              TEXT         NOT NULL,
+                encrypted_credentials TEXT         NOT NULL,
+                config_json           JSONB        NOT NULL DEFAULT '{}',
+                enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
+                created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                UNIQUE (org_id, provider)
+            );
+            CREATE TABLE IF NOT EXISTS linear_issue_signals (
+                id              BIGSERIAL    PRIMARY KEY,
+                org_id          TEXT         NOT NULL,
+                signal_id       BIGINT       NOT NULL,
+                linear_issue_id TEXT         NOT NULL,
+                created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                UNIQUE (linear_issue_id)
+            );
+            """
+        )
+
+
+async def fetch_org_alert_integration(org_id: str, provider: str) -> dict | None:
+    """Returns {encrypted_credentials, config} for this org's alert
+    destination, or None if not configured or disabled. Gracefully returns
+    None if the table doesn't exist yet (api_svc's migration hasn't run) —
+    degrades to 'no per-org override, use global .env fallback' rather than
+    erroring, same tolerance fetch_agent_overrides already has."""
+    if not _pool:
+        return None
+    try:
+        async with _pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT encrypted_credentials, config_json
+                FROM org_alert_integrations
+                WHERE org_id = $1 AND provider = $2 AND enabled = TRUE
+                """,
+                org_id,
+                provider,
+            )
+    except Exception as exc:
+        logger.warning("fetch_org_alert_integration failed (table may not exist yet): %s", exc)
+        return None
+    if row is None:
+        return None
+    import json as _json
+
+    config = row["config_json"]
+    return {
+        "encrypted_credentials": row["encrypted_credentials"],
+        "config": _json.loads(config) if isinstance(config, str) else dict(config),
+    }
+
+
+async def fetch_undelivered_approvals(limit: int = 50) -> list[dict]:
+    """Pending approvals a human hasn't been notified about yet, and that
+    haven't already expired. Tolerates a missing approvals table (api_svc's
+    migration hasn't run) the same way fetch_org_alert_integration does —
+    returns [] rather than erroring, so a stale alerts deploy doesn't crash."""
+    if not _pool:
+        return []
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, org_id, run_id, agent_id, tool_name, tool_args,
+                       requested_at, expires_at
+                FROM approvals
+                WHERE status = 'pending'
+                  AND delivered_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > NOW())
+                ORDER BY requested_at
+                LIMIT $1
+                """,
+                limit,
+            )
+    except Exception as exc:
+        logger.warning("fetch_undelivered_approvals failed (table may not exist yet): %s", exc)
+        return []
+    return [dict(r) for r in rows]
+
+
+async def mark_approval_delivered(approval_id: int) -> None:
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE approvals SET delivered_at = NOW() WHERE id = $1",
+            approval_id,
+        )
+
+
+async def record_linear_issue_mapping(org_id: str, signal_id: int, linear_issue_id: str) -> None:
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO linear_issue_signals (org_id, signal_id, linear_issue_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (linear_issue_id) DO NOTHING
+            """,
+            org_id,
+            signal_id,
+            linear_issue_id,
         )
 
 
@@ -367,7 +506,8 @@ async def fetch_agent_overrides(
         async with _pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT org_id, agent_id, failure_type, fp_count, confidence_floor, silenced
+                SELECT org_id, agent_id, failure_type, fp_count, confidence_floor,
+                       silenced, snoozed_until
                 FROM agent_detector_overrides
                 WHERE org_id = ANY($1::text[])
                   AND agent_id = ANY($2::text[])

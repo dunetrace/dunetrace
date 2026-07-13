@@ -24,7 +24,12 @@ from detector_svc.custom_python_detectors import load_custom_detector_plugins
 import detector_svc.detectors as detector_svc_detectors
 
 
-class _RegistryIsolatedTestCase(unittest.TestCase):
+class _RegistryIsolatedTestCase(unittest.IsolatedAsyncioTestCase):
+    """IsolatedAsyncioTestCase rather than plain TestCase — get_detectors()
+    became async in Phase 1.0 (it reads org_enabled_packs). Fully backward
+    compatible with the sync test methods in TestLoadCustomDetectorPlugins
+    below."""
+
     def setUp(self):
         self._patcher = mock.patch.dict(detectors_module.CUSTOM_DETECTOR_REGISTRY, clear=True)
         self._patcher.start()
@@ -124,31 +129,31 @@ class TestLoadCustomDetectorPlugins(_RegistryIsolatedTestCase):
 
 
 class TestGetDetectorsMergesPlugins(_RegistryIsolatedTestCase):
-    def test_registered_plugin_appears_in_default_category(self):
+    async def test_registered_plugin_appears_in_default_category(self):
         class _FakePlugin(BaseDetector):
             name = "FAKE_PLUGIN"
 
         detectors_module.CUSTOM_DETECTOR_REGISTRY["_FakePlugin"] = _FakePlugin
-        result = detector_svc_detectors.get_detectors("default")
+        result = await detector_svc_detectors.get_detectors("default", "test-org")
         names = [d.name for d in result]
         self.assertIn("FAKE_PLUGIN", names)
 
-    def test_registered_plugin_appears_in_a_named_category_too(self):
+    async def test_registered_plugin_appears_in_a_named_category_too(self):
         class _FakePlugin(BaseDetector):
             name = "FAKE_PLUGIN"
 
         detectors_module.CUSTOM_DETECTOR_REGISTRY["_FakePlugin"] = _FakePlugin
-        result = detector_svc_detectors.get_detectors("web-research")
+        result = await detector_svc_detectors.get_detectors("web-research", "test-org")
         names = [d.name for d in result]
         self.assertIn("FAKE_PLUGIN", names)
 
-    def test_no_plugins_registered_returns_only_builtins(self):
-        result = detector_svc_detectors.get_detectors("default")
+    async def test_no_plugins_registered_returns_only_builtins(self):
+        result = await detector_svc_detectors.get_detectors("default", "test-org")
         names = [d.name for d in result]
         self.assertNotIn("FAKE_PLUGIN", names)
         self.assertGreater(len(names), 0)  # built-ins are still there
 
-    def test_plugin_instantiation_failure_is_skipped_not_raised(self):
+    async def test_plugin_instantiation_failure_is_skipped_not_raised(self):
         class _BrokenPlugin(BaseDetector):
             name = "BROKEN_PLUGIN"
 
@@ -156,7 +161,7 @@ class TestGetDetectorsMergesPlugins(_RegistryIsolatedTestCase):
                 raise RuntimeError("boom at construction")
 
         detectors_module.CUSTOM_DETECTOR_REGISTRY["_BrokenPlugin"] = _BrokenPlugin
-        result = detector_svc_detectors.get_detectors("default")  # must not raise
+        result = await detector_svc_detectors.get_detectors("default", "test-org")  # must not raise
         names = [d.name for d in result]
         self.assertNotIn("BROKEN_PLUGIN", names)
         self.assertGreater(len(names), 0)  # built-ins still returned

@@ -65,6 +65,11 @@ CREATE TABLE IF NOT EXISTS processed_runs (
     signal_count  INTEGER     NOT NULL DEFAULT 0,
     trigger       TEXT        NOT NULL   -- "completed" | "errored" | "stalled"
 );
+-- audit Finding 15: remember how many events a run had when we processed it, so
+-- late-arriving events (event count grew) trigger a re-detection instead of being
+-- silently ignored. Defaults to 0 for pre-existing rows (they'll reprocess once
+-- if any new event arrives, which is harmless — writes are deduped by run_id+type).
+ALTER TABLE processed_runs ADD COLUMN IF NOT EXISTS event_count INTEGER NOT NULL DEFAULT 0;
 
 -- Add shadow column to failure_signals if it doesn't exist.
 -- Shadow signals are stored but never sent to customers.
@@ -133,6 +138,39 @@ CREATE TABLE IF NOT EXISTS custom_detector_results (
 CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
 
+-- Conversation modeling (Phase 3.1). A "run" has no other dedicated table
+-- anywhere in this codebase — it's just a run_id value shared across events/
+-- failure_signals rows — so this is genuinely new infrastructure, not a
+-- column bolted onto an existing table. conversation_id is nullable: every
+-- processed run gets a runs row regardless of whether the SDK's
+-- dt.run(conversation_id=...) was ever set, old runs and single-turn agents
+-- simply never get a conversations row or FK.
+CREATE TABLE IF NOT EXISTS conversations (
+    id            BIGSERIAL   PRIMARY KEY,
+    org_id        TEXT        NOT NULL,
+    agent_id      TEXT        NOT NULL,
+    user_id       TEXT,                     -- nullable, unpopulated for now — no SDK source exists yet
+    external_id   TEXT        NOT NULL,     -- the SDK's own conversation_id string
+    first_run_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_run_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    run_count     INTEGER     NOT NULL DEFAULT 0,
+    metadata      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (org_id, agent_id, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_org_agent ON conversations(org_id, agent_id);
+
+CREATE TABLE IF NOT EXISTS runs (
+    run_id          TEXT        PRIMARY KEY,
+    org_id          TEXT        NOT NULL,
+    agent_id        TEXT        NOT NULL,
+    agent_version   TEXT        NOT NULL,
+    conversation_id BIGINT      REFERENCES conversations(id),
+    started_at      TIMESTAMPTZ NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_runs_conversation ON runs(conversation_id) WHERE conversation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_runs_org_agent    ON runs(org_id, agent_id, started_at DESC);
+
 -- Performance indexes for baseline queries (processed_runs) and alert worker queries (failure_signals).
 CREATE INDEX IF NOT EXISTS idx_processed_runs_agent_version
     ON processed_runs(agent_id, agent_version, processed_at DESC);
@@ -162,6 +200,55 @@ ALTER TABLE custom_detector_results ADD COLUMN IF NOT EXISTS org_id TEXT;
 """
 
 _ORG_BACKFILL_TABLES_BY_AGENT = ("issues", "custom_detectors", "custom_detector_results")
+
+# ── Pack activation (Phase 1.0) ─────────────────────────────────────────────────
+#
+# packs is a small, Dunetrace-owned lookup table (which detector-pack classes
+# exist) — org_enabled_packs is the per-org activation side table, following
+# the same org_id-TEXT-no-FK convention every other org-scoped table in this
+# codebase uses (org_github_integrations, org_alert_integrations, etc.) rather
+# than a FK to organizations(id), which is itself TEXT (e.g. the literal
+# string 'default' in dev mode), not the uuid the original spec assumed.
+# pack_name DOES FK to packs(name) — that's Dunetrace's own small, rarely-
+# changing registry, not customer-controlled data, so the same "don't FK
+# across service/tenant boundaries" reasoning doesn't apply to it.
+_PACKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS packs (
+    name           TEXT         PRIMARY KEY,
+    description    TEXT         NOT NULL,
+    detector_names TEXT[]       NOT NULL DEFAULT '{}',
+    added_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS org_enabled_packs (
+    org_id      TEXT         NOT NULL,
+    pack_name   TEXT         NOT NULL REFERENCES packs(name),
+    enabled_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    enabled_by  TEXT,
+    PRIMARY KEY (org_id, pack_name)
+);
+CREATE INDEX IF NOT EXISTS idx_org_enabled_packs_org ON org_enabled_packs(org_id);
+"""
+
+# Per-run state metrics (Capability 3, Phase 3.3). One row per (run, state);
+# api_svc reads these to build cross-run state analytics. run_started_at is when
+# the run happened (from run.started), so trends bucket by run time, not compute
+# time. org_id TEXT NOT NULL, no FK — same convention as every org-scoped table.
+_RUN_STATE_METRICS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_state_metrics (
+    run_id         TEXT         NOT NULL,
+    org_id         TEXT         NOT NULL,
+    agent_id       TEXT         NOT NULL,
+    state          TEXT         NOT NULL,
+    total_ms       BIGINT       NOT NULL,
+    segment_count  INT          NOT NULL,
+    run_started_at TIMESTAMPTZ,
+    computed_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (run_id, state)
+);
+CREATE INDEX IF NOT EXISTS idx_rsm_agent
+    ON run_state_metrics(org_id, agent_id, run_started_at);
+"""
 
 
 async def _backfill_org_id(conn) -> None:
@@ -286,7 +373,37 @@ async def ensure_detector_schema() -> None:
         await conn.execute(_DETECTOR_SCHEMA)
         await conn.execute(_MULTI_TENANCY_DDL)
         await _backfill_org_id(conn)
+        await conn.execute(_PACKS_SCHEMA)
+        await _seed_packs(conn)
+        await conn.execute(_RUN_STATE_METRICS_SCHEMA)
     logger.info("Detector schema ready")
+
+
+async def _seed_packs(conn) -> None:
+    """Registers every currently-imported DetectorPack into the packs table.
+    Idempotent (ON CONFLICT DO NOTHING on name) — safe to call on every
+    startup, including ones where a pack's description or detector list
+    changed: those get picked up via the explicit UPDATE below rather than
+    silently staying stale, since a pack is Dunetrace-owned code, not
+    customer data."""
+    from dunetrace.packs import PACK_REGISTRY  # import here: avoids a hard
+
+    # dependency from db.py's module-load time on the packs subpackage having
+    # finished registering everything yet (packs register on import, and
+    # detector_svc/detectors.py is what actually imports dunetrace.packs).
+    for pack in PACK_REGISTRY.values():
+        await conn.execute(
+            """
+            INSERT INTO packs (name, description, detector_names)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (name) DO UPDATE
+                SET description = EXCLUDED.description,
+                    detector_names = EXCLUDED.detector_names
+            """,
+            pack.name,
+            pack.description,
+            [d.__name__ for d in pack.detectors],
+        )
 
 
 # ── Reads ──────────────────────────────────────────────────────────────────────
@@ -732,8 +849,13 @@ async def fetch_completed_runs(
                 e.event_type AS trigger
             FROM events e
             WHERE e.event_type IN ('run.completed', 'run.errored')
-              AND NOT EXISTS (
-                  SELECT 1 FROM processed_runs p WHERE p.run_id = e.run_id
+              AND (
+                  -- not yet processed …
+                  NOT EXISTS (SELECT 1 FROM processed_runs p WHERE p.run_id = e.run_id)
+                  -- … OR processed, but new events arrived since (audit Finding 15:
+                  -- late events must trigger a re-detection, not be dropped).
+                  OR (SELECT count(*) FROM events e2 WHERE e2.run_id = e.run_id)
+                     > (SELECT p.event_count FROM processed_runs p WHERE p.run_id = e.run_id)
               )
               AND ($2::int = 1 OR abs(hashtext(e.agent_id)) % $2 = $3)
             ORDER BY e.run_id, e.received_at ASC
@@ -799,7 +921,7 @@ async def fetch_run_events(run_id: str) -> list[dict]:
             """
             SELECT
                 event_type, run_id, agent_id, agent_version,
-                step_index, timestamp, payload, parent_run_id
+                step_index, timestamp, payload, parent_run_id, conversation_id
             FROM events
             WHERE run_id = $1
             ORDER BY step_index ASC, timestamp ASC
@@ -862,16 +984,27 @@ async def write_signals(signals: list, shadow: bool, org_id: str) -> int:
 
 
 async def mark_run_processed(
-    run_id: str, agent_id: str, agent_version: str, trigger: str, signal_count: int, org_id: str
+    run_id: str,
+    agent_id: str,
+    agent_version: str,
+    trigger: str,
+    signal_count: int,
+    org_id: str,
+    event_count: int = 0,
 ) -> None:
-    """Record that this run has been processed. Prevents double-processing."""
+    """Record that this run has been processed. On a reprocess (audit Finding 15,
+    late events grew the count) UPDATE the stored event_count/signal_count so the
+    run isn't re-fetched forever."""
     async with _pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO processed_runs
-                (run_id, agent_id, agent_version, trigger, signal_count, org_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (run_id) DO NOTHING
+                (run_id, agent_id, agent_version, trigger, signal_count, org_id, event_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (run_id) DO UPDATE
+                SET signal_count = processed_runs.signal_count + EXCLUDED.signal_count,
+                    event_count  = EXCLUDED.event_count,
+                    processed_at = NOW()
             """,
             run_id,
             agent_id,
@@ -879,6 +1012,83 @@ async def mark_run_processed(
             trigger,
             signal_count,
             org_id,
+            event_count,
+        )
+
+
+async def fetch_run_state(run_id: str) -> Optional[dict]:
+    """Return {'event_count', 'signal_types'} for a run's prior processing, or
+    None if never processed. `signal_types` is the set of failure_type values
+    already stored for the run — used to make re-detection additive (Finding 15):
+    we only write failure types not already recorded, so a reprocess never
+    duplicates a signal or re-alerts an existing one."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        prow = await conn.fetchrow(
+            "SELECT event_count FROM processed_runs WHERE run_id = $1", run_id
+        )
+        if prow is None:
+            return None
+        types = await conn.fetch(
+            "SELECT DISTINCT failure_type FROM failure_signals WHERE run_id = $1", run_id
+        )
+    return {
+        "event_count": prow["event_count"],
+        "signal_types": {t["failure_type"] for t in types},
+    }
+
+
+# ── Conversation modeling (Phase 3.1) ────────────────────────────────────────────
+
+
+async def upsert_run_and_conversation(
+    run_id: str,
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    started_at: float,
+    conversation_external_id: Optional[str],
+) -> None:
+    """Registers this run in the runs registry — called once per processed
+    run, regardless of whether conversation_id was ever set. When it was,
+    also upserts the owning conversation (creating it on first sight, else
+    bumping run_count/last_run_at) and links the run to its internal id.
+    ON CONFLICT DO NOTHING on runs mirrors mark_run_processed's own
+    idempotency guarantee — a run is only ever processed once under normal
+    operation."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        conversation_pk = None
+        if conversation_external_id:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO conversations (org_id, agent_id, external_id, run_count)
+                VALUES ($1, $2, $3, 1)
+                ON CONFLICT (org_id, agent_id, external_id) DO UPDATE
+                    SET last_run_at = NOW(),
+                        run_count   = conversations.run_count + 1
+                RETURNING id
+                """,
+                org_id,
+                agent_id,
+                conversation_external_id,
+            )
+            conversation_pk = row["id"]
+
+        await conn.execute(
+            """
+            INSERT INTO runs (run_id, org_id, agent_id, agent_version, conversation_id, started_at)
+            VALUES ($1, $2, $3, $4, $5, to_timestamp($6))
+            ON CONFLICT (run_id) DO NOTHING
+            """,
+            run_id,
+            org_id,
+            agent_id,
+            agent_version,
+            conversation_pk,
+            started_at,
         )
 
 
@@ -1052,3 +1262,54 @@ async def write_custom_signal(
             shadow,
             org_id,
         )
+
+
+# ── Pack activation reads ───────────────────────────────────────────────────────
+
+
+async def fetch_org_enabled_packs(org_id: str) -> list[str]:
+    """Pack names currently activated for this org. Empty list if none —
+    never raises for an org with no row, since that's the default state."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch("SELECT pack_name FROM org_enabled_packs WHERE org_id = $1", org_id)
+    return [r["pack_name"] for r in rows]
+
+
+async def write_run_state_metrics(
+    run_id: str,
+    org_id: str,
+    agent_id: str,
+    run_started_ts: Optional[float],
+    states: dict,
+) -> None:
+    """Upsert one row per state for a run (Capability 3, Phase 3.3). Idempotent
+    on (run_id, state) — reprocessing a run overwrites its metrics rather than
+    duplicating them. `states` is summarize_states(events)["states"]."""
+    if not _pool or not states:
+        return
+    from datetime import datetime, timezone
+
+    started_at = datetime.fromtimestamp(run_started_ts, tz=timezone.utc) if run_started_ts else None
+    async with _pool.acquire() as conn:
+        for state, agg in states.items():
+            await conn.execute(
+                """
+                INSERT INTO run_state_metrics
+                    (run_id, org_id, agent_id, state, total_ms, segment_count, run_started_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (run_id, state) DO UPDATE
+                    SET total_ms = EXCLUDED.total_ms,
+                        segment_count = EXCLUDED.segment_count,
+                        run_started_at = EXCLUDED.run_started_at,
+                        computed_at = NOW()
+                """,
+                run_id,
+                org_id,
+                agent_id,
+                state,
+                int(agg["total_ms"]),
+                int(agg["count"]),
+                started_at,
+            )

@@ -1799,6 +1799,44 @@ class TestToolArgumentFabricationDetector(unittest.TestCase):
         )
         self.assertIsNone(self.d.on_run_completion(state))
 
+    def test_does_not_fire_on_short_alpha_canonical_value(self):
+        # audit Finding 21 regression: an agent correctly translating "Paris" to
+        # the IATA code "CDG" must NOT be flagged as fabrication. Short, pure-
+        # alpha, unstructured -> not identifier-shaped under the tightened rule.
+        state = self._state(
+            [make_tool_call("flight_search", 1, args="{'destination': 'CDG'}")],
+            input_text="book me a flight to Paris next Friday",
+        )
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_does_not_fire_on_rephrased_single_word_query(self):
+        # Agent rephrases user "cats" -> tool arg "felines": legitimate, not an ID.
+        state = self._state(
+            [make_tool_call("search", 1, args="{'q': 'felines'}")],
+            input_text="find me information about cats",
+        )
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_still_fires_on_structured_ungrounded_id(self):
+        # Tightening must NOT create a false negative: a structured id (digit +
+        # separator) that appears nowhere in context still fires.
+        state = self._state(
+            [make_tool_call("fetch_order", 1, args="{'order_id': 'ORD-88213'}")],
+            input_text="check on my recent order",
+        )
+        sig = self.d.on_run_completion(state)
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.failure_type, FailureType.TOOL_ARGUMENT_FABRICATION)
+
+    def test_still_fires_on_long_opaque_ungrounded_token(self):
+        # A long pure-alpha opaque token (>= MIN_OPAQUE_LEN) is still an
+        # identifier and still fires when ungrounded.
+        state = self._state(
+            [make_tool_call("resume_session", 1, args="{'token': 'abcdefghijklmnop'}")],
+            input_text="continue where I left off",
+        )
+        self.assertIsNotNone(self.d.on_run_completion(state))
+
     # ── Edge cases ───────────────────────────────────────────────────────────
 
     def test_does_not_fire_on_empty_run(self):

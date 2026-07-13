@@ -23,6 +23,12 @@ docker compose up -d --force-recreate alerts
 
 Each Slack alert includes: failure type, severity, confidence, what happened, why it matters, a concrete code fix targeted at the specific failure pattern detected, a one-line rate context summary showing how common this pattern is for the agent, and a **View Run** button that deep-links directly to that run's detail panel in the dashboard.
 
+Three action buttons let you respond directly from Slack:
+
+- **Mark resolved** — sets `resolved_at` on the signal.
+- **Not a problem** — records a false positive (`agent_detector_overrides`); after 3 false positives for the same `(agent_id, failure_type)`, that detector is silenced for that agent until manually reset.
+- **Snooze 24h** — mutes this `(agent_id, failure_type)` for 24 hours without affecting the false-positive count. Unlike "Not a problem," snoozing is a deliberate temporary decision ("I know about this, stop paging me today"), not accumulated feedback about detector accuracy — the two mechanisms are independent and don't interact.
+
 When token data is available for the run, a `:moneybag:` line is included showing total tokens consumed and estimated cost (e.g. `:moneybag: *Tokens:* 581 (wasted)  *Cost:* ~$0.00`). This uses actual `prompt_tokens + completion_tokens` from SDK-recorded `llm.responded` events.
 
 > **Note:** `docker compose restart alerts` does not re-read `.env`. Use `docker compose up -d alerts` to recreate the container and pick up env var changes.
@@ -112,3 +118,18 @@ Delivery is deduplicated via a `digest_log` table. If a digest was sent within t
 ## Shadow mode
 
 Signals in shadow mode are stored and visible in the dashboard but never delivered to Slack or webhooks. See [detectors.md](detectors.md#shadow-mode) for how to promote a detector to live.
+
+---
+
+## Per-detector destination routing
+
+By default every alertable signal goes to every globally-enabled destination (Slack and/or the generic webhook). To route specific failure types to specific destinations, add a `destinations` list to that detector's block in `detectors.yml`:
+
+```yaml
+default:
+  tool_loop:
+    threshold: 3
+    destinations: [slack]   # only Slack, even if WEBHOOK_URL is also configured
+```
+
+Valid values: `slack`, `webhook`, `linear` (Linear delivery itself is not yet implemented — a detector routed only to `linear` today delivers nowhere until that lands). Restart the alerts worker (`docker compose restart alerts`) to apply changes.

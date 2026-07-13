@@ -18,6 +18,22 @@
 #
 # One-off failures are silently counted. Only sustained patterns alert.
 #
+# ── Destination routing (Phase 4.1) ───────────────────────────────────────────
+# Each detector can declare `destinations` — which alert destination(s) this
+# failure type is delivered to. Omitted means "no override": send to every
+# globally-enabled destination (SLACK_WEBHOOK_URL / WEBHOOK_URL), same as
+# before this option existed.
+#
+#   destinations: [slack]            # this detector only ever alerts to Slack
+#   destinations: [linear]           # only to Linear (delivery not yet implemented
+#                                    # as of Phase 4.1's Slack-only rollout — a
+#                                    # detector routed only to "linear" today
+#                                    # delivers nowhere until that lands)
+#   destinations: [slack, linear]    # both
+#
+# Valid values: slack, webhook, linear. Unknown values are ignored (logged,
+# not fatal). Restart the alerts worker to apply changes.
+#
 # ── Custom detectors ──────────────────────────────────────────────────────────
 # Global (not per-agent-category) budget for evaluating user-defined custom
 # detectors, including content-condition operators (contains, regex_matches,
@@ -43,6 +59,7 @@ default:
       mode: consecutive   # alert after 2 runs in a row — one-off flukes don't alert
       threshold: 2
       window_runs: 10
+    # destinations: [slack]   # uncomment to restrict this detector to Slack only
 
   tool_thrashing:
     window: 6         # alternating A/B pattern checked over last N tool calls

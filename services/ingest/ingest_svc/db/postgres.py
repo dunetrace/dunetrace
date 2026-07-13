@@ -87,9 +87,16 @@ CREATE TABLE IF NOT EXISTS events (
     payload        JSONB            NOT NULL DEFAULT '{}',
     parent_run_id  TEXT,
     received_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    event_id       TEXT,
     PRIMARY KEY (id, received_at)
 ) PARTITION BY RANGE (received_at);
 
+-- audit Finding 14: client-generated dedup id. A global UNIQUE isn't possible on
+-- a table partitioned by received_at (a unique index must include the partition
+-- key, but received_at differs per retry) — so ingest dedups at the application
+-- layer using this id (see insert_events). ALTER covers pre-existing tables.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS event_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
 CREATE INDEX IF NOT EXISTS idx_events_run_id  ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_agent   ON events(agent_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_type    ON events(event_type);
@@ -157,6 +164,29 @@ CREATE TABLE IF NOT EXISTS policies (
 );
 CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
 
+-- Policy evaluation observability (Phase 5). One row per shipped policy.evaluated
+-- record (rate-limited SDK-side). `trigger_name` avoids the SQL reserved word
+-- `trigger`. Read by the customer API's GET /v1/policies/{id}/evaluations.
+CREATE TABLE IF NOT EXISTS policy_evaluations (
+    id              BIGSERIAL PRIMARY KEY,
+    org_id          TEXT,
+    policy_id       BIGINT,
+    policy_name     TEXT        NOT NULL DEFAULT '',
+    agent_id        TEXT        NOT NULL DEFAULT '',
+    run_id          TEXT,
+    trigger_name    TEXT,
+    trigger_matched BOOLEAN,
+    fired           BOOLEAN,
+    sampled         BOOLEAN     NOT NULL DEFAULT FALSE,
+    reason          TEXT,
+    conditions      JSONB,
+    evaluated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_policy_evals_policy
+    ON policy_evaluations(org_id, policy_id, evaluated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_policy_evals_agent
+    ON policy_evaluations(org_id, agent_id, evaluated_at DESC);
+
 CREATE TABLE IF NOT EXISTS deploy_events (
     id           BIGSERIAL PRIMARY KEY,
     agent_id     TEXT        NOT NULL,
@@ -220,6 +250,14 @@ CREATE TABLE IF NOT EXISTS organizations (
 
 INSERT INTO organizations (id, name) VALUES ('default', 'Default Organization')
 ON CONFLICT (id) DO NOTHING;
+
+-- Semantic feedback loop opt-in (Phase 1.4.3) — owned by api_svc's own
+-- migration (services/api/api_svc/db/queries.py's _SEMANTIC_FEEDBACK_DDL),
+-- added here defensively too since this service creates `organizations`
+-- first on a fresh install and semantic_svc reads these columns without
+-- necessarily waiting on api_svc to have started.
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_auto_suppress BOOLEAN NOT NULL DEFAULT FALSE;
 
 DO $$
 BEGIN
@@ -286,9 +324,34 @@ ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS org_id TEXT;
 ALTER TABLE fixes           ADD COLUMN IF NOT EXISTS org_id TEXT;
 ALTER TABLE deploy_events   ADD COLUMN IF NOT EXISTS org_id TEXT;
 ALTER TABLE policies        ADD COLUMN IF NOT EXISTS org_id TEXT;
+-- HMAC canonical-form version (see api_svc _sign_policy). Added defensively here
+-- too so fetch_policies' SELECT never fails on a missing column regardless of
+-- which service ran its schema first.
+ALTER TABLE policies        ADD COLUMN IF NOT EXISTS sig_version INT NOT NULL DEFAULT 1;
 
 CREATE INDEX IF NOT EXISTS idx_events_org_agent  ON events(org_id, agent_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_org_agent ON failure_signals(org_id, agent_id, detected_at DESC);
+
+-- External evaluation integration correlation key (Langfuse/LangSmith/
+-- Braintrust — Phase 2). Optional/instrumentation-dependent, same as
+-- system_prompt: populated when the customer's dt.run(trace_id=...) sets it,
+-- or automatically for OTLP-ingested runs (the raw OTel traceId, before
+-- otel.py's lossy _trace_to_uuid() conversion into run_id). A genuine column
+-- (not payload-only) because it's looked up in the REVERSE direction from
+-- every other per-run field here — "given an external trace_id, find the
+-- run" — which a JSONB payload scan can't do efficiently.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS trace_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events(trace_id) WHERE trace_id IS NOT NULL;
+
+-- Conversation modeling (Phase 3.1). Same column-not-payload rationale as
+-- trace_id — detector_svc reads this back off every event in a processed
+-- run to upsert the conversations/runs registry (services/detector/detector_svc/db.py),
+-- which is a reverse-direction lookup a JSONB payload scan can't do
+-- efficiently either. Optional: dt.run(conversation_id=...) sets it, threaded
+-- onto every event in the run the same way trace_id is; omitted entirely for
+-- single-turn agents and any run predating this field.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS conversation_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_events_conversation_id ON events(conversation_id) WHERE conversation_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_fixes_org         ON fixes(org_id);
 CREATE INDEX IF NOT EXISTS idx_deploys_org       ON deploy_events(org_id);
 CREATE INDEX IF NOT EXISTS idx_policies_org      ON policies(org_id, enabled);
@@ -492,7 +555,36 @@ async def prune_old_events(retention_days: int = 90) -> int:
             "SELECT COUNT(*) FROM pg_class WHERE relname = 'events' AND relkind = 'p'"
         )
         if not is_partitioned:
-            return 0
+            # audit Finding 13: the intended monthly partitions don't exist here
+            # (this table predates partitioning or was never migrated). Instead of
+            # silently no-opping — which let events grow forever while docs claimed
+            # 90-day retention — fall back to a batched DELETE so retention ACTUALLY
+            # runs, and warn loudly so an operator can migrate for the far cheaper
+            # partition-drop path (scripts/migrate_events_to_partitioned.py).
+            logger.warning(
+                "events table is NOT partitioned — retention is running via a "
+                "batched DELETE (slower + needs vacuum, unlike an instant "
+                "partition drop). Migrate to a partitioned events table for "
+                "efficient retention: scripts/migrate_events_to_partitioned.py."
+            )
+            deleted_total = 0
+            while True:
+                result = await conn.execute(
+                    "DELETE FROM events WHERE ctid IN "
+                    "(SELECT ctid FROM events WHERE received_at < $1 LIMIT 10000)",
+                    cutoff,
+                )
+                n = int(result.split()[-1]) if result.startswith("DELETE") else 0
+                deleted_total += n
+                if n < 10000:
+                    break
+            if deleted_total:
+                logger.info(
+                    "Retention pass (DELETE fallback): %d event(s) deleted (before %s)",
+                    deleted_total,
+                    cutoff,
+                )
+            return deleted_total
 
         rows = await conn.fetch("""
             SELECT c.relname, c.reltuples
@@ -565,36 +657,108 @@ async def insert_events(events: list, batch_id: str, org_id: str) -> int:
         logger.error("insert_events: pool not available, dropping %d events", len(events))
         return 0
 
-    rows = [
-        (
-            batch_id,
-            e.event_type,
-            e.run_id,
-            e.agent_id,
-            e.agent_version,
-            e.step_index,
-            e.timestamp,
-            json.dumps(e.payload),
-            e.parent_run_id,
-            org_id,
-        )
-        for e in events
-    ]
-
     try:
         async with _pool.acquire() as conn:
+            # audit Finding 14: drop events whose client-generated event_id was
+            # already ingested (an at-least-once SDK retry re-sends the exact same
+            # events with the same ids). Events with no event_id (older clients)
+            # are never deduped. This filter is partition-safe (no unique index on
+            # the received_at-partitioned table); sequential retries from one SDK
+            # don't race, which is the case this protects.
+            ids = [e.event_id for e in events if getattr(e, "event_id", None)]
+            already: set = set()
+            if ids:
+                existing = await conn.fetch(
+                    "SELECT event_id FROM events WHERE event_id = ANY($1::text[])", ids
+                )
+                already = {r["event_id"] for r in existing}
+
+            rows = [
+                (
+                    batch_id,
+                    e.event_type,
+                    e.run_id,
+                    e.agent_id,
+                    e.agent_version,
+                    e.step_index,
+                    e.timestamp,
+                    json.dumps(e.payload),
+                    e.parent_run_id,
+                    org_id,
+                    e.trace_id,
+                    e.conversation_id,
+                    getattr(e, "event_id", None),
+                )
+                for e in events
+                if not (getattr(e, "event_id", None) and e.event_id in already)
+            ]
+            if not rows:
+                return 0
             await conn.executemany(
                 """
                 INSERT INTO events
                     (batch_id, event_type, run_id, agent_id, agent_version,
-                     step_index, timestamp, payload, parent_run_id, org_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+                     step_index, timestamp, payload, parent_run_id, org_id, trace_id,
+                     conversation_id, event_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13)
                 """,
                 rows,
             )
         return len(rows)
     except Exception as exc:
         logger.error("insert_events failed: %s", exc)
+        return 0
+
+
+async def insert_policy_evaluations(events: list, batch_id: str, org_id: str) -> int:
+    """Persist policy.evaluated observability records into policy_evaluations.
+
+    Each event's payload is a PolicyEvaluationRecord dict (policy_name/id, trigger,
+    trigger_matched, fired, conditions, reason, sampled, ts). Best-effort — a
+    failure here never affects the main event-ingest path (they're inserted
+    separately by the router). Returns rows written.
+    """
+    if not _pool:
+        logger.error(
+            "insert_policy_evaluations: pool not available, dropping %d records", len(events)
+        )
+        return 0
+    try:
+        rows = []
+        for e in events:
+            p = getattr(e, "payload", None) or {}
+            rows.append(
+                (
+                    org_id,
+                    p.get("policy_id"),
+                    p.get("policy_name") or "",
+                    p.get("agent_id") or getattr(e, "agent_id", "") or "",
+                    p.get("run_id") or getattr(e, "run_id", None),
+                    p.get("trigger"),
+                    p.get("trigger_matched"),
+                    p.get("fired"),
+                    bool(p.get("sampled", False)),
+                    p.get("reason"),
+                    json.dumps(p.get("conditions") or []),
+                    float(p.get("ts") or getattr(e, "timestamp", 0.0) or 0.0),
+                )
+            )
+        if not rows:
+            return 0
+        async with _pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO policy_evaluations
+                    (org_id, policy_id, policy_name, agent_id, run_id, trigger_name,
+                     trigger_matched, fired, sampled, reason, conditions, evaluated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
+                        to_timestamp($12))
+                """,
+                rows,
+            )
+        return len(rows)
+    except Exception as exc:
+        logger.error("insert_policy_evaluations failed: %s", exc)
         return 0
 
 
@@ -637,7 +801,8 @@ async def fetch_policies(agent_id: str, org_id: str) -> list:
         async with _pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, agent_id, name, condition, action, enabled, priority, signature
+                SELECT id, agent_id, name, condition, action, enabled, priority,
+                       signature, sig_version
                 FROM policies
                 WHERE org_id = $1
                   AND enabled = TRUE
@@ -665,6 +830,7 @@ async def fetch_policies(agent_id: str, org_id: str) -> list:
                 "enabled": r["enabled"],
                 "priority": r["priority"],
                 "signature": r["signature"] or "",
+                "sig_version": r["sig_version"] or 1,
             }
             for r in rows
         ]

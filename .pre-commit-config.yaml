@@ -8,6 +8,13 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=500]
       - id: check-merge-conflict
+      # audit Phase 10: block accidentally committed private keys and .env files.
+      # Excludes two files that document the GITHUB_APP_PRIVATE_KEY env-var format
+      # with a PEM-header placeholder (no key material) — the hook matches the
+      # header text, not real keys.
+      - id: detect-private-key
+        exclude: ^(\.env\.example|docs/integrations/github-app\.md)$
+      - id: check-case-conflict
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.11
@@ -29,8 +36,26 @@ repos:
           #        bandit cannot see through f-string construction of WHERE clauses
         files: ^(services|packages/sdk-py)/
 
+  # audit Phase 10 (Finding 36): secret scanning — catches hardcoded API keys /
+  # tokens / credentials before they're committed (the audit found plaintext key
+  # storage F5; this guards the source tree against committed secrets).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
   - repo: local
     hooks:
+      # audit Phase 10 (Finding 36): enforce the org_id-in-URL-path convention.
+      # scripts/check_endpoint_conventions.py existed but was wired nowhere; this
+      # is the tenant-isolation-drift guard referenced in api_svc/auth.py.
+      - id: endpoint-conventions
+        name: org_id-not-in-URL-path convention
+        language: system
+        entry: python scripts/check_endpoint_conventions.py
+        pass_filenames: false
+        files: ^services/.*/routers/.*\.py$
+
       - id: sdk-py-mypy
         name: SDK (Python) mypy
         language: system

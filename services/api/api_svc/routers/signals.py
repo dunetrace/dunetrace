@@ -18,6 +18,9 @@ from api_svc.db.queries import (
     record_fix,
     get_signal_fix_status,
     get_run_detail,
+    get_organization_semantic_feedback,
+    record_signal_feedback,
+    get_org_github_integration,
 )
 from api_svc.fix_classification import build_suggested_policy, classify_fix
 from api_svc.schemas import SignalDetail, SignalListResponse, Page
@@ -277,8 +280,12 @@ async def explain_signal(
 
     if fix_type == "code_change":
         # code_change has a real one-click path — POST /v1/signals/{id}/open-pr —
-        # gated only on GitHub being configured, independent of anything else.
-        apply_blocked = not settings.github_configured
+        # gated on GitHub being configured, either per-org (Phase 4.3's
+        # GitHub App) or the legacy global PAT fallback.
+        github_integration = await get_org_github_integration(org_id)
+        apply_blocked = not (
+            (github_integration and github_integration.get("repos")) or settings.github_configured
+        )
     elif fix_type == "no_auto_apply":
         apply_blocked = True  # security signal — never auto-apply, review manually
     else:
@@ -334,10 +341,165 @@ async def record_copy(
     return {"fix_id": fix_id, "signal_id": signal_id}
 
 
+_VALID_FEEDBACK_VERDICTS = frozenset({"false_positive"})
+
+
+class SignalFeedbackRequest(BaseModel):
+    verdict: str
+    notes: Optional[str] = None
+
+
+@router.post(
+    "/v1/signals/{signal_id}/feedback",
+    summary='Record feedback on a semantic signal (e.g. "not a real issue")',
+    response_model=Dict[str, Any],
+    status_code=201,
+)
+async def submit_signal_feedback(
+    signal_id: int,
+    body: SignalFeedbackRequest,
+    org_id: str = Depends(require_org),
+) -> Dict[str, Any]:
+    """Phase 1.4.3. Only applies to semantic signals — structural detector
+    false-positives already have their own mechanism (the Slack "Mark false
+    positive" button -> agent_detector_overrides), which this does not
+    replace or touch. Opt-in per org: the org must have enabled the feedback
+    loop (POST/GET /v1/orgs/semantic-feedback) before this does anything.
+    """
+    if body.verdict not in _VALID_FEEDBACK_VERDICTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"verdict must be one of {sorted(_VALID_FEEDBACK_VERDICTS)}.",
+        )
+
+    signal = await get_signal_by_id(org_id, signal_id)
+    if signal is None:
+        raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found.")
+
+    if signal["source"] != "semantic":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Feedback is only supported for semantic signals. Structural "
+                "detector false positives are marked via the Slack integration."
+            ),
+        )
+
+    org_settings = await get_organization_semantic_feedback(org_id)
+    if not org_settings or not org_settings["enabled"]:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "The semantic feedback loop is not enabled for this org. "
+                "Enable it via PATCH /v1/orgs/semantic-feedback."
+            ),
+        )
+
+    feedback_id = await record_signal_feedback(signal_id, org_id, body.verdict, body.notes)
+    return {"feedback_id": feedback_id, "signal_id": signal_id, "verdict": body.verdict}
+
+
 class OpenPRRequest(BaseModel):
     root_cause: str
     fix_content: str
     fix_patch: str
+
+
+async def _resolve_github_auth(org_id: str) -> Optional[Dict[str, Any]]:
+    """Per-org GitHub App installation first (Phase 4.3), else the legacy
+    global PAT (pre-4.3 self-hosted single-tenant path) — same
+    org-config-first-then-global-fallback precedent Phase 4.1 established
+    for Slack. Returns None if neither is configured."""
+    from api_svc.github_app_auth import get_installation_token
+
+    github_integration = await get_org_github_integration(org_id)
+    if github_integration and github_integration.get("repos"):
+        token = await get_installation_token(github_integration["installation_id"])
+        return {
+            "token": token,
+            "repos": github_integration["repos"],
+            "reviewers": github_integration.get("reviewers") or [],
+        }
+
+    if settings.github_configured:
+        return {
+            "token": settings.GITHUB_TOKEN,
+            "repos": [{"repo": settings.GITHUB_REPO, "base_branch": settings.GITHUB_BASE_BRANCH}],
+            "reviewers": [],
+        }
+
+    return None
+
+
+async def _attempt_real_diff(
+    org_id: str,
+    agent_id: str,
+    token: str,
+    repos: list,
+    root_cause: str,
+    fix_content: str,
+) -> Optional[Dict[str, Any]]:
+    """Returns {"repo", "file_path", "base_branch", "new_content"} if source
+    mapping resolves a file AND the LLM produces a usable corrected version
+    AND it passes the security guardrail — else None, meaning "fall back to
+    the safe markdown-summary-file PR." Never raises — any failure along
+    this path degrades to that fallback, logged but not surfaced as an error
+    to the caller (opening *some* PR still succeeds)."""
+    from api_svc.source_resolution import resolve_source
+    from api_svc.github_client import fetch_file_content
+    from api_svc.diff_generation import generate_real_file_content
+    from api_svc.fix_security import validate_target_path
+
+    try:
+        resolved = await resolve_source(org_id, agent_id)
+        if not resolved:
+            return None
+
+        repo_cfg = next((r for r in repos if r.get("repo") == resolved["repo"]), None)
+        if repo_cfg is None:
+            # Source mapping resolved a repo this org hasn't connected the
+            # GitHub App to — can't write there regardless of how confident
+            # the resolution was.
+            return None
+        base_branch = repo_cfg.get("base_branch") or "main"
+
+        ok, reason = validate_target_path(resolved["file_path"], resolved["file_path"])
+        if not ok:
+            logger.warning(
+                "Real diff blocked by security guardrail for org=%s agent=%s: %s",
+                org_id,
+                agent_id,
+                reason,
+            )
+            return None
+
+        current_content = await fetch_file_content(
+            token, resolved["repo"], resolved["file_path"], base_branch
+        )
+        if current_content is None:
+            return None
+
+        new_content = await generate_real_file_content(
+            root_cause, fix_content, resolved["file_path"], current_content
+        )
+        if new_content is None:
+            return None
+
+        return {
+            "repo": resolved["repo"],
+            "file_path": resolved["file_path"],
+            "base_branch": base_branch,
+            "old_content": current_content,
+            "new_content": new_content,
+        }
+    except Exception as exc:
+        logger.warning(
+            "Real diff attempt failed for org=%s agent=%s (falling back to summary PR): %s",
+            org_id,
+            agent_id,
+            exc,
+        )
+        return None
 
 
 @router.post(
@@ -350,10 +512,18 @@ async def open_pr(
     body: OpenPRRequest,
     org_id: str = Depends(require_org),
 ) -> Dict[str, Any]:
-    if not settings.github_configured:
+    # GitHub-config check stays first, matching pre-4.3 behavior/tests —
+    # this is a config-gating error independent of whether the signal_id
+    # itself is valid, so it should surface regardless of signal lookup.
+    auth = await _resolve_github_auth(org_id)
+    if auth is None:
         raise HTTPException(
             status_code=503,
-            detail="GitHub not configured. Add GITHUB_TOKEN and GITHUB_REPO to .env.",
+            detail=(
+                "GitHub not configured. Install the Dunetrace GitHub App "
+                "(POST /v1/orgs/integrations/github) or set GITHUB_TOKEN/"
+                "GITHUB_REPO for a single-tenant self-hosted install."
+            ),
         )
 
     signal = await get_signal_by_id(org_id, signal_id)
@@ -370,16 +540,49 @@ async def open_pr(
             ),
         )
 
+    real_file = await _attempt_real_diff(
+        org_id, signal["agent_id"], auth["token"], auth["repos"], body.root_cause, body.fix_content
+    )
+
     from api_svc.github_client import create_fix_pr
+    from api_svc.diff_generation import compute_unified_diff
+
+    if real_file:
+        fix_patch = compute_unified_diff(
+            real_file["file_path"], real_file["old_content"], real_file["new_content"]
+        )
+        target_repo = real_file["repo"]
+        base_branch = real_file["base_branch"]
+        real_file_arg = {
+            "file_path": real_file["file_path"],
+            "new_content": real_file["new_content"],
+        }
+    else:
+        fix_patch = body.fix_patch
+        first_repo = auth["repos"][0]
+        target_repo = first_repo.get("repo")
+        base_branch = first_repo.get("base_branch") or "main"
+        real_file_arg = None
+
+    if not target_repo:
+        raise HTTPException(
+            status_code=503,
+            detail="No repo configured for this GitHub integration.",
+        )
 
     try:
         result = await create_fix_pr(
+            token=auth["token"],
+            repo=target_repo,
+            base_branch=base_branch,
             signal_id=signal_id,
             agent_id=signal["agent_id"],
             failure_type=signal["failure_type"],
             root_cause=body.root_cause,
             fix_content=body.fix_content,
-            fix_patch=body.fix_patch,
+            fix_patch=fix_patch,
+            reviewers=auth["reviewers"],
+            real_file=real_file_arg,
         )
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -387,7 +590,7 @@ async def open_pr(
         logger.warning("create_fix_pr failed: %s", exc)
         raise HTTPException(
             status_code=502,
-            detail="Could not create GitHub PR. Check GITHUB_TOKEN and GITHUB_REPO.",
+            detail="Could not create GitHub PR. Check your GitHub App installation or GITHUB_TOKEN/GITHUB_REPO.",
         )
 
     try:

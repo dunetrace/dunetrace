@@ -117,7 +117,9 @@ def _install_fake_openai():
 
     completions.Completions = Completions
     completions.AsyncCompletions = AsyncCompletions
-    sys.modules.setdefault("openai", mod)
+    # Force-install (not setdefault): keeping a previously-imported real openai
+    # would make _patch_openai() patch the wrong module. See _install_fake_anthropic.
+    sys.modules["openai"] = mod
     sys.modules["openai.resources"] = resources
     sys.modules["openai.resources.chat"] = chat
     sys.modules["openai.resources.chat.completions"] = completions
@@ -150,7 +152,14 @@ def _install_fake_anthropic():
 
     messages_mod.Messages = Messages
     messages_mod.AsyncMessages = AsyncMessages
-    sys.modules.setdefault("anthropic", mod)
+    # Force-install the fake. setdefault() would keep a previously-imported REAL
+    # anthropic module (present under pytest's ordering once anything imports it),
+    # so _patch_anthropic() would patch the real module while the test calls this
+    # fake — no events emitted. Overwriting guarantees the patched module and the
+    # tested module are the same object.
+    mod.resources = resources
+    resources.messages = messages_mod
+    sys.modules["anthropic"] = mod
     sys.modules["anthropic.resources"] = resources
     sys.modules["anthropic.resources.messages"] = messages_mod
     return messages_mod
@@ -205,6 +214,20 @@ def _install_fake_requests():
     mod._FakePrepared = FakePreparedRequest
     sys.modules["requests"] = mod
     return mod
+
+
+def _uninstall_fake(*prefixes):
+    """Remove fake provider modules a test class installed and forget them in
+    the global _PATCHED set, so they don't leak into later tests (e.g. the
+    idempotency test's real auto_instrument() call, which would otherwise trip
+    over an incomplete fake). The next real `import` re-imports the genuine
+    module. Order-independent isolation for the fake-installing provider classes."""
+    for name in list(sys.modules):
+        for pfx in prefixes:
+            if name == pfx or name.startswith(pfx + "."):
+                sys.modules.pop(name, None)
+    for pfx in prefixes:
+        _PATCHED.discard(pfx)
 
 
 def _get_langchain_classes():
@@ -624,6 +647,10 @@ class TestAutoInstrumentOpenAI(unittest.TestCase):
 
         _patch_openai()
 
+    @classmethod
+    def tearDownClass(cls):
+        _uninstall_fake("openai")
+
     def test_sync_llm_events_emitted(self):
         dt = _make_client()
         captured = _capture(dt)
@@ -717,13 +744,20 @@ class TestAutoInstrumentOpenAI(unittest.TestCase):
 
 
 class TestAutoInstrumentAnthropic(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls._messages_mod = _install_fake_anthropic()
+    def setUp(self):
+        # Re-install + re-patch the fake per test (not once per class): the fake
+        # module and the global _PATCHED set are shared process state, and under
+        # pytest's definition-order execution an earlier provider class can leave
+        # "anthropic" state a once-per-class setup never recovers from. Doing it
+        # per test makes each one self-contained regardless of ordering.
+        self._messages_mod = _install_fake_anthropic()
         _PATCHED.discard("anthropic")
         from dunetrace.auto import _patch_anthropic
 
         _patch_anthropic()
+
+    def tearDown(self):
+        _uninstall_fake("anthropic")
 
     def test_sync_llm_events_emitted(self):
         dt = _make_client()
@@ -786,6 +820,10 @@ class TestAutoInstrumentHTTPX(unittest.TestCase):
         from dunetrace.auto import _patch_httpx
 
         _patch_httpx()
+
+    @classmethod
+    def tearDownClass(cls):
+        _uninstall_fake("httpx")
 
     def test_sync_tool_events_emitted(self):
         dt = _make_client()
@@ -870,6 +908,10 @@ class TestAutoInstrumentRequests(unittest.TestCase):
         from dunetrace.auto import _patch_requests
 
         _patch_requests()
+
+    @classmethod
+    def tearDownClass(cls):
+        _uninstall_fake("requests")
 
     def test_tool_events_emitted(self):
         dt = _make_client()

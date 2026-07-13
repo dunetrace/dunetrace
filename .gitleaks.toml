@@ -1,0 +1,18 @@
+# gitleaks configuration. Extends the default ruleset and allowlists a small set
+# of files that legitimately contain placeholder credentials for documentation:
+#   - .env.example                       example env file (commented placeholders)
+#   - docs/integrations/github-app.md    documents the GITHUB_APP_PRIVATE_KEY format
+#                                        with a "-----BEGIN ...-----\n...\n-----END-----" placeholder
+#   - docs/detector-packs/voice.md       a curl example with an Authorization header
+# None contain real key material. Fake secrets inside test files use an inline
+# `# gitleaks:allow` marker instead, so they stay individually visible.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholder credentials in docs and the example env file"
+paths = [
+  '''\.env\.example$''',
+  '''docs/integrations/github-app\.md$''',
+  '''docs/detector-packs/voice\.md$''',
+]

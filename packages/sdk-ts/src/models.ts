@@ -19,6 +19,10 @@ export interface AgentEvent {
   timestamp:      number;
   payload:        Record<string, unknown>;
   parent_run_id?: string | null;
+  trace_id?:      string | null;
+  conversation_id?: string | null;
+  // audit Finding 14: stable per-event id for ingest-side dedup of retries.
+  event_id?:      string;
 }
 
 export interface RunOptions {
@@ -30,6 +34,17 @@ export interface RunOptions {
   /** Pre-set the run UUID. Use this to correlate a Dunetrace run with an external
    *  tracing system that was given the same ID. */
   runId?:        string;
+  /** Correlation key for external evaluation integrations (Langfuse/LangSmith/
+   *  Braintrust) — pass the same trace id your own instrumentation of that
+   *  provider's SDK uses. Unlike runId, this doesn't change Dunetrace's own
+   *  run_id — it's an independent pointer, for when you don't want the two
+   *  identifiers conflated. Not folded into agentVersion's hash. */
+  traceId?:      string;
+  /** Groups this run with others from the same end-user interaction —
+   *  pass the same id across every run() call in a multi-turn conversation.
+   *  Same non-identity rationale as traceId; not folded into agentVersion's
+   *  hash. */
+  conversationId?: string;
 }
 
 export interface LlmRespondedOptions {

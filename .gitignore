@@ -5,8 +5,10 @@ __pycache__/
 *.so
 *.egg
 *.egg-info/
+*.whl
 dist/
 build/
+extracted/
 .eggs/
 .Python
 pip-log.txt
@@ -85,3 +87,15 @@ node_modules/
 
 # Local scratch notes — not part of the tracked repo
 BACKLOG.md
+
+# Pre-production audit working files — internal diligence output, not source
+audit/
+
+# Local docker overrides (often contain local ports/secrets) & merge artifacts
+docker-compose.override.yml
+docker-compose.override.yaml
+*.orig
+*.rej
+
+# Marketing drafts — not part of the tracked docs
+docs/blog/

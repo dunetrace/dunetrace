@@ -316,6 +316,10 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
             "step_index": step,
             "timestamp": ts,
             "payload": payload,
+            # Raw OTel trace_id, not the lossy _trace_to_uuid() conversion
+            # used for run_id — external evaluation integrations (Langfuse/
+            # LangSmith/Braintrust) correlate against the real trace_id.
+            "trace_id": trace_id,
         }
 
     events.append(

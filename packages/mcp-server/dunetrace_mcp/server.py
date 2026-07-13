@@ -1221,6 +1221,172 @@ def list_agent_issues(agent_id: str, status: str = "open") -> str:
     return "\n".join(lines)
 
 
+# ── coding-agent issue tools (Phase 4.2) ───────────────────────────────────────
+
+
+@mcp.tool()
+def get_issue(issue_id: int) -> str:
+    """
+    Full context for a single issue — metadata, affected runs, root cause,
+    and a suggested fix. This is the deep-dive tool for triaging one
+    specific issue found via search_issues or list_agent_issues.
+
+    Note: this may trigger an LLM call to generate the root cause/fix
+    (same native root-cause analysis trigger_explain uses) and can take
+    5-15 seconds. If no LLM key is configured on the backend, root_cause/
+    suggested_fix are omitted but the rest of the report still returns.
+
+    code_references (source file/line the issue maps to) is always empty
+    for now — Dunetrace has no source-mapping capability yet (planned,
+    not yet built).
+
+    Args:
+        issue_id: The integer issue ID (from search_issues or list_agent_issues).
+    """
+    try:
+        data = client.get(f"/v1/issues/{issue_id}")
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    lines = [
+        f"Issue #{data['id']}: {data['failure_type']} on {data['agent_id']}",
+        f"Status: {data['status']}  (opened {_ago(data.get('first_seen'))}, "
+        f"last seen {_ago(data.get('last_seen'))})",
+        f"Affected runs: {data.get('affected_runs_count', 0)} total",
+    ]
+    if data.get("manually_resolved") and data.get("resolution_notes"):
+        lines.append(f"Resolution notes: {data['resolution_notes']}")
+    lines.append("")
+
+    affected_runs = data.get("affected_runs") or []
+    if affected_runs:
+        lines.append("AFFECTED RUNS (most recent):")
+        lines.append(f"  {'RUN ID':<15}  {'WHEN':<12}  {'STEP':>4}  CONF")
+        for r in affected_runs[:10]:
+            run_id = str(r.get("run_id") or "—")[:15]
+            when = _ago(r.get("detected_at"))
+            step = r.get("step_index", "—")
+            conf = r.get("confidence")
+            conf_str = f"{conf:.0%}" if conf is not None else "—"
+            lines.append(f"  {run_id:<15}  {when:<12}  {str(step):>4}  {conf_str}")
+        lines.append("")
+
+    if data.get("root_cause"):
+        lines.append("ROOT CAUSE:")
+        lines.append(f"  {data['root_cause']}")
+        lines.append("")
+
+    if data.get("suggested_fix"):
+        lines.append("SUGGESTED FIX:")
+        lines.append(f"  {data['suggested_fix']}")
+        lines.append("")
+
+    if not data.get("root_cause") and not data.get("suggested_fix"):
+        lines.append(
+            "No root cause/fix available — configure ANTHROPIC_API_KEY or OPENAI_API_KEY "
+            "on the backend, or call trigger_explain on one of the affected runs' signals."
+        )
+        lines.append("")
+
+    code_refs = data.get("code_references") or []
+    lines.append("CODE REFERENCES:")
+    if code_refs:
+        for ref in code_refs:
+            lines.append(f"  {ref}")
+    else:
+        lines.append("  Not available yet — source mapping hasn't been configured for this agent.")
+    lines.append("")
+
+    lines.append(f'To resolve: resolve_issue(issue_id={data["id"]}, resolution_notes="...")')
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def search_issues(
+    query: str = "",
+    status: str = "",
+    agent_id: str = "",
+    failure_type: str = "",
+    limit: int = 20,
+) -> str:
+    """
+    Search issues across ALL agents in your org — for triage across an
+    entire fleet rather than one agent at a time (list_agent_issues is
+    scoped to a single agent).
+
+    `query` is a plain substring match against agent_id/failure_type/
+    resolution_notes — not full-text search or relevance ranking (issues
+    have no free-text title/description field beyond resolution_notes,
+    which is only populated once an issue has been manually resolved).
+
+    Args:
+        query:        Substring to match. Empty matches everything.
+        status:       Filter: 'open', 'resolved', or 'reopened'. Empty = all.
+        agent_id:     Restrict to one agent. Empty = all agents.
+        failure_type: Restrict to one failure type, e.g. TOOL_LOOP. Empty = all.
+        limit:        Max results (default 20).
+    """
+    try:
+        data = client.get(
+            "/v1/issues/search",
+            q=query or None,
+            status=status or None,
+            agent_id=agent_id or None,
+            failure_type=failure_type or None,
+            limit=limit,
+        )
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    issues = data.get("issues", [])
+    total = data.get("page", {}).get("total", len(issues))
+
+    if not issues:
+        return "No issues match these filters."
+
+    lines = [
+        f"Issues matching filters ({total} total, showing {len(issues)}):\n",
+        f"{'ID':>5}  {'AGENT':<20}  {'FAILURE TYPE':<30}  {'LAST SEEN':<12}  {'RUNS':>5}  STATUS",
+        "─" * 95,
+    ]
+    for issue in issues:
+        agent = (issue.get("agent_id") or "—")[:20]
+        ft = (issue.get("failure_type") or "—")[:30]
+        last_seen = _ago(issue.get("last_seen"))
+        count = issue.get("affected_runs", 0)
+        iss_status = issue.get("status", "open")
+        lines.append(
+            f"{issue.get('id'):>5}  {agent:<20}  {ft:<30}  {last_seen:<12}  {count:>5}  {iss_status}"
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def resolve_issue(issue_id: int, resolution_notes: str) -> str:
+    """
+    Manually mark an issue resolved with notes on what fixed it — for when
+    you've made a code/prompt change and want to close the loop, distinct
+    from Dunetrace's automatic resolve-after-5-clean-runs detection.
+
+    If the failure recurs later, the issue reopens automatically regardless
+    of whether it was auto- or manually-resolved — resolution_notes is kept
+    as a historical record either way.
+
+    Args:
+        issue_id:         The integer issue ID to resolve.
+        resolution_notes: What fixed it, e.g. "Added a per-tool call limit
+                           of 3 in the agent's retry loop."
+    """
+    try:
+        client.post(f"/v1/issues/{issue_id}/resolve", {"resolution_notes": resolution_notes})
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    return f"Issue #{issue_id} marked resolved.\nNotes: {resolution_notes}"
+
+
 # ── failure pattern detail tool ───────────────────────────────────────────────
 
 

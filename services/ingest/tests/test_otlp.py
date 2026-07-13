@@ -135,6 +135,19 @@ def test_minimal_root_span_only():
     events = otlp_to_events([_make_resource_span("trace1", [root])])
     types = [e["event_type"] for e in events]
     assert types == ["run.started", "run.completed"]
+
+
+def test_every_event_carries_the_raw_otel_trace_id():
+    """trace_id must be the RAW OTel traceId, not the lossy _trace_to_uuid()
+    conversion used for run_id — external evaluation integrations (Langfuse/
+    LangSmith/Braintrust) correlate against the real trace_id."""
+    root = _span("aaaa", "", "my-agent", 1_000_000_000_000, 2_000_000_000_000)
+    events = otlp_to_events([_make_resource_span("4bf92f3577b34da6a3ce929d0e0e4736", [root])])
+    assert len(events) == 2
+    for e in events:
+        assert e["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
+        assert e["run_id"] == "4bf92f35-77b3-4da6-a3ce-929d0e0e4736"
+        assert e["trace_id"] != e["run_id"]
     assert events[0]["agent_id"] == "my-agent"
     assert events[0]["agent_version"] == "1.0"
 

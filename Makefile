@@ -33,8 +33,14 @@ test-api:
 test-mcp:
 	python -m pytest packages/mcp-server/tests/ -v
 
+test-semantic:
+	PYTHONPATH=services/explainer:services/semantic python -m pytest services/semantic/tests/ -v
+
+test-integrations:
+	PYTHONPATH=services/integrations python -m pytest services/integrations/tests/ -v
+
 test-sdk-ts:
 	cd packages/sdk-ts && npm test
 
 test:
-	$(MAKE) test-schemas test-ingest test-detector test-explainer test-alerts test-api test-mcp test-sdk-ts
+	$(MAKE) test-schemas test-ingest test-detector test-explainer test-alerts test-api test-mcp test-semantic test-integrations test-sdk-ts

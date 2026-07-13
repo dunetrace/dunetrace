@@ -426,6 +426,96 @@ Event timeline:
 
 The prompt token growth across LLM calls (512 → 612 → 710 → 805) is a secondary signal: context is inflating with each redundant search result even though the queries are identical.
 
+Note: `get_run_detail` is the tool for "give me the full trace of this run" — there is no separate `get_run` tool. If you're looking for one by that name, this is it.
+
+---
+
+### `get_issue`
+
+Full context for a single issue — metadata, affected runs, root cause, and a suggested fix. The deep-dive tool for triaging one specific issue found via `search_issues` or `list_agent_issues`.
+
+May trigger an LLM call to generate the root cause/fix (the same native root-cause analysis `trigger_explain` uses) and can take 5–15 seconds. If no LLM key is configured on the backend, `root_cause`/`suggested_fix` are omitted but the rest of the report still returns.
+
+`code_references` (the source file/line an issue maps to) is always empty for now — Dunetrace has no source-mapping capability yet.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `issue_id` | int | The integer issue ID (from `search_issues` or `list_agent_issues`) |
+
+**Example — issue `#7` (`TOOL_LOOP` on `support-bot`):**
+```
+Issue #7: TOOL_LOOP on support-bot
+Status: open  (opened 5d ago, last seen 1h ago)
+Affected runs: 12 total
+
+AFFECTED RUNS (most recent):
+  RUN ID           WHEN          STEP  CONF
+  run-abc123       1h ago           5   90%
+  run-def456       6h ago           3   85%
+
+ROOT CAUSE:
+  The agent loops on web_search without tracking prior queries.
+
+SUGGESTED FIX:
+  Deduplicate web_search calls by argument.
+
+CODE REFERENCES:
+  Not available yet — source mapping hasn't been configured for this agent.
+
+To resolve: resolve_issue(issue_id=7, resolution_notes="...")
+```
+
+---
+
+### `search_issues`
+
+Search issues across ALL agents in your org — for triage across an entire fleet rather than one agent at a time (`list_agent_issues` is scoped to a single agent).
+
+`query` is a plain substring match against `agent_id`/`failure_type`/`resolution_notes` — not full-text search or relevance ranking (issues have no free-text title/description field beyond `resolution_notes`, which is only populated once an issue has been manually resolved via `resolve_issue`).
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `query` | string | Substring to match. Empty matches everything. |
+| `status` | string | `open` \| `resolved` \| `reopened`. Empty = all. |
+| `agent_id` | string | Restrict to one agent. Empty = all agents. |
+| `failure_type` | string | Restrict to one failure type, e.g. `TOOL_LOOP`. Empty = all. |
+| `limit` | int | Max results (default 20). |
+
+**Example:**
+```
+Issues matching filters (2 total, showing 2):
+
+   ID  AGENT                 FAILURE TYPE                    LAST SEEN     RUNS  STATUS
+───────────────────────────────────────────────────────────────────────────────────────
+    7  support-bot           TOOL_LOOP                       1h ago          12  open
+    8  billing-bot           COST_SPIKE                       2h ago           3  reopened
+```
+
+---
+
+### `resolve_issue`
+
+Manually mark an issue resolved with notes on what fixed it — for when you've made a code/prompt change and want to close the loop, distinct from Dunetrace's automatic resolve-after-5-clean-runs detection.
+
+If the failure recurs later, the issue reopens automatically regardless of whether it was auto- or manually-resolved — `resolution_notes` is kept as a historical record either way.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `issue_id` | int | The integer issue ID to resolve |
+| `resolution_notes` | string | What fixed it, e.g. "Added a per-tool call limit of 3." |
+
+**Example:**
+```
+Issue #7 marked resolved.
+Notes: Added a per-tool call limit of 3 in the agent's retry loop.
+```
+
 ---
 
 ### `get_agent_token_stats`

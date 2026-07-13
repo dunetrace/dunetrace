@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from api_svc.auth import require_org
 from api_svc.config import settings
 from api_svc.db.queries import list_runs, get_run_detail
+from api_svc.run_states import reconstruct_states
 from api_svc.schemas import (
     RunDetail,
     RunEvent,
@@ -90,4 +91,24 @@ async def get_run(
         cost_usd=data.get("cost_usd"),
         events=[RunEvent(**e) for e in data["events"]],
         signals=[RunSignal(**s) for s in data["signals"]],
+        conversation_id=data.get("conversation_id"),
     )
+
+
+@router.get(
+    "/v1/runs/{run_id}/states",
+    summary="Reconstruct the run's state-machine timeline from its events",
+)
+async def get_run_states(
+    run_id: str,
+    org_id: str = Depends(require_org),
+) -> dict:
+    # org_id from require_org(), not the URL — reuses get_run_detail's own
+    # org-scoping (returns None for another org's run). See
+    # scripts/check_endpoint_conventions.py.
+    data = await get_run_detail(org_id, run_id)
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Run {run_id!r} not found"
+        )
+    return reconstruct_states(data["events"])

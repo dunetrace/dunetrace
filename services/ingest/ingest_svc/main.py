@@ -134,7 +134,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Dunetrace Ingest API",
-        version="0.1.0",
+        version=settings.APP_VERSION,
         description="Receives agent instrumentation events from the Dunetrace SDK.",
         lifespan=lifespan,
     )

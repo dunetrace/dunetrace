@@ -97,7 +97,7 @@ class TestDeliverSlack(unittest.TestCase):
             patch("alerts_svc.worker.settings") as ms,
             patch(
                 "alerts_svc.worker.send_slack",
-                side_effect=lambda p: (
+                side_effect=lambda p, webhook_url=None: (
                     captured_payload.append(p) or SendResult(True, "slack", 1, 200)
                 ),
             ),
@@ -137,6 +137,86 @@ class TestDeliverSlack(unittest.TestCase):
             ms.webhook_enabled = False
             results = worker_module.deliver(self.exp)
         self.assertEqual(results, {})
+
+
+class TestDeliverDestinationRouting(unittest.TestCase):
+    """Phase 4.1 — per-detector destinations override."""
+
+    def setUp(self):
+        self.exp = make_explanation()
+
+    def test_none_destinations_preserves_pre_4_1_behavior(self):
+        """destinations=None (no detectors.yml override) sends to every
+        globally-enabled destination, exactly as before this option existed."""
+        with (
+            patch("alerts_svc.worker.settings") as ms,
+            patch("alerts_svc.worker.send_slack", return_value=SendResult(True, "slack", 1, 200)),
+            patch(
+                "alerts_svc.worker.send_webhook",
+                return_value=SendResult(True, "webhook", 1, 200),
+            ),
+            patch("alerts_svc.worker.build_signed_request", return_value=(b"{}", {})),
+        ):
+            ms.slack_enabled = True
+            ms.webhook_enabled = True
+            ms.SLACK_MIN_SEVERITY = "LOW"
+            ms.ALERT_DEDUP_WINDOW = 0
+            results = worker_module.deliver(self.exp, signal_id=1, destinations=None)
+
+        self.assertIn("slack", results)
+        self.assertIn("webhook", results)
+
+    def test_destinations_restricts_to_slack_only(self):
+        """destinations=['slack'] must skip webhook even though it's globally enabled."""
+        with (
+            patch("alerts_svc.worker.settings") as ms,
+            patch("alerts_svc.worker.send_slack", return_value=SendResult(True, "slack", 1, 200)),
+            patch("alerts_svc.worker.send_webhook") as mock_webhook,
+        ):
+            ms.slack_enabled = True
+            ms.webhook_enabled = True
+            ms.SLACK_MIN_SEVERITY = "LOW"
+            ms.ALERT_DEDUP_WINDOW = 0
+            results = worker_module.deliver(self.exp, signal_id=1, destinations=["slack"])
+
+        self.assertIn("slack", results)
+        self.assertNotIn("webhook", results)
+        mock_webhook.assert_not_called()
+
+    def test_destinations_restricts_to_webhook_only(self):
+        with (
+            patch("alerts_svc.worker.settings") as ms,
+            patch("alerts_svc.worker.send_slack") as mock_slack,
+            patch(
+                "alerts_svc.worker.send_webhook",
+                return_value=SendResult(True, "webhook", 1, 200),
+            ),
+            patch("alerts_svc.worker.build_signed_request", return_value=(b"{}", {})),
+        ):
+            ms.slack_enabled = True
+            ms.webhook_enabled = True
+            ms.SLACK_MIN_SEVERITY = "LOW"
+            results = worker_module.deliver(self.exp, signal_id=1, destinations=["webhook"])
+
+        self.assertIn("webhook", results)
+        self.assertNotIn("slack", results)
+        mock_slack.assert_not_called()
+
+    def test_destinations_naming_linear_with_no_sender_delivers_nowhere(self):
+        """A detector routed only to 'linear' before Linear delivery exists —
+        same graceful no-op as globally-unconfigured destinations, not an error."""
+        with (
+            patch("alerts_svc.worker.settings") as ms,
+            patch("alerts_svc.worker.send_slack") as mock_slack,
+            patch("alerts_svc.worker.send_webhook") as mock_webhook,
+        ):
+            ms.slack_enabled = True
+            ms.webhook_enabled = True
+            results = worker_module.deliver(self.exp, signal_id=1, destinations=["linear"])
+
+        self.assertEqual(results, {})
+        mock_slack.assert_not_called()
+        mock_webhook.assert_not_called()
 
 
 # ── deliver() — Webhook ────────────────────────────────────────────────────────

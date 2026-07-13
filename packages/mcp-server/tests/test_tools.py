@@ -1662,6 +1662,181 @@ class TestListAgentIssues(unittest.TestCase):
         self.assertIn("No open issues", out)
 
 
+class TestGetIssue(unittest.TestCase):
+    """Smoke tests for get_issue (Phase 4.2)."""
+
+    ISSUE_DETAIL = {
+        "id": 7,
+        "agent_id": "support-bot",
+        "failure_type": "TOOL_LOOP",
+        "status": "open",
+        "first_seen": time.time() - 86400 * 5,
+        "last_seen": time.time() - 3600,
+        "affected_runs_count": 12,
+        "clean_runs_since": 0,
+        "resolution_notes": None,
+        "manually_resolved": False,
+        "affected_runs": [
+            {
+                "run_id": "run-abc123",
+                "detected_at": time.time() - 3600,
+                "step_index": 5,
+                "confidence": 0.9,
+            }
+        ],
+        "root_cause": "The agent loops on web_search without tracking prior queries.",
+        "suggested_fix": "Deduplicate web_search calls by argument.",
+        "code_references": [],
+    }
+
+    def test_shows_issue_id_and_agent(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.ISSUE_DETAIL):
+            out = srv.get_issue(7)
+        self.assertIn("Issue #7", out)
+        self.assertIn("support-bot", out)
+        self.assertIn("TOOL_LOOP", out)
+
+    def test_shows_affected_runs(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.ISSUE_DETAIL):
+            out = srv.get_issue(7)
+        self.assertIn("run-abc123", out)
+
+    def test_shows_root_cause_and_fix(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.ISSUE_DETAIL):
+            out = srv.get_issue(7)
+        self.assertIn("loops on web_search", out)
+        self.assertIn("Deduplicate web_search", out)
+
+    def test_code_references_empty_shows_not_available_note(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.ISSUE_DETAIL):
+            out = srv.get_issue(7)
+        self.assertIn("Not available yet", out)
+
+    def test_missing_root_cause_shows_guidance(self):
+        data = dict(self.ISSUE_DETAIL, root_cause=None, suggested_fix=None)
+        with patch("dunetrace_mcp.client.get", return_value=data):
+            out = srv.get_issue(7)
+        self.assertIn("No root cause/fix available", out)
+
+    def test_resolution_notes_shown_when_manually_resolved(self):
+        data = dict(
+            self.ISSUE_DETAIL,
+            status="resolved",
+            manually_resolved=True,
+            resolution_notes="Added a per-tool call limit.",
+        )
+        with patch("dunetrace_mcp.client.get", return_value=data):
+            out = srv.get_issue(7)
+        self.assertIn("Added a per-tool call limit.", out)
+
+    def test_error_handled_gracefully(self):
+        with patch(
+            "dunetrace_mcp.client.get", side_effect=RuntimeError("API error 404: not found")
+        ):
+            out = srv.get_issue(999)
+        self.assertIn("Error:", out)
+
+
+class TestSearchIssues(unittest.TestCase):
+    """Smoke tests for search_issues (Phase 4.2)."""
+
+    RESULTS = {
+        "issues": [
+            {
+                "id": 7,
+                "agent_id": "support-bot",
+                "failure_type": "TOOL_LOOP",
+                "status": "open",
+                "last_seen": time.time() - 3600,
+                "affected_runs": 12,
+            },
+            {
+                "id": 8,
+                "agent_id": "billing-bot",
+                "failure_type": "COST_SPIKE",
+                "status": "reopened",
+                "last_seen": time.time() - 7200,
+                "affected_runs": 3,
+            },
+        ],
+        "page": {"total": 2, "offset": 0, "limit": 20, "has_more": False},
+    }
+
+    def test_shows_matching_issues_across_agents(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.RESULTS):
+            out = srv.search_issues(query="loop")
+        self.assertIn("support-bot", out)
+        self.assertIn("billing-bot", out)
+        self.assertIn("TOOL_LOOP", out)
+        self.assertIn("COST_SPIKE", out)
+
+    def test_shows_total_count(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.RESULTS):
+            out = srv.search_issues()
+        self.assertIn("2 total", out)
+
+    def test_empty_returns_message(self):
+        with patch("dunetrace_mcp.client.get", return_value={"issues": [], "page": {"total": 0}}):
+            out = srv.search_issues(query="nonexistent")
+        self.assertIn("No issues match", out)
+
+    def test_filters_forwarded_to_client(self):
+        with patch(
+            "dunetrace_mcp.client.get", return_value={"issues": [], "page": {"total": 0}}
+        ) as mock:
+            srv.search_issues(
+                query="loop",
+                status="open",
+                agent_id="support-bot",
+                failure_type="TOOL_LOOP",
+                limit=5,
+            )
+
+        mock.assert_called_once_with(
+            "/v1/issues/search",
+            q="loop",
+            status="open",
+            agent_id="support-bot",
+            failure_type="TOOL_LOOP",
+            limit=5,
+        )
+
+    def test_empty_filters_passed_as_none(self):
+        with patch(
+            "dunetrace_mcp.client.get", return_value={"issues": [], "page": {"total": 0}}
+        ) as mock:
+            srv.search_issues()
+
+        kwargs = mock.call_args.kwargs
+        self.assertIsNone(kwargs["q"])
+        self.assertIsNone(kwargs["status"])
+        self.assertIsNone(kwargs["agent_id"])
+        self.assertIsNone(kwargs["failure_type"])
+
+
+class TestResolveIssue(unittest.TestCase):
+    """Smoke tests for resolve_issue (Phase 4.2)."""
+
+    def test_success_message_includes_notes(self):
+        with patch("dunetrace_mcp.client.post", return_value={"resolved": True, "issue_id": 7}):
+            out = srv.resolve_issue(7, "Added a per-tool call limit.")
+        self.assertIn("Issue #7", out)
+        self.assertIn("resolved", out)
+        self.assertIn("Added a per-tool call limit.", out)
+
+    def test_calls_client_post_with_notes(self):
+        with patch("dunetrace_mcp.client.post", return_value={"resolved": True}) as mock:
+            srv.resolve_issue(7, "Fixed the loop")
+        mock.assert_called_once_with("/v1/issues/7/resolve", {"resolution_notes": "Fixed the loop"})
+
+    def test_error_handled_gracefully(self):
+        with patch(
+            "dunetrace_mcp.client.post", side_effect=RuntimeError("API error 404: not found")
+        ):
+            out = srv.resolve_issue(999, "notes")
+        self.assertIn("Error:", out)
+
+
 class TestAgoISOString(unittest.TestCase):
     """Ensure _ago handles ISO-8601 strings as well as epoch floats."""
 

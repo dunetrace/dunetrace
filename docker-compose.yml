@@ -82,6 +82,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./detectors.yml:/app/detectors.yml:ro
+      - ./docs/config/semantic-evaluators.yml:/app/docs/config/semantic-evaluators.yml:ro
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       POLL_INTERVAL: 10
@@ -92,12 +93,70 @@ services:
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3000}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
       detector:
         condition: service_started
     command: ["python", "-m", "alerts_svc.worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  semantic:
+    build:
+      context: .
+      dockerfile: services/semantic/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./docs/config/semantic-sampling.yml:/app/docs/config/semantic-sampling.yml:ro
+      - ./docs/config/semantic-evaluators.yml:/app/docs/config/semantic-evaluators.yml:ro
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      POLL_INTERVAL: 15
+      SEMANTIC_WORKER_ENABLED: ${SEMANTIC_WORKER_ENABLED:-false}
+      SEMANTIC_LLM_PROVIDER: ${SEMANTIC_LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      HALLUCINATION_MODEL: ${HALLUCINATION_MODEL:-}
+      TASK_COMPLETION_MODEL: ${TASK_COMPLETION_MODEL:-}
+      # audit Finding 17: this env override was dropping /app/packages/sdk-py, so
+      # explainer_svc's `import dunetrace` failed even after the Dockerfile fix.
+      PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/semantic
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+    command: ["python", "-m", "semantic_svc.worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  integrations:
+    build:
+      context: .
+      dockerfile: services/integrations/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      WAKE_INTERVAL: 15
+      INTEGRATIONS_WORKER_ENABLED: ${INTEGRATIONS_WORKER_ENABLED:-false}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+      PYTHONPATH: /app/services/integrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+    command: ["python", "-m", "integrations_svc.worker"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
       interval: 30s
@@ -121,7 +180,11 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_REPO: ${GITHUB_REPO:-}
       GITHUB_BASE_BRANCH: ${GITHUB_BASE_BRANCH:-main}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

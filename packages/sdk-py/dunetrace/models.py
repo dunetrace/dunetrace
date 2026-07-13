@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -33,6 +34,26 @@ class EventType(str, Enum):
     RETRIEVAL_RESPONDED = "retrieval.responded"
     EXTERNAL_SIGNAL = "external.signal"
     POLICY_TRIGGERED = "policy.triggered"
+    # Policy evaluation observability (rate-limited): one record per policy
+    # evaluation, shipped via the normal transport but routed by ingest into the
+    # policy_evaluations table rather than stored as a run event. Kept in sync
+    # with dunetrace_schemas.enums.EventType (test_sdk_parity.py).
+    POLICY_EVALUATED = "policy.evaluated"
+    # Voice-agent events (detector pack "voice"). Additive: emitted only by the
+    # optional voice-specific RunContext helpers; no built-in detector reads
+    # them until the voice pack is active. Kept value-for-value in sync with
+    # dunetrace_schemas.enums.EventType (enforced by test_sdk_parity.py).
+    TRANSCRIPTION_RECEIVED = "transcription.received"
+    TTS_GENERATED = "tts.generated"
+    VOICE_ACTIVITY_DETECTED = "voice_activity.detected"
+    TURN_TAKING = "turn_taking.changed"
+    # Human-in-the-loop approval events (Capability 2). Emitted around a
+    # require_approval policy gate. Kept value-for-value in sync with
+    # dunetrace_schemas.enums.EventType (enforced by test_sdk_parity.py).
+    APPROVAL_REQUESTED = "approval.requested"
+    APPROVAL_GRANTED = "approval.granted"
+    APPROVAL_DENIED = "approval.denied"
+    APPROVAL_TIMEOUT = "approval.timeout"
 
 
 class Severity(str, Enum):
@@ -88,6 +109,13 @@ class AgentEvent:
     timestamp: float = field(default_factory=time.time)
     payload: Dict[str, Any] = field(default_factory=dict)
     parent_run_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    # audit Finding 14: a stable per-event id, generated at construction time so
+    # it survives the durable retry queue unchanged — the ingest side dedups on
+    # it (ON CONFLICT DO NOTHING), so an at-least-once retry never duplicates
+    # events (which would otherwise inflate counts into phantom signals).
+    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -99,6 +127,9 @@ class AgentEvent:
             "timestamp": self.timestamp,
             "payload": self.payload,
             "parent_run_id": self.parent_run_id,
+            "trace_id": self.trace_id,
+            "conversation_id": self.conversation_id,
+            "event_id": self.event_id,
         }
 
 

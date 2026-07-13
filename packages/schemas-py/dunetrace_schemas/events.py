@@ -28,6 +28,11 @@ class AgentEventSchema(BaseModel):
     timestamp: float = Field(default_factory=time.time)
     payload: Dict[str, Any] = Field(default_factory=dict)
     parent_run_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    # audit Finding 14: client-generated dedup id. Optional so older SDK clients
+    # (which don't send it) still validate — those events simply aren't deduped.
+    event_id: Optional[str] = None
 
     @field_validator("event_type")
     @classmethod

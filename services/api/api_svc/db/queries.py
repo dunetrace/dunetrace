@@ -72,6 +72,31 @@ CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
 
 _POLICY_SECURITY_DDL = """
 ALTER TABLE policies ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT '';
+-- Which version of the HMAC canonical form a policy was signed under. Existing
+-- rows default to 1 (the original form); policies using a condition.match
+-- expression block are signed as 2. Verification is driven by this per-row value.
+ALTER TABLE policies ADD COLUMN IF NOT EXISTS sig_version INT NOT NULL DEFAULT 1;
+
+-- Policy evaluation observability (Phase 5). Owned/written by ingest_svc; created
+-- defensively here (IF NOT EXISTS) so the API's read query never fails if the API
+-- happens to start first. Kept in sync with ingest_svc's DDL.
+CREATE TABLE IF NOT EXISTS policy_evaluations (
+    id              BIGSERIAL PRIMARY KEY,
+    org_id          TEXT,
+    policy_id       BIGINT,
+    policy_name     TEXT        NOT NULL DEFAULT '',
+    agent_id        TEXT        NOT NULL DEFAULT '',
+    run_id          TEXT,
+    trigger_name    TEXT,
+    trigger_matched BOOLEAN,
+    fired           BOOLEAN,
+    sampled         BOOLEAN     NOT NULL DEFAULT FALSE,
+    reason          TEXT,
+    conditions      JSONB,
+    evaluated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_policy_evals_policy
+    ON policy_evaluations(org_id, policy_id, evaluated_at DESC);
 
 CREATE TABLE IF NOT EXISTS policy_audit_log (
     id          BIGSERIAL    PRIMARY KEY,
@@ -129,6 +154,12 @@ DO $$ BEGIN
             PRIMARY KEY (org_id, agent_id, failure_type);
     END IF;
 END $$;
+
+-- Phase 4.1 — "Snooze this pattern" Slack button. Independent of fp_count/
+-- confidence_floor/silenced above (snoozing is a deliberate, temporary
+-- human decision — "I know about this, stop paging me for a day" — not
+-- accumulated false-positive feedback). NULL/past means not snoozed.
+ALTER TABLE agent_detector_overrides ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
 """
 
 _KEYS_DDL = """
@@ -179,6 +210,330 @@ CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_
 CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
 """
 
+# Phase 1.4.3 — semantic signal feedback capture. This service creates
+# signal_groups/signal_group_members defensively (IF NOT EXISTS) even though
+# semantic_svc is their primary owner — same dual-creation convention already
+# used for custom_detectors/custom_detector_results (detector_svc + api_svc):
+# whichever service starts first wins, and semantic_svc may never even be
+# enabled (SEMANTIC_WORKER_ENABLED defaults to false) on a given install.
+_SEMANTIC_FEEDBACK_DDL = """
+-- Opt-in per org (default off) — the whole feedback loop (capture +
+-- auto-suppress) is inert until an org turns it on. auto_suppress controls
+-- what happens once a group crosses the false-positive threshold: FALSE
+-- (default) just lowers future confidence by 0.3; TRUE stops writing new
+-- signals for that group entirely. See semantic_svc/worker.py.
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_auto_suppress BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS signal_groups (
+    id                BIGSERIAL    PRIMARY KEY,
+    org_id            TEXT         NOT NULL,
+    agent_id          TEXT         NOT NULL,
+    evaluator         TEXT         NOT NULL,
+    root_cause_hash   TEXT         NOT NULL,
+    root_cause_sample TEXT         NOT NULL,
+    first_seen        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    last_seen         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    signal_count      INTEGER      NOT NULL DEFAULT 0,
+    UNIQUE (org_id, agent_id, evaluator, root_cause_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_signal_groups_org_agent ON signal_groups(org_id, agent_id);
+
+CREATE TABLE IF NOT EXISTS signal_group_members (
+    id         BIGSERIAL   PRIMARY KEY,
+    group_id   BIGINT      NOT NULL REFERENCES signal_groups(id) ON DELETE CASCADE,
+    signal_id  BIGINT      NOT NULL,
+    run_id     TEXT        NOT NULL,
+    added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_signal_group_members_group ON signal_group_members(group_id, added_at DESC);
+CREATE INDEX IF NOT EXISTS idx_signal_group_members_signal ON signal_group_members(signal_id);
+
+-- One row per group that has accumulated false-positive feedback. No row at
+-- all means fp_count=0 — a group is only ever created here once its first
+-- false_positive verdict arrives (see record_signal_feedback).
+CREATE TABLE IF NOT EXISTS signal_group_overrides (
+    group_id   BIGINT      PRIMARY KEY REFERENCES signal_groups(id) ON DELETE CASCADE,
+    fp_count   INTEGER     NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One row per feedback submission (not per group) — (signal_id, org_id,
+-- verdict, notes), exactly the shape in the Phase 1.4 brief. Aggregation
+-- into signal_group_overrides.fp_count happens at write time in
+-- record_signal_feedback, not by re-scanning this table on every read.
+CREATE TABLE IF NOT EXISTS signal_feedback (
+    id         BIGSERIAL   PRIMARY KEY,
+    signal_id  BIGINT      NOT NULL,
+    org_id     TEXT        NOT NULL,
+    verdict    TEXT        NOT NULL,
+    notes      TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_signal_feedback_signal ON signal_feedback(signal_id);
+"""
+
+# Phase 1.5 — semantic evaluation billing/quotas. Defensively duplicated from
+# semantic_svc's own migration (services/semantic/semantic_svc/db.py), same
+# whichever-starts-first convention as _SEMANTIC_FEEDBACK_DDL above — this
+# service's new usage endpoint reads both tables without depending on
+# semantic_svc (which may be disabled entirely, SEMANTIC_WORKER_ENABLED
+# defaults to false) having ever run.
+_SEMANTIC_QUOTA_DDL = """
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_evaluation_quota INTEGER NOT NULL DEFAULT 1000;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS allow_semantic_overage BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS org_semantic_evaluation_usage (
+    org_id     TEXT    NOT NULL,
+    month      TEXT    NOT NULL,
+    eval_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (org_id, month)
+);
+
+CREATE TABLE IF NOT EXISTS semantic_evaluation_log (
+    id                BIGSERIAL   PRIMARY KEY,
+    org_id            TEXT        NOT NULL,
+    agent_id          TEXT        NOT NULL,
+    evaluator         TEXT        NOT NULL,
+    fired             BOOLEAN     NOT NULL,
+    prompt_tokens     INTEGER     NOT NULL,
+    completion_tokens INTEGER     NOT NULL,
+    cost_usd          REAL        NOT NULL,
+    evaluated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_semantic_evaluation_log_org_time ON semantic_evaluation_log(org_id, evaluated_at);
+"""
+
+# Phase 2.1 — external evaluation integrations (Langfuse first; LangSmith/
+# Braintrust reuse this same generic shape in 2.2/2.3, differing only by
+# `provider` and whatever keys their own credentials JSON needs).
+# Primarily owned by integrations_worker's own migration (not yet built as of
+# this PR being the config-CRUD half); duplicated here defensively, same
+# whichever-starts-first convention as every other cross-service table in
+# this schema.
+_INTEGRATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS external_evaluation_integrations (
+    id                    BIGSERIAL    PRIMARY KEY,
+    org_id                TEXT         NOT NULL,
+    provider              TEXT         NOT NULL,
+    endpoint_url          TEXT         NOT NULL,
+    encrypted_credentials TEXT         NOT NULL,
+    poll_interval_secs    INTEGER      NOT NULL DEFAULT 60,
+    enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
+    last_polled_at        TIMESTAMPTZ,
+    last_success_at       TIMESTAMPTZ,
+    consecutive_failures  INTEGER      NOT NULL DEFAULT 0,
+    first_failure_at      TIMESTAMPTZ,
+    last_alerted_at       TIMESTAMPTZ,
+    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (org_id, provider)
+);
+CREATE INDEX IF NOT EXISTS idx_ext_integrations_enabled
+    ON external_evaluation_integrations(enabled) WHERE enabled = TRUE;
+
+-- Dedup: a poll's overlap window (to tolerate the provider's own indexing
+-- lag) will re-fetch evaluations already seen — this is what prevents
+-- writing a duplicate failure_signals row for the same external evaluation.
+CREATE TABLE IF NOT EXISTS external_evaluation_processed (
+    org_id       TEXT        NOT NULL,
+    provider     TEXT        NOT NULL,
+    external_id  TEXT        NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (org_id, provider, external_id)
+);
+"""
+
+_ALERT_INTEGRATIONS_DDL = """
+-- Phase 4.1 — per-org Slack/Linear alert destinations, both bring-your-own
+-- (a customer's own Slack incoming webhook / Linear API key + webhook
+-- secret), same encrypt-at-rest pattern as Phase 2.1's
+-- external_evaluation_integrations. api_svc only ever encrypts (on config
+-- submission) and never decrypts, EXCEPT for Linear's webhook_secret — see
+-- api_svc/crypto.py::decrypt_credentials_for_webhook_verification's
+-- docstring for why that one case is a deliberate, narrow exception.
+-- alerts_svc is the only thing that decrypts webhook_url/api_key, to
+-- actually call Slack/Linear's API.
+CREATE TABLE IF NOT EXISTS org_alert_integrations (
+    id                    BIGSERIAL    PRIMARY KEY,
+    org_id                TEXT         NOT NULL,
+    provider              TEXT         NOT NULL,   -- 'slack' | 'linear'
+    encrypted_credentials TEXT         NOT NULL,   -- slack: {webhook_url}; linear: {api_key, webhook_secret}
+    config_json           JSONB        NOT NULL DEFAULT '{}',  -- slack: {channel}; linear: {team_id, project_id}
+    enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (org_id, provider)
+);
+
+-- Bi-directional sync (Linear issue closed -> Dunetrace signal resolved).
+-- Written by alerts_svc (when it creates a Linear issue for a signal), read
+-- by api_svc's webhook receiver (routers/linear_webhook.py) to find which
+-- signal a given Linear issue corresponds to.
+CREATE TABLE IF NOT EXISTS linear_issue_signals (
+    id              BIGSERIAL    PRIMARY KEY,
+    org_id          TEXT         NOT NULL,
+    signal_id       BIGINT       NOT NULL,
+    linear_issue_id TEXT         NOT NULL,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (linear_issue_id)
+);
+"""
+
+# Phase 4.2 — MCP resolve_issue tool. `issues` is owned by detector_svc
+# (services/detector/detector_svc/db.py); api_svc has only ever read it
+# (list_issues) until now. This service becomes the first WRITER of these
+# two specific columns (via resolve_issue below), so it defensively ensures
+# they exist here — same "whichever service needs a column adds it
+# defensively" convention detector_svc itself already uses for
+# failure_signals.shadow/co_signal_count (owned by ingest_svc).
+# Deliberately orthogonal to the existing auto-resolve/reopen-on-recurrence
+# machinery (clean_runs_since) — a manually-resolved issue still reopens if
+# the failure recurs later, same as an auto-resolved one; these two columns
+# only record how a resolution happened, not a permanent lock.
+#
+# Guarded by an existence check, not a bare ALTER — api_svc doesn't create
+# `issues` itself (detector_svc does), so on a fresh install where
+# detector_svc hasn't started yet, a bare ALTER TABLE would fail with
+# "relation issues does not exist" and crash this service's entire
+# startup, taking down every other endpoint with it. This degrades to a
+# no-op instead, retried (and eventually succeeding) on next restart —
+# same tolerance list_issues already implicitly relies on.
+_ISSUES_RESOLUTION_DDL = """
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'issues') THEN
+        ALTER TABLE issues ADD COLUMN IF NOT EXISTS resolution_notes TEXT;
+        ALTER TABLE issues ADD COLUMN IF NOT EXISTS manually_resolved BOOLEAN NOT NULL DEFAULT FALSE;
+    END IF;
+END $$;
+"""
+
+# Phase 4.3 — GitHub App per-org config. installation_id isn't a secret (an
+# App is one operator-level registration; per-org installs are just
+# identifiers), so unlike the Slack/Linear integrations there's no
+# encrypted_credentials column here at all — a genuine simplification, not
+# an oversight.
+_GITHUB_APP_DDL = """
+CREATE TABLE IF NOT EXISTS org_github_integrations (
+    id               BIGSERIAL    PRIMARY KEY,
+    org_id           TEXT         NOT NULL,
+    installation_id  BIGINT       NOT NULL,
+    repos            JSONB        NOT NULL DEFAULT '[]',
+    reviewers        JSONB        NOT NULL DEFAULT '[]',
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (org_id)
+);
+
+-- Tier-1 explicit source mapping (Phase 4.3). No central `agents` table
+-- exists anywhere in this codebase — same side-table-keyed-by-(org_id,
+-- agent_id) convention agent_semantic_config/agent_detector_overrides
+-- already established.
+CREATE TABLE IF NOT EXISTS agent_source_config (
+    org_id      TEXT         NOT NULL,
+    agent_id    TEXT         NOT NULL,
+    repo        TEXT         NOT NULL,
+    file_path   TEXT,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (org_id, agent_id)
+);
+"""
+
+# failure_signals.source is owned by semantic_svc's migration (added there
+# for Phase 1's semantic evaluators, reused by integrations_svc for
+# Phase 2's external providers) — but Phase 4.4's agent_performance_trends()
+# reads it directly from api_svc, and semantic_svc is disabled by default
+# (SEMANTIC_WORKER_ENABLED). Found via a real 500 (UndefinedColumnError)
+# against a deployment that had never started semantic_svc: api_svc must not
+# assume a column owned by an optional service exists. Defensive
+# ADD COLUMN IF NOT EXISTS, same "whichever starts first wins" convention
+# already used for custom_detectors/custom_detector_results above.
+_PERFORMANCE_TRENDS_DDL = """
+ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'structural';
+"""
+
+# Pack activation (Phase 1.0). detector_svc owns packs (it seeds rows from
+# PACK_REGISTRY at startup and is the sole reader of org_enabled_packs for
+# detector selection) — created here too defensively, same "whichever starts
+# first wins" convention as every other cross-service table, since api_svc
+# is the write path for activation (POST/DELETE /v1/orgs/packs/{name}) and
+# must not assume detector_svc has started first.
+_PACKS_DDL = """
+CREATE TABLE IF NOT EXISTS packs (
+    name           TEXT         PRIMARY KEY,
+    description    TEXT         NOT NULL,
+    detector_names TEXT[]       NOT NULL DEFAULT '{}',
+    added_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS org_enabled_packs (
+    org_id      TEXT         NOT NULL,
+    pack_name   TEXT         NOT NULL REFERENCES packs(name),
+    enabled_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    enabled_by  TEXT,
+    PRIMARY KEY (org_id, pack_name)
+);
+CREATE INDEX IF NOT EXISTS idx_org_enabled_packs_org ON org_enabled_packs(org_id);
+"""
+
+# Human-in-the-loop approvals (Capability 2). org_id TEXT NOT NULL, no FK to
+# organizations(id) — same convention as every other org-scoped table here.
+# status is stored as TEXT (validated against api_svc.approvals.ApprovalStatus
+# in code, not a DB enum, so adding a status later needs no migration).
+_APPROVALS_DDL = """
+CREATE TABLE IF NOT EXISTS approvals (
+    id               BIGSERIAL    PRIMARY KEY,
+    org_id           TEXT         NOT NULL,
+    run_id           TEXT         NOT NULL,
+    agent_id         TEXT         NOT NULL,
+    tool_name        TEXT         NOT NULL,
+    tool_args        TEXT,
+    status           TEXT         NOT NULL DEFAULT 'pending',
+    requested_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    expires_at       TIMESTAMPTZ,
+    decided_at       TIMESTAMPTZ,
+    decided_by       TEXT,
+    decision_channel TEXT,
+    delivered_at     TIMESTAMPTZ
+);
+-- delivered_at: set once alerts_svc has notified a human (Phase 2.3). Added
+-- via ALTER too, so an approvals table created by an earlier build in this
+-- sprint (before delivery existed) gains the column without a manual migration.
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_approvals_org_status ON approvals(org_id, status);
+CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id);
+CREATE INDEX IF NOT EXISTS idx_approvals_undelivered
+    ON approvals(requested_at) WHERE delivered_at IS NULL AND status = 'pending';
+"""
+
+# Per-run state metrics (Capability 3, Phase 3.3). Written by detector_svc,
+# read here for cross-run analytics. Defensive copy (CREATE IF NOT EXISTS) —
+# whichever service starts first wins, same pattern as the packs tables.
+_RUN_STATE_METRICS_DDL = """
+CREATE TABLE IF NOT EXISTS run_state_metrics (
+    run_id         TEXT         NOT NULL,
+    org_id         TEXT         NOT NULL,
+    agent_id       TEXT         NOT NULL,
+    state          TEXT         NOT NULL,
+    total_ms       BIGINT       NOT NULL,
+    segment_count  INT          NOT NULL,
+    run_started_at TIMESTAMPTZ,
+    computed_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (run_id, state)
+);
+CREATE INDEX IF NOT EXISTS idx_rsm_agent
+    ON run_state_metrics(org_id, agent_id, run_started_at);
+"""
+
+
+def _ts(v):
+    """Normalize a DB timestamp (datetime or numeric) to a unix-epoch float, or
+    None. Module-level so every row mapper shares one definition."""
+    if v is None:
+        return None
+    return v.timestamp() if hasattr(v, "timestamp") else float(v)
+
 
 async def init_pool() -> None:
     global _pool
@@ -202,6 +557,16 @@ async def init_pool() -> None:
         await conn.execute(_FEEDBACK_DDL)
         await conn.execute(_KEYS_DDL)
         await conn.execute(_CUSTOM_DETECTORS_DDL)
+        await conn.execute(_SEMANTIC_FEEDBACK_DDL)
+        await conn.execute(_SEMANTIC_QUOTA_DDL)
+        await conn.execute(_INTEGRATIONS_DDL)
+        await conn.execute(_ALERT_INTEGRATIONS_DDL)
+        await conn.execute(_ISSUES_RESOLUTION_DDL)
+        await conn.execute(_GITHUB_APP_DDL)
+        await conn.execute(_PERFORMANCE_TRENDS_DDL)
+        await conn.execute(_PACKS_DDL)
+        await conn.execute(_APPROVALS_DDL)
+        await conn.execute(_RUN_STATE_METRICS_DDL)
     logger.info("DB pool ready")
 
 
@@ -515,6 +880,16 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
             run_id,
         )
 
+        # Phase 3.3 — "part of conversation X" navigation. runs is owned by
+        # detector_svc (Phase 3.1); read directly, same trust relationship
+        # this function already has with processed_runs (no defensive
+        # CREATE TABLE here — this service never writes either table).
+        # NULL for runs that predate this migration or never had a
+        # conversation_id at all, same "instrumentation-dependent, may be
+        # absent" tolerance as trace_id/system_prompt elsewhere.
+        run_row = await conn.fetchrow("SELECT conversation_id FROM runs WHERE run_id = $1", run_id)
+        conversation_id = run_row["conversation_id"] if run_row else None
+
     started_at = next((e["timestamp"] for e in events if e["event_type"] == "run.started"), None)
     completed_at = next(
         (e["timestamp"] for e in events if e["event_type"] in ("run.completed", "run.errored")),
@@ -624,7 +999,179 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         "cost_usd": cost_usd,
         "events": event_list,
         "signals": signal_list,
+        "conversation_id": conversation_id,
     }
+
+
+# ── Conversations (Phase 3.3) ───────────────────────────────────────────────────
+
+
+async def get_conversation_detail(org_id: str, conversation_id: int) -> Optional[dict]:
+    """Conversation metadata + its ordered run list + conversation-level
+    signals. Returns None if the conversation doesn't exist OR belongs to a
+    different org.
+
+    conversations/runs are owned by detector_svc (Phase 3.1) — read directly,
+    same no-defensive-copy trust relationship as processed_runs above."""
+    if not _pool:
+        return None
+
+    async with _pool.acquire() as conn:
+        conv = await conn.fetchrow(
+            """
+            SELECT id, agent_id, user_id, external_id, first_run_at, last_run_at, run_count
+            FROM conversations WHERE id = $1 AND org_id = $2
+            """,
+            conversation_id,
+            org_id,
+        )
+        if not conv:
+            return None
+
+        runs = await conn.fetch(
+            """
+            SELECT run_id, agent_version, started_at
+            FROM runs WHERE conversation_id = $1
+            ORDER BY started_at ASC
+            """,
+            conversation_id,
+        )
+
+        # Generic: any ConversationEvaluator's finding (evidence.conversation_id
+        # present), not hardcoded to USER_FRUSTRATION — a future second
+        # ConversationEvaluator's signals show up here automatically.
+        signals = await conn.fetch(
+            """
+            SELECT id, failure_type, severity, confidence, detected_at, evidence
+            FROM failure_signals
+            WHERE org_id = $1 AND evidence ? 'conversation_id'
+              AND evidence->>'conversation_id' = $2
+            ORDER BY detected_at DESC
+            """,
+            org_id,
+            conv["external_id"],
+        )
+
+    return {
+        "id": conv["id"],
+        "agent_id": conv["agent_id"],
+        "user_id": conv["user_id"],
+        "external_id": conv["external_id"],
+        "first_run_at": conv["first_run_at"].timestamp(),
+        "last_run_at": conv["last_run_at"].timestamp(),
+        "run_count": conv["run_count"],
+        "runs": [
+            {
+                "run_id": r["run_id"],
+                "agent_version": r["agent_version"],
+                "started_at": r["started_at"].timestamp(),
+            }
+            for r in runs
+        ],
+        "signals": [
+            {
+                "id": s["id"],
+                "failure_type": s["failure_type"],
+                "severity": s["severity"],
+                "confidence": s["confidence"],
+                "detected_at": s["detected_at"].timestamp(),
+                "evidence": (
+                    _json_mod.loads(s["evidence"])
+                    if isinstance(s["evidence"], str)
+                    else dict(s["evidence"])
+                ),
+            }
+            for s in signals
+        ],
+    }
+
+
+async def search_conversations(
+    org_id: str,
+    agent_id: Optional[str],
+    user_id: Optional[str],
+    has_frustration_signal: Optional[bool],
+    offset: int,
+    limit: int,
+) -> tuple[list[dict], int]:
+    """Cross-conversation search. All filters optional. has_frustration_signal
+    specifically checks for a USER_FRUSTRATION finding (the one
+    ConversationEvaluator that exists today) — narrower than
+    get_conversation_detail's evaluator-generic signal list, matching what
+    the brief actually asked to search by. Same COUNT-then-paginated-query
+    shape as list_runs, not a fetch-everything-then-slice-in-Python approach.
+
+    user_id filtering is real, correct plumbing but currently a no-op in
+    practice: nothing populates conversations.user_id yet (no SDK parameter
+    for it — see BACKLOG.md's Phase 3.1 entry). Kept here so it starts
+    working the moment a source for it exists, rather than needing this
+    query rewritten later.
+    """
+    if not _pool:
+        return [], 0
+
+    frustration_filter = ""
+    if has_frustration_signal is not None:
+        frustration_filter = "WHERE scored.has_frustration_signal = $4"
+
+    async with _pool.acquire() as conn:
+        count_query = f"""
+            WITH scored AS (
+                SELECT c.id,
+                       EXISTS (
+                           SELECT 1 FROM failure_signals fs
+                           WHERE fs.org_id = c.org_id
+                             AND fs.evidence->>'conversation_id' = c.external_id
+                             AND fs.failure_type = 'USER_FRUSTRATION'
+                       ) AS has_frustration_signal
+                FROM conversations c
+                WHERE c.org_id = $1
+                  AND ($2::text IS NULL OR c.agent_id = $2)
+                  AND ($3::text IS NULL OR c.user_id = $3)
+            )
+            SELECT COUNT(*) FROM scored {frustration_filter}
+        """
+        count_args = [org_id, agent_id, user_id]
+        if has_frustration_signal is not None:
+            count_args.append(has_frustration_signal)
+        total = await conn.fetchval(count_query, *count_args)
+
+        page_query = f"""
+            WITH scored AS (
+                SELECT c.id, c.agent_id, c.user_id, c.external_id, c.last_run_at, c.run_count,
+                       EXISTS (
+                           SELECT 1 FROM failure_signals fs
+                           WHERE fs.org_id = c.org_id
+                             AND fs.evidence->>'conversation_id' = c.external_id
+                             AND fs.failure_type = 'USER_FRUSTRATION'
+                       ) AS has_frustration_signal
+                FROM conversations c
+                WHERE c.org_id = $1
+                  AND ($2::text IS NULL OR c.agent_id = $2)
+                  AND ($3::text IS NULL OR c.user_id = $3)
+            )
+            SELECT * FROM scored {frustration_filter}
+            ORDER BY last_run_at DESC
+            LIMIT ${len(count_args) + 1} OFFSET ${len(count_args) + 2}
+        """
+        page_args = list(count_args) + [limit, offset]
+        rows = await conn.fetch(page_query, *page_args)
+
+    return (
+        [
+            {
+                "id": r["id"],
+                "agent_id": r["agent_id"],
+                "user_id": r["user_id"],
+                "external_id": r["external_id"],
+                "last_run_at": r["last_run_at"].timestamp(),
+                "run_count": r["run_count"],
+                "has_frustration_signal": r["has_frustration_signal"],
+            }
+            for r in rows
+        ],
+        total,
+    )
 
 
 # ── Signals ───────────────────────────────────────────────────────────────────
@@ -642,7 +1189,8 @@ async def get_signal_by_id(org_id: str, signal_id: int) -> Optional[dict]:
             """
             SELECT id, failure_type, severity, run_id, agent_id, agent_version,
                    step_index, confidence, detected_at, evidence, alerted, shadow,
-                   COALESCE(co_signal_count, 0) AS co_signal_count
+                   COALESCE(co_signal_count, 0) AS co_signal_count,
+                   COALESCE(source, 'structural') AS source
             FROM failure_signals
             WHERE id = $1 AND org_id = $2
             """,
@@ -692,6 +1240,7 @@ async def get_signal_by_id(org_id: str, signal_id: int) -> Optional[dict]:
         "alerted": row["alerted"],
         "shadow": row["shadow"],
         "co_signal_count": row["co_signal_count"],
+        "source": row["source"],
         "title": exp.title if exp else row["failure_type"],
         "what": exp.what if exp else "",
         "why_it_matters": exp.why_it_matters if exp else "",
@@ -1008,11 +1557,6 @@ async def agent_version_stats(org_id: str, agent_id: str) -> list:
     if not _pool:
         return []
 
-    def _ts(v):
-        if v is None:
-            return None
-        return v.timestamp() if hasattr(v, "timestamp") else float(v)
-
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -1179,11 +1723,6 @@ async def list_issues(org_id: str, agent_id: str, status: Optional[str] = None) 
     if not _pool:
         return []
 
-    def _ts(v):
-        if v is None:
-            return None
-        return v.timestamp() if hasattr(v, "timestamp") else float(v)
-
     where = "WHERE org_id = $1 AND agent_id = $2"
     params: list = [org_id, agent_id]
     if status:
@@ -1218,6 +1757,166 @@ async def list_issues(org_id: str, agent_id: str, status: Optional[str] = None) 
         }
         for r in rows
     ]
+
+
+# ── Single-issue lookup, search, manual resolve (Phase 4.2 — MCP tools) ─────────
+
+
+async def get_issue_by_id(org_id: str, issue_id: int) -> Optional[dict]:
+    """Single issue by its own id, org-scoped — no such lookup existed
+    before Phase 4.2 (list_issues above is agent-scoped listing only)."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, agent_id, failure_type, status,
+                   first_seen, last_seen, resolved_at,
+                   affected_runs, clean_runs_since,
+                   resolution_notes, manually_resolved
+            FROM issues
+            WHERE id = $1 AND org_id = $2
+            """,
+            issue_id,
+            org_id,
+        )
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "agent_id": row["agent_id"],
+        "failure_type": row["failure_type"],
+        "status": row["status"],
+        "first_seen": _ts(row["first_seen"]),
+        "last_seen": _ts(row["last_seen"]),
+        "resolved_at": _ts(row["resolved_at"]),
+        "affected_runs": int(row["affected_runs"]),
+        "clean_runs_since": int(row["clean_runs_since"]),
+        "resolution_notes": row["resolution_notes"],
+        "manually_resolved": row["manually_resolved"],
+    }
+
+
+async def search_issues(
+    org_id: str,
+    q: str = "",
+    status: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    failure_type: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 20,
+) -> tuple[list[dict], int]:
+    """Cross-agent issue search. `q` is a plain substring match across
+    agent_id/failure_type/resolution_notes — issues have no free-text
+    title/description field, so this is not full-text search or relevance
+    ranking, just a simple filter. Same COUNT-then-paginated-query shape as
+    list_runs/search_conversations."""
+    if not _pool:
+        return [], 0
+
+    where = ["org_id = $1"]
+    params: list = [org_id]
+    if q:
+        params.append(f"%{q}%")
+        where.append(
+            f"(agent_id ILIKE ${len(params)} OR failure_type ILIKE ${len(params)} "
+            f"OR resolution_notes ILIKE ${len(params)})"
+        )
+    if status:
+        params.append(status.lower())
+        where.append(f"status = ${len(params)}")
+    if agent_id:
+        params.append(agent_id)
+        where.append(f"agent_id = ${len(params)}")
+    if failure_type:
+        params.append(failure_type.upper())
+        where.append(f"failure_type = ${len(params)}")
+    where_clause = " AND ".join(where)
+
+    async with _pool.acquire() as conn:
+        total = await conn.fetchval(f"SELECT COUNT(*) FROM issues WHERE {where_clause}", *params)
+
+        rows = await conn.fetch(
+            f"""
+            SELECT id, agent_id, failure_type, status,
+                   first_seen, last_seen, resolved_at,
+                   affected_runs, clean_runs_since,
+                   resolution_notes, manually_resolved
+            FROM issues
+            WHERE {where_clause}
+            ORDER BY last_seen DESC
+            LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+            """,
+            *params,
+            limit,
+            offset,
+        )
+
+    return (
+        [
+            {
+                "id": r["id"],
+                "agent_id": r["agent_id"],
+                "failure_type": r["failure_type"],
+                "status": r["status"],
+                "first_seen": _ts(r["first_seen"]),
+                "last_seen": _ts(r["last_seen"]),
+                "resolved_at": _ts(r["resolved_at"]),
+                "affected_runs": int(r["affected_runs"]),
+                "clean_runs_since": int(r["clean_runs_since"]),
+                "resolution_notes": r["resolution_notes"],
+                "manually_resolved": r["manually_resolved"],
+            }
+            for r in rows
+        ],
+        total,
+    )
+
+
+async def resolve_issue_manually(org_id: str, issue_id: int, resolution_notes: str) -> bool:
+    """Manual resolve (Phase 4.2's resolve_issue MCP tool) — orthogonal to
+    the existing auto-resolve-after-N-clean-runs mechanism (unchanged): a
+    manually-resolved issue still reopens if the failure recurs later, same
+    as an auto-resolved one. Returns False if the issue doesn't exist or
+    belongs to a different org."""
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE issues
+            SET status = 'resolved',
+                resolved_at = NOW(),
+                resolution_notes = $1,
+                manually_resolved = TRUE
+            WHERE id = $2 AND org_id = $3
+            """,
+            resolution_notes,
+            issue_id,
+            org_id,
+        )
+    return result != "UPDATE 0"
+
+
+async def get_most_recent_signal_id(org_id: str, agent_id: str, failure_type: str) -> Optional[int]:
+    """The most recent failure_signals row for this (agent_id, failure_type)
+    pair — used to anchor get_issue's root-cause analysis onto a real
+    signal, since native_explain operates on individual signals, not the
+    aggregated issues row."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            SELECT id FROM failure_signals
+            WHERE org_id = $1 AND agent_id = $2 AND failure_type = $3
+            ORDER BY detected_at DESC
+            LIMIT 1
+            """,
+            org_id,
+            agent_id,
+            failure_type,
+        )
 
 
 async def agent_failure_rates(org_id: str, agent_id: str) -> list:
@@ -1284,11 +1983,6 @@ async def agent_systemic_patterns(org_id: str, agent_id: str, rate_threshold: fl
     """
     if not _pool:
         return []
-
-    def _ts(v):
-        if v is None:
-            return None
-        return v.timestamp() if hasattr(v, "timestamp") else float(v)
 
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
@@ -1358,11 +2052,6 @@ async def agent_deploy_events(org_id: str, agent_id: str) -> list:
             org_id,
             agent_id,
         )
-
-    def _ts(v):
-        if v is None:
-            return None
-        return v.timestamp() if hasattr(v, "timestamp") else float(v)
 
     def _meta(v):
         if not v:
@@ -1692,6 +2381,756 @@ async def record_fix(
     return int(row["id"]) if row else None
 
 
+# ── Semantic feedback (Phase 1.4.3) ────────────────────────────────────────────
+
+
+async def get_organization_semantic_feedback(org_id: str) -> Optional[dict]:
+    """Returns {enabled, auto_suppress} for an org's feedback-loop settings, or
+    None if the org doesn't exist (shouldn't happen for an org that passed
+    require_org, but defensive)."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT semantic_feedback_enabled, semantic_feedback_auto_suppress "
+            "FROM organizations WHERE id = $1",
+            org_id,
+        )
+    if row is None:
+        return None
+    return {
+        "enabled": row["semantic_feedback_enabled"],
+        "auto_suppress": row["semantic_feedback_auto_suppress"],
+    }
+
+
+async def update_organization_semantic_feedback(
+    org_id: str, enabled: bool, auto_suppress: bool
+) -> None:
+    """Toggle an org's opt-in feedback-loop settings (dashboard-facing)."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE organizations SET semantic_feedback_enabled = $2, "
+            "semantic_feedback_auto_suppress = $3 WHERE id = $1",
+            org_id,
+            enabled,
+            auto_suppress,
+        )
+
+
+async def get_org_semantic_usage(org_id: str, month: str) -> dict:
+    """Returns {quota, allow_overage, used_this_month, cost_so_far_usd} for
+    the given 'YYYY-MM' UTC month.
+
+    used_this_month reads org_semantic_evaluation_usage — incremented on
+    every sampled run regardless of per-agent budget config (Phase 1.5), not
+    derived from failure_signals or the per-agent semantic_evaluation_usage
+    table, either of which would undercount. cost_so_far_usd reads
+    semantic_evaluation_log — every evaluate() call, fired or not; see that
+    table's schema comment for why failure_signals alone isn't enough for
+    honest billing math.
+    """
+    defaults = {"quota": 1000, "allow_overage": False}
+    if not _pool:
+        return {**defaults, "used_this_month": 0, "cost_so_far_usd": 0.0}
+
+    async with _pool.acquire() as conn:
+        org_row = await conn.fetchrow(
+            "SELECT semantic_evaluation_quota, allow_semantic_overage FROM organizations WHERE id = $1",
+            org_id,
+        )
+        usage_row = await conn.fetchrow(
+            "SELECT eval_count FROM org_semantic_evaluation_usage WHERE org_id = $1 AND month = $2",
+            org_id,
+            month,
+        )
+        cost_row = await conn.fetchrow(
+            """
+            SELECT COALESCE(SUM(cost_usd), 0.0) AS total_cost
+            FROM semantic_evaluation_log
+            WHERE org_id = $1 AND to_char(evaluated_at, 'YYYY-MM') = $2
+            """,
+            org_id,
+            month,
+        )
+
+    quota = org_row["semantic_evaluation_quota"] if org_row else defaults["quota"]
+    allow_overage = org_row["allow_semantic_overage"] if org_row else defaults["allow_overage"]
+    used_this_month = usage_row["eval_count"] if usage_row else 0
+    cost_so_far_usd = float(cost_row["total_cost"]) if cost_row else 0.0
+
+    return {
+        "quota": quota,
+        "allow_overage": allow_overage,
+        "used_this_month": used_this_month,
+        "cost_so_far_usd": cost_so_far_usd,
+    }
+
+
+# ── External evaluation integrations (Phase 2.1) ───────────────────────────────
+
+
+async def upsert_external_integration(
+    org_id: str,
+    provider: str,
+    endpoint_url: str,
+    encrypted_credentials: str,
+    poll_interval_secs: int,
+) -> int:
+    """Create or replace this org's config for one provider. Replacing
+    (rather than requiring a separate update path) re-encrypts fresh
+    credentials in one call — simplest correct behavior for "I rotated my
+    Langfuse API key." Resets failure tracking, since new credentials
+    deserve a clean slate rather than inheriting a stale outage streak.
+    """
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO external_evaluation_integrations
+                (org_id, provider, endpoint_url, encrypted_credentials, poll_interval_secs)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (org_id, provider) DO UPDATE
+                SET endpoint_url          = EXCLUDED.endpoint_url,
+                    encrypted_credentials = EXCLUDED.encrypted_credentials,
+                    poll_interval_secs    = EXCLUDED.poll_interval_secs,
+                    enabled               = TRUE,
+                    consecutive_failures  = 0,
+                    first_failure_at      = NULL,
+                    updated_at            = NOW()
+            RETURNING id
+            """,
+            org_id,
+            provider,
+            endpoint_url,
+            encrypted_credentials,
+            poll_interval_secs,
+        )
+    return row["id"]
+
+
+async def get_external_integration_status(org_id: str, provider: str) -> Optional[dict]:
+    """Configuration + health status — never the credential itself, even
+    encrypted. `configured` distinguishes "never set up" (None) from "set up
+    but currently failing" (a real status dict with consecutive_failures > 0)."""
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT endpoint_url, poll_interval_secs, enabled, last_polled_at,
+                   last_success_at, consecutive_failures
+            FROM external_evaluation_integrations
+            WHERE org_id = $1 AND provider = $2
+            """,
+            org_id,
+            provider,
+        )
+    if row is None:
+        return None
+    return {
+        "endpoint_url": row["endpoint_url"],
+        "poll_interval_secs": row["poll_interval_secs"],
+        "enabled": row["enabled"],
+        "last_polled_at": row["last_polled_at"],
+        "last_success_at": row["last_success_at"],
+        "consecutive_failures": row["consecutive_failures"],
+    }
+
+
+async def delete_external_integration(org_id: str, provider: str) -> bool:
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM external_evaluation_integrations WHERE org_id = $1 AND provider = $2",
+            org_id,
+            provider,
+        )
+    return result != "DELETE 0"
+
+
+# ── Alert destination integrations (Phase 4.1) ─────────────────────────────────
+
+
+async def upsert_org_alert_integration(
+    org_id: str,
+    provider: str,
+    encrypted_credentials: str,
+    config_json: dict,
+) -> int:
+    """Create or replace this org's config for one alert destination
+    (slack | linear). Same replace-not-update-in-place semantics as Phase
+    2.1's upsert_external_integration — rotating a customer's webhook URL
+    or API key should just work with one call."""
+    if not _pool:
+        return 0
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO org_alert_integrations (org_id, provider, encrypted_credentials, config_json)
+            VALUES ($1, $2, $3, $4::jsonb)
+            ON CONFLICT (org_id, provider) DO UPDATE
+                SET encrypted_credentials = EXCLUDED.encrypted_credentials,
+                    config_json           = EXCLUDED.config_json,
+                    enabled               = TRUE,
+                    updated_at            = NOW()
+            RETURNING id
+            """,
+            org_id,
+            provider,
+            encrypted_credentials,
+            _json_mod.dumps(config_json),
+        )
+    return row["id"]
+
+
+async def get_org_alert_integration_status(org_id: str, provider: str) -> Optional[dict]:
+    """Configuration + enabled status — never the credential itself, even
+    encrypted (matches Phase 2.1's own GET semantics)."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT config_json, enabled FROM org_alert_integrations WHERE org_id = $1 AND provider = $2",
+            org_id,
+            provider,
+        )
+    if row is None:
+        return None
+    config = row["config_json"]
+    return {
+        "config": _json_mod.loads(config) if isinstance(config, str) else dict(config),
+        "enabled": row["enabled"],
+    }
+
+
+async def delete_org_alert_integration(org_id: str, provider: str) -> bool:
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM org_alert_integrations WHERE org_id = $1 AND provider = $2",
+            org_id,
+            provider,
+        )
+    return result != "DELETE 0"
+
+
+# ── GitHub App integration + source mapping (Phase 4.3) ────────────────────────
+
+
+async def upsert_org_github_installation(org_id: str, installation_id: int) -> None:
+    """Called by the install-flow callback once GitHub redirects back with
+    a real installation_id. repos/reviewers start empty — a separate config
+    call (set_org_github_config) fills those in."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO org_github_integrations (org_id, installation_id)
+            VALUES ($1, $2)
+            ON CONFLICT (org_id) DO UPDATE
+                SET installation_id = EXCLUDED.installation_id,
+                    updated_at      = NOW()
+            """,
+            org_id,
+            installation_id,
+        )
+
+
+async def set_org_github_config(org_id: str, repos: list, reviewers: list) -> bool:
+    """Returns False if this org has no installation yet (install must
+    happen before config — there's nothing to configure otherwise)."""
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE org_github_integrations
+            SET repos = $1::jsonb, reviewers = $2::jsonb, updated_at = NOW()
+            WHERE org_id = $3
+            """,
+            _json_mod.dumps(repos),
+            _json_mod.dumps(reviewers),
+            org_id,
+        )
+    return result != "UPDATE 0"
+
+
+async def get_org_github_integration(org_id: str) -> Optional[dict]:
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT installation_id, repos, reviewers FROM org_github_integrations WHERE org_id = $1",
+            org_id,
+        )
+    if row is None:
+        return None
+    repos = row["repos"]
+    reviewers = row["reviewers"]
+    return {
+        "installation_id": row["installation_id"],
+        "repos": _json_mod.loads(repos) if isinstance(repos, str) else list(repos),
+        "reviewers": _json_mod.loads(reviewers) if isinstance(reviewers, str) else list(reviewers),
+    }
+
+
+async def delete_org_github_integration(org_id: str) -> bool:
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM org_github_integrations WHERE org_id = $1", org_id)
+    return result != "DELETE 0"
+
+
+# ── Pack activation (Phase 1.0) ─────────────────────────────────────────────────
+
+
+async def list_all_packs() -> list[dict]:
+    """Every registered pack, regardless of activation status anywhere.
+    detector_svc seeds this table from PACK_REGISTRY at startup — api_svc
+    never writes to it, only reads it to validate a pack_name exists and to
+    serve GET /v1/packs."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT name, description, detector_names, added_at FROM packs ORDER BY name"
+        )
+    return [dict(r) for r in rows]
+
+
+async def pack_exists(pack_name: str) -> bool:
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        return bool(await conn.fetchval("SELECT 1 FROM packs WHERE name = $1", pack_name))
+
+
+async def list_org_enabled_packs(org_id: str) -> list[dict]:
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT pack_name, enabled_at, enabled_by
+            FROM org_enabled_packs
+            WHERE org_id = $1
+            ORDER BY pack_name
+            """,
+            org_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def activate_pack(org_id: str, pack_name: str, enabled_by: Optional[str]) -> None:
+    """Idempotent — activating an already-active pack just refreshes
+    enabled_at/enabled_by rather than erroring, since re-activation isn't a
+    meaningfully different action from the caller's point of view."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO org_enabled_packs (org_id, pack_name, enabled_by)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (org_id, pack_name) DO UPDATE
+                SET enabled_at = NOW(),
+                    enabled_by = EXCLUDED.enabled_by
+            """,
+            org_id,
+            pack_name,
+            enabled_by,
+        )
+
+
+async def deactivate_pack(org_id: str, pack_name: str) -> bool:
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM org_enabled_packs WHERE org_id = $1 AND pack_name = $2",
+            org_id,
+            pack_name,
+        )
+    return result != "DELETE 0"
+
+
+# ── State analytics (Capability 3, Phase 3.3) ───────────────────────────────
+
+
+async def agent_state_analytics(org_id: str, agent_id: str, window_days: int = 30) -> dict:
+    """Fetch this agent's run_state_metrics within the window and reduce them to
+    the analytics payload (aggregates, trends, outliers) via the pure module."""
+    from datetime import datetime, timedelta, timezone
+
+    from api_svc.state_analytics import compute_state_analytics
+
+    if not _pool:
+        return compute_state_analytics([], window_days=window_days)
+
+    since = datetime.now(timezone.utc) - timedelta(days=window_days)
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT run_id, state, total_ms, run_started_at
+            FROM run_state_metrics
+            WHERE org_id = $1 AND agent_id = $2
+              AND (run_started_at IS NULL OR run_started_at >= $3)
+            """,
+            org_id,
+            agent_id,
+            since,
+        )
+    return compute_state_analytics([dict(r) for r in rows], window_days=window_days)
+
+
+# ── Approvals (Capability 2, Phase 2.1) ─────────────────────────────────────
+
+
+async def create_approval(
+    org_id: str,
+    run_id: str,
+    agent_id: str,
+    tool_name: str,
+    tool_args: Optional[str],
+    expires_at,
+) -> Optional[dict]:
+    """Insert a pending approval and return the created row (including its id),
+    or None if the pool isn't up."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO approvals (org_id, run_id, agent_id, tool_name, tool_args, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, org_id, run_id, agent_id, tool_name, tool_args,
+                      status, requested_at, expires_at, decided_at, decided_by,
+                      decision_channel
+            """,
+            org_id,
+            run_id,
+            agent_id,
+            tool_name,
+            tool_args,
+            expires_at,
+        )
+    return dict(row) if row else None
+
+
+async def list_approvals(org_id: str, status: Optional[str] = None, limit: int = 100) -> list[dict]:
+    """Approvals for this org, newest first, optionally filtered by status.
+    Org-scoped so the dashboard only ever sees its own org's approvals."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, org_id, run_id, agent_id, tool_name, tool_args, status,
+                   requested_at, expires_at, decided_at, decided_by, decision_channel
+            FROM approvals
+            WHERE org_id = $1 AND ($2::text IS NULL OR status = $2)
+            ORDER BY requested_at DESC
+            LIMIT $3
+            """,
+            org_id,
+            status,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_approval(org_id: str, approval_id: int) -> Optional[dict]:
+    """Fetch one approval, scoped to org_id so one org can't read another's."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, org_id, run_id, agent_id, tool_name, tool_args, status,
+                   requested_at, expires_at, decided_at, decided_by, decision_channel
+            FROM approvals
+            WHERE org_id = $1 AND id = $2
+            """,
+            org_id,
+            approval_id,
+        )
+    return dict(row) if row else None
+
+
+async def set_approval_decision(
+    org_id: str,
+    approval_id: int,
+    new_status: str,
+    decided_by: Optional[str],
+    decision_channel: Optional[str],
+) -> Optional[dict]:
+    """Move a *pending* approval to a terminal status. The `status = 'pending'`
+    guard in the WHERE clause makes this a no-op on an already-decided approval
+    (late Slack click, double submit) — it returns None rather than overwriting
+    the recorded outcome. Caller should treat None as 'already decided or not
+    found' and re-read to see the actual state. Transition legality is enforced
+    here structurally (only pending → terminal is reachable); the full rule set
+    lives in api_svc.approvals.is_valid_transition()."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE approvals
+            SET status = $3,
+                decided_at = NOW(),
+                decided_by = $4,
+                decision_channel = $5
+            WHERE org_id = $1 AND id = $2 AND status = 'pending'
+            RETURNING id, org_id, run_id, agent_id, tool_name, tool_args, status,
+                      requested_at, expires_at, decided_at, decided_by, decision_channel
+            """,
+            org_id,
+            approval_id,
+            new_status,
+            decided_by,
+            decision_channel,
+        )
+    return dict(row) if row else None
+
+
+async def upsert_agent_source_config(
+    org_id: str, agent_id: str, repo: str, file_path: Optional[str]
+) -> None:
+    """Tier-1 explicit source mapping. file_path may be omitted (repo-only)
+    — see source_resolution.py for how that combines with tier-2 SDK
+    auto-detection."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_source_config (org_id, agent_id, repo, file_path)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (org_id, agent_id) DO UPDATE
+                SET repo       = EXCLUDED.repo,
+                    file_path  = EXCLUDED.file_path,
+                    updated_at = NOW()
+            """,
+            org_id,
+            agent_id,
+            repo,
+            file_path,
+        )
+
+
+async def get_agent_source_config(org_id: str, agent_id: str) -> Optional[dict]:
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT repo, file_path FROM agent_source_config WHERE org_id = $1 AND agent_id = $2",
+            org_id,
+            agent_id,
+        )
+    return {"repo": row["repo"], "file_path": row["file_path"]} if row else None
+
+
+async def delete_agent_source_config(org_id: str, agent_id: str) -> bool:
+    if not _pool:
+        return False
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM agent_source_config WHERE org_id = $1 AND agent_id = $2",
+            org_id,
+            agent_id,
+        )
+    return result != "DELETE 0"
+
+
+async def get_latest_run_started_payload(org_id: str, agent_id: str) -> Optional[dict]:
+    """Most recent run.started event's payload for this agent — used to
+    read the SDK's tier-2 auto-detected source_file (see
+    packages/sdk-py/dunetrace/run_context.py), the same way native_explain
+    already reads system_prompt off this same event."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT payload FROM events
+            WHERE org_id = $1 AND agent_id = $2 AND event_type = 'run.started'
+            ORDER BY received_at DESC
+            LIMIT 1
+            """,
+            org_id,
+            agent_id,
+        )
+    if row is None:
+        return None
+    payload = row["payload"]
+    return _json_mod.loads(payload) if isinstance(payload, str) else dict(payload)
+
+
+async def get_org_linear_webhook_secret(org_id: str) -> Optional[str]:
+    """Returns the encrypted_credentials token for this org's Linear
+    integration, for routers/linear_webhook.py to decrypt (see
+    api_svc/crypto.py::decrypt_credentials_for_webhook_verification's
+    docstring — this is the one deliberate exception to api_svc's
+    encrypt-only rule)."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT encrypted_credentials FROM org_alert_integrations "
+            "WHERE org_id = $1 AND provider = 'linear' AND enabled = TRUE",
+            org_id,
+        )
+
+
+async def get_signal_id_for_linear_issue(linear_issue_id: str) -> Optional[dict]:
+    """Returns {org_id, signal_id} for a Linear issue previously created by
+    alerts_svc (see alerts_svc/db.py::record_linear_issue_mapping), or None
+    if this issue wasn't one Dunetrace created."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT org_id, signal_id FROM linear_issue_signals WHERE linear_issue_id = $1",
+            linear_issue_id,
+        )
+    return dict(row) if row else None
+
+
+# ── Generic external signal push (Phase 2.4) ───────────────────────────────────
+
+
+async def has_processed_external(org_id: str, provider: str, external_id: str) -> bool:
+    """Reuses the same external_evaluation_processed table Phase 2.1-2.3's
+    pull integrations use for dedup, keyed the same way — a push caller's
+    own external_id plays the same idempotency-key role a pulled score's own
+    id does."""
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM external_evaluation_processed "
+            "WHERE org_id = $1 AND provider = $2 AND external_id = $3)",
+            org_id,
+            provider,
+            external_id,
+        )
+
+
+async def mark_processed_external(org_id: str, provider: str, external_id: str) -> None:
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO external_evaluation_processed (org_id, provider, external_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (org_id, provider, external_id) DO NOTHING
+            """,
+            org_id,
+            provider,
+            external_id,
+        )
+
+
+async def fetch_run_by_trace_id_for_org(org_id: str, trace_id: str) -> Optional[dict]:
+    """Correlates a pushed evaluation back to the Dunetrace run it's about —
+    scoped to the caller's own org_id, unlike integrations_svc's
+    fetch_run_by_trace_id (which trusts that a configured pull integration
+    only ever sees its own org's trace_ids). This endpoint takes a
+    caller-supplied trace_id directly over the wire, so it deliberately
+    doesn't extend that same trust — a customer must not be able to probe
+    for another org's trace_id by reading this endpoint's response."""
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT run_id, agent_id, agent_version
+            FROM events
+            WHERE trace_id = $1 AND org_id = $2
+            LIMIT 1
+            """,
+            trace_id,
+            org_id,
+        )
+    return dict(row) if row else None
+
+
+async def write_pushed_external_signal(
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    run_id: str,
+    provider: str,
+    failure_type: str,
+    confidence: float,
+    evidence: dict,
+) -> int:
+    """Same shadow=FALSE convention Phase 2.1's write_external_signal
+    established — the caller explicitly pushed this evaluation, so they're
+    trusted to have judged its quality. Returns the new row's id (unlike the
+    pull-integration version, which has no caller waiting on a response to
+    hand it back to)."""
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO failure_signals
+                (failure_type, severity, run_id, agent_id, agent_version,
+                 step_index, confidence, evidence, shadow, co_signal_count, org_id, source)
+            VALUES ($1, 'MEDIUM', $2, $3, $4, 0, $5, $6::jsonb, FALSE, 0, $7, $8)
+            RETURNING id
+            """,
+            failure_type,
+            run_id,
+            agent_id,
+            agent_version,
+            confidence,
+            _json_mod.dumps(evidence),
+            org_id,
+            provider,
+        )
+    return row["id"]
+
+
+async def record_signal_feedback(
+    signal_id: int, org_id: str, verdict: str, notes: Optional[str]
+) -> int:
+    """Records one feedback submission, and — for a false_positive verdict —
+    increments the false-positive counter for whichever signal_group this
+    signal belongs to (via signal_group_members). A signal with no group yet
+    (e.g. written before Phase 1.4.2 shipped) simply doesn't affect any
+    group's count; the feedback row itself is still recorded either way.
+    Returns the new signal_feedback row's id.
+    """
+    async with _pool.acquire() as conn:
+        async with conn.transaction():
+            feedback_id = await conn.fetchval(
+                """
+                INSERT INTO signal_feedback (signal_id, org_id, verdict, notes)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
+                """,
+                signal_id,
+                org_id,
+                verdict,
+                notes,
+            )
+            if verdict == "false_positive":
+                group_id = await conn.fetchval(
+                    "SELECT group_id FROM signal_group_members WHERE signal_id = $1",
+                    signal_id,
+                )
+                if group_id is not None:
+                    await conn.execute(
+                        """
+                        INSERT INTO signal_group_overrides (group_id, fp_count)
+                        VALUES ($1, 1)
+                        ON CONFLICT (group_id) DO UPDATE
+                            SET fp_count   = signal_group_overrides.fp_count + 1,
+                                updated_at = NOW()
+                        """,
+                        group_id,
+                    )
+    return feedback_id
+
+
 async def get_signal_fix_status(
     org_id: str,
     agent_id: str,
@@ -1789,9 +3228,50 @@ def _policy_row(r: Any) -> dict:
         "enabled": r["enabled"],
         "priority": r["priority"],
         "signature": r.get("signature", "") or "",
+        "sig_version": r.get("sig_version", 1) or 1,
         "created_at": ca.timestamp() if hasattr(ca, "timestamp") else ca,
         "updated_at": ua.timestamp() if hasattr(ua, "timestamp") else ua,
     }
+
+
+def _policy_canonical(
+    version: int,
+    policy_id: int,
+    agent_id: str,
+    name: str,
+    condition: dict,
+    action: dict,
+    enabled: bool,
+    priority: int,
+) -> str:
+    """Versioned canonical string for the policy HMAC. MUST stay in exact sync
+    with the SDK's ``_policy_canonical`` (dunetrace/policies/__init__.py):
+      v1 — original 7 fields, null-byte separated (byte-identical to pre-feature).
+      v2 — same fields with an authenticated "v2" domain-separation prefix; used
+           for policies carrying a condition.match expression block.
+    condition is JSON-dumped with sort_keys, so the nested `match` block is
+    already covered by the signature under either version."""
+    fields = [
+        str(policy_id),
+        agent_id,
+        name,
+        _json_mod.dumps(condition, sort_keys=True),
+        _json_mod.dumps(action, sort_keys=True),
+        str(enabled),
+        str(priority),
+    ]
+    if version >= 2:
+        fields.insert(0, "v%d" % version)
+    return "\x00".join(fields)
+
+
+def _sig_version_for(condition: dict) -> int:
+    """The minimum canonical-form version representing this condition: v2 when it
+    uses a `match` expression block, else v1 (keeps legacy policies byte-identical
+    and older SDKs able to verify them)."""
+    if isinstance(condition, dict) and condition.get("match") is not None:
+        return 2
+    return 1
 
 
 def _sign_policy(
@@ -1803,26 +3283,20 @@ def _sign_policy(
     enabled: bool,
     priority: int,
     secret: str,
-) -> str:
-    """HMAC-SHA256 over canonical policy fields. Returns '' when secret is empty (dev mode).
+) -> tuple:
+    """HMAC-SHA256 over the versioned canonical policy fields. Returns
+    ``(signature, sig_version)``; signature is '' when secret is empty (dev mode),
+    but sig_version is still reported so it can be recorded consistently.
 
-    Uses null-byte field separator to prevent ambiguity from colons in agent_id or name.
     Must stay in sync with _verify_policy_signature in the SDK's policies.py.
     """
+    version = _sig_version_for(condition)
     if not secret:
-        return ""
-    canonical = "\x00".join(
-        [
-            str(policy_id),
-            agent_id,
-            name,
-            _json_mod.dumps(condition, sort_keys=True),
-            _json_mod.dumps(action, sort_keys=True),
-            str(enabled),
-            str(priority),
-        ]
+        return "", version
+    canonical = _policy_canonical(
+        version, policy_id, agent_id, name, condition, action, enabled, priority
     )
-    return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest(), version
 
 
 async def log_policy_audit(
@@ -1876,6 +3350,52 @@ async def get_policy_by_id(org_id: str, policy_id: int) -> Optional[dict]:
     return _policy_row(row) if row else None
 
 
+def _policy_eval_row(r: Any) -> dict:
+    import json as _json
+
+    conds = r["conditions"]
+    if isinstance(conds, str):
+        conds = _json.loads(conds)
+    ea = r["evaluated_at"]
+    return {
+        "id": r["id"],
+        "policy_id": r["policy_id"],
+        "policy_name": r["policy_name"],
+        "agent_id": r["agent_id"],
+        "run_id": r["run_id"],
+        "trigger": r["trigger_name"],
+        "trigger_matched": r["trigger_matched"],
+        "fired": r["fired"],
+        "sampled": r["sampled"],
+        "reason": r["reason"],
+        "conditions": conds if conds is not None else [],
+        "evaluated_at": ea.timestamp() if hasattr(ea, "timestamp") else ea,
+    }
+
+
+async def fetch_policy_evaluations(org_id: str, policy_id: int, limit: int = 100) -> list:
+    """Recent policy.evaluated observability records for one policy, newest
+    first. Powers GET /v1/policies/{id}/evaluations — the "why did/didn't my
+    policy fire?" debug view. Org-scoped so one org can't read another's."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, policy_id, policy_name, agent_id, run_id, trigger_name,
+                   trigger_matched, fired, sampled, reason, conditions, evaluated_at
+            FROM policy_evaluations
+            WHERE org_id = $1 AND policy_id = $2
+            ORDER BY evaluated_at DESC
+            LIMIT $3
+            """,
+            org_id,
+            policy_id,
+            limit,
+        )
+    return [_policy_eval_row(r) for r in rows]
+
+
 async def create_policy(
     org_id: str,
     name: str,
@@ -1908,7 +3428,7 @@ async def create_policy(
             # tenancy filter, not part of the policy's cryptographic identity, and
             # must stay out of the canonical string so existing signed policies
             # (and the SDK's _verify_policy_signature) don't need to be re-signed.
-            sig = _sign_policy(
+            sig, sig_version = _sign_policy(
                 row["id"],
                 agent_id,
                 name,
@@ -1919,8 +3439,9 @@ async def create_policy(
                 settings.POLICY_SIGNING_SECRET,
             )
             row = await conn.fetchrow(
-                "UPDATE policies SET signature = $1 WHERE id = $2 RETURNING *",
+                "UPDATE policies SET signature = $1, sig_version = $2 WHERE id = $3 RETURNING *",
                 sig,
+                sig_version,
                 row["id"],
             )
     return _policy_row(row)
@@ -1967,7 +3488,7 @@ async def update_policy(org_id: str, policy_id: int, fields: dict) -> dict:
                 cond = _json_mod.loads(cond)
             if isinstance(act, str):
                 act = _json_mod.loads(act)
-            sig = _sign_policy(
+            sig, sig_version = _sign_policy(
                 row["id"],
                 row["agent_id"],
                 row["name"],
@@ -1978,8 +3499,9 @@ async def update_policy(org_id: str, policy_id: int, fields: dict) -> dict:
                 settings.POLICY_SIGNING_SECRET,
             )
             row = await conn.fetchrow(
-                "UPDATE policies SET signature = $1 WHERE id = $2 RETURNING *",
+                "UPDATE policies SET signature = $1, sig_version = $2 WHERE id = $3 RETURNING *",
                 sig,
+                sig_version,
                 policy_id,
             )
     return _policy_row(row)
@@ -2729,6 +4251,245 @@ async def agent_user_impact(org_id: str, agent_id: str) -> list:
     ]
 
 
+# ── Performance trends (Phase 4.4) ──────────────────────────────────────────────
+
+
+async def agent_performance_trends(org_id: str, agent_id: str, window_days: int) -> dict:
+    """
+    Per-agent performance trends: daily time series (structural/semantic
+    signal rate, cost, latency), failure-mode deltas (current window_days vs
+    the immediately preceding window_days), and a self-baseline comparison
+    (ALWAYS last 30 days vs this agent's own rate 90-30 days ago — the same
+    fixed reference get_agent_health_score uses, independent of window_days;
+    see performance_trends.py's module docstring for why it's pinned rather
+    than parameterized).
+
+    All arithmetic lives in api_svc/performance_trends.py (pure, unit-tested
+    without a DB) — this function only fetches raw rows and hands them over.
+    """
+    empty = {"points": [], "failure_mode_deltas": [], "baseline_comparisons": []}
+    if not _pool:
+        return empty
+
+    from api_svc.performance_trends import (
+        build_day_buckets,
+        compute_baseline_comparisons,
+        compute_daily_points,
+        compute_failure_mode_deltas,
+    )
+    from explainer_svc.cost import estimate_cost
+
+    window_str = str(window_days)
+    double_window_str = str(window_days * 2)
+
+    async with _pool.acquire() as conn:
+        runs_rows = await conn.fetch(
+            """
+            SELECT DATE_TRUNC('day', processed_at AT TIME ZONE 'UTC')::date AS day,
+                   COUNT(DISTINCT run_id)::int AS total_runs
+            FROM processed_runs
+            WHERE org_id = $1 AND agent_id = $2
+              AND processed_at >= NOW() - ($3 || ' days')::interval
+            GROUP BY day
+            """,
+            org_id,
+            agent_id,
+            window_str,
+        )
+        runs_by_day = {str(r["day"]): r["total_runs"] for r in runs_rows}
+
+        signal_rows = await conn.fetch(
+            """
+            SELECT DATE_TRUNC('day', pr.processed_at AT TIME ZONE 'UTC')::date AS day,
+                   (fs.source = 'structural') AS is_structural,
+                   COUNT(DISTINCT fs.run_id)::int AS affected_runs
+            FROM processed_runs pr
+            JOIN failure_signals fs
+                ON fs.run_id = pr.run_id AND fs.org_id = pr.org_id AND fs.agent_id = pr.agent_id
+            WHERE pr.org_id = $1 AND pr.agent_id = $2
+              AND fs.shadow = FALSE
+              AND pr.processed_at >= NOW() - ($3 || ' days')::interval
+            GROUP BY day, is_structural
+            """,
+            org_id,
+            agent_id,
+            window_str,
+        )
+        structural_by_day: dict = {}
+        semantic_by_day: dict = {}
+        for r in signal_rows:
+            day = str(r["day"])
+            (structural_by_day if r["is_structural"] else semantic_by_day)[day] = r["affected_runs"]
+
+        token_rows = await conn.fetch(
+            """
+            SELECT e.run_id,
+                   DATE_TRUNC('day', pr.processed_at AT TIME ZONE 'UTC')::date AS day,
+                   MAX(CASE WHEN e.event_type = 'llm.called' THEN e.payload->>'model' END) AS model,
+                   SUM(COALESCE((e.payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
+                   SUM(CASE WHEN e.event_type = 'llm.responded'
+                            THEN COALESCE((e.payload->>'completion_tokens')::int, 0) ELSE 0 END)
+                       AS completion_tokens
+            FROM events e
+            JOIN processed_runs pr
+                ON pr.run_id = e.run_id AND pr.org_id = e.org_id AND pr.agent_id = e.agent_id
+            WHERE e.org_id = $1 AND e.agent_id = $2
+              AND e.event_type IN ('llm.called', 'llm.responded')
+              AND pr.processed_at >= NOW() - ($3 || ' days')::interval
+            GROUP BY e.run_id, day
+            """,
+            org_id,
+            agent_id,
+            window_str,
+        )
+        cost_by_day: dict = {}
+        for r in token_rows:
+            day = str(r["day"])
+            cost = estimate_cost(
+                r["model"] or "unknown",
+                int(r["prompt_tokens"] or 0),
+                int(r["completion_tokens"] or 0),
+            )
+            cost_by_day[day] = cost_by_day.get(day, 0.0) + cost
+
+        latency_rows = await conn.fetch(
+            """
+            SELECT DATE_TRUNC('day', pr.processed_at AT TIME ZONE 'UTC')::date AS day,
+                   AVG((e.payload->>'latency_ms')::float) AS avg_latency_ms
+            FROM events e
+            JOIN processed_runs pr
+                ON pr.run_id = e.run_id AND pr.org_id = e.org_id AND pr.agent_id = e.agent_id
+            WHERE e.org_id = $1 AND e.agent_id = $2
+              AND e.event_type = 'llm.responded'
+              AND e.payload->>'latency_ms' IS NOT NULL
+              AND pr.processed_at >= NOW() - ($3 || ' days')::interval
+            GROUP BY day
+            """,
+            org_id,
+            agent_id,
+            window_str,
+        )
+        latency_by_day = {
+            str(r["day"]): (float(r["avg_latency_ms"]) if r["avg_latency_ms"] is not None else None)
+            for r in latency_rows
+        }
+
+        buckets = build_day_buckets(window_days)
+        points = compute_daily_points(
+            buckets, runs_by_day, structural_by_day, semantic_by_day, cost_by_day, latency_by_day
+        )
+
+        # Current window_days vs the immediately preceding window_days — total
+        # run counts and per-failure-type counts, each via one query with a
+        # CASE-based period label rather than two near-duplicate queries.
+        period_totals = await conn.fetch(
+            """
+            SELECT
+                CASE WHEN processed_at >= NOW() - ($3 || ' days')::interval
+                     THEN 'current' ELSE 'previous' END AS period,
+                COUNT(DISTINCT run_id)::int AS total_runs
+            FROM processed_runs
+            WHERE org_id = $1 AND agent_id = $2
+              AND processed_at >= NOW() - ($4 || ' days')::interval
+            GROUP BY period
+            """,
+            org_id,
+            agent_id,
+            window_str,
+            double_window_str,
+        )
+        period_total_map = {r["period"]: r["total_runs"] for r in period_totals}
+        current_total = period_total_map.get("current", 0)
+        previous_total = period_total_map.get("previous", 0)
+
+        period_counts = await conn.fetch(
+            """
+            SELECT
+                fs.failure_type,
+                CASE WHEN pr.processed_at >= NOW() - ($3 || ' days')::interval
+                     THEN 'current' ELSE 'previous' END AS period,
+                COUNT(DISTINCT fs.run_id)::int AS affected_runs
+            FROM failure_signals fs
+            JOIN processed_runs pr
+                ON pr.run_id = fs.run_id AND pr.org_id = fs.org_id AND pr.agent_id = fs.agent_id
+            WHERE fs.org_id = $1 AND fs.agent_id = $2 AND fs.shadow = FALSE
+              AND pr.processed_at >= NOW() - ($4 || ' days')::interval
+            GROUP BY fs.failure_type, period
+            """,
+            org_id,
+            agent_id,
+            window_str,
+            double_window_str,
+        )
+        current_counts: dict = {}
+        previous_counts: dict = {}
+        for r in period_counts:
+            (current_counts if r["period"] == "current" else previous_counts)[r["failure_type"]] = (
+                r["affected_runs"]
+            )
+
+        deltas = compute_failure_mode_deltas(
+            current_counts, previous_counts, current_total, previous_total
+        )
+
+        # Self-baseline: fixed last-30d vs 90-30d-ago, independent of window_days.
+        baseline_totals = await conn.fetch(
+            """
+            SELECT
+                CASE WHEN processed_at >= NOW() - INTERVAL '30 days' THEN 'current' ELSE 'baseline' END
+                    AS period,
+                COUNT(DISTINCT run_id)::int AS total_runs
+            FROM processed_runs
+            WHERE org_id = $1 AND agent_id = $2
+              AND processed_at >= NOW() - INTERVAL '90 days'
+            GROUP BY period
+            """,
+            org_id,
+            agent_id,
+        )
+        baseline_total_map = {r["period"]: r["total_runs"] for r in baseline_totals}
+        baseline_current_total = baseline_total_map.get("current", 0)
+        baseline_ref_total = baseline_total_map.get("baseline", 0)
+
+        baseline_period_counts = await conn.fetch(
+            """
+            SELECT
+                fs.failure_type,
+                CASE WHEN pr.processed_at >= NOW() - INTERVAL '30 days' THEN 'current' ELSE 'baseline' END
+                    AS period,
+                COUNT(DISTINCT fs.run_id)::int AS affected_runs
+            FROM failure_signals fs
+            JOIN processed_runs pr
+                ON pr.run_id = fs.run_id AND pr.org_id = fs.org_id AND pr.agent_id = fs.agent_id
+            WHERE fs.org_id = $1 AND fs.agent_id = $2 AND fs.shadow = FALSE
+              AND pr.processed_at >= NOW() - INTERVAL '90 days'
+            GROUP BY fs.failure_type, period
+            """,
+            org_id,
+            agent_id,
+        )
+        baseline_current_counts: dict = {}
+        baseline_ref_counts: dict = {}
+        for r in baseline_period_counts:
+            (baseline_current_counts if r["period"] == "current" else baseline_ref_counts)[
+                r["failure_type"]
+            ] = r["affected_runs"]
+
+        current_rates = {
+            ft: round(count / baseline_current_total, 4) if baseline_current_total else 0.0
+            for ft, count in baseline_current_counts.items()
+        }
+        baseline_comparisons = compute_baseline_comparisons(
+            current_rates, baseline_ref_counts, baseline_ref_total
+        )
+
+    return {
+        "points": points,
+        "failure_mode_deltas": deltas,
+        "baseline_comparisons": baseline_comparisons,
+    }
+
+
 # ── Cross-run patterns ─────────────────────────────────────────────────────────
 
 
@@ -2884,6 +4645,36 @@ async def record_false_positive(
             org_id,
             agent_id,
             failure_type,
+        )
+    return dict(row) if row else {}
+
+
+async def snooze_pattern(
+    org_id: str,
+    agent_id: str,
+    failure_type: str,
+    hours: int = 24,
+) -> dict:
+    """ "Snooze this pattern" — sets snoozed_until = NOW() + hours, leaving
+    fp_count/confidence_floor/silenced untouched (a deliberate temporary
+    mute is a different signal than accumulated false-positive feedback;
+    the two mechanisms don't interact). Returns the updated row."""
+    if not _pool:
+        return {}
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO agent_detector_overrides (org_id, agent_id, failure_type, snoozed_until)
+            VALUES ($1, $2, $3, NOW() + ($4 || ' hours')::interval)
+            ON CONFLICT (org_id, agent_id, failure_type) DO UPDATE
+              SET snoozed_until = NOW() + ($4 || ' hours')::interval,
+                  updated_at    = NOW()
+            RETURNING org_id, agent_id, failure_type, snoozed_until
+            """,
+            org_id,
+            agent_id,
+            failure_type,
+            str(hours),
         )
     return dict(row) if row else {}
 

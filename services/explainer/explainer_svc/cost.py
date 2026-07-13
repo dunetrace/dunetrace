@@ -85,7 +85,15 @@ def estimate_cost(
     completion_tokens: int,
     reasoning_tokens: int = 0,
 ) -> float:
-    """Return estimated cost in USD. Returns 0.0 when prompt_tokens and completion_tokens are both zero."""
+    """Return estimated cost in USD. Returns 0.0 when prompt_tokens and completion_tokens are both zero.
+
+    This is the single source of truth for token pricing across every
+    Dunetrace service — do not fork this table (see
+    services/semantic/semantic_svc/evaluators, which computes semantic
+    evaluation cost by calling this directly rather than trusting a
+    third-party library's own bundled — and possibly stale or divergent —
+    per-model pricing).
+    """
     prompt_tokens = prompt_tokens or 0
     completion_tokens = completion_tokens or 0
     billed_output_tokens = completion_tokens

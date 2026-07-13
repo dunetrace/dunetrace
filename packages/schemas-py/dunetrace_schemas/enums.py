@@ -24,6 +24,22 @@ class EventType(str, Enum):
     RETRIEVAL_RESPONDED = "retrieval.responded"
     EXTERNAL_SIGNAL = "external.signal"
     POLICY_TRIGGERED = "policy.triggered"
+    # Policy evaluation observability record (rate-limited). Routed by ingest into
+    # policy_evaluations, not stored as a run event. Kept value-for-value in sync
+    # with dunetrace.models.EventType — see test_sdk_parity.py.
+    POLICY_EVALUATED = "policy.evaluated"
+    # Voice-agent events (detector pack "voice"). Kept value-for-value in sync
+    # with dunetrace.models.EventType — see test_sdk_parity.py.
+    TRANSCRIPTION_RECEIVED = "transcription.received"
+    TTS_GENERATED = "tts.generated"
+    VOICE_ACTIVITY_DETECTED = "voice_activity.detected"
+    TURN_TAKING = "turn_taking.changed"
+    # Human-in-the-loop approval events (Capability 2). Kept value-for-value in
+    # sync with dunetrace.models.EventType — see test_sdk_parity.py.
+    APPROVAL_REQUESTED = "approval.requested"
+    APPROVAL_GRANTED = "approval.granted"
+    APPROVAL_DENIED = "approval.denied"
+    APPROVAL_TIMEOUT = "approval.timeout"
 
 
 class Severity(str, Enum):

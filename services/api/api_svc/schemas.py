@@ -97,6 +97,44 @@ if _PYDANTIC:
         cost_usd: Optional[float] = None
         events: List[RunEvent]
         signals: List[RunSignal]
+        conversation_id: Optional[int] = None
+
+    class ConversationRun(_Model):
+        run_id: str
+        agent_version: str
+        started_at: float
+
+    class ConversationSignal(_Model):
+        id: int
+        failure_type: str
+        severity: str
+        confidence: float
+        detected_at: float
+        evidence: Dict[str, Any]
+
+    class ConversationDetail(_Model):
+        id: int
+        agent_id: str
+        user_id: Optional[str] = None
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        runs: List[ConversationRun]
+        signals: List[ConversationSignal]
+
+    class ConversationSummary(_Model):
+        id: int
+        agent_id: str
+        user_id: Optional[str] = None
+        external_id: str
+        last_run_at: float
+        run_count: int
+        has_frustration_signal: bool
+
+    class ConversationSearchResponse(_Model):
+        conversations: List[ConversationSummary]
+        page: Page
 
     class RunListResponse(_Model):
         runs: List[RunSummary]
@@ -128,7 +166,7 @@ if _PYDANTIC:
 
     class HealthResponse(_Model):
         status: str = "ok"
-        version: str = "0.1.0"
+        version: str = "0.5.0"
         db: str = "unknown"
 
     # Insights models
@@ -259,10 +297,44 @@ if _PYDANTIC:
         resolved_at: Optional[float]
         affected_runs: int
         clean_runs_since: int
+        resolution_notes: Optional[str] = None
+        manually_resolved: bool = False
 
     class IssueListResponse(_Model):
         issues: List[Issue]
         total: int
+
+    class AffectedRun(_Model):
+        run_id: str
+        detected_at: Optional[float] = None
+        step_index: Optional[int] = None
+        confidence: Optional[float] = None
+
+    class IssueDetail(_Model):
+        id: int
+        agent_id: str
+        failure_type: str
+        status: str
+        first_seen: float
+        last_seen: float
+        resolved_at: Optional[float]
+        affected_runs_count: int
+        clean_runs_since: int
+        resolution_notes: Optional[str] = None
+        manually_resolved: bool = False
+        affected_runs: List[AffectedRun] = []
+        root_cause: Optional[str] = None
+        suggested_fix: Optional[str] = None
+        # Phase 4.3 (not yet built) will populate this — always empty for now.
+        # See BACKLOG.md's Phase 4.2 entry.
+        code_references: List[str] = []
+
+    class IssueSearchResponse(_Model):
+        issues: List[Issue]
+        page: Page
+
+    class ResolveIssueRequest(_Model):
+        resolution_notes: str
 
     # Failure pattern models
 
@@ -352,6 +424,39 @@ if _PYDANTIC:
 
     class PatternsResponse(_Model):
         agents: List[AgentPatterns]
+
+    # Phase 4.4 — performance trends
+
+    class TrendPoint(_Model):
+        day: str
+        total_runs: int
+        structural_signal_rate: float
+        semantic_signal_rate: float
+        cost_usd: float
+        avg_latency_ms: Optional[float] = None
+
+    class FailureModeDelta(_Model):
+        failure_type: str
+        current_rate: float
+        previous_rate: float
+        delta: float
+        current_affected_runs: int
+        previous_affected_runs: int
+
+    class BaselineComparison(_Model):
+        failure_type: str
+        current_rate: float
+        baseline_rate: float
+        ratio: Optional[float] = None
+        baseline_sample_runs: int
+        baseline_ready: bool
+
+    class AgentPerformanceTrends(_Model):
+        agent_id: str
+        window_days: int
+        points: List[TrendPoint]
+        failure_mode_deltas: List[FailureModeDelta]
+        baseline_comparisons: List[BaselineComparison]
 
 else:
     # Stdlib dataclass fallback (sandbox / testing)
@@ -456,6 +561,74 @@ else:
         step_count: int
         events: List[Any]
         signals: List[Any]
+        conversation_id: Optional[int] = None
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class ConversationRun:
+        run_id: str
+        agent_version: str
+        started_at: float
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class ConversationSignal:
+        id: int
+        failure_type: str
+        severity: str
+        confidence: float
+        detected_at: float
+        evidence: Dict[str, Any]
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class ConversationDetail:
+        id: int
+        agent_id: str
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        runs: List[Any]
+        signals: List[Any]
+        user_id: Optional[str] = None
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class ConversationSummary:
+        id: int
+        agent_id: str
+        external_id: str
+        last_run_at: float
+        run_count: int
+        has_frustration_signal: bool
+        user_id: Optional[str] = None
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class ConversationSearchResponse:
+        conversations: List[Any]
+        page: Page
 
         def model_dump(self):
             import dataclasses
@@ -511,7 +684,7 @@ else:
     @dataclass
     class HealthResponse:
         status: str = "ok"
-        version: str = "0.1.0"
+        version: str = "0.5.0"
         db: str = "unknown"
 
     @dataclass
@@ -715,6 +888,63 @@ else:
         cost_stats: Optional[Any] = None
         deploy_regressions: List[Any] = _field(default_factory=list)
         user_impact: List[Any] = _field(default_factory=list)
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    # Phase 4.4 — performance trends
+
+    @dataclass
+    class TrendPoint:
+        day: str
+        total_runs: int
+        structural_signal_rate: float
+        semantic_signal_rate: float
+        cost_usd: float
+        avg_latency_ms: Optional[float] = None
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class FailureModeDelta:
+        failure_type: str
+        current_rate: float
+        previous_rate: float
+        delta: float
+        current_affected_runs: int
+        previous_affected_runs: int
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class BaselineComparison:
+        failure_type: str
+        current_rate: float
+        baseline_rate: float
+        baseline_sample_runs: int
+        baseline_ready: bool
+        ratio: Optional[float] = None
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class AgentPerformanceTrends:
+        agent_id: str
+        window_days: int
+        points: List[Any]
+        failure_mode_deltas: List[Any]
+        baseline_comparisons: List[Any]
 
         def model_dump(self):
             import dataclasses
