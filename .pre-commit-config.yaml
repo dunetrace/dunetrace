@@ -66,6 +66,16 @@ repos:
         pass_filenames: false
         files: ^(README\.md|docs/.+\.md|packages/sdk-py/dunetrace/(detectors\.py|packs/.+\.py)|services/semantic/semantic_svc/evaluators/.+\.py)$
 
+      # Unit tests for the drift check itself — the same suite CI runs. Catches a
+      # stale expectation in the test (e.g. a newly-shipped detector not added to
+      # the expected-names list) locally instead of in CI.
+      - id: validate-detector-docs-test
+        name: Detector-docs drift check — unit tests
+        language: system
+        entry: python -m unittest scripts.test_validate_detector_docs
+        pass_filenames: false
+        files: ^(scripts/(validate_detector_docs|test_validate_detector_docs)\.py|packages/sdk-py/dunetrace/(detectors\.py|packs/.+\.py)|services/semantic/semantic_svc/evaluators/.+\.py)$
+
       - id: sdk-py-mypy
         name: SDK (Python) mypy
         language: system

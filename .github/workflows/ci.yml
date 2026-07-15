@@ -41,9 +41,13 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          # Key the pip cache on this job's actual dependency source so the
+          # heavy langchain/langgraph install is reused across runs instead of
+          # re-resolved every time (the other jobs already set this).
+          cache-dependency-path: packages/sdk-py/pyproject.toml
+      # dev extra already provides mypy, so no separate install step is needed.
       - run: pip install -e "packages/sdk-py[dev,langchain]"
-      - run: python -m pytest packages/sdk-py/tests/ -v
-      - run: pip install mypy
+      - run: python -m pytest packages/sdk-py/tests/ -q
       - run: python -m mypy packages/sdk-py/dunetrace/ --ignore-missing-imports --no-error-summary --config-file packages/sdk-py/pyproject.toml
 
   services:

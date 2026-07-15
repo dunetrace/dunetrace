@@ -87,16 +87,13 @@ class TestAgainstRealCodeAndDocs(unittest.TestCase):
             "TASK_UNDERSTANDING_FAILURE",
             "SYCOPHANCY_SIGNAL",
             "OFF_TOPIC_DRIFT",  # Phase 5-8
+            "MEMORY_POISONING",  # Capability 1
+            "DELEGATION_LOOP",  # Capability 2
             "TOOL_LOOP",
             "HALLUCINATION",
             "VOICE_SILENCE_TIMEOUT",  # pre-existing
         ):
             self.assertIn(n, names)
-
-    def test_deferred_detectors_are_not_falsely_present(self):
-        names = v.code_names()
-        self.assertNotIn("MEMORY_POISONING", names)
-        self.assertNotIn("DELEGATION_LOOP", names)
 
     def test_real_docs_have_no_drift(self):
         # Catches any current drift between code and the detector-claim docs.
