@@ -10,9 +10,23 @@ Supported frameworks:
 - ``httpx``     — Client.send + AsyncClient.send (all outbound HTTP as tool calls)
 - ``requests``  — Session.send (all outbound HTTP as tool calls)
 - ``langchain`` — BaseChatModel.{invoke,ainvoke,stream,astream} + BaseTool.{run,arun},
-                  covers LangGraph too (its nodes call these same base-class methods)
+                  covers LangGraph too (its nodes call these same base-class methods).
+                  Also patches LangGraph's ``BaseStore.{put,get,delete}`` (+ async) so
+                  long-term memory writes/reads/clears become memory.* events —
+                  ``BaseStore`` implements these concretely and delegates to an
+                  abstract ``batch``, so one patch covers every store backend.
 - ``crewai``    — Crew/Agent.{kickoff,kickoff_async} for the run boundary, plus
-                  CrewAI's own global before/after LLM+tool hooks
+                  CrewAI's own global before/after LLM+tool hooks. Also patches the
+                  CrewAI memory classes' ``save``/``search``/``reset`` so short-term,
+                  long-term, and entity memory become memory.* events.
+
+The memory patches (LangGraph ``BaseStore``, CrewAI memory) only ever attach to an
+already-open ``dt.run()`` — like the openai/anthropic patches — and emit
+``memory.*`` annotation events (they don't advance the step counter). Framework
+memory APIs don't expose the *provenance* of a written value, so auto-captured
+writes carry no ``source``; use the manual ``run.memory_written(..., source=...)``
+API when the provenance is known (feeds the MEMORY_POISONING detector's
+risk weighting).
 
 ``crewai`` is different in kind from ``openai``/``anthropic``/``httpx``/
 ``requests``: those four just react to an already-open ``dt.run()`` and never
@@ -52,6 +66,8 @@ Usage::
 from __future__ import annotations
 
 import functools
+import importlib
+import json
 import logging
 import time
 from typing import TYPE_CHECKING, List, Optional
@@ -469,6 +485,12 @@ def _patch_langchain(
     the caller separately passed ``callbacks=[handler]`` to a chain), but
     that path isn't reachable through this leaf-level patch alone.
     """
+    # LangGraph long-term memory (BaseStore) is instrumented independently of the
+    # BaseChatModel/BaseTool patches below — it needs no client and no open-run
+    # semantics beyond "attach if a run is active", so patch it first, before the
+    # client-None guard can short-circuit this function.
+    _patch_langgraph_store()
+
     if "langchain" in _PATCHED:
         return
     try:
@@ -684,6 +706,10 @@ def _patch_crewai(
     except ImportError:
         logger.debug("crewai not installed — skipping auto-instrument")
         return
+
+    # CrewAI memory (short-term/long-term/entity) needs no client — patch it up
+    # front so it is covered even if the client-None guard below short-circuits.
+    _patch_crewai_memory()
     if client is None:
         logger.warning(
             "Dunetrace: crewai auto-instrumentation requires a client — "
@@ -793,6 +819,216 @@ def _patch_crewai(
 
     _PATCHED.add("crewai")
     logger.debug("crewai auto-instrumented")
+
+
+# ── Framework memory channels ─────────────────────────────────────────────────
+
+# Cap auto-captured memory values so a large store payload never bloats an event.
+# The manual run.memory_written() API does not truncate; this cap is specific to
+# values pulled off framework internals we don't control the size of.
+_MEMORY_VALUE_LIMIT = 4000
+
+
+def _safe_memory(action) -> None:
+    """Run a memory-event emit, swallowing any error. Memory instrumentation is
+    strictly additive observability — a bug here must never break the framework
+    call it is wrapping."""
+    try:
+        action()
+    except Exception:
+        logger.debug("dunetrace memory instrumentation emit failed", exc_info=True)
+
+
+def _mem_text(value) -> str:
+    """Best-effort string form of a written memory value, capped in length."""
+    if isinstance(value, str):
+        s = value
+    else:
+        s = None
+        for attr in ("task", "data", "value", "content", "text"):
+            v = getattr(value, attr, None)
+            if isinstance(v, str) and v:
+                s = v
+                break
+        if s is None:
+            try:
+                s = json.dumps(value, default=str, ensure_ascii=False)
+            except Exception:
+                s = str(value)
+    return s if len(s) <= _MEMORY_VALUE_LIMIT else s[:_MEMORY_VALUE_LIMIT]
+
+
+def _store_key(namespace, key) -> str:
+    """Flatten a LangGraph (namespace_tuple, key) pair into one memory key."""
+    try:
+        ns = "/".join(str(p) for p in namespace) if namespace else ""
+    except TypeError:
+        ns = str(namespace)
+    return f"{ns}:{key}" if ns else str(key)
+
+
+def _patch_langgraph_store() -> None:
+    """Patch LangGraph's ``BaseStore.{put,get,delete}`` (+ async) so long-term
+    memory operations become ``memory.*`` events. ``BaseStore`` defines these
+    concretely and delegates to an abstract ``batch``/``abatch``, so patching
+    the base intercepts every backend (InMemoryStore, PostgresStore, …)."""
+    if "langgraph_store" in _PATCHED:
+        return
+    try:
+        from langgraph.store.base import BaseStore
+    except ImportError:
+        logger.debug("langgraph not installed — skipping memory auto-instrument")
+        return
+
+    _orig_put = BaseStore.put
+
+    @functools.wraps(_orig_put)
+    def _patched_put(self, namespace, key, value, *args, **kwargs):
+        run = _current_run.get()
+        if run is not None:
+            _safe_memory(lambda: run.memory_written(_store_key(namespace, key), _mem_text(value)))
+        return _orig_put(self, namespace, key, value, *args, **kwargs)
+
+    BaseStore.put = _patched_put
+
+    _orig_get = BaseStore.get
+
+    @functools.wraps(_orig_get)
+    def _patched_get(self, namespace, key, *args, **kwargs):
+        run = _current_run.get()
+        if run is not None:
+            _safe_memory(lambda: run.memory_read(_store_key(namespace, key)))
+        return _orig_get(self, namespace, key, *args, **kwargs)
+
+    BaseStore.get = _patched_get
+
+    _orig_delete = BaseStore.delete
+
+    @functools.wraps(_orig_delete)
+    def _patched_delete(self, namespace, key, *args, **kwargs):
+        run = _current_run.get()
+        if run is not None:
+            _safe_memory(lambda: run.memory_cleared(_store_key(namespace, key)))
+        return _orig_delete(self, namespace, key, *args, **kwargs)
+
+    BaseStore.delete = _patched_delete
+
+    _orig_aput = BaseStore.aput
+
+    @functools.wraps(_orig_aput)
+    async def _patched_aput(self, namespace, key, value, *args, **kwargs):
+        run = _current_run.get()
+        if run is not None:
+            _safe_memory(lambda: run.memory_written(_store_key(namespace, key), _mem_text(value)))
+        return await _orig_aput(self, namespace, key, value, *args, **kwargs)
+
+    BaseStore.aput = _patched_aput
+
+    _orig_aget = BaseStore.aget
+
+    @functools.wraps(_orig_aget)
+    async def _patched_aget(self, namespace, key, *args, **kwargs):
+        run = _current_run.get()
+        if run is not None:
+            _safe_memory(lambda: run.memory_read(_store_key(namespace, key)))
+        return await _orig_aget(self, namespace, key, *args, **kwargs)
+
+    BaseStore.aget = _patched_aget
+
+    _orig_adelete = BaseStore.adelete
+
+    @functools.wraps(_orig_adelete)
+    async def _patched_adelete(self, namespace, key, *args, **kwargs):
+        run = _current_run.get()
+        if run is not None:
+            _safe_memory(lambda: run.memory_cleared(_store_key(namespace, key)))
+        return await _orig_adelete(self, namespace, key, *args, **kwargs)
+
+    BaseStore.adelete = _patched_adelete
+
+    _PATCHED.add("langgraph_store")
+    logger.debug("langgraph store memory auto-instrumented")
+
+
+# CrewAI memory classes, keyed by a short memory-kind label. Ordered so the
+# concrete subclasses that *override* save() are wrapped in their own right,
+# while ShortTermMemory (which inherits Memory.save) is covered by the base.
+_CREWAI_MEMORY_CLASSES = [
+    ("crewai.memory.short_term.short_term_memory", "ShortTermMemory", "short_term"),
+    ("crewai.memory.long_term.long_term_memory", "LongTermMemory", "long_term"),
+    ("crewai.memory.entity.entity_memory", "EntityMemory", "entity"),
+    ("crewai.memory.memory", "Memory", "memory"),
+]
+
+
+def _wrap_crewai_memory_class(cls, mem_key: str) -> bool:
+    """Wrap a CrewAI memory class's save/search/reset — but only methods it
+    defines *itself* (``in cls.__dict__``), so a method inherited from the base
+    ``Memory`` isn't double-wrapped once the base is patched too."""
+    did = False
+
+    if "save" in cls.__dict__:
+        _orig_save = cls.save
+
+        @functools.wraps(_orig_save)
+        def _patched_save(self, *args, _orig=_orig_save, _k=mem_key, **kwargs):
+            run = _current_run.get()
+            if run is not None:
+                val = args[0] if args else kwargs.get("value", kwargs.get("item"))
+                _safe_memory(lambda: run.memory_written(_k, _mem_text(val)))
+            return _orig(self, *args, **kwargs)
+
+        cls.save = _patched_save
+        did = True
+
+    if "search" in cls.__dict__:
+        _orig_search = cls.search
+
+        @functools.wraps(_orig_search)
+        def _patched_search(self, *args, _orig=_orig_search, **kwargs):
+            run = _current_run.get()
+            if run is not None:
+                q = args[0] if args else kwargs.get("query", kwargs.get("task"))
+                if q:
+                    _safe_memory(lambda: run.memory_read(str(q)[:200]))
+            return _orig(self, *args, **kwargs)
+
+        cls.search = _patched_search
+        did = True
+
+    if "reset" in cls.__dict__:
+        _orig_reset = cls.reset
+
+        @functools.wraps(_orig_reset)
+        def _patched_reset(self, *args, _orig=_orig_reset, **kwargs):
+            run = _current_run.get()
+            if run is not None:
+                _safe_memory(lambda: run.memory_cleared(None))
+            return _orig(self, *args, **kwargs)
+
+        cls.reset = _patched_reset
+        did = True
+
+    return did
+
+
+def _patch_crewai_memory() -> None:
+    """Patch CrewAI's short-term / long-term / entity memory so save/search/reset
+    become ``memory.*`` events. No client needed — these attach to an already-open
+    run (CrewAI's kickoff patch opens one)."""
+    if "crewai_memory" in _PATCHED:
+        return
+    patched_any = False
+    for modpath, clsname, mem_key in _CREWAI_MEMORY_CLASSES:
+        try:
+            mod = importlib.import_module(modpath)
+            cls = getattr(mod, clsname)
+        except Exception:
+            continue
+        patched_any = _wrap_crewai_memory_class(cls, mem_key) or patched_any
+    if patched_any:
+        _PATCHED.add("crewai_memory")
+        logger.debug("crewai memory auto-instrumented")
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────

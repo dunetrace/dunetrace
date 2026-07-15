@@ -13,6 +13,7 @@ from dunetrace.models import (
     RunState,
     ToolCall,
     LlmCall,
+    MemoryEvent,
     RetrievalResult,
 )
 
@@ -84,6 +85,7 @@ def build_run_state(events: list[dict]) -> RunState:
                     latency_ms=payload.get("latency_ms"),
                     output_length=payload.get("output_length"),
                     completion_tokens=payload.get("completion_tokens"),
+                    output_text=payload.get("output") or None,
                     step_index=pending.get("step_index", step_index),
                     timestamp=pending.get("timestamp", raw.get("timestamp", 0.0)),
                 )
@@ -124,6 +126,39 @@ def build_run_state(events: list[dict]) -> RunState:
                     top_score=payload.get("top_score"),
                     step_index=step_index,
                     content=payload.get("content") or None,
+                )
+            )
+
+        # memory.written / read / cleared - reconstruct the typed memory view the
+        # MEMORY_POISONING detector consumes. Content lives on the wire once (in
+        # the event payload) and is referenced into memory_events here.
+        elif event_type == "memory.written":
+            state.memory_events.append(
+                MemoryEvent(
+                    op="written",
+                    key=payload.get("key"),
+                    value=payload.get("value"),
+                    source=payload.get("source"),
+                    step_index=step_index,
+                    timestamp=raw.get("timestamp", 0.0),
+                )
+            )
+        elif event_type == "memory.read":
+            state.memory_events.append(
+                MemoryEvent(
+                    op="read",
+                    key=payload.get("key"),
+                    step_index=step_index,
+                    timestamp=raw.get("timestamp", 0.0),
+                )
+            )
+        elif event_type == "memory.cleared":
+            state.memory_events.append(
+                MemoryEvent(
+                    op="cleared",
+                    key=payload.get("key"),
+                    step_index=step_index,
+                    timestamp=raw.get("timestamp", 0.0),
                 )
             )
 

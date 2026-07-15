@@ -8,7 +8,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from dunetrace.detectors import CUSTOM_DETECTOR_REGISTRY, HandoffContextLossDetector, run_detectors
+from dunetrace.detectors import (
+    CUSTOM_DETECTOR_REGISTRY,
+    DelegationLoopDetector,
+    HandoffContextLossDetector,
+    run_detectors,
+)
 from dunetrace.models import FailureSignal, FailureType, Severity
 from dunetrace.risk_engine import RiskEngine
 from detector_svc.detectors import get_detectors
@@ -27,6 +32,7 @@ from detector_svc.db import (
     fetch_latency_baseline,
     fetch_llm_tool_ratio_baseline,
     fetch_run_events,
+    fetch_run_lineage,
     fetch_run_state,
     fetch_stalled_runs,
     fetch_step_count_baseline,
@@ -44,6 +50,13 @@ from detector_svc.db import (
 )
 from detector_svc.state_metrics import summarize_states
 from detector_svc.run_builder import build_run_state
+from detector_svc.run_graph import (
+    RunNode,
+    agent_sequence,
+    build_agent_delegation_edges,
+    build_ancestor_chain,
+    find_cycle,
+)
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -178,6 +191,32 @@ def _handoff_signal_from_events(
     return detector.evaluate_handoff(parent_context, child_input, run_id, agent_id, agent_version)
 
 
+async def _delegation_signal_from_chain(
+    run_id: str,
+    agent_id: str,
+    agent_version: str,
+    parent_run_id: str,
+    detector: DelegationLoopDetector,
+) -> FailureSignal | None:
+    """Cross-run graph evaluation for DELEGATION_LOOP. Walks this run's
+    parent_run_id chain (one lightweight lineage fetch per hop), builds the
+    agent-delegation graph, runs DFS cycle detection, and lets the detector
+    decide whether it's a sustained loop. See run_graph.py."""
+    start = RunNode(
+        run_id=run_id,
+        agent_id=agent_id,
+        agent_version=agent_version,
+        parent_run_id=parent_run_id,
+    )
+    chain = await build_ancestor_chain(start, fetch_run_lineage)
+    if len(chain) < 2:
+        return None
+    cycle = find_cycle(build_agent_delegation_edges(chain))
+    return detector.evaluate_delegation_cycle(
+        cycle, agent_sequence(chain), run_id, agent_id, agent_version
+    )
+
+
 async def process_run(
     run_id: str,
     agent_id: str,
@@ -237,6 +276,16 @@ async def process_run(
                 )
                 if handoff:
                     signals.append(handoff)
+
+            delegation_detector = next(
+                (d for d in detectors if isinstance(d, DelegationLoopDetector)), None
+            )
+            if delegation_detector is not None:
+                delegation = await _delegation_signal_from_chain(
+                    run_id, agent_id, agent_version, parent_run_id, delegation_detector
+                )
+                if delegation:
+                    signals.append(delegation)
 
         risk = RiskEngine().evaluate(signals, state)
         logger.debug(

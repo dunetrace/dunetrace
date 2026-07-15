@@ -26,4 +26,6 @@ export type {
   RunOptions,
   LlmRespondedOptions,
   ClientOptions,
+  MemorySource,
 } from "./models.js";
+export { MEMORY_SOURCES } from "./models.js";

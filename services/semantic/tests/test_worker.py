@@ -321,13 +321,15 @@ class TestMaybeRunConversationEvaluator(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_returns_zero_when_no_conversation_evaluator_built(self):
-        with patch.object(semantic_svc.worker, "_conversation_evaluator", None):
+        with patch.object(semantic_svc.worker, "_conversation_evaluators", {}):
             result = await self._run()
         self.assertEqual(result, 0)
 
     async def test_returns_zero_when_run_has_no_conversation_id(self):
         with (
-            patch.object(semantic_svc.worker, "_conversation_evaluator", MagicMock()),
+            patch.object(
+                semantic_svc.worker, "_conversation_evaluators", {"USER_FRUSTRATION": MagicMock()}
+            ),
             patch("semantic_svc.worker.fetch_run_conversation_id", AsyncMock(return_value=None)),
             patch("semantic_svc.worker.fetch_conversation_run_ids", AsyncMock()) as siblings_mock,
         ):
@@ -338,7 +340,9 @@ class TestMaybeRunConversationEvaluator(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_zero_when_not_sampled(self):
         with (
-            patch.object(semantic_svc.worker, "_conversation_evaluator", MagicMock()),
+            patch.object(
+                semantic_svc.worker, "_conversation_evaluators", {"USER_FRUSTRATION": MagicMock()}
+            ),
             patch(
                 "semantic_svc.worker.fetch_run_conversation_id",
                 AsyncMock(return_value="conv-1"),
@@ -362,7 +366,9 @@ class TestMaybeRunConversationEvaluator(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_zero_when_quota_exhausted(self):
         with (
-            patch.object(semantic_svc.worker, "_conversation_evaluator", MagicMock()),
+            patch.object(
+                semantic_svc.worker, "_conversation_evaluators", {"USER_FRUSTRATION": MagicMock()}
+            ),
             patch(
                 "semantic_svc.worker.fetch_run_conversation_id",
                 AsyncMock(return_value="conv-1"),
@@ -422,7 +428,11 @@ class TestMaybeRunConversationEvaluator(unittest.IsolatedAsyncioTestCase):
             return events_by_run[run_id]
 
         with (
-            patch.object(semantic_svc.worker, "_conversation_evaluator", fake_evaluator),
+            patch.object(
+                semantic_svc.worker,
+                "_conversation_evaluators",
+                {"USER_FRUSTRATION": fake_evaluator},
+            ),
             patch(
                 "semantic_svc.worker.fetch_run_conversation_id",
                 AsyncMock(return_value="conv-xyz"),
@@ -490,7 +500,11 @@ class TestMaybeRunConversationEvaluator(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch.object(semantic_svc.worker, "_conversation_evaluator", fake_evaluator),
+            patch.object(
+                semantic_svc.worker,
+                "_conversation_evaluators",
+                {"USER_FRUSTRATION": fake_evaluator},
+            ),
             patch(
                 "semantic_svc.worker.fetch_run_conversation_id",
                 AsyncMock(return_value="conv-1"),
@@ -522,7 +536,9 @@ class TestMaybeRunConversationEvaluator(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_extractable_content_in_any_sibling_run_writes_nothing(self):
         with (
-            patch.object(semantic_svc.worker, "_conversation_evaluator", MagicMock()),
+            patch.object(
+                semantic_svc.worker, "_conversation_evaluators", {"USER_FRUSTRATION": MagicMock()}
+            ),
             patch(
                 "semantic_svc.worker.fetch_run_conversation_id",
                 AsyncMock(return_value="conv-1"),

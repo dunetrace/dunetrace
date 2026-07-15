@@ -29,6 +29,11 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
     "goal_abandonment": {"stall_steps": "STALL_STEPS"},
     "rag_empty_retrieval": {"min_score": "MIN_SCORE", "min_results": "MIN_RESULTS"},
     "llm_truncation_loop": {"threshold": "THRESHOLD"},
+    "silent_truncation": {
+        "min_output_length": "MIN_OUTPUT_LENGTH",
+        "loop_threshold": "LOOP_THRESHOLD",
+    },
+    "model_fallback_drift": {"model_tiers": "MODEL_TIERS"},
     "context_bloat": {
         "growth_factor": "GROWTH_FACTOR",
         "min_calls": "MIN_CALLS",
@@ -89,6 +94,15 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
         "completion_patterns": "COMPLETION_PATTERNS",
         "lookback_messages": "LOOKBACK_MESSAGES",
         "case_sensitive": "CASE_SENSITIVE",
+    },
+    "memory_poisoning": {
+        "poison_phrases": "POISON_PHRASES",
+        "case_sensitive": "CASE_SENSITIVE",
+        "require_untrusted_source": "REQUIRE_UNTRUSTED_SOURCE",
+    },
+    "delegation_loop": {
+        "min_loop_runs": "MIN_LOOP_RUNS",
+        "critical_loop_runs": "CRITICAL_LOOP_RUNS",
     },
 }
 

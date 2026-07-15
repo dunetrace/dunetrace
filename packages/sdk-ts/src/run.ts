@@ -1,8 +1,18 @@
 import { randomUUID } from "node:crypto";
-import type { AgentEvent, EventType, LlmRespondedOptions } from "./models.js";
+import type { AgentEvent, EventType, LlmRespondedOptions, MemorySource } from "./models.js";
+import { MEMORY_SOURCES } from "./models.js";
 
 export interface EventEmitter {
   _emit(event: AgentEvent): void;
+}
+
+/** True when DUNETRACE_OMIT_LLM_OUTPUT_TEXT opts out of transmitting raw LLM
+ *  output text (bandwidth-sensitive deployments). Read per-call so it can be
+ *  toggled at runtime / in tests. `output_length` is always sent, so size-based
+ *  detectors work either way. Mirrors the Python SDK. */
+function omitLlmOutputText(): boolean {
+  const v = (process.env.DUNETRACE_OMIT_LLM_OUTPUT_TEXT ?? "").toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
 }
 
 export class DunetraceRun {
@@ -34,8 +44,12 @@ export class DunetraceRun {
       latency_ms:        opts.latencyMs        ?? 0,
       finish_reason:     opts.finishReason      ?? "stop",
       output_length:     opts.outputLength      ?? (opts.outputText?.length ?? 0),
-      output:            opts.outputText ?? "",
     };
+    // Transmit the output text by default; omit it (bandwidth) when
+    // DUNETRACE_OMIT_LLM_OUTPUT_TEXT is set. output_length is always sent.
+    if (!omitLlmOutputText()) {
+      payload["output"] = opts.outputText ?? "";
+    }
     if (opts.promptTokens) payload["prompt_tokens"] = opts.promptTokens;
     this._emit("llm.responded", payload, false);
   }
@@ -161,6 +175,45 @@ export class DunetraceRun {
     this.llmCalled(model, promptTokens);
     this.llmResponded({ completionTokens, latencyMs, finishReason, outputText });
     return response;
+  }
+
+  // ── Agent memory channel ───────────────────────────────────────────────────
+  //
+  // Instrumentation for what an agent persists to and reads from its own memory
+  // (conversation buffers, scratchpads, long-term stores). None of these advance
+  // the step counter — they annotate the run, like externalSignal. The
+  // server-side MEMORY_POISONING detector reads these events.
+
+  /**
+   * Record that `value` was written to agent memory under `key`.
+   *
+   * `source` is optional but strongly encouraged — it names where the content
+   * originated so downstream detection can weigh injection risk: one of
+   * "user_input", "retrieval", "tool_output", "llm_output", "agent_reasoning",
+   * "external". Does not advance the step counter.
+   */
+  memoryWritten(key: string, value: string, source?: MemorySource): void {
+    if (source !== undefined && !MEMORY_SOURCES.includes(source)) {
+      throw new Error(
+        `memoryWritten: source must be one of ${MEMORY_SOURCES.join(", ")} or undefined, got ${String(source)}`,
+      );
+    }
+    const payload: Record<string, unknown> = { key, value };
+    if (source !== undefined) payload["source"] = source;
+    this._emit("memory.written", payload, false);
+  }
+
+  /** Record that agent memory was read at `key`. Does not advance the step counter. */
+  memoryRead(key: string): void {
+    this._emit("memory.read", { key }, false);
+  }
+
+  /**
+   * Record that agent memory was cleared — a specific `key`, or all memory when
+   * `key` is omitted. Does not advance the step counter.
+   */
+  memoryCleared(key?: string): void {
+    this._emit("memory.cleared", { key: key ?? null }, false);
   }
 
   finalAnswer(): void {

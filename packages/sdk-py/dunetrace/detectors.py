@@ -556,6 +556,91 @@ class LlmTruncationLoopDetector(BaseDetector):
         )
 
 
+# ── SILENT_TRUNCATION ─────────────────────────────────────────────────────────
+
+
+class SilentTruncationDetector(BaseDetector):
+    """
+    A single LLM response was truncated (finish_reason "length" for OpenAI,
+    "max_tokens" for Anthropic) and the agent proceeded without recovering — no
+    retry, no continuation call. One truncation the agent silently builds on:
+    partial JSON, a cut-off plan, half a code block, passed downstream as if it
+    were complete.
+
+    Distinct from LLM_TRUNCATION_LOOP, which fires on REPEATED truncation
+    (THRESHOLD or more). This detector owns the single-occurrence case and steps
+    aside at or above LOOP_THRESHOLD so the two never double-fire on one run.
+
+    Fires HIGH when the truncated response was the run's final output (nothing
+    ran after it to catch the problem), MEDIUM when the agent did more work
+    afterward but never retried the truncated call.
+
+    "Recovered" is defined narrowly and cheaply: any LLM call after the truncated
+    one is treated as a retry/continuation (the agent noticed and re-asked), so
+    the detector does not fire. Absence of any later LLM call means the truncated
+    output was consumed as-is.
+
+    Tunable:
+      MIN_OUTPUT_LENGTH — ignore truncations whose output is shorter than this
+        (default 1). A zero-length "truncated" response is EMPTY_LLM_RESPONSE's
+        concern, not this detector's.
+      LOOP_THRESHOLD — the truncation count at/above which LLM_TRUNCATION_LOOP
+        takes over (default 2, kept in sync with that detector's THRESHOLD).
+    """
+
+    name = "SILENT_TRUNCATION"
+    SEVERITY = None  # computed per-signal: MEDIUM or HIGH
+    MAX_COST_NS = 50_000
+
+    TRUNCATION_REASONS = ("length", "max_tokens")
+    MIN_OUTPUT_LENGTH = 1
+    LOOP_THRESHOLD = 2
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        llm_calls = state.llm_calls
+        if not llm_calls:
+            return None
+
+        all_truncated = [c for c in llm_calls if c.finish_reason in self.TRUNCATION_REASONS]
+        if not all_truncated:
+            return None
+        # Repeated truncation is LLM_TRUNCATION_LOOP's job — don't double-fire.
+        if len(all_truncated) >= self.LOOP_THRESHOLD:
+            return None
+
+        t = all_truncated[0]
+        # An empty "truncated" response is a different failure (EMPTY_LLM_RESPONSE).
+        if t.output_length is not None and t.output_length < self.MIN_OUTPUT_LENGTH:
+            return None
+        # A later LLM call means the agent re-asked (retry/continuation) — recovered.
+        if any(c.step_index > t.step_index for c in llm_calls):
+            return None
+
+        later_tool_steps = [
+            tc.step_index for tc in state.tool_calls if tc.step_index > t.step_index
+        ]
+        is_final = not later_tool_steps  # nothing ran after the truncated output
+
+        return FailureSignal(
+            failure_type=FailureType.SILENT_TRUNCATION,
+            severity=Severity.HIGH if is_final else Severity.MEDIUM,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=t.step_index,
+            confidence=0.85 if is_final else 0.7,
+            evidence={
+                "truncated_step": t.step_index,
+                "finish_reason": t.finish_reason,
+                "output_length": t.output_length,
+                "model": t.model,
+                "recovered": False,
+                "was_final_output": is_final,
+                "subsequent_tool_steps": later_tool_steps,
+            },
+        )
+
+
 # ── CONTEXT_BLOAT ─────────────────────────────────────────────────────────────
 
 
@@ -2285,6 +2370,363 @@ class RunawayIterationDetector(BaseDetector):
         )
 
 
+# ── MODEL_FALLBACK_DRIFT ──────────────────────────────────────────────────────
+
+
+class ModelFallbackDriftDetector(BaseDetector):
+    """
+    Within one run the agent's LLM model changed to a less capable one (gpt-4o →
+    gpt-4o-mini, claude-sonnet → claude-haiku). Usually a silent fallback under
+    rate limiting or an SDK's automatic-retry-on-a-cheaper-model behavior; the
+    run keeps going on a weaker model and quality drops with nothing surfacing
+    it. Fires on the first downgrade in the run.
+
+    Only compares calls WITHIN a single run, which is a single agent — a
+    multi-agent system runs each agent as its own `dt.run()`, so "different
+    agents use different models by design" never reaches this detector (those
+    are separate runs, each judged on its own). An upgrade (mini → 4o) or a
+    same-tier switch (gpt-4o → claude-3-5-sonnet) is not a downgrade and does
+    not fire. Unknown models (not in the tier map) are skipped rather than
+    guessed at.
+
+    Evidence records whether a rate-limit external signal preceded the switch,
+    which is the usual cause worth acting on.
+
+    Tunable: MODEL_TIERS — the model→capability-tier map (higher = more capable).
+    Override in detectors.yml to add models or re-rank tiers.
+    """
+
+    name = "MODEL_FALLBACK_DRIFT"
+    SEVERITY = Severity.MEDIUM
+    MAX_COST_NS = 50_000
+
+    # Matched by longest substring, so versioned names (gpt-4o-2024-08-06,
+    # claude-3-5-sonnet-20241022) resolve to their family. Higher tier = more
+    # capable; a strictly lower tier on a later call is a downgrade.
+    MODEL_TIERS: dict[str, int] = {
+        # OpenAI
+        "gpt-3.5": 1,
+        "gpt-4o-mini": 2,
+        "gpt-4o": 3,
+        "gpt-4-turbo": 3,
+        "gpt-4": 3,
+        "o1-mini": 2,
+        "o3-mini": 2,
+        "o1": 3,
+        "o3": 3,
+        "gpt-5-mini": 3,
+        "gpt-5": 4,
+        # Anthropic
+        "claude-3-haiku": 2,
+        "claude-3-5-haiku": 2,
+        "claude-haiku": 2,
+        "claude-3-sonnet": 3,
+        "claude-3-5-sonnet": 3,
+        "claude-sonnet-4": 3,
+        "claude-sonnet": 3,
+        "claude-3-opus": 4,
+        "claude-opus-4": 4,
+        "claude-opus": 4,
+    }
+
+    def _tier(self, model: str) -> Optional[int]:
+        if not model:
+            return None
+        m = model.lower()
+        best_key: Optional[str] = None
+        for key in self.MODEL_TIERS:
+            if key in m and (best_key is None or len(key) > len(best_key)):
+                best_key = key
+        return self.MODEL_TIERS[best_key] if best_key is not None else None
+
+    def _preceded_by_rate_limit(self, state: RunState, step: int) -> bool:
+        return any(
+            "rate" in (s.signal_name or "").lower() and s.step_index <= step
+            for s in state.external_signals
+        )
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        calls = [c for c in state.llm_calls if c.model]
+        if len(calls) < 2:
+            return None
+
+        for prev, cur in zip(calls, calls[1:]):
+            if cur.model == prev.model:
+                continue
+            prev_tier, cur_tier = self._tier(prev.model), self._tier(cur.model)
+            if prev_tier is None or cur_tier is None:
+                continue  # unknown model on either side — can't judge a downgrade
+            if cur_tier >= prev_tier:
+                continue  # upgrade or same tier
+            return FailureSignal(
+                failure_type=FailureType.MODEL_FALLBACK_DRIFT,
+                severity=self.SEVERITY,
+                run_id=state.run_id,
+                agent_id=state.agent_id,
+                agent_version=state.agent_version,
+                step_index=cur.step_index,
+                confidence=0.8,
+                evidence={
+                    "from_model": prev.model,
+                    "to_model": cur.model,
+                    "from_tier": prev_tier,
+                    "to_tier": cur_tier,
+                    "tier_delta": prev_tier - cur_tier,
+                    "downgrade_step": cur.step_index,
+                    "preceded_by_rate_limit": self._preceded_by_rate_limit(state, cur.step_index),
+                },
+            )
+        return None
+
+
+# ── MEMORY_POISONING ──────────────────────────────────────────────────────────
+
+
+class MemoryPoisonedDetector(BaseDetector):
+    """
+    An injection / override directive was persisted into the agent's own memory
+    (a conversation buffer, scratchpad, or long-term store) — content that will
+    steer the agent when it reads that memory back on a later step or turn.
+
+    This is a third, distinct injection surface from the two Dunetrace already
+    covers, differing in *when* and *from where* the hostile text enters:
+
+    - `PROMPT_INJECTION_SIGNAL` checks the user's own input at run-start.
+    - `RETRIEVED_CONTENT_INJECTION` checks content pulled in from a retrieval or
+      tool result *during* the run (read once, acted on immediately).
+    - `MEMORY_POISONING` checks what the agent *writes to memory* — the danger
+      is persistence: a directive planted in memory survives across steps and
+      across turns, and re-steers the agent every time that memory is loaded,
+      long after the step that wrote it. The classic attack is content from an
+      untrusted channel (a retrieved document, a tool response, an external
+      feed) being summarized/persisted into memory verbatim, injection and all.
+
+    Reads the typed `state.memory_events` view (built from `memory.*` events —
+    see run_context.py / run_builder.py). A run that never touches the memory
+    channel gives this detector nothing to check; it fires only on a positive
+    marker match in a written value, never on absence of memory activity.
+
+    Marker vocabulary is deliberately narrower than `PROMPT_INJECTION_SIGNAL`'s:
+    it keeps the unambiguous *override* signatures (ignore/disregard/forget
+    instructions, override/bypass safety, embedded role markers, instruction
+    delimiters, jailbreak/DAN) but drops the role-play ones (`act as`,
+    `pretend`, `you are now`, `your new role is`) — those legitimately appear in
+    user personalization that agents routinely persist ("act as my travel
+    planner", "you are now my coding assistant"), and including them tanks
+    precision on benign stored preferences. See scripts/calibration/
+    memory_poisoning_calibration.md.
+
+    Fires once per run, on the first written value that matches a marker.
+
+    Severity: HIGH on any match. CRITICAL when the write is higher-confidence
+    poisoning — either its `source` is an attacker-controllable channel
+    (`retrieval` / `tool_output` / `external`), or the poisoned key is
+    subsequently *read* in the same run (the poisoned memory was actually
+    loaded back, not just written and left dormant).
+
+    Tunable: POISON_PHRASES, CASE_SENSITIVE, REQUIRE_UNTRUSTED_SOURCE.
+    """
+
+    name = "MEMORY_POISONING"
+    SEVERITY = None  # computed per-signal: HIGH or CRITICAL
+
+    # Substring markers (case-insensitive by default). Override-style directives
+    # only — no role-play phrases (see class docstring / calibration).
+    POISON_PHRASES = [
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "ignore prior instructions",
+        "ignore the above instructions",
+        "ignore earlier instructions",
+        "disregard previous instructions",
+        "disregard all previous instructions",
+        "disregard prior instructions",
+        "disregard the above",
+        "forget previous instructions",
+        "forget all previous instructions",
+        "forget everything above",
+        "do not follow your previous",
+        "do not follow the previous",
+        "do not follow your original",
+        "override safety",
+        "override your safety",
+        "override the safety",
+        "bypass safety",
+        "bypass your restrictions",
+        "bypass all restrictions",
+        "developer mode enabled",
+        "jailbreak",
+        "dan mode",
+    ]
+    # Structural markers matched by regex, independent of POISON_PHRASES.
+    ROLE_MARKER_RE = re.compile(r"(?:^|\n)\s*(system|assistant)\s*:", re.IGNORECASE)
+    DELIMITER_RE = re.compile(
+        r"\[/?INST\]|<<SYS>>|<</SYS>>|<\|im_start\|>|<\|system\|>|###\s*system",
+        re.IGNORECASE,
+    )
+    CASE_SENSITIVE = False
+    # When True, only fire on writes whose source is a known untrusted channel
+    # (retrieval/tool_output/external). Off by default so that source-less
+    # framework-auto-captured writes (unknown provenance) still fire.
+    REQUIRE_UNTRUSTED_SOURCE = False
+
+    _UNTRUSTED_SOURCES = frozenset({"retrieval", "tool_output", "external"})
+
+    def _match_marker(self, text: str) -> Optional[str]:
+        haystack = text if self.CASE_SENSITIVE else text.lower()
+        for phrase in self.POISON_PHRASES:
+            needle = phrase if self.CASE_SENSITIVE else phrase.lower()
+            if needle in haystack:
+                return phrase
+        if self.ROLE_MARKER_RE.search(text):
+            return "embedded_role_marker"
+        if self.DELIMITER_RE.search(text):
+            return "instruction_delimiter"
+        return None
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        writes = [m for m in state.memory_events if m.op == "written" and m.value]
+        if not writes:
+            return None
+
+        # Keys read at or after their write step — the poisoned content was
+        # actually loaded back, not just written and left dormant.
+        reads = [m for m in state.memory_events if m.op == "read"]
+
+        matched = []
+        for w in writes:
+            value = w.value or ""  # writes are pre-filtered to a truthy value; narrows Optional
+            marker = self._match_marker(value)
+            if marker is None:
+                continue
+            untrusted = w.source in self._UNTRUSTED_SOURCES
+            if self.REQUIRE_UNTRUSTED_SOURCE and not untrusted:
+                continue
+            matched.append((w, marker, untrusted, value))
+
+        if not matched:
+            return None
+
+        w, marker, untrusted, value = matched[0]
+        consumed = any(r.key == w.key and r.step_index >= w.step_index for r in reads)
+        critical = untrusted or consumed
+        return FailureSignal(
+            failure_type=FailureType.MEMORY_POISONING,
+            severity=Severity.CRITICAL if critical else Severity.HIGH,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=w.step_index,
+            confidence=0.85 if critical else 0.7,
+            evidence={
+                "memory_key": w.key,
+                "source": w.source,
+                "matched_marker": marker,
+                "untrusted_source": untrusted,
+                "consumed": consumed,
+                "write_step": w.step_index,
+                "poisoned_write_count": len(matched),
+                "value_snippet": value[:200],
+            },
+        )
+
+
+# ── DELEGATION_LOOP ───────────────────────────────────────────────────────────
+
+
+class DelegationLoopDetector(BaseDetector):
+    """
+    Two or more agents delegate to each other in a cycle — agent A hands off to
+    B, B hands back to A, A hands to B again — and the loop keeps going around
+    instead of converging. A multi-agent analogue of `TOOL_LOOP`: no single run
+    is misbehaving, but the *system* of runs is stuck in a mutual-delegation
+    spin, burning tokens and never terminating.
+
+    Like `HANDOFF_CONTEXT_LOSS`, this can't run via `on_run_completion(state)` —
+    that contract only ever sees one run, and a delegation cycle is a property of
+    the run *graph*. So it follows the same precedent `PROMPT_INJECTION_SIGNAL`
+    and `HANDOFF_CONTEXT_LOSS` set: `on_run_completion` returns None here, and the
+    real logic runs from `services/detector/detector_svc/worker.py::process_run()`
+    via `evaluate_delegation_cycle()`, the one place with cross-run graph access.
+
+    How the graph is built: a run's `parent_run_id` (auto-threaded by the SDK
+    when one `dt.run()` opens inside another — see client.py) links a child run
+    to the run that spawned it. The worker walks that chain to the root
+    (`run_graph.build_ancestor_chain`), derives the directed agent-delegation
+    graph from it, and runs three-colour DFS cycle detection
+    (`run_graph.find_cycle`). The *run* graph is a forest and can never cycle;
+    the cycle is in the *agent* dimension (A → B → A).
+
+    Fires only when the loop is sustained: at least `MIN_LOOP_RUNS` (default 5)
+    runs in the chain participate in a detected agent cycle. 5 is the calibrated
+    boundary that separates a runaway loop from a legitimate iterative supervisor
+    exchange (supervisor delegates, worker returns, supervisor delegates again,
+    then finishes — 4 runs, which must NOT fire); see
+    scripts/calibration/delegation_loop_calibration.md.
+
+    Severity: HIGH normally; CRITICAL once `CRITICAL_LOOP_RUNS` (default 7) runs
+    are caught in the loop — a runaway that isn't self-terminating.
+
+    Disclosed limitation: only fires when `parent_run_id` is set along the chain.
+    Auto-threading (Phase 2.1) covers nested `dt.run()` calls on the same task or
+    an asyncio child task; a sub-agent dispatched to a bare thread, or a
+    framework that collapses a whole crew into a single run, produces no
+    multi-run graph to walk.
+
+    Tunable: MIN_LOOP_RUNS, CRITICAL_LOOP_RUNS.
+    """
+
+    name = "DELEGATION_LOOP"
+    SEVERITY = None  # computed per-signal: HIGH or CRITICAL
+
+    MIN_LOOP_RUNS = 5
+    CRITICAL_LOOP_RUNS = 7
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        return None
+
+    def evaluate_delegation_cycle(
+        self,
+        cycle: Optional[List[str]],
+        agent_sequence: List[str],
+        run_id: str,
+        agent_id: str,
+        agent_version: str,
+    ) -> Optional[FailureSignal]:
+        """Decide whether a detected agent cycle is a sustained delegation loop.
+
+        ``cycle`` is the DFS result (e.g. ``['A', 'B', 'A']``) or None if the
+        agent graph was acyclic. ``agent_sequence`` is the full root-first agent
+        order along the chain, with repetition preserved, so we can measure how
+        many runs are caught in the loop.
+        """
+        if not cycle:
+            return None
+        cycle_agents = set(cycle)
+        loop_run_count = sum(1 for a in agent_sequence if a in cycle_agents)
+        if loop_run_count < self.MIN_LOOP_RUNS:
+            return None  # a single hand-back, not a sustained loop
+
+        critical = loop_run_count >= self.CRITICAL_LOOP_RUNS
+        return FailureSignal(
+            failure_type=FailureType.DELEGATION_LOOP,
+            severity=Severity.CRITICAL if critical else Severity.HIGH,
+            run_id=run_id,
+            agent_id=agent_id,
+            agent_version=agent_version,
+            step_index=0,  # a cross-run signal — no single step owns it
+            confidence=min(0.9, 0.6 + 0.05 * (loop_run_count - self.MIN_LOOP_RUNS + 1)),
+            evidence={
+                "cycle": cycle,
+                "cycle_agents": sorted(cycle_agents),
+                "cycle_length": len(cycle_agents),
+                "loop_run_count": loop_run_count,
+                "delegation_chain": agent_sequence,
+                "min_loop_runs": self.MIN_LOOP_RUNS,
+            },
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TIER1_DETECTORS: List[BaseDetector] = [
@@ -2294,6 +2736,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     GoalAbandonmentDetector(),
     RagEmptyRetrievalDetector(),
     LlmTruncationLoopDetector(),
+    SilentTruncationDetector(),
     ContextBloatDetector(),
     SlowStepDetector(),
     RetryStormDetector(),
@@ -2309,6 +2752,8 @@ TIER1_DETECTORS: List[BaseDetector] = [
     ToolArgumentFabricationDetector(),
     RetrievedContentInjectionDetector(),
     RunawayIterationDetector(),
+    ModelFallbackDriftDetector(),
+    MemoryPoisonedDetector(),
     # PromptInjectionDetector and HandoffContextLossDetector are handled
     # separately — the former needs raw input, the latter needs a second
     # run's data, which no detector in this list ever gets (see their

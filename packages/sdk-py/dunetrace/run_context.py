@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import os
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -16,6 +17,7 @@ from dunetrace.models import (
     EventType,
     ExternalSignal,
     LlmCall,
+    MemoryEvent,
     RetrievalResult,
     RunState,
     ToolCall,
@@ -39,6 +41,20 @@ logger = logging.getLogger("dunetrace.run")
 # would silently never match it).
 _VAD_TYPES = frozenset({"speech_start", "speech_end", "silence", "barge_in"})
 _TURN_TAKING_ACTIONS = frozenset({"agent_speaking", "user_speaking", "both_speaking", "neither"})
+# Where content written to agent memory came from (Capability 1). Optional on
+# memory_written, but strongly encouraged: MEMORY_POISONING weighs injection risk
+# higher for retrieval/tool_output/external sources than for user-set preferences.
+_MEMORY_SOURCES = frozenset(
+    {"user_input", "retrieval", "tool_output", "llm_output", "agent_reasoning", "external"}
+)
+
+
+def _omit_llm_output_text() -> bool:
+    """True when DUNETRACE_OMIT_LLM_OUTPUT_TEXT opts out of transmitting raw LLM
+    output text (bandwidth-sensitive deployments). Read per-call so it can be
+    toggled at runtime/in tests; the check is a cheap env lookup off the hot path."""
+    return os.environ.get("DUNETRACE_OMIT_LLM_OUTPUT_TEXT", "").lower() in ("1", "true", "yes")
+
 
 if TYPE_CHECKING:
     from dunetrace.client import Dunetrace
@@ -163,6 +179,10 @@ class RunContext:
             lc.output_length = output_length
             lc.completion_tokens = completion_tokens or None
             lc.reasoning_tokens = reasoning_tokens or None
+            # Typed access to the output text. Stored on the struct even when
+            # transmission is opted out below — it's already in-process here, so
+            # local runtime detectors keep full fidelity at zero bandwidth cost.
+            lc.output_text = output or None
             if prompt_tokens:
                 lc.prompt_tokens = prompt_tokens
             self._cost_usd += compute_run_cost([lc])
@@ -170,9 +190,13 @@ class RunContext:
             "completion_tokens": completion_tokens,
             "latency_ms": latency_ms,
             "finish_reason": finish_reason,
-            "output": output,
             "output_length": output_length,
         }
+        # Transmit the output text by default; omit it (bandwidth) when
+        # DUNETRACE_OMIT_LLM_OUTPUT_TEXT is set. output_length is always sent, so
+        # size-based detectors work either way.
+        if not _omit_llm_output_text():
+            payload["output"] = output
         if prompt_tokens:
             payload["prompt_tokens"] = prompt_tokens
         if reasoning_tokens:
@@ -405,6 +429,58 @@ class RunContext:
         )
         self.state.events.append(event)
         self._client._emit(event)
+
+    # ── Agent memory channel (Capability 1) ───────────────────────────────────
+    #
+    # Instrumentation for what an agent persists to and reads from its own memory
+    # (conversation buffers, scratchpads, long-term stores). None of these advance
+    # the step counter — they annotate the run, like external_signal. The typed
+    # RunState.memory_events view is built from these events (Phase 1.3); the
+    # MEMORY_POISONING detector reads it (Phase 1.4).
+
+    def memory_written(self, key: str, value: str, source: Optional[str] = None) -> None:
+        """Record that ``value`` was written to agent memory under ``key``.
+
+        ``source`` is optional but strongly encouraged — it names where the
+        content originated so downstream detection can weigh injection risk:
+        one of ``user_input``, ``retrieval``, ``tool_output``, ``llm_output``,
+        ``agent_reasoning``, ``external``. Does not advance the step counter.
+        """
+        if source is not None and source not in _MEMORY_SOURCES:
+            raise ValueError(
+                f"memory_written: source must be one of {sorted(_MEMORY_SOURCES)} "
+                f"or None, got {source!r}"
+            )
+        payload: Dict[str, Any] = {"key": key, "value": value}
+        if source is not None:
+            payload["source"] = source
+        self.state.memory_events.append(
+            MemoryEvent(
+                op="written",
+                key=key,
+                value=value,
+                source=source,
+                step_index=self.step,
+                timestamp=time.time(),
+            )
+        )
+        self._emit(EventType.MEMORY_WRITTEN, payload, advance=False)
+
+    def memory_read(self, key: str) -> None:
+        """Record that agent memory was read at ``key``. Does not advance the step
+        counter."""
+        self.state.memory_events.append(
+            MemoryEvent(op="read", key=key, step_index=self.step, timestamp=time.time())
+        )
+        self._emit(EventType.MEMORY_READ, {"key": key}, advance=False)
+
+    def memory_cleared(self, key: Optional[str] = None) -> None:
+        """Record that agent memory was cleared — a specific ``key``, or all
+        memory when ``key`` is None. Does not advance the step counter."""
+        self.state.memory_events.append(
+            MemoryEvent(op="cleared", key=key, step_index=self.step, timestamp=time.time())
+        )
+        self._emit(EventType.MEMORY_CLEARED, {"key": key}, advance=False)
 
     # ── Human-in-the-loop approvals (Capability 2) ────────────────────────────
     #

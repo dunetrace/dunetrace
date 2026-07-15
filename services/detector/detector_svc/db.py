@@ -914,6 +914,29 @@ async def fetch_stalled_runs(
     return [dict(r) for r in rows]
 
 
+async def fetch_run_lineage(run_id: str) -> Optional[dict]:
+    """One lightweight lineage row for a run — its identity and immediate parent,
+    read from `run.started` — without pulling the run's full event list.
+
+    Used to walk a delegation graph's parent_run_id chain one hop at a time
+    (see run_graph.py / the DELEGATION_LOOP detector), where fetching every
+    event of every ancestor would be wasteful — only agent_id + parent_run_id
+    are needed per hop. Returns None if the run has no `run.started` on record.
+    """
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT run_id, agent_id, agent_version, parent_run_id
+            FROM events
+            WHERE run_id = $1 AND event_type = 'run.started'
+            ORDER BY step_index ASC, timestamp ASC
+            LIMIT 1
+            """,
+            run_id,
+        )
+    return dict(row) if row else None
+
+
 async def fetch_run_events(run_id: str) -> list[dict]:
     """All events for a run, ordered by step_index then timestamp."""
     async with _pool.acquire() as conn:

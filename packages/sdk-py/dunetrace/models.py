@@ -54,6 +54,12 @@ class EventType(str, Enum):
     APPROVAL_GRANTED = "approval.granted"
     APPROVAL_DENIED = "approval.denied"
     APPROVAL_TIMEOUT = "approval.timeout"
+    # Agent memory channel (Capability 1). Content written to / read from / cleared
+    # in agent memory, so a run's persisted state is observable. Kept value-for-
+    # value in sync with dunetrace_schemas.enums.EventType (test_sdk_parity.py).
+    MEMORY_WRITTEN = "memory.written"
+    MEMORY_READ = "memory.read"
+    MEMORY_CLEARED = "memory.cleared"
 
 
 class Severity(str, Enum):
@@ -71,6 +77,7 @@ class FailureType(str, Enum):
     PROMPT_INJECTION_SIGNAL = "PROMPT_INJECTION_SIGNAL"
     RAG_EMPTY_RETRIEVAL = "RAG_EMPTY_RETRIEVAL"
     LLM_TRUNCATION_LOOP = "LLM_TRUNCATION_LOOP"
+    SILENT_TRUNCATION = "SILENT_TRUNCATION"
     CONTEXT_BLOAT = "CONTEXT_BLOAT"
     SLOW_STEP = "SLOW_STEP"
     RETRY_STORM = "RETRY_STORM"
@@ -91,6 +98,9 @@ class FailureType(str, Enum):
     RETRIEVED_CONTENT_INJECTION = "RETRIEVED_CONTENT_INJECTION"
     HANDOFF_CONTEXT_LOSS = "HANDOFF_CONTEXT_LOSS"
     RUNAWAY_ITERATION = "RUNAWAY_ITERATION"
+    MODEL_FALLBACK_DRIFT = "MODEL_FALLBACK_DRIFT"
+    MEMORY_POISONING = "MEMORY_POISONING"
+    DELEGATION_LOOP = "DELEGATION_LOOP"
     CUSTOM = "CUSTOM"  # sentinel for user-defined custom detectors
 
 
@@ -162,6 +172,11 @@ class LlmCall:
     output_length: Optional[int] = None
     completion_tokens: Optional[int] = None
     reasoning_tokens: Optional[int] = None
+    # Raw LLM output text. Nullable: None when the caller didn't pass output=, or
+    # when transmission was opted out (DUNETRACE_OMIT_LLM_OUTPUT_TEXT=1) on the
+    # server-reconstructed side. Detectors/evaluators that only need the size
+    # keep reading output_length; those that need the text read this.
+    output_text: Optional[str] = None
 
 
 @dataclass
@@ -192,6 +207,25 @@ class RetrievalResult:
 
 
 @dataclass
+class MemoryEvent:
+    """A single agent-memory operation (write/read/clear) within a run.
+
+    Emitted via ``run.memory_written``/``memory_read``/``memory_cleared`` or
+    auto-captured from framework memory (LangGraph store, CrewAI memory). Like
+    ``ExternalSignal`` it annotates the current step rather than advancing it.
+    Server-side, ``run_builder`` reconstructs these from ``memory.*`` events so
+    the MEMORY_POISONING detector can inspect written content and its provenance.
+    """
+
+    op: str  # "written" | "read" | "cleared"
+    key: Optional[str]  # None only for a clear-all (memory_cleared() with no key)
+    step_index: int
+    timestamp: float
+    value: Optional[str] = None  # written content; None for read/clear
+    source: Optional[str] = None  # provenance of a written value; None when unknown
+
+
+@dataclass
 class RunState:
     """Accumulated state for a single agent run. Detectors consume this, not raw events."""
 
@@ -204,6 +238,7 @@ class RunState:
     retrievals: List[RetrievalResult] = field(default_factory=list)
     events: List[AgentEvent] = field(default_factory=list)
     external_signals: List[ExternalSignal] = field(default_factory=list)
+    memory_events: List[MemoryEvent] = field(default_factory=list)
     step_durations_ms: Dict[int, int] = field(default_factory=dict)
     current_step: int = 0
     exit_reason: Optional[str] = None

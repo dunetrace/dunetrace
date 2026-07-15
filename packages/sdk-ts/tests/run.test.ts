@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { DunetraceRun } from "../src/run.js";
 import type { AgentEvent } from "../src/models.js";
 
@@ -304,5 +304,97 @@ describe("DunetraceRun.llm() — Anthropic format", () => {
     expect(emitted[0].payload["prompt_tokens"]).toBe(80);
     expect(emitted[1].payload["completion_tokens"]).toBe(20);
     expect(emitted[1].payload["finish_reason"]).toBe("end_turn");
+  });
+});
+
+describe("DunetraceRun — memory channel", () => {
+  it("memoryWritten emits memory.written with key/value/source", () => {
+    const { run, emitted } = makeRun();
+    run.memoryWritten("user_prefs", "prefers dark mode", "user_input");
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].event_type).toBe("memory.written");
+    expect(emitted[0].payload).toEqual({
+      key: "user_prefs",
+      value: "prefers dark mode",
+      source: "user_input",
+    });
+  });
+
+  it("memoryWritten omits source when not given", () => {
+    const { run, emitted } = makeRun();
+    run.memoryWritten("note", "some text");
+    expect(emitted[0].payload).toEqual({ key: "note", value: "some text" });
+    expect("source" in (emitted[0].payload as object)).toBe(false);
+  });
+
+  it("memoryWritten rejects an invalid source", () => {
+    const { run } = makeRun();
+    expect(() => run.memoryWritten("k", "v", "not_a_source" as never)).toThrow(/source must be one of/);
+  });
+
+  it("memoryWritten accepts every documented source", () => {
+    const { run, emitted } = makeRun();
+    for (const s of ["user_input", "retrieval", "tool_output", "llm_output", "agent_reasoning", "external"] as const) {
+      run.memoryWritten(`k_${s}`, "v", s);
+    }
+    expect(emitted).toHaveLength(6);
+  });
+
+  it("memoryRead and memoryCleared emit the right payloads", () => {
+    const { run, emitted } = makeRun();
+    run.memoryRead("user_prefs");
+    run.memoryCleared("user_prefs");
+    run.memoryCleared(); // clear all
+    expect(emitted[0]).toMatchObject({ event_type: "memory.read", payload: { key: "user_prefs" } });
+    expect(emitted[1]).toMatchObject({ event_type: "memory.cleared", payload: { key: "user_prefs" } });
+    expect(emitted[2]).toMatchObject({ event_type: "memory.cleared", payload: { key: null } });
+  });
+
+  it("memory events do NOT advance the step counter", () => {
+    const { run } = makeRun();
+    run.toolCalled("search");
+    const stepAfterTool = run.currentStep();
+    run.memoryWritten("k", "v", "tool_output");
+    run.memoryRead("k");
+    run.memoryCleared();
+    expect(run.currentStep()).toBe(stepAfterTool);
+  });
+});
+
+describe("DunetraceRun — DUNETRACE_OMIT_LLM_OUTPUT_TEXT opt-out", () => {
+  const KEY = "DUNETRACE_OMIT_LLM_OUTPUT_TEXT";
+  let saved: string | undefined;
+  beforeEach(() => { saved = process.env[KEY]; delete process.env[KEY]; });
+  afterEach(() => { if (saved === undefined) delete process.env[KEY]; else process.env[KEY] = saved; });
+
+  it("transmits output by default", () => {
+    const { run, emitted } = makeRun();
+    run.llmResponded({ outputText: "hello world", finishReason: "stop" });
+    expect(emitted[0].payload["output"]).toBe("hello world");
+    expect(emitted[0].payload["output_length"]).toBe(11);
+  });
+
+  it("omits output when opted out, but still sends output_length", () => {
+    process.env[KEY] = "1";
+    const { run, emitted } = makeRun();
+    run.llmResponded({ outputText: "hello world", finishReason: "stop" });
+    expect("output" in (emitted[0].payload as object)).toBe(false);
+    expect(emitted[0].payload["output_length"]).toBe(11);
+  });
+
+  it("accepts true / yes (case-insensitive) as opt-out values", () => {
+    for (const v of ["true", "YES", "True"]) {
+      process.env[KEY] = v;
+      const { run, emitted } = makeRun();
+      run.llmResponded({ outputText: "x", finishReason: "stop" });
+      expect("output" in (emitted[0].payload as object)).toBe(false);
+    }
+  });
+
+  it("a non-truthy value keeps transmitting output", () => {
+    process.env[KEY] = "0";
+    const { run, emitted } = makeRun();
+    run.llmResponded({ outputText: "keep me", finishReason: "stop" });
+    expect(emitted[0].payload["output"]).toBe("keep me");
   });
 });

@@ -97,6 +97,23 @@ default:
       threshold: 2
       window_runs: 10
 
+  silent_truncation:
+    min_output_length: 1   # ignore truncations shorter than this (0-length = EMPTY_LLM_RESPONSE)
+    loop_threshold: 2      # at/above this many truncations, LLM_TRUNCATION_LOOP owns it
+    alert_policy:
+      mode: consecutive
+      threshold: 2
+      window_runs: 10
+
+  model_fallback_drift:
+    # model_tiers: {...}   # optional: override the built-in model->tier map
+    #                        (higher = more capable; a lower tier on a later
+    #                        call in the same run is a downgrade)
+    alert_policy:
+      mode: consecutive
+      threshold: 2
+      window_runs: 10
+
   context_bloat:
     growth_factor: 3.0    # last/first prompt token ratio to trigger (static fallback when no baseline)
     min_calls: 3          # minimum LLM calls with token data required
@@ -257,6 +274,41 @@ default:
     # detector's docstring.
     alert_policy:
       mode: immediate   # crossing an absolute ceiling with no completion signal is worth knowing about immediately
+      threshold: 1
+      window_runs: 1
+
+  memory_poisoning:
+    case_sensitive: false
+    require_untrusted_source: false   # true = only fire on writes sourced from an
+                                      # attacker-controllable channel (retrieval/
+                                      # tool_output/external); raises precision at
+                                      # the cost of missing unknown-provenance writes
+    # poison_phrases: list, override only to add/remove entries — see
+    # docs/detectors.md for the defaults. Reads memory.written events (the
+    # memory channel — see docs/memory.md); a run that never writes memory gives
+    # this detector nothing to check. Shadow by default (not in LIVE_DETECTORS)
+    # pending real-traffic validation — see scripts/calibration/
+    # memory_poisoning_calibration.md.
+    alert_policy:
+      mode: immediate   # a security signal — always alert on first occurrence
+      threshold: 1
+      window_runs: 1
+
+  delegation_loop:
+    min_loop_runs: 5          # fire when >=N runs in the parent_run_id chain are
+                              # caught in a mutual-delegation cycle (A->B->A->B).
+                              # 5 is the calibrated boundary separating a runaway
+                              # loop from a legitimate 2-iteration supervisor
+                              # exchange (4 runs) — calibration: FP 0%, TP 93%.
+    critical_loop_runs: 7     # escalate to CRITICAL at this many looping runs
+    # Multi-agent detector. Evaluated at the worker level (not the per-run
+    # detector loop — like handoff_context_loss), walking the parent_run_id
+    # graph. Only fires when parent_run_id is set along the chain — auto-threaded
+    # for nested dt.run() calls (see docs/multi-agent.md). Shadow by default
+    # (not in LIVE_DETECTORS) pending real-traffic validation — see
+    # scripts/calibration/delegation_loop_calibration.md.
+    alert_policy:
+      mode: immediate   # a non-terminating loop burns tokens now — alert at once
       threshold: 1
       window_runs: 1
 

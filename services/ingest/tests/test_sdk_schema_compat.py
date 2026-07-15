@@ -109,6 +109,11 @@ def _record_a_full_run() -> list:
         run.voice_activity_detected("speech_start", duration_ms=100)
         run.turn_taking("agent_speaking")
 
+        # Memory channel events.
+        run.memory_written("user_prefs", "prefers concise answers", source="user_input")
+        run.memory_read("user_prefs")
+        run.memory_cleared("user_prefs")
+
         # Full approval lifecycle: granted, then denied, then timeout (the last
         # two raise ApprovalDenied, which we swallow — we only want the events).
         run.request_approval("wire_money", {"amt": 1}, timeout_s=300)  # granted
@@ -179,3 +184,24 @@ class TestSdkPayloadValidatesAgainstRealSchema:
 
         r = await client.post("/v1/ingest", json=_build_ingest_payload(policy_events))
         assert r.status_code == 202, r.text
+
+    async def test_unknown_future_event_type_does_not_reject_batch(self, client):
+        # Forward compat (Capability 1): a newer SDK emitting an event type this
+        # ingest build has never heard of must NOT poison the batch. A mix of a
+        # known event and a genuinely-unknown one is accepted whole, so a rolling
+        # deploy (SDK ahead of ingest) never silently loses the known events too.
+        known = {
+            "event_type": "tool.called",
+            "run_id": "r1",
+            "agent_id": "a1",
+            "agent_version": "v1",
+            "step_index": 1,
+            "timestamp": 1.0,
+            "payload": {"tool_name": "search"},
+        }
+        future = dict(known, event_type="future.capability.kind", step_index=2)
+        payload = {"api_key": "dt_dev_test", "agent_id": "a1", "events": [known, future]}
+
+        r = await client.post("/v1/ingest", json=payload)
+        assert r.status_code == 202, r.text
+        assert r.json()["accepted"] == 2  # both events, including the unknown one

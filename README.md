@@ -18,7 +18,7 @@
 
 ---
 
-## Star us
+## Star us ⭐
 
 **If Dunetrace helps you, consider giving it a ⭐ on top right, it helps others find the project.**
 
@@ -44,7 +44,7 @@ Dunetrace covers the full agent reliability lifecycle, not just one slice of it:
 | | Pillar | What it does |
 |---|---|---|
 | 1 | **Sessions & Events** | Every run, every tool call, every LLM exchange — the raw data everything else is built on |
-| 2 | **Structural Detection** | 23 zero-LLM detectors, in-path, sub-500μs — the always-on first line |
+| 2 | **Structural Detection** | 27 zero-LLM detectors, in-path, sub-500μs — the always-on first line |
 | 3 | **Semantic Evaluation** | LLM-based judgment (hallucination, task completion, cross-turn frustration) — post-hoc, sampling-based, opt-in → [docs/semantic-evaluation.md](docs/semantic-evaluation.md) |
 | 4 | **Runtime Prevention** | Policies that stop, redirect, or downgrade a run *while it's happening* — the differentiator no tracer offers → [docs/policies.md](docs/policies.md) |
 | 5 | **Root Cause & Fix** | Native root-cause analysis, auto-applied policy fixes, or a one-click draft PR → [Diagnose & fix](#diagnose--fix) |
@@ -86,15 +86,18 @@ npm install dunetrace                       # Node.js / TypeScript
 **Python**
 ```python
 from dunetrace import Dunetrace
+import openai
 
 dt = Dunetrace()
+dt.init(agent_id="support-agent")   # auto-instruments installed clients (OpenAI, Anthropic, LangChain, CrewAI, httpx, requests)
 
-@dt.tool
-def web_search(query: str) -> list: ...
-
-@dt.trace
+@dt.agent("support-agent", model="gpt-4o")
 def my_agent(question: str) -> str:
-    return web_search(question)[0]
+    resp = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": question}],
+    )
+    return resp.choices[0].message.content   # LLM + tool calls tracked automatically, no manual hooks
 ```
 
 **TypeScript / Node.js**
@@ -126,7 +129,7 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ## Detectors
 
-23 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
+27 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Signal | What it catches |
 |---|---|
@@ -134,12 +137,19 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 | `RETRY_STORM` | Tool failing, agent retrying it repeatedly |
 | `COST_SPIKE` | Total token consumption unusually high vs per-agent baseline |
 | `PROMPT_INJECTION_SIGNAL` | Input matched adversarial injection patterns |
-| `PREMATURE_TERMINATION` | Agent claims success right after a tool call it made actually failed |
+| `MEMORY_POISONING` | An injection directive was written into the agent's own memory, re-steering it when read back |
+| `DELEGATION_LOOP` | Agents delegate to each other in a cycle that never converges |
 | `RUNAWAY_ITERATION` | Step or cost ceiling crossed with no completion signal |
+| `SILENT_TRUNCATION` | A response was truncated and the agent used it without retrying |
+| `MODEL_FALLBACK_DRIFT` | The run silently switched to a weaker model (e.g. under rate limiting) |
 
 Each alert includes: what fired, why it matters, a concrete fix, and a rate context line (first occurrence / recurring / systemic).
 
-→ [docs/detectors.md](docs/detectors.md) for the full list of 23 detectors
+→ [docs/detectors.md](docs/detectors.md) for the full list of 27 detectors
+
+**Multi-agent systems** — instrument each agent as its own `dt.run()` and Dunetrace auto-links them into a delegation graph (`parent_run_id` is threaded automatically for nested runs). Two detectors read that graph: `DELEGATION_LOOP` (agents cycling without converging) and `HANDOFF_CONTEXT_LOSS` (a handoff dropping the parent's context). → [docs/multi-agent.md](docs/multi-agent.md)
+
+**Agent memory** — instrument what an agent writes to and reads from its own memory (`run.memory_written()` / `memory_read()`, or automatically for LangGraph/CrewAI memory via `dt.auto_instrument()`), and `MEMORY_POISONING` flags adversarial content persisted into it. → [docs/memory.md](docs/memory.md)
 
 **Custom detectors** — write a detector in plain English. Dunetrace translates it to a structured condition set, runs it in shadow mode against real traffic, and lets you review the fire rate before any alert fires. In the dashboard: **Config → Custom detectors → Add detector**.
 
@@ -152,12 +162,14 @@ Each alert includes: what fired, why it matters, a concrete fix, and a rate cont
 ## Semantic evaluation
 
 For failure modes no structural check can catch — did the agent hallucinate,
-did it actually finish the task, is the user getting frustrated across a
-conversation. Post-hoc (never in your agent's request path), sampling-based,
-disabled by default. Ships three [DeepEval](https://github.com/confident-ai/deepeval)-backed
-evaluators (hallucination, task completion, cross-turn user frustration) plus
-false-positive management (confidence floors, grouping, feedback loop,
-second-opinion for high-stakes findings).
+did it finish the task, did it solve the wrong task, is the user going in
+circles. Post-hoc (never in your agent's request path), sampling-based,
+disabled by default. Ships seven [DeepEval](https://github.com/confident-ai/deepeval)-backed
+evaluators — four run-level (hallucination, task completion, task-understanding
+failure, off-topic drift) and three conversation-level (user frustration,
+confusion loops, sycophancy) — plus false-positive management (confidence
+floors, grouping, feedback loop, second-opinion for high-stakes findings). Each
+calibrated before ship (see `scripts/calibration/`).
 
 ```bash
 SEMANTIC_WORKER_ENABLED=true
@@ -290,7 +302,7 @@ pip install dunetrace-mcp
 Agent Code
   └─► Dunetrace SDK        (raw content → ingest events)
         └─► Ingest API      (POST /v1/ingest → Postgres)
-                ├─► Detector          (poll → 23 detectors → signals)
+                ├─► Detector          (poll → 27 detectors → signals)
                 ├─► Semantic Worker   (optional — poll → DeepEval → signals)
                 ├─► Integrations      (optional — pull Langfuse/LangSmith/Braintrust)
                 ├─► Alerts            (poll → explain → Slack / webhook)
@@ -340,10 +352,6 @@ Agent Code
 Fork, branch, change, `make test`, PR. For larger changes (new detectors, architecture changes), open an issue first.
 
 Requires Python 3.11+, Node.js 18+, Docker + Docker Compose.
-
-## Star history
-
-[![Star History Chart](https://api.star-history.com/svg?repos=dunetrace/dunetrace&type=Date)](https://star-history.com/#dunetrace/dunetrace&Date)
 
 ## Contact
 

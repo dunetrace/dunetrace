@@ -631,3 +631,78 @@ describe("Dunetrace.wrapAnthropic()", () => {
     await dt.shutdown();
   });
 });
+
+// ── parent_run_id auto-threading ────────────────────────────────────────────────
+
+describe("Dunetrace.run() — parent_run_id auto-threading", () => {
+  function started(events: AgentEvent[], agentId: string): AgentEvent {
+    const e = events.find((ev) => ev.event_type === "run.started" && ev.agent_id === agentId);
+    if (!e) throw new Error(`no run.started for ${agentId}`);
+    return e;
+  }
+
+  it("a nested run inherits the active run's id as parent_run_id", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    let parentId = "";
+    await dt.run("orchestrator", {}, async (parent) => {
+      parentId = parent.runId;
+      await dt.run("researcher", {}, async () => {});
+    });
+
+    expect(started(events, "orchestrator").parent_run_id).toBeNull();
+    expect(started(events, "researcher").parent_run_id).toBe(parentId);
+  });
+
+  it("an explicit parentRunId always wins", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("orchestrator", {}, async () => {
+      await dt.run("researcher", { parentRunId: "explicit-parent" }, async () => {});
+    });
+
+    expect(started(events, "researcher").parent_run_id).toBe("explicit-parent");
+  });
+
+  it("a top-level run has no parent", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("solo", {}, async () => {});
+    expect(started(events, "solo").parent_run_id).toBeNull();
+  });
+
+  it("sequential (non-nested) runs do not link", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent-a", {}, async () => {});
+    await dt.run("agent-b", {}, async () => {});
+    expect(started(events, "agent-b").parent_run_id).toBeNull();
+  });
+
+  it("three-level nesting links each run to its immediate parent", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    let aId = "", bId = "";
+    await dt.run("a", {}, async (a) => {
+      aId = a.runId;
+      await dt.run("b", {}, async (b) => {
+        bId = b.runId;
+        await dt.run("c", {}, async () => {});
+      });
+    });
+
+    expect(started(events, "a").parent_run_id).toBeNull();
+    expect(started(events, "b").parent_run_id).toBe(aId);
+    expect(started(events, "c").parent_run_id).toBe(bId);
+  });
+});

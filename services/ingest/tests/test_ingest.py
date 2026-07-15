@@ -205,11 +205,14 @@ class TestValidation:
         r = await client.post("/v1/ingest", json=make_batch(events=[]))
         assert r.status_code == 422
 
-    async def test_unknown_event_type_rejected_422(self, client):
+    async def test_unknown_event_type_accepted_for_forward_compat(self, client):
+        # Forward compat: a newer SDK may emit event types this ingest build
+        # doesn't know yet. They must be accepted, not 422'd — rejecting would
+        # drop the whole batch during a rolling deploy (SDK ahead of ingest).
         r = await client.post(
             "/v1/ingest", json=make_batch(events=[make_event(event_type="not.valid")])
         )
-        assert r.status_code == 422
+        assert r.status_code == 202
 
     async def test_missing_run_id_rejected_422(self, client):
         event = make_event()
@@ -255,7 +258,10 @@ class TestValidation:
         assert r.status_code == 422
 
     async def test_422_has_detail_field(self, client):
-        r = await client.post("/v1/ingest", json=make_batch(events=[make_event(event_type="bad")]))
+        # An empty run_id is still a hard validation error (unlike an unknown
+        # event_type, which is now accepted for forward compat).
+        r = await client.post("/v1/ingest", json=make_batch(events=[make_event(run_id="")]))
+        assert r.status_code == 422
         assert "detail" in r.json()
 
     async def test_non_dict_payload_rejected_422(self, client):

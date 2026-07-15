@@ -244,6 +244,23 @@ class Dunetrace:
         """
         tools = tools or []
         version = agent_version(system_prompt, model, tools)
+
+        # Auto-thread parent_run_id: if this run opens while another run is
+        # already active on this task/thread and the caller didn't pass
+        # parent_run_id explicitly, inherit the active run's id. This links a
+        # nested multi-agent run (an orchestrator opening a sub-agent's own
+        # dt.run()) into a parent/child run graph with no manual id threading —
+        # the substrate DELEGATION_LOOP and HANDOFF_CONTEXT_LOSS consume. An
+        # explicit parent_run_id always wins. Propagation follows contextvars:
+        # synchronous nesting and asyncio child tasks inherit automatically;
+        # a sub-agent dispatched to a bare thread does not (the thread starts
+        # with a fresh context) unless the caller copies context or passes
+        # parent_run_id explicitly.
+        if parent_run_id is None:
+            _active_run = _current_run.get()
+            if _active_run is not None:
+                parent_run_id = _active_run.run_id
+
         ctx = RunContext(
             client=self,
             agent_id=agent_id,

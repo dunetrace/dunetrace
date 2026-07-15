@@ -56,6 +56,16 @@ repos:
         pass_filenames: false
         files: ^services/.*/routers/.*\.py$
 
+      # Fail if the docs claim a detector/evaluator that doesn't exist in code
+      # (the drift that let README/marketing list unbuilt detectors). Runs when
+      # the detector-claim docs or the detector/evaluator/pack source change.
+      - id: validate-detector-docs
+        name: Detector/evaluator name consistency (docs vs code)
+        language: system
+        entry: python scripts/validate_detector_docs.py
+        pass_filenames: false
+        files: ^(README\.md|docs/.+\.md|packages/sdk-py/dunetrace/(detectors\.py|packs/.+\.py)|services/semantic/semantic_svc/evaluators/.+\.py)$
+
       - id: sdk-py-mypy
         name: SDK (Python) mypy
         language: system

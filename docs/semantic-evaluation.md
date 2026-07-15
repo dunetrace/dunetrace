@@ -74,18 +74,50 @@ cap, independent of the org-wide billing quota below), and `evaluators`
 
 ## Evaluators (DeepEval-backed)
 
-Two evaluators ship in v1, both wrapping [DeepEval](https://github.com/confident-ai/deepeval)
+Seven evaluators ship, all wrapping [DeepEval](https://github.com/confident-ai/deepeval)
 metrics behind a Dunetrace-native interface (`services/semantic/semantic_svc/evaluators/base.py`)
-so they can be swapped or extended without touching worker code:
+so they can be swapped or extended without touching worker code. Four are
+run-level; three (below) operate across a conversation:
 
 - **`HALLUCINATION`** — did the agent state something as fact that its own
   context doesn't support.
 - **`TASK_COMPLETION`** — did the agent actually do what it was asked, not
-  just respond plausibly.
+  just respond plausibly (thoroughness of the right task).
+- **`TASK_UNDERSTANDING_FAILURE`** — did the agent solve the *wrong* problem:
+  its response addresses a different task than the user requested. Distinct from
+  `TASK_COMPLETION` (which is about how fully the *right* task was done) and from
+  `HALLUCINATION` (factuality). A fully-complete answer to the wrong question
+  fails this while passing the other two. Calibrated on 108 labeled runs (margin
+  0.21 vs 0.60 between wrong- and right-task; 0% false positives at the default
+  0.5 threshold, including partial / ambiguous / multi-part hard negatives) —
+  see `scripts/calibration/task_understanding_failure_calibration.md`.
 
-A third, **`USER_FRUSTRATION`**, operates on conversations rather than
-single runs — see [Conversation-level evaluation](#conversation-level-evaluation)
-below.
+Two more operate on conversations rather than single runs — see
+[Conversation-level evaluation](#conversation-level-evaluation) below:
+
+- **`USER_FRUSTRATION`** — is the user getting frustrated across the
+  conversation (complaints, sarcasm, escalating tone).
+- **`CONFUSION_LOOP`** — is the user re-asking the same underlying question
+  because the agent's answers aren't resolving their intent. Distinct from
+  frustration: it's about repeated *intent*, not emotional tone — a calm user
+  politely re-asking the same thing three times is a confusion loop.
+  Calibrated on 108 labeled conversations (score margin 0.20 vs 0.83 between
+  loops and non-loops; 0% false positives including hard negatives at the
+  default 0.5 threshold) — see `scripts/calibration/confusion_loop_calibration.md`.
+- **`SYCOPHANCY_SIGNAL`** — did the agent flip-flop its position to agree with
+  the user because they pushed back, rather than because they gave it a good
+  reason. Correcting a genuine mistake on a user-supplied correct fact is *not*
+  sycophancy. Calibrated on 100 conversations; because caving-to-pressure and
+  legitimate-correction genuinely overlap, it ships precision-first at threshold
+  **0.4** (0% false positives, 88% recall) rather than the standard 0.5 — see
+  `scripts/calibration/sycophancy_signal_calibration.md`.
+- **`OFF_TOPIC_DRIFT`** (run-level) — did the response start on the user's
+  question and then wander off it (unrelated features, marketing, a tangent).
+  Distinct from `TASK_UNDERSTANDING_FAILURE`: drift starts on-topic and loses
+  the thread, rather than misreading the task from the start. Covering multiple
+  related aspects of a broad question is not drift. Calibrated on 100 runs (margin
+  0.44 vs 0.82; 0% false positives including broad multi-aspect answers at the
+  default 0.5 threshold) — see `scripts/calibration/off_topic_drift_calibration.md`.
 
 LLM provider is configurable per evaluator (`SEMANTIC_LLM_PROVIDER`,
 default OpenAI `gpt-4o-mini` for cost; upgradeable to `gpt-4o` or
@@ -191,7 +223,7 @@ something no single-run evaluator can see. See
 
 - Not a replacement for structural detection — semantic evaluation
   *augments* it (100% of structurally-flagged runs also get semantic
-  context) and catches a different class of failure, but the 23 structural
+  context) and catches a different class of failure, but the 27 structural
   detectors remain the always-on, zero-cost, zero-LLM first line.
 - Not a runtime guardrail — see the policies cross-link above.
 - Not required — `SEMANTIC_WORKER_ENABLED` defaults to off; everything else

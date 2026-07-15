@@ -51,6 +51,10 @@ class Settings:
     HALLUCINATION_MODEL: str = os.getenv("HALLUCINATION_MODEL", "")
     TASK_COMPLETION_MODEL: str = os.getenv("TASK_COMPLETION_MODEL", "")
     USER_FRUSTRATION_MODEL: str = os.getenv("USER_FRUSTRATION_MODEL", "")
+    CONFUSION_LOOP_MODEL: str = os.getenv("CONFUSION_LOOP_MODEL", "")
+    TASK_UNDERSTANDING_FAILURE_MODEL: str = os.getenv("TASK_UNDERSTANDING_FAILURE_MODEL", "")
+    SYCOPHANCY_SIGNAL_MODEL: str = os.getenv("SYCOPHANCY_SIGNAL_MODEL", "")
+    OFF_TOPIC_DRIFT_MODEL: str = os.getenv("OFF_TOPIC_DRIFT_MODEL", "")
 
 
 settings = Settings()

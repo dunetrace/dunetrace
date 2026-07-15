@@ -1,0 +1,502 @@
+[
+  {
+    "label": "drift",
+    "score": 0.4256,
+    "confidence": 0.5744
+  },
+  {
+    "label": "drift",
+    "score": 0.2095,
+    "confidence": 0.7905
+  },
+  {
+    "label": "drift",
+    "score": 0.3949,
+    "confidence": 0.6051
+  },
+  {
+    "label": "drift",
+    "score": 0.3355,
+    "confidence": 0.6645
+  },
+  {
+    "label": "drift",
+    "score": 0.3698,
+    "confidence": 0.6302
+  },
+  {
+    "label": "drift",
+    "score": 0.3407,
+    "confidence": 0.6593
+  },
+  {
+    "label": "drift",
+    "score": 0.4408,
+    "confidence": 0.5592
+  },
+  {
+    "label": "drift",
+    "score": 0.2076,
+    "confidence": 0.7924
+  },
+  {
+    "label": "drift",
+    "score": 0.3571,
+    "confidence": 0.6429
+  },
+  {
+    "label": "drift",
+    "score": 0.3539,
+    "confidence": 0.6461
+  },
+  {
+    "label": "drift",
+    "score": 0.3618,
+    "confidence": 0.6382
+  },
+  {
+    "label": "drift",
+    "score": 0.3,
+    "confidence": 0.7
+  },
+  {
+    "label": "drift",
+    "score": 0.3682,
+    "confidence": 0.6318
+  },
+  {
+    "label": "drift",
+    "score": 0.2076,
+    "confidence": 0.7924
+  },
+  {
+    "label": "drift",
+    "score": 0.3923,
+    "confidence": 0.6077
+  },
+  {
+    "label": "drift",
+    "score": 0.3504,
+    "confidence": 0.6496
+  },
+  {
+    "label": "drift",
+    "score": 0.3795,
+    "confidence": 0.6205
+  },
+  {
+    "label": "drift",
+    "score": 0.3029,
+    "confidence": 0.6971
+  },
+  {
+    "label": "drift",
+    "score": 0.4035,
+    "confidence": 0.5965
+  },
+  {
+    "label": "drift",
+    "score": 0.2032,
+    "confidence": 0.7968
+  },
+  {
+    "label": "drift",
+    "score": 0.3571,
+    "confidence": 0.6429
+  },
+  {
+    "label": "drift",
+    "score": 0.3495,
+    "confidence": 0.6505
+  },
+  {
+    "label": "drift",
+    "score": 0.3429,
+    "confidence": 0.6571
+  },
+  {
+    "label": "drift",
+    "score": 0.3065,
+    "confidence": 0.6935
+  },
+  {
+    "label": "drift",
+    "score": 0.4,
+    "confidence": 0.6
+  },
+  {
+    "label": "drift",
+    "score": 0.2119,
+    "confidence": 0.7881
+  },
+  {
+    "label": "drift",
+    "score": 0.3911,
+    "confidence": 0.6089
+  },
+  {
+    "label": "drift",
+    "score": 0.3741,
+    "confidence": 0.6259
+  },
+  {
+    "label": "drift",
+    "score": 0.3767,
+    "confidence": 0.6233
+  },
+  {
+    "label": "drift",
+    "score": 0.2894,
+    "confidence": 0.7106
+  },
+  {
+    "label": "drift",
+    "score": 0.3923,
+    "confidence": 0.6077
+  },
+  {
+    "label": "drift",
+    "score": 0.2119,
+    "confidence": 0.7881
+  },
+  {
+    "label": "drift",
+    "score": 0.3731,
+    "confidence": 0.6269
+  },
+  {
+    "label": "drift",
+    "score": 0.3428,
+    "confidence": 0.6572
+  },
+  {
+    "label": "drift",
+    "score": 0.3352,
+    "confidence": 0.6648
+  },
+  {
+    "label": "drift",
+    "score": 0.3077,
+    "confidence": 0.6923
+  },
+  {
+    "label": "drift",
+    "score": 0.3859,
+    "confidence": 0.6141
+  },
+  {
+    "label": "drift",
+    "score": 0.2095,
+    "confidence": 0.7905
+  },
+  {
+    "label": "drift",
+    "score": 0.3822,
+    "confidence": 0.6178
+  },
+  {
+    "label": "drift",
+    "score": 0.3682,
+    "confidence": 0.6318
+  },
+  {
+    "label": "drift",
+    "score": 0.3606,
+    "confidence": 0.6394
+  },
+  {
+    "label": "drift",
+    "score": 0.2842,
+    "confidence": 0.7158
+  },
+  {
+    "label": "drift",
+    "score": 0.3908,
+    "confidence": 0.6092
+  },
+  {
+    "label": "drift",
+    "score": 0.2019,
+    "confidence": 0.7981
+  },
+  {
+    "label": "drift",
+    "score": 0.3713,
+    "confidence": 0.6287
+  },
+  {
+    "label": "drift",
+    "score": 0.3516,
+    "confidence": 0.6484
+  },
+  {
+    "label": "drift",
+    "score": 0.3795,
+    "confidence": 0.6205
+  },
+  {
+    "label": "drift",
+    "score": 0.3106,
+    "confidence": 0.6894
+  },
+  {
+    "label": "drift",
+    "score": 0.4035,
+    "confidence": 0.5965
+  },
+  {
+    "label": "drift",
+    "score": 0.2119,
+    "confidence": 0.7881
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.998,
+    "confidence": 0.002
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.9982,
+    "confidence": 0.0018
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.8294,
+    "confidence": 0.1706
+  },
+  {
+    "label": "on_topic",
+    "score": 0.9818,
+    "confidence": 0.0182
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.8612,
+    "confidence": 0.1388
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.8416,
+    "confidence": 0.1584
+  },
+  {
+    "label": "on_topic",
+    "score": 0.9509,
+    "confidence": 0.0491
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.8776,
+    "confidence": 0.1224
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.8195,
+    "confidence": 0.1805
+  },
+  {
+    "label": "on_topic",
+    "score": 0.9579,
+    "confidence": 0.0421
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.8701,
+    "confidence": 0.1299
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.9989,
+    "confidence": 0.0011
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.8254,
+    "confidence": 0.1746
+  },
+  {
+    "label": "on_topic",
+    "score": 0.9599,
+    "confidence": 0.0401
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.8694,
+    "confidence": 0.1306
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.8321,
+    "confidence": 0.1679
+  },
+  {
+    "label": "on_topic",
+    "score": 0.9527,
+    "confidence": 0.0473
+  },
+  {
+    "label": "on_topic",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "on_topic",
+    "score": 0.9088,
+    "confidence": 0.0912
+  }
+]

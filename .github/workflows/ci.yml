@@ -18,6 +18,20 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
 
+  docs-consistency:
+    name: Docs consistency (detectors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The check imports dunetrace (detectors + packs) to read real names.
+      - run: pip install -e packages/sdk-py
+      # Fails if docs claim a detector/evaluator that doesn't exist in code.
+      - run: python scripts/validate_detector_docs.py
+      - run: python -m unittest scripts.test_validate_detector_docs
+
   sdk-py:
     name: SDK (Python)
     runs-on: ubuntu-latest

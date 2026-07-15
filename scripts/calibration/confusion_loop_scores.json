@@ -1,0 +1,542 @@
+[
+  {
+    "label": "loop",
+    "score": 0.0811,
+    "confidence": 0.9189
+  },
+  {
+    "label": "loop",
+    "score": 0.1767,
+    "confidence": 0.8233
+  },
+  {
+    "label": "loop",
+    "score": 0.1762,
+    "confidence": 0.8238
+  },
+  {
+    "label": "loop",
+    "score": 0.1956,
+    "confidence": 0.8044
+  },
+  {
+    "label": "loop",
+    "score": 0.1881,
+    "confidence": 0.8119
+  },
+  {
+    "label": "loop",
+    "score": 0.1848,
+    "confidence": 0.8152
+  },
+  {
+    "label": "loop",
+    "score": 0.1343,
+    "confidence": 0.8657
+  },
+  {
+    "label": "loop",
+    "score": 0.1213,
+    "confidence": 0.8787
+  },
+  {
+    "label": "loop",
+    "score": 0.0029,
+    "confidence": 0.9971
+  },
+  {
+    "label": "loop",
+    "score": 0.0327,
+    "confidence": 0.9673
+  },
+  {
+    "label": "loop",
+    "score": 0.0409,
+    "confidence": 0.9591
+  },
+  {
+    "label": "loop",
+    "score": 0.1677,
+    "confidence": 0.8323
+  },
+  {
+    "label": "loop",
+    "score": 0.0746,
+    "confidence": 0.9254
+  },
+  {
+    "label": "loop",
+    "score": 0.006,
+    "confidence": 0.994
+  },
+  {
+    "label": "loop",
+    "score": 0.0011,
+    "confidence": 0.9989
+  },
+  {
+    "label": "loop",
+    "score": 0.0623,
+    "confidence": 0.9377
+  },
+  {
+    "label": "loop",
+    "score": 0.1072,
+    "confidence": 0.8928
+  },
+  {
+    "label": "loop",
+    "score": 0.068,
+    "confidence": 0.932
+  },
+  {
+    "label": "loop",
+    "score": 0.1799,
+    "confidence": 0.8201
+  },
+  {
+    "label": "loop",
+    "score": 0.1974,
+    "confidence": 0.8026
+  },
+  {
+    "label": "loop",
+    "score": 0.1493,
+    "confidence": 0.8507
+  },
+  {
+    "label": "loop",
+    "score": 0.1843,
+    "confidence": 0.8157
+  },
+  {
+    "label": "loop",
+    "score": 0.1287,
+    "confidence": 0.8713
+  },
+  {
+    "label": "loop",
+    "score": 0.194,
+    "confidence": 0.806
+  },
+  {
+    "label": "loop",
+    "score": 0.0126,
+    "confidence": 0.9874
+  },
+  {
+    "label": "loop",
+    "score": 0.0071,
+    "confidence": 0.9929
+  },
+  {
+    "label": "loop",
+    "score": 0.1,
+    "confidence": 0.9
+  },
+  {
+    "label": "loop",
+    "score": 0.1406,
+    "confidence": 0.8594
+  },
+  {
+    "label": "loop",
+    "score": 0.0086,
+    "confidence": 0.9914
+  },
+  {
+    "label": "loop",
+    "score": 0.0194,
+    "confidence": 0.9806
+  },
+  {
+    "label": "loop",
+    "score": 0.0,
+    "confidence": 1.0
+  },
+  {
+    "label": "loop",
+    "score": 0.151,
+    "confidence": 0.849
+  },
+  {
+    "label": "loop",
+    "score": 0.1575,
+    "confidence": 0.8425
+  },
+  {
+    "label": "loop",
+    "score": 0.1791,
+    "confidence": 0.8209
+  },
+  {
+    "label": "loop",
+    "score": 0.1711,
+    "confidence": 0.8289
+  },
+  {
+    "label": "loop",
+    "score": 0.1946,
+    "confidence": 0.8054
+  },
+  {
+    "label": "loop",
+    "score": 0.1636,
+    "confidence": 0.8364
+  },
+  {
+    "label": "loop",
+    "score": 0.0849,
+    "confidence": 0.9151
+  },
+  {
+    "label": "loop",
+    "score": 0.1199,
+    "confidence": 0.8801
+  },
+  {
+    "label": "loop",
+    "score": 0.1377,
+    "confidence": 0.8623
+  },
+  {
+    "label": "loop",
+    "score": 0.0,
+    "confidence": 1.0
+  },
+  {
+    "label": "loop",
+    "score": 0.0273,
+    "confidence": 0.9727
+  },
+  {
+    "label": "loop",
+    "score": 0.1126,
+    "confidence": 0.8874
+  },
+  {
+    "label": "loop",
+    "score": 0.0849,
+    "confidence": 0.9151
+  },
+  {
+    "label": "loop",
+    "score": 0.0542,
+    "confidence": 0.9458
+  },
+  {
+    "label": "loop",
+    "score": 0.0047,
+    "confidence": 0.9953
+  },
+  {
+    "label": "loop",
+    "score": 0.0,
+    "confidence": 1.0
+  },
+  {
+    "label": "loop",
+    "score": 0.0393,
+    "confidence": 0.9607
+  },
+  {
+    "label": "loop",
+    "score": 0.1575,
+    "confidence": 0.8425
+  },
+  {
+    "label": "loop",
+    "score": 0.0498,
+    "confidence": 0.9502
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9982,
+    "confidence": 0.0018
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9585,
+    "confidence": 0.0415
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9905,
+    "confidence": 0.0095
+  },
+  {
+    "label": "progress",
+    "score": 0.9932,
+    "confidence": 0.0068
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9429,
+    "confidence": 0.0571
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9932,
+    "confidence": 0.0068
+  },
+  {
+    "label": "progress",
+    "score": 0.9705,
+    "confidence": 0.0295
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.944,
+    "confidence": 0.056
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": -0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9924,
+    "confidence": 0.0076
+  },
+  {
+    "label": "progress",
+    "score": 0.9883,
+    "confidence": 0.0117
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9896,
+    "confidence": 0.0104
+  },
+  {
+    "label": "progress",
+    "score": 0.9963,
+    "confidence": 0.0037
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9631,
+    "confidence": 0.0369
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9866,
+    "confidence": 0.0134
+  },
+  {
+    "label": "progress",
+    "score": 0.9963,
+    "confidence": 0.0037
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9984,
+    "confidence": 0.0016
+  },
+  {
+    "label": "progress",
+    "score": 0.9636,
+    "confidence": 0.0364
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9538,
+    "confidence": 0.0462
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.9654,
+    "confidence": 0.0346
+  },
+  {
+    "label": "progress",
+    "score": 0.994,
+    "confidence": 0.006
+  },
+  {
+    "label": "progress",
+    "score": 0.9547,
+    "confidence": 0.0453
+  },
+  {
+    "label": "progress",
+    "score": 0.9947,
+    "confidence": 0.0053
+  },
+  {
+    "label": "progress",
+    "score": 0.8331,
+    "confidence": 0.1669
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 1.0,
+    "confidence": 0.0
+  },
+  {
+    "label": "progress",
+    "score": 0.8973,
+    "confidence": 0.1027
+  }
+]

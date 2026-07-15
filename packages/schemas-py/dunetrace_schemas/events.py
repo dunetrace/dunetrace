@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from dunetrace_schemas.enums import EventType
 
@@ -34,9 +34,10 @@ class AgentEventSchema(BaseModel):
     # (which don't send it) still validate — those events simply aren't deduped.
     event_id: Optional[str] = None
 
-    @field_validator("event_type")
-    @classmethod
-    def valid_event_type(cls, v: str) -> str:
-        if v not in VALID_EVENT_TYPES:
-            raise ValueError(f"Unknown event_type {v!r}. Valid: {sorted(VALID_EVENT_TYPES)}")
-        return v
+    # event_type is deliberately NOT validated against a closed set. A newer SDK
+    # may emit event types an older ingest doesn't know yet (memory.*, future
+    # kinds); rejecting them here would fail the whole IngestRequest and drop the
+    # entire batch, not just the unknown event. Accepting any string makes new
+    # event types rolling-deploy safe — downstream services already ignore types
+    # they don't handle. VALID_EVENT_TYPES stays exported as the set of types
+    # this build knows about (used by the SDK↔schema parity tests).

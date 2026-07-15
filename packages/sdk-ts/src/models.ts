@@ -8,7 +8,32 @@ export type EventType =
   | "tool.responded"
   | "retrieval.called"
   | "retrieval.responded"
-  | "external.signal";
+  | "external.signal"
+  // Agent memory channel — see run.memoryWritten/memoryRead/memoryCleared.
+  | "memory.written"
+  | "memory.read"
+  | "memory.cleared";
+
+/** Provenance of a value written to agent memory. Feeds the server-side
+ *  MEMORY_POISONING detector's risk weighting — content from an
+ *  attacker-controllable channel (retrieval/tool_output/external) persisted to
+ *  memory is higher risk than the agent's own reasoning. */
+export type MemorySource =
+  | "user_input"
+  | "retrieval"
+  | "tool_output"
+  | "llm_output"
+  | "agent_reasoning"
+  | "external";
+
+export const MEMORY_SOURCES: readonly MemorySource[] = [
+  "user_input",
+  "retrieval",
+  "tool_output",
+  "llm_output",
+  "agent_reasoning",
+  "external",
+];
 
 export interface AgentEvent {
   event_type:     EventType;

@@ -40,6 +40,11 @@ class EventType(str, Enum):
     APPROVAL_GRANTED = "approval.granted"
     APPROVAL_DENIED = "approval.denied"
     APPROVAL_TIMEOUT = "approval.timeout"
+    # Agent memory channel (Capability 1). Kept value-for-value in sync with
+    # dunetrace.models.EventType — see test_sdk_parity.py.
+    MEMORY_WRITTEN = "memory.written"
+    MEMORY_READ = "memory.read"
+    MEMORY_CLEARED = "memory.cleared"
 
 
 class Severity(str, Enum):
@@ -57,6 +62,7 @@ class FailureType(str, Enum):
     PROMPT_INJECTION_SIGNAL = "PROMPT_INJECTION_SIGNAL"
     RAG_EMPTY_RETRIEVAL = "RAG_EMPTY_RETRIEVAL"
     LLM_TRUNCATION_LOOP = "LLM_TRUNCATION_LOOP"
+    SILENT_TRUNCATION = "SILENT_TRUNCATION"
     CONTEXT_BLOAT = "CONTEXT_BLOAT"
     SLOW_STEP = "SLOW_STEP"
     RETRY_STORM = "RETRY_STORM"
@@ -77,4 +83,7 @@ class FailureType(str, Enum):
     RETRIEVED_CONTENT_INJECTION = "RETRIEVED_CONTENT_INJECTION"
     HANDOFF_CONTEXT_LOSS = "HANDOFF_CONTEXT_LOSS"
     RUNAWAY_ITERATION = "RUNAWAY_ITERATION"
+    MODEL_FALLBACK_DRIFT = "MODEL_FALLBACK_DRIFT"
+    MEMORY_POISONING = "MEMORY_POISONING"
+    DELEGATION_LOOP = "DELEGATION_LOOP"
     CUSTOM = "CUSTOM"  # sentinel for user-defined custom detectors

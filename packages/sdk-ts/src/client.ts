@@ -47,6 +47,16 @@ export class Dunetrace {
     const version = agentVersion(opts.systemPrompt ?? "", model, tools);
     const run     = new DunetraceRun(agentId, version, this, opts.runId);
 
+    // Auto-thread parent_run_id: if this run opens while another run is already
+    // active (this call is nested inside an enclosing run's fn, so
+    // _runStorage.getStore() returns that parent) and the caller didn't pass
+    // parentRunId, inherit the active run's id. This links nested multi-agent
+    // runs into a parent/child graph with no manual id threading — the substrate
+    // the server-side DELEGATION_LOOP and HANDOFF_CONTEXT_LOSS detectors consume.
+    // An explicit parentRunId always wins. Propagation follows AsyncLocalStorage,
+    // so it survives awaits within the same async context.
+    const parentRunId = opts.parentRunId ?? _runStorage.getStore()?.runId ?? null;
+
     this._emit({
       event_type:    "run.started",
       run_id:        run.runId,
@@ -60,7 +70,7 @@ export class Dunetrace {
         model,
         tools,
       },
-      parent_run_id: opts.parentRunId ?? null,
+      parent_run_id: parentRunId,
       trace_id:      opts.traceId ?? null,
       conversation_id: opts.conversationId ?? null,
     });

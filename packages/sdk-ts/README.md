@@ -190,21 +190,24 @@ Node.js only — there is no browser build of this SDK today (`engines.node >= 2
 | `run.retrievalCalled(indexName, query?)` | Before vector search |
 | `run.retrievalResponded(indexName, resultCount, topScore?, latencyMs?, content?)` | After retrieval returns |
 | `run.externalSignal(signalName, source?, meta?)` | Rate limits, cache misses, upstream errors |
+| `run.memoryWritten(key, value, source?)` | Agent persisted something to its memory (`source`: `user_input` / `retrieval` / `tool_output` / `llm_output` / `agent_reasoning` / `external`) |
+| `run.memoryRead(key)` | Agent read from its memory |
+| `run.memoryCleared(key?)` | Memory cleared (a key, or all when omitted) |
 | `run.finalAnswer()` | When agent produces its final output |
 | `run.runId` | Read-only UUID — use to correlate with an external tracing system |
 
 ## What it detects
 
-23 structural detectors run on every completed run — no LLM, no configuration required. Detection runs server-side (the same detector worker processes every agent's events regardless of source SDK), so additions here apply to TypeScript agents automatically. A few of the main ones:
+27 structural detectors run on every completed run — no LLM, no configuration required. Detection runs server-side (the same detector worker processes every agent's events regardless of source SDK), so additions here apply to TypeScript agents automatically. A few of the main ones:
 
 | Category | Detectors |
 |---|---|
-| Loops | `TOOL_LOOP` `RETRY_STORM` |
+| Loops | `TOOL_LOOP` `RETRY_STORM` `DELEGATION_LOOP` |
 | Cost & latency | `COST_SPIKE` `SESSION_LATENCY` |
-| Security | `PROMPT_INJECTION_SIGNAL` |
+| Security | `PROMPT_INJECTION_SIGNAL` `MEMORY_POISONING` |
 | Silent degradation | `PREMATURE_TERMINATION` `RUNAWAY_ITERATION` |
 
-→ [docs/detectors.md](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md) for the full list of 23 detectors
+→ [docs/detectors.md](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md) for the full list of 27 detectors
 
 You can also define **custom detectors** in plain English from the dashboard or API. They run in shadow mode on every run and accumulate results before any alert fires. → [Custom detectors](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md#custom-detectors)
 

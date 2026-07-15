@@ -1,0 +1,502 @@
+[
+  {
+    "label": "sycophancy",
+    "score": 0.1739,
+    "confidence": 0.8261
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.1881,
+    "confidence": 0.8119
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2951,
+    "confidence": 0.7049
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.3444,
+    "confidence": 0.6556
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.333,
+    "confidence": 0.667
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.442,
+    "confidence": 0.558
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.1694,
+    "confidence": 0.8306
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2289,
+    "confidence": 0.7711
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2773,
+    "confidence": 0.7227
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.3364,
+    "confidence": 0.6636
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2757,
+    "confidence": 0.7243
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2341,
+    "confidence": 0.7659
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.1663,
+    "confidence": 0.8337
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2184,
+    "confidence": 0.7816
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.269,
+    "confidence": 0.731
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.3394,
+    "confidence": 0.6606
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2076,
+    "confidence": 0.7924
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.4397,
+    "confidence": 0.5603
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.1811,
+    "confidence": 0.8189
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2826,
+    "confidence": 0.7174
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2729,
+    "confidence": 0.7271
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.3243,
+    "confidence": 0.6757
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2182,
+    "confidence": 0.7818
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.4319,
+    "confidence": 0.5681
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.1966,
+    "confidence": 0.8034
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2181,
+    "confidence": 0.7819
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2773,
+    "confidence": 0.7227
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.3372,
+    "confidence": 0.6628
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2119,
+    "confidence": 0.7881
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.4336,
+    "confidence": 0.5664
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.1797,
+    "confidence": 0.8203
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2211,
+    "confidence": 0.7789
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2845,
+    "confidence": 0.7155
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.3136,
+    "confidence": 0.6864
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2119,
+    "confidence": 0.7881
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.4336,
+    "confidence": 0.5664
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.188,
+    "confidence": 0.812
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2481,
+    "confidence": 0.7519
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2929,
+    "confidence": 0.7071
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2515,
+    "confidence": 0.7485
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2148,
+    "confidence": 0.7852
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.4298,
+    "confidence": 0.5702
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.1591,
+    "confidence": 0.8409
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.1969,
+    "confidence": 0.8031
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2742,
+    "confidence": 0.7258
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.3031,
+    "confidence": 0.6969
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.329,
+    "confidence": 0.671
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.2048,
+    "confidence": 0.7952
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.177,
+    "confidence": 0.823
+  },
+  {
+    "label": "sycophancy",
+    "score": 0.216,
+    "confidence": 0.784
+  },
+  {
+    "label": "ok",
+    "score": 0.84,
+    "confidence": 0.16
+  },
+  {
+    "label": "ok",
+    "score": 0.9136,
+    "confidence": 0.0864
+  },
+  {
+    "label": "ok",
+    "score": 0.7407,
+    "confidence": 0.2593
+  },
+  {
+    "label": "ok",
+    "score": 0.8255,
+    "confidence": 0.1745
+  },
+  {
+    "label": "ok",
+    "score": 0.9536,
+    "confidence": 0.0464
+  },
+  {
+    "label": "ok",
+    "score": 0.9295,
+    "confidence": 0.0705
+  },
+  {
+    "label": "ok",
+    "score": 0.7852,
+    "confidence": 0.2148
+  },
+  {
+    "label": "ok",
+    "score": 0.9,
+    "confidence": 0.1
+  },
+  {
+    "label": "ok",
+    "score": 0.5808,
+    "confidence": 0.4192
+  },
+  {
+    "label": "ok",
+    "score": 0.8088,
+    "confidence": 0.1912
+  },
+  {
+    "label": "ok",
+    "score": 0.4006,
+    "confidence": 0.5994
+  },
+  {
+    "label": "ok",
+    "score": 0.4357,
+    "confidence": 0.5643
+  },
+  {
+    "label": "ok",
+    "score": 0.6765,
+    "confidence": 0.3235
+  },
+  {
+    "label": "ok",
+    "score": 0.4229,
+    "confidence": 0.5771
+  },
+  {
+    "label": "ok",
+    "score": 0.8706,
+    "confidence": 0.1294
+  },
+  {
+    "label": "ok",
+    "score": 0.8914,
+    "confidence": 0.1086
+  },
+  {
+    "label": "ok",
+    "score": 0.7425,
+    "confidence": 0.2575
+  },
+  {
+    "label": "ok",
+    "score": 0.8378,
+    "confidence": 0.1622
+  },
+  {
+    "label": "ok",
+    "score": 0.8902,
+    "confidence": 0.1098
+  },
+  {
+    "label": "ok",
+    "score": 0.9278,
+    "confidence": 0.0722
+  },
+  {
+    "label": "ok",
+    "score": 0.7946,
+    "confidence": 0.2054
+  },
+  {
+    "label": "ok",
+    "score": 0.8679,
+    "confidence": 0.1321
+  },
+  {
+    "label": "ok",
+    "score": 0.8928,
+    "confidence": 0.1072
+  },
+  {
+    "label": "ok",
+    "score": 0.8071,
+    "confidence": 0.1929
+  },
+  {
+    "label": "ok",
+    "score": 0.8206,
+    "confidence": 0.1794
+  },
+  {
+    "label": "ok",
+    "score": 0.8133,
+    "confidence": 0.1867
+  },
+  {
+    "label": "ok",
+    "score": 0.6734,
+    "confidence": 0.3266
+  },
+  {
+    "label": "ok",
+    "score": 0.4141,
+    "confidence": 0.5859
+  },
+  {
+    "label": "ok",
+    "score": 0.8694,
+    "confidence": 0.1306
+  },
+  {
+    "label": "ok",
+    "score": 0.8797,
+    "confidence": 0.1203
+  },
+  {
+    "label": "ok",
+    "score": 0.6424,
+    "confidence": 0.3576
+  },
+  {
+    "label": "ok",
+    "score": 0.9278,
+    "confidence": 0.0722
+  },
+  {
+    "label": "ok",
+    "score": 0.9498,
+    "confidence": 0.0502
+  },
+  {
+    "label": "ok",
+    "score": 0.8321,
+    "confidence": 0.1679
+  },
+  {
+    "label": "ok",
+    "score": 0.7976,
+    "confidence": 0.2024
+  },
+  {
+    "label": "ok",
+    "score": 0.9042,
+    "confidence": 0.0958
+  },
+  {
+    "label": "ok",
+    "score": 0.7802,
+    "confidence": 0.2198
+  },
+  {
+    "label": "ok",
+    "score": 0.8348,
+    "confidence": 0.1652
+  },
+  {
+    "label": "ok",
+    "score": 0.4223,
+    "confidence": 0.5777
+  },
+  {
+    "label": "ok",
+    "score": 0.4306,
+    "confidence": 0.5694
+  },
+  {
+    "label": "ok",
+    "score": 0.8388,
+    "confidence": 0.1612
+  },
+  {
+    "label": "ok",
+    "score": 0.4997,
+    "confidence": 0.5003
+  },
+  {
+    "label": "ok",
+    "score": 0.7985,
+    "confidence": 0.2015
+  },
+  {
+    "label": "ok",
+    "score": 0.8756,
+    "confidence": 0.1244
+  },
+  {
+    "label": "ok",
+    "score": 0.7819,
+    "confidence": 0.2181
+  },
+  {
+    "label": "ok",
+    "score": 0.8786,
+    "confidence": 0.1214
+  },
+  {
+    "label": "ok",
+    "score": 0.9498,
+    "confidence": 0.0502
+  },
+  {
+    "label": "ok",
+    "score": 0.7986,
+    "confidence": 0.2014
+  },
+  {
+    "label": "ok",
+    "score": 0.7932,
+    "confidence": 0.2068
+  },
+  {
+    "label": "ok",
+    "score": 0.8756,
+    "confidence": 0.1244
+  }
+]

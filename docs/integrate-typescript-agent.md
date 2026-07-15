@@ -136,7 +136,7 @@ await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
 });
 ```
 
-Full `run` API: `llmCalled` / `llmResponded`, `toolCalled` / `toolResponded`, `retrievalCalled` / `retrievalResponded`, `externalSignal`, `finalAnswer`, `run.llm(model, promise)` (auto-extracts tokens from an OpenAI/Anthropic response).
+Full `run` API: `llmCalled` / `llmResponded`, `toolCalled` / `toolResponded`, `retrievalCalled` / `retrievalResponded`, `externalSignal`, `memoryWritten` / `memoryRead` / `memoryCleared` (the agent memory channel — feeds `MEMORY_POISONING`), `finalAnswer`, `run.llm(model, promise)` (auto-extracts tokens from an OpenAI/Anthropic response).
 
 ### `getCurrentRun()`
 
@@ -166,16 +166,24 @@ run.retrievalResponded("product-docs", docs.length, docs[0]?.score);
 
 ### Sub-agent tracking
 
-Link a child run to a parent with `parentRunId` — both appear in the dashboard with a hierarchy indicator:
+A run opened inside another run **auto-inherits** the active run's id as its
+`parent_run_id` — no manual threading. Both appear in the dashboard with a
+hierarchy indicator, and the parent/child graph feeds the `DELEGATION_LOOP` and
+`HANDOFF_CONTEXT_LOSS` detectors:
 
 ```typescript
 await dt.run("orchestrator", { model: "gpt-4o" }, async (parentRun) => {
-  await dt.run("sub-agent", { model: "gpt-4o-mini", parentRunId: parentRun.runId }, async (childRun) => {
+  // Nested run: parent_run_id is set to orchestrator's id automatically.
+  await dt.run("sub-agent", { model: "gpt-4o-mini" }, async (childRun) => {
     childRun.finalAnswer();
   });
   parentRun.finalAnswer();
 });
 ```
+
+Threading rides `AsyncLocalStorage`, so it survives `await`s within the same
+async context. Pass `parentRunId` explicitly if you ever need to link across a
+boundary the async context can't cross (it always wins over the inherited id).
 
 ### Deploy markers
 

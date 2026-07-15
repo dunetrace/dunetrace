@@ -33,9 +33,17 @@ class TestAgentEventSchema(unittest.TestCase):
         self.assertEqual(ev.event_type, "tool.called")
         self.assertEqual(ev.payload, {"tool_name": "search"})
 
-    def test_unknown_event_type_rejected(self):
-        with self.assertRaises(ValidationError):
-            AgentEventSchema(**self._base(event_type="not.a.real.event"))
+    def test_unknown_event_type_accepted_for_forward_compat(self):
+        # A newer SDK may emit event types this ingest build doesn't know yet.
+        # They must NOT be rejected (that would drop the whole batch); they pass
+        # through so a rolling deploy / SDK-ahead-of-ingest never loses events.
+        ev = AgentEventSchema(**self._base(event_type="future.event.kind"))
+        self.assertEqual(ev.event_type, "future.event.kind")
+
+    def test_memory_event_types_accepted(self):
+        for et in ("memory.written", "memory.read", "memory.cleared"):
+            ev = AgentEventSchema(**self._base(event_type=et))
+            self.assertEqual(ev.event_type, et)
 
     def test_all_canonical_event_types_accepted(self):
         for et in VALID_EVENT_TYPES:

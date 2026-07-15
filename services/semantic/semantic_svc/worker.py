@@ -30,8 +30,14 @@ from semantic_svc.sampling import (
     decide_conversation_sampling,
     decide_sampling,
 )
+from semantic_svc.evaluators.confusion_loop import ConfusionLoopEvaluator
 from semantic_svc.evaluators.hallucination import HallucinationEvaluator
+from semantic_svc.evaluators.off_topic_drift import OffTopicDriftEvaluator
+from semantic_svc.evaluators.sycophancy_signal import SycophancySignalEvaluator
 from semantic_svc.evaluators.task_completion import TaskCompletionEvaluator
+from semantic_svc.evaluators.task_understanding_failure import (
+    TaskUnderstandingFailureEvaluator,
+)
 from semantic_svc.evaluators.user_frustration import UserFrustrationEvaluator
 from semantic_svc.evaluators.run_extract import build_evaluation_input
 from semantic_svc.evaluators.conversation_extract import build_conversation_evaluation_input
@@ -78,10 +84,11 @@ _EVALUATOR_CONFIG = load_evaluator_config()
 # actual runtime container — importing this module (e.g. for tests, or when
 # SEMANTIC_WORKER_ENABLED=false) must never require one.
 _evaluators: dict[str, object] = {}
-# Phase 3.2 — built the same lazy way. None until run_worker() builds it;
-# _maybe_run_conversation_evaluator treats None as "conversation evaluation
-# disabled," same as an unconfigured entry in _evaluators.
-_conversation_evaluator: object = None
+# Phase 3.2 — built the same lazy way; empty until run_worker() builds it.
+# _maybe_run_conversation_evaluator treats an empty dict as "conversation
+# evaluation disabled." Multiple conversation-level evaluators (USER_FRUSTRATION,
+# CONFUSION_LOOP, …) run in one pass over the same conversation window.
+_conversation_evaluators: dict[str, object] = {}
 
 # How many of a conversation's most recent runs UserFrustrationEvaluator
 # reads — bounds both LLM context size and cost. MIN_CONVERSATION_RUNS
@@ -98,6 +105,8 @@ _second_opinion_evaluators: dict[str, object] = {}
 _EVALUATOR_CLASSES = {
     HallucinationEvaluator.name: HallucinationEvaluator,
     TaskCompletionEvaluator.name: TaskCompletionEvaluator,
+    TaskUnderstandingFailureEvaluator.name: TaskUnderstandingFailureEvaluator,
+    OffTopicDriftEvaluator.name: OffTopicDriftEvaluator,
 }
 
 # Confidence -> severity. Only applied when an evaluator's EvalResult.fired is
@@ -133,12 +142,28 @@ def _build_evaluators() -> dict[str, object]:
         TaskCompletionEvaluator.name: TaskCompletionEvaluator(
             provider, settings.TASK_COMPLETION_MODEL or None
         ),
+        TaskUnderstandingFailureEvaluator.name: TaskUnderstandingFailureEvaluator(
+            provider, settings.TASK_UNDERSTANDING_FAILURE_MODEL or None
+        ),
+        OffTopicDriftEvaluator.name: OffTopicDriftEvaluator(
+            provider, settings.OFF_TOPIC_DRIFT_MODEL or None
+        ),
     }
 
 
-def _build_conversation_evaluator() -> UserFrustrationEvaluator:
+def _build_conversation_evaluators() -> dict[str, object]:
     provider = settings.SEMANTIC_LLM_PROVIDER
-    return UserFrustrationEvaluator(provider, settings.USER_FRUSTRATION_MODEL or None)
+    return {
+        UserFrustrationEvaluator.name: UserFrustrationEvaluator(
+            provider, settings.USER_FRUSTRATION_MODEL or None
+        ),
+        ConfusionLoopEvaluator.name: ConfusionLoopEvaluator(
+            provider, settings.CONFUSION_LOOP_MODEL or None
+        ),
+        SycophancySignalEvaluator.name: SycophancySignalEvaluator(
+            provider, settings.SYCOPHANCY_SIGNAL_MODEL or None
+        ),
+    }
 
 
 def _opposite_provider(provider: str) -> str:
@@ -310,9 +335,10 @@ async def _maybe_run_conversation_evaluator(
     """Independent of this run's own per-run sampling decision (see
     process_run) — a conversation can be selected for conversation-level
     monitoring regardless of whether any individual run within it happens to
-    be sampled for per-run semantic evaluation. Returns signals written (0 or 1).
+    be sampled for per-run semantic evaluation. Returns signals written (one per
+    conversation evaluator that fired).
     """
-    if _conversation_evaluator is None:
+    if not _conversation_evaluators:
         return 0
 
     conversation_external_id = await fetch_run_conversation_id(run_id)
@@ -347,38 +373,45 @@ async def _maybe_run_conversation_evaluator(
     if conversation_input is None:
         return 0
 
-    # audit Finding 20: isolate DeepEval's sync loop (see _run_evaluators).
-    result = await asyncio.to_thread(_conversation_evaluator.evaluate, conversation_input)
-    await log_semantic_evaluation(
-        org_id,
-        agent_id,
-        result.evaluator,
-        result.fired,
-        result.prompt_tokens,
-        result.completion_tokens,
-        result.cost_usd,
-    )
-    if not result.fired:
-        return 0
+    # One quota unit was consumed for this conversation-evaluation pass above; the
+    # pass now runs every registered conversation evaluator over the same window
+    # (each is its own LLM call, cost-logged individually). A pass writes one
+    # signal per evaluator that fired.
+    signals_written = 0
+    for evaluator in _conversation_evaluators.values():
+        # audit Finding 20: isolate DeepEval's sync loop (see _run_evaluators).
+        result = await asyncio.to_thread(evaluator.evaluate, conversation_input)
+        await log_semantic_evaluation(
+            org_id,
+            agent_id,
+            result.evaluator,
+            result.fired,
+            result.prompt_tokens,
+            result.completion_tokens,
+            result.cost_usd,
+        )
+        if not result.fired:
+            continue
 
-    await write_semantic_signal(
-        evaluator=result.evaluator,
-        severity=_severity_for_confidence(result.confidence),
-        run_id=run_id,  # the triggering/most-recent run in the window
-        agent_id=agent_id,
-        agent_version=agent_version,
-        confidence=result.confidence,
-        evidence={
-            "reasoning": result.reasoning,
-            "prompt_tokens": result.prompt_tokens,
-            "completion_tokens": result.completion_tokens,
-            "cost_usd": result.cost_usd,
-            "conversation_id": conversation_external_id,
-            "run_ids_considered": sibling_run_ids,
-        },
-        org_id=org_id,
-    )
-    return 1
+        await write_semantic_signal(
+            evaluator=result.evaluator,
+            severity=_severity_for_confidence(result.confidence),
+            run_id=run_id,  # the triggering/most-recent run in the window
+            agent_id=agent_id,
+            agent_version=agent_version,
+            confidence=result.confidence,
+            evidence={
+                "reasoning": result.reasoning,
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "cost_usd": result.cost_usd,
+                "conversation_id": conversation_external_id,
+                "run_ids_considered": sibling_run_ids,
+            },
+            org_id=org_id,
+        )
+        signals_written += 1
+    return signals_written
 
 
 async def process_run(
@@ -480,10 +513,10 @@ async def run_worker() -> None:
         )
         return
 
-    global _evaluators, _second_opinion_evaluators, _conversation_evaluator
+    global _evaluators, _second_opinion_evaluators, _conversation_evaluators
     _evaluators = _build_evaluators()
     _second_opinion_evaluators = _build_second_opinion_evaluators()
-    _conversation_evaluator = _build_conversation_evaluator()
+    _conversation_evaluators = _build_conversation_evaluators()
 
     await init_pool()
     await ensure_semantic_schema()
