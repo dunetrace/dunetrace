@@ -9,6 +9,7 @@ jobs:
   lint:
     name: Lint (Python)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,6 +22,7 @@ jobs:
   docs-consistency:
     name: Docs consistency (detectors)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,6 +37,8 @@ jobs:
   sdk-py:
     name: SDK (Python)
     runs-on: ubuntu-latest
+    # Backstop against a hung test: the job can't burn the full 6h runner cap.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,13 +50,17 @@ jobs:
           # re-resolved every time (the other jobs already set this).
           cache-dependency-path: packages/sdk-py/pyproject.toml
       # dev extra already provides mypy, so no separate install step is needed.
-      - run: pip install -e "packages/sdk-py[dev,langchain]"
-      - run: python -m pytest packages/sdk-py/tests/ -q
+      - run: pip install -e "packages/sdk-py[dev,langchain]" pytest-timeout
+      # --timeout kills (and dumps the stack of) any single test that hangs,
+      # so a deadlock fails in seconds with a named culprit instead of blocking
+      # the whole run for hours.
+      - run: python -m pytest packages/sdk-py/tests/ -q --timeout=120
       - run: python -m mypy packages/sdk-py/dunetrace/ --ignore-missing-imports --no-error-summary --config-file packages/sdk-py/pyproject.toml
 
   services:
     name: ${{ matrix.service }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -91,29 +99,32 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: ${{ matrix.requirements }}
-      - run: pip install -r ${{ matrix.requirements }} pytest pytest-asyncio ${{ matrix.extra || '' }}
+      - run: pip install -r ${{ matrix.requirements }} pytest pytest-asyncio pytest-timeout ${{ matrix.extra || '' }}
       - run: pip install -e packages/sdk-py
       - name: Run tests
         env:
           PYTHONPATH: ${{ matrix.pythonpath }}
-        run: python -m pytest services/${{ matrix.service }}/tests/ -v
+        # --timeout kills and dumps the stack of any single hung test.
+        run: python -m pytest services/${{ matrix.service }}/tests/ -v --timeout=120
 
   mcp-server:
     name: MCP Server
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e "packages/mcp-server" pytest mypy
-      - run: python -m pytest packages/mcp-server/tests/ -v
+      - run: pip install -e "packages/mcp-server" pytest pytest-timeout mypy
+      - run: python -m pytest packages/mcp-server/tests/ -v --timeout=120
       - run: python -m mypy packages/mcp-server/dunetrace_mcp/ --ignore-missing-imports --no-error-summary
 
   sdk-ts:
     name: SDK (TypeScript)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/sdk-ts
@@ -135,6 +146,7 @@ jobs:
   docker-build:
     name: Docker images build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Build all service images (no push)

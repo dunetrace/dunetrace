@@ -587,7 +587,10 @@ class TestConcurrentIsolation(unittest.TestCase):
         def shared_tool(x: str) -> str:
             return x
 
-        barrier = threading.Barrier(2)
+        # Bounded barrier: if one thread never arrives (e.g. it died before this
+        # point), the other raises BrokenBarrierError instead of blocking
+        # forever — a deadlock here would otherwise hang the whole suite.
+        barrier = threading.Barrier(2, timeout=10)
 
         @c.trace("agent-1")
         def agent1(q: str) -> str:
@@ -605,8 +608,11 @@ class TestConcurrentIsolation(unittest.TestCase):
         t2 = threading.Thread(target=agent2, args=("world",))
         t1.start()
         t2.start()
-        t1.join()
-        t2.join()
+        # Bounded joins so a stuck thread fails the test loudly rather than
+        # hanging the run indefinitely.
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+        self.assertFalse(t1.is_alive() or t2.is_alive(), "agent threads deadlocked")
         c.shutdown(timeout=3)
 
         starts = [e for e in emitted if e.event_type == EventType.RUN_STARTED]
