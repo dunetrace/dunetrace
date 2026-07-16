@@ -49,8 +49,8 @@ jobs:
           # heavy langchain/langgraph install is reused across runs instead of
           # re-resolved every time (the other jobs already set this).
           cache-dependency-path: packages/sdk-py/pyproject.toml
-      # dev extra already provides mypy, so no separate install step is needed.
-      - run: pip install -e "packages/sdk-py[dev,langchain]" pytest-timeout
+      # dev extra provides mypy + pytest-timeout, so no separate installs needed.
+      - run: pip install -e "packages/sdk-py[dev,langchain]"
       # --timeout kills (and dumps the stack of) any single test that hangs,
       # so a deadlock fails in seconds with a named culprit instead of blocking
       # the whole run for hours.

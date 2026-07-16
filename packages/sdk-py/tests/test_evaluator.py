@@ -10,6 +10,17 @@ asserts the <100µs target on a representative policy.
 import time
 import unittest
 
+# The ReDoS timeout is a feature of the `regex` package; without it the evaluator
+# falls back to stdlib `re`, which has no timeout and WILL hang on a catastrophic
+# pattern. Guard the ReDoS test so a regex-less env skips it rather than hanging
+# the whole suite (this is what let a clean sdk-py CI install hang for hours).
+try:
+    import regex as _regex  # noqa: F401
+
+    _HAS_REGEX = True
+except ImportError:
+    _HAS_REGEX = False
+
 from dunetrace.policies import parse_match_block
 from dunetrace.policies.evaluator import (
     ComparisonTrace,
@@ -212,6 +223,7 @@ class TestSafetyAndDeterminism(unittest.TestCase):
         results = {ev(block, **ctx_args) for _ in range(100)}
         self.assertEqual(results, {True})
 
+    @unittest.skipUnless(_HAS_REGEX, "ReDoS timeout requires the 'regex' package")
     def test_redos_pattern_does_not_hang(self):
         # Pathological pattern + input; must return quickly (timeout → False), not hang.
         start = time.perf_counter()

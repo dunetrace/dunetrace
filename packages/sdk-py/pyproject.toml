@@ -36,8 +36,17 @@ otel = [
 dev = [
     "pytest>=7",
     "pytest-cov",
+    # Kills (and dumps the stack of) any single hung test so a deadlock can't
+    # wedge a local `pre-commit run` — the same protection CI uses.
+    "pytest-timeout",
     "mypy",
     "ruff",
+    # Test-only (not a runtime dependency — the core SDK stays stdlib-only). The
+    # policy evaluator's ReDoS timeout uses `regex` when present and degrades to
+    # stdlib `re` (no timeout) otherwise; the test env installs it so the
+    # timeout-protected path is actually exercised instead of hanging on the
+    # catastrophic-backtracking test pattern.
+    "regex",
 ]
 
 [project.urls]
