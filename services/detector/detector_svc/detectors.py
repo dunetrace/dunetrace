@@ -21,6 +21,7 @@ import logging
 
 from dunetrace.detectors import (
     CUSTOM_DETECTOR_REGISTRY,
+    AgentHandoffFailureDetector,
     BaseDetector,
     CascadingToolFailureDetector,
     ContextBloatDetector,
@@ -78,6 +79,7 @@ _DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
     "unread_tool_error": UnreadToolErrorDetector,
     "tool_argument_fabrication": ToolArgumentFabricationDetector,
     "retrieved_content_injection": RetrievedContentInjectionDetector,
+    "agent_handoff_failure": AgentHandoffFailureDetector,
     "handoff_context_loss": HandoffContextLossDetector,
     "runaway_iteration": RunawayIterationDetector,
     "model_fallback_drift": ModelFallbackDriftDetector,

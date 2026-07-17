@@ -11,6 +11,7 @@ import time
 
 from dunetrace.models import RunState, ToolCall, RetrievalResult, FailureType
 from dunetrace.detectors import (
+    AgentHandoffFailureDetector,
     ToolLoopDetector,
     ToolThrashingDetector,
     ToolAvoidanceDetector,
@@ -30,8 +31,22 @@ def make_state(**kwargs) -> RunState:
     return RunState(**defaults)
 
 
-def make_tool_call(name: str, step: int = 0) -> ToolCall:
-    return ToolCall(tool_name=name, args="aaa", step_index=step, timestamp=time.time())
+def make_tool_call(
+    name: str,
+    step: int = 0,
+    success=None,
+    output_length: int | None = None,
+    output: str | None = None,
+) -> ToolCall:
+    return ToolCall(
+        tool_name=name,
+        args="aaa",
+        step_index=step,
+        timestamp=time.time(),
+        success=success,
+        output_length=output_length,
+        output=output,
+    )
 
 
 # ── ToolLoopDetector ──────────────────────────────────────────────────────────
@@ -121,6 +136,91 @@ class TestToolThrashingDetector(unittest.TestCase):
         state.tool_calls = [make_tool_call("web_search")] * 6
         state.current_step = 6
         # This is TOOL_LOOP not thrashing
+        assert self.detector.on_run_completion(state) is None
+
+
+# ── AgentHandoffFailureDetector ──────────────────────────────────────────────
+
+
+class TestAgentHandoffFailureDetector(unittest.TestCase):
+    detector = AgentHandoffFailureDetector()
+
+    def _state_with_call(self, call: ToolCall) -> RunState:
+        state = make_state()
+        state.tool_calls = [call]
+        state.current_step = call.step_index
+        return state
+
+    def test_does_not_fire_for_non_handoff_tool_names(self):
+        state = self._state_with_call(
+            make_tool_call("summarize", step=1, success=True, output_length=0)
+        )
+        assert self.detector.on_run_completion(state) is None
+
+    def test_fires_on_short_successful_handoff_outputs(self):
+        for output_length in (0, 5):
+            with self.subTest(output_length=output_length):
+                state = self._state_with_call(
+                    make_tool_call(
+                        "handoff_research",
+                        step=2,
+                        success=True,
+                        output_length=output_length,
+                    )
+                )
+                signal = self.detector.on_run_completion(state)
+                assert signal is not None
+                assert signal.failure_type == FailureType.AGENT_HANDOFF_FAILURE
+                assert signal.evidence["tool_name"] == "handoff_research"
+                assert signal.evidence["step_index"] == 2
+                assert signal.evidence["output_length"] == output_length
+                assert signal.evidence["success"] is True
+
+    def test_fires_on_failed_handoff_tool(self):
+        state = self._state_with_call(
+            make_tool_call("delegate_planner", step=3, success=False, output_length=128)
+        )
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.AGENT_HANDOFF_FAILURE
+        assert signal.evidence["reason"] == "tool_failed"
+        assert signal.evidence["success"] is False
+
+    def test_fires_on_known_empty_response_even_when_length_is_not_short(self):
+        state = self._state_with_call(
+            make_tool_call(
+                "billing_agent",
+                step=4,
+                success=True,
+                output_length=42,
+                output="done",
+            )
+        )
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.AGENT_HANDOFF_FAILURE
+        assert signal.evidence["reason"] == "known_empty_response"
+        assert signal.evidence["known_empty_response"] == "done"
+
+    def test_returns_none_when_no_matching_tool_calls_exist(self):
+        state = make_state()
+        state.tool_calls = [
+            make_tool_call("search", step=1, success=True, output_length=0),
+            make_tool_call("calculator", step=2, success=True, output_length=3),
+        ]
+        state.current_step = 2
+        assert self.detector.on_run_completion(state) is None
+
+    def test_does_not_fire_on_successful_non_empty_handoff(self):
+        state = self._state_with_call(
+            make_tool_call(
+                "transfer_support",
+                step=5,
+                success=True,
+                output_length=64,
+                output="Escalated with customer context and order details.",
+            )
+        )
         assert self.detector.on_run_completion(state) is None
 
 

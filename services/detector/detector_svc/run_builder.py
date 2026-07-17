@@ -114,6 +114,7 @@ def build_run_state(events: list[dict]) -> RunState:
                     if tc.tool_name == tool_name and tc.success is None:
                         tc.success = bool(success)
                         tc.error = payload.get("error")
+                        tc.output_length = payload.get("output_length")
                         tc.output = payload.get("output") or None
                         break
 

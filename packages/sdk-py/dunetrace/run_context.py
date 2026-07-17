@@ -256,6 +256,7 @@ class RunContext:
             if tc.tool_name == tool_name and tc.success is None:
                 tc.success = success
                 tc.error = error_text
+                tc.output_length = output_length
                 tc.output = output or None
                 if not success:
                     self._error_count += 1
