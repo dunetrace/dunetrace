@@ -243,12 +243,16 @@ class RunContext:
         self,
         tool_name: str,
         success: bool = True,
-        output_length: int = 0,
+        output_length: Optional[int] = None,
         latency_ms: int = 0,
         error: Optional[str] = None,
         output: str = "",
     ) -> None:
         error_text = error if (not success and error) else None
+        if output_length is None:
+            computed_length = len(output) if output else 0
+        else:
+            computed_length = output_length
         # Back-fill success, error, and output on the most recent matching ToolCall.
         # _error_count increments only when a ToolCall is actually found and back-filled
         # so the running total stays in sync with the full-scan baseline in build_metrics.
@@ -256,7 +260,7 @@ class RunContext:
             if tc.tool_name == tool_name and tc.success is None:
                 tc.success = success
                 tc.error = error_text
-                tc.output_length = output_length
+                tc.output_length = computed_length
                 tc.output = output or None
                 if not success:
                     self._error_count += 1
@@ -264,7 +268,7 @@ class RunContext:
         payload: dict = {
             "tool_name": tool_name,
             "success": success,
-            "output_length": output_length,
+            "output_length": computed_length,
             "latency_ms": latency_ms,
             "output": output,
         }
