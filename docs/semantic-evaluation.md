@@ -17,7 +17,7 @@ by construction only starts once it has. See
 [policies.md's "Structural signals only" section](policies.md#structural-signals-only)
 for the full explanation.
 
-If you're looking for the 23 in-path structural detectors instead (Tool
+If you're looking for the 28 in-path structural detectors instead (Tool
 Loop, Retry Storm, Cost Spike, and the rest — the ones that can and do fire
 policies), see [docs/detectors.md](detectors.md).
 
@@ -223,7 +223,7 @@ something no single-run evaluator can see. See
 
 - Not a replacement for structural detection — semantic evaluation
   *augments* it (100% of structurally-flagged runs also get semantic
-  context) and catches a different class of failure, but the 27 structural
+  context) and catches a different class of failure, but the 28 structural
   detectors remain the always-on, zero-cost, zero-LLM first line.
 - Not a runtime guardrail — see the policies cross-link above.
 - Not required — `SEMANTIC_WORKER_ENABLED` defaults to off; everything else

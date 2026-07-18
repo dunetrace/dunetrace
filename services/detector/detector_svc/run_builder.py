@@ -115,8 +115,11 @@ def build_run_state(events: list[dict]) -> RunState:
                         tc.success = bool(success)
                         tc.error = payload.get("error")
                         tc.output = payload.get("output") or None
+                        # Prefer the reported length; fall back to the reconstructed
+                        # output only when it wasn't reported. `is not None` (not
+                        # truthiness) so a genuinely-reported 0 isn't recomputed.
                         output_length = payload.get("output_length")
-                        if output_length:
+                        if output_length is not None:
                             tc.output_length = output_length
                         else:
                             tc.output_length = len(tc.output) if tc.output else 0

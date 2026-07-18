@@ -198,7 +198,7 @@ Node.js only — there is no browser build of this SDK today (`engines.node >= 2
 
 ## What it detects
 
-27 structural detectors run on every completed run — no LLM, no configuration required. Detection runs server-side (the same detector worker processes every agent's events regardless of source SDK), so additions here apply to TypeScript agents automatically. A few of the main ones:
+28 structural detectors run on every completed run — no LLM, no configuration required. Detection runs server-side (the same detector worker processes every agent's events regardless of source SDK), so additions here apply to TypeScript agents automatically. A few of the main ones:
 
 | Category | Detectors |
 |---|---|
@@ -207,7 +207,7 @@ Node.js only — there is no browser build of this SDK today (`engines.node >= 2
 | Security | `PROMPT_INJECTION_SIGNAL` `MEMORY_POISONING` |
 | Silent degradation | `PREMATURE_TERMINATION` `RUNAWAY_ITERATION` |
 
-→ [docs/detectors.md](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md) for the full list of 27 detectors
+→ [docs/detectors.md](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md) for the full list of 28 detectors
 
 You can also define **custom detectors** in plain English from the dashboard or API. They run in shadow mode on every run and accumulate results before any alert fires. → [Custom detectors](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md#custom-detectors)
 

@@ -89,6 +89,7 @@ class TestAgainstRealCodeAndDocs(unittest.TestCase):
             "OFF_TOPIC_DRIFT",  # Phase 5-8
             "MEMORY_POISONING",  # Capability 1
             "DELEGATION_LOOP",  # Capability 2
+            "AGENT_HANDOFF_FAILURE",  # PR #52
             "TOOL_LOOP",
             "HALLUCINATION",
             "VOICE_SILENCE_TIMEOUT",  # pre-existing

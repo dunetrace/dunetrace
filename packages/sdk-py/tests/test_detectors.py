@@ -214,13 +214,32 @@ class TestAgentHandoffFailureDetector(unittest.TestCase):
     def test_does_not_fire_on_successful_non_empty_handoff(self):
         state = self._state_with_call(
             make_tool_call(
-                "transfer_support",
+                "transfer_to_support",
                 step=5,
                 success=True,
                 output_length=64,
                 output="Escalated with customer context and order details.",
             )
         )
+        assert self.detector.on_run_completion(state) is None
+
+    def test_transfer_to_prefix_is_a_handoff_but_bare_transfer_is_not(self):
+        # `transfer_to_billing` is the Swarm handoff convention → recognized;
+        # `transfer_funds` is a money transfer that merely starts with transfer_
+        # → NOT a handoff, so an empty result must not fire.
+        fires = self._state_with_call(
+            make_tool_call("transfer_to_billing", step=1, success=True, output="ok")
+        )
+        assert self.detector.on_run_completion(fires) is not None
+
+        ignored = self._state_with_call(
+            make_tool_call("transfer_funds", step=1, success=True, output="sent")
+        )
+        assert self.detector.on_run_completion(ignored) is None
+
+    def test_excluded_tool_names_are_not_treated_as_handoffs(self):
+        # `user_agent` ends in _agent but is a known non-handoff collision.
+        state = self._state_with_call(make_tool_call("user_agent", step=1, success=True, output=""))
         assert self.detector.on_run_completion(state) is None
 
 

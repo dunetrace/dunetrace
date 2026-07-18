@@ -547,6 +547,20 @@ class TestToolDecorator(unittest.TestCase):
         responded = next(e for e in emitted if e.event_type == EventType.TOOL_RESPONDED)
         self.assertEqual(responded.payload["output"], str(["result-one", "result-two"]))
 
+    def test_tool_responded_output_length_derived_from_output_when_omitted(self):
+        # tool_responded(output=..., output_length omitted) derives the length
+        # from output; an explicit output_length still wins.
+        c, emitted = self._client()
+        with c.run("agent") as run:
+            run.tool_called("a")
+            run.tool_responded("a", success=True, output="hello world")  # 11 chars
+            run.tool_called("b")
+            run.tool_responded("b", success=True, output="ignored", output_length=99)
+        c.shutdown(timeout=2)
+        responded = [e for e in emitted if e.event_type == EventType.TOOL_RESPONDED]
+        self.assertEqual(responded[0].payload["output_length"], 11)  # derived
+        self.assertEqual(responded[1].payload["output_length"], 99)  # explicit wins
+
     def test_tool_and_trace_compose(self):
         """@dt.trace + @dt.tool work together end to end."""
         c, emitted = self._client()

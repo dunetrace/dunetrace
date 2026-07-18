@@ -1,6 +1,6 @@
 # Detectors
 
-Dunetrace runs 27 structural detectors against every completed agent run — 18 Tier 1 detectors, prompt injection signal detection, plus the additional detectors below. All thresholds are configurable i.e. no code changes required.
+Dunetrace runs 28 structural detectors against every completed agent run — 18 Tier 1 detectors, prompt injection signal detection, plus the additional detectors below. All thresholds are configurable i.e. no code changes required.
 
 **This page is structural detectors only.** Structural detectors are
 zero-LLM, zero-cost, always-on regex/arithmetic checks — the ones that can
@@ -48,6 +48,7 @@ Semantic findings never trigger a policy — see
 | `TOOL_ARGUMENT_FABRICATION` | Tool call argument references an entity not present anywhere in prior context | HIGH/CRITICAL |
 | `RETRIEVED_CONTENT_INJECTION` | Retrieved or fetched content contains text directed at the agent as an instruction | HIGH/CRITICAL |
 | `HANDOFF_CONTEXT_LOSS` | Multi-agent handoff loses a large chunk of the parent agent's context | HIGH |
+| `AGENT_HANDOFF_FAILURE` | A handoff-named tool call fails or returns an empty/insufficient payload | HIGH |
 | `RUNAWAY_ITERATION` | Step or cost ceiling crossed with no completion signal | HIGH/CRITICAL |
 | `MEMORY_POISONING` | An injection/override directive was written into the agent's own memory, where it re-steers the agent when read back | HIGH/CRITICAL |
 | `DELEGATION_LOOP` | Two or more agents delegate to each other in a cycle that keeps going around instead of converging | HIGH/CRITICAL |
@@ -97,7 +98,7 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`) by default. The newest few — `SILENT_TRUNCATION`, `MODEL_FALLBACK_DRIFT`, `MEMORY_POISONING`, and `DELEGATION_LOOP` — ship in shadow mode pending real-traffic validation (they're absent from `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`; add them there to promote). User-defined custom detectors also always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
+Most built-in detectors are live (`shadow = false`) by default. The newest few — `SILENT_TRUNCATION`, `MODEL_FALLBACK_DRIFT`, `MEMORY_POISONING`, `DELEGATION_LOOP`, and `AGENT_HANDOFF_FAILURE` — ship in shadow mode pending real-traffic validation (they're absent from `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`; add them there to promote). User-defined custom detectors also always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
 
 ### Shadow signals in the dashboard
 
@@ -934,6 +935,73 @@ trips is the honest boundary between a loop and normal iteration.
 
 ---
 
+### AGENT_HANDOFF_FAILURE
+
+#### What it catches
+
+A handoff tool — one an agent calls to delegate work to another agent — either
+reports failure or comes back with nothing useful: an empty/terse payload
+(`done`, `ok`, `complete`) or an output shorter than `min_output_length`. The
+handoff "succeeded" mechanically but produced no work product for the caller to
+act on.
+
+#### How this differs from `HANDOFF_CONTEXT_LOSS`
+
+Despite the similar name they are unrelated mechanisms. `HANDOFF_CONTEXT_LOSS`
+compares two runs linked by `parent_run_id` and fires when the *child* run was
+handed a materially smaller context than the parent had accumulated.
+`AGENT_HANDOFF_FAILURE` is single-run and tool-output-based: it inspects the
+handoff *tool call* within one run and never looks across runs.
+
+#### Signal
+
+For each tool call in the run, in order, when the tool is a handoff tool
+(name ends in `_agent`, or starts with `delegate_` / `handoff_` / `transfer_to_` —
+the OpenAI Swarm / Agents SDK handoff convention — and isn't in the
+`excluded_tool_names` stop-list):
+1. If it reported `success=False` → fire (`reason: tool_failed`).
+2. If it reported `success=True` but the output is a known-empty response
+   (`done`/`ok`/`complete`/…) → fire (`reason: known_empty_response`).
+3. If it reported `success=True` but the observed output length is below
+   `min_output_length` → fire (`reason: short_output`).
+
+Fires once per run, on the first handoff tool that matches.
+
+**Data-availability note**: the empty/short checks need `tool_responded`'s
+`success` and `output`/`output_length` to be instrumented. A handoff tool call
+with no recorded response (`success=None`) is never flagged.
+
+#### Severity
+
+HIGH. Confidence 0.9 on an outright `success=False`, 0.85 on an empty/short
+payload.
+
+#### Configuration
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `min_output_length` | int | `10` | Handoff output shorter than this (and not a longer, useful payload) counts as empty |
+| `handoff_patterns` | list[str] | `_agent`, `delegate_`, `handoff_`, `transfer_to_` | Name conventions that mark a tool as a handoff (suffix if it starts with `_`, else prefix) |
+| `excluded_tool_names` | list[str] | `user_agent` | Names that match a pattern but are known non-handoffs — extend as collisions surface |
+
+#### Known limitations (disclosed)
+
+- **Convention-based tool detection.** Handoff tools are recognized by name. The
+  patterns were tightened after calibration (`transfer_to_` rather than a bare
+  `transfer_`, plus an `excluded_tool_names` stop-list) so `transfer_funds` and
+  `user_agent` no longer misfire — calibration is 100% recall / 0% FP
+  (`scripts/calibration/agent_handoff_failure_calibration.md`). It still relies
+  on naming conventions, so a handoff tool named outside them won't be seen; ships
+  shadow by default pending real-traffic validation.
+
+#### Related detectors
+
+- `HANDOFF_CONTEXT_LOSS` — cross-run context comparison (see above).
+- `PREMATURE_TERMINATION` / `UNREAD_TOOL_ERROR` — also about failed tool calls,
+  but keyed on the agent's *narration* after the call, not the handoff payload.
+
+---
+
 ## Confidence scoring
 
 **Dynamic confidence** — count and ratio detectors scale confidence based on how far the observation exceeds the trigger threshold:
@@ -969,6 +1037,8 @@ Hard overrides fire before the co-occurrence boost, so the final confidence on a
 ---
 
 ## How detection works
+
+> **Adding your own?** See the step-by-step [Adding a detector guide](contributing/adding-a-detector.md) — it walks the full registration path (class, enum parity, config, calibration, docs) with a worked example.
 
 The detector worker polls Postgres every 5 seconds for completed or stalled runs. For each run it:
 

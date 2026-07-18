@@ -250,6 +250,23 @@ default:
       threshold: 1
       window_runs: 1
 
+  agent_handoff_failure:
+    min_output_length: 10   # a handoff tool returning fewer chars than this (and
+                            # not a longer, useful payload) is treated as an empty
+                            # handoff. Reads tool_responded(success=..., output=...).
+    # handoff_patterns / excluded_tool_names: lists, override to tune which tool
+    # names count as handoffs (defaults: _agent / delegate_ / handoff_ /
+    # transfer_to_, minus the user_agent collision) — see docs/detectors.md.
+    # Calibrated at 100% recall / 0% FP (scripts/calibration/
+    # agent_handoff_failure_calibration.md). Shadow by default (not in
+    # LIVE_DETECTORS) pending real-traffic validation. Fires within a single run
+    # when a handoff-named tool fails or returns an empty/terse payload; distinct
+    # from handoff_context_loss (cross-run context comparison).
+    alert_policy:
+      mode: immediate
+      threshold: 1
+      window_runs: 1
+
   handoff_context_loss:
     size_drop_threshold: 0.5     # fire if child's input is >50% smaller than parent's accumulated context
     entity_loss_threshold: 1     # fire if >=1 entity from the parent's context is missing from the child's input

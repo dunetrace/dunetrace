@@ -129,7 +129,7 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ## Detectors
 
-27 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
+28 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Signal | What it catches |
 |---|---|
@@ -145,7 +145,7 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 Each alert includes: what fired, why it matters, a concrete fix, and a rate context line (first occurrence / recurring / systemic).
 
-→ [docs/detectors.md](docs/detectors.md) for the full list of 27 detectors
+→ [docs/detectors.md](docs/detectors.md) for the full list of 28 detectors
 
 **Multi-agent systems** — instrument each agent as its own `dt.run()` and Dunetrace auto-links them into a delegation graph (`parent_run_id` is threaded automatically for nested runs). Two detectors read that graph: `DELEGATION_LOOP` (agents cycling without converging) and `HANDOFF_CONTEXT_LOSS` (a handoff dropping the parent's context). → [docs/multi-agent.md](docs/multi-agent.md)
 
@@ -302,7 +302,7 @@ pip install dunetrace-mcp
 Agent Code
   └─► Dunetrace SDK        (raw content → ingest events)
         └─► Ingest API      (POST /v1/ingest → Postgres)
-                ├─► Detector          (poll → 27 detectors → signals)
+                ├─► Detector          (poll → 28 detectors → signals)
                 ├─► Semantic Worker   (optional — poll → DeepEval → signals)
                 ├─► Integrations      (optional — pull Langfuse/LangSmith/Braintrust)
                 ├─► Alerts            (poll → explain → Slack / webhook)
@@ -349,9 +349,11 @@ Agent Code
 
 ## Contributing
 
-Fork, branch, change, `make test`, PR. For larger changes (new detectors, architecture changes), open an issue first.
+Fork, branch, change, `make test`, PR. For larger changes (new integrations, architecture changes), open an issue first.
 
-Requires Python 3.11+, Node.js 18+, Docker + Docker Compose.
+New here? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup and workflow, browse the [good first issues](https://github.com/dunetrace/dunetrace/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) (most are "add one detector"), and follow the step-by-step **[Adding a detector guide](docs/contributing/adding-a-detector.md)**.
+
+Requires Python 3.11+, Node.js 22+, Docker + Docker Compose.
 
 ## Contact
 

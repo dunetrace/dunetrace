@@ -2140,12 +2140,21 @@ class AgentHandoffFailureDetector(BaseDetector):
     """
     A handoff tool completed with no useful response, or reported failure.
 
-    Handoff tools are identified by convention: names ending in `_agent`, names
-    starting with `delegate_`, `handoff_`, or `transfer_`, or an optional
-    future `handoff` tag on the ToolCall object.
+    Handoff tools are identified by convention: names ending in `_agent`, or
+    names starting with `delegate_`, `handoff_`, or `transfer_to_` (the OpenAI
+    Swarm / Agents SDK handoff convention). The prefix is `transfer_to_`, not a
+    bare `transfer_`, so a `transfer_funds`-style money-transfer tool isn't
+    misread as a handoff. EXCLUDED_TOOL_NAMES is a stop-list for names that match
+    a pattern but are known non-handoffs (e.g. `user_agent`), extendable via
+    detectors.yml as real traffic surfaces more collisions.
 
-    Tunable: MIN_OUTPUT_LENGTH. KNOWN_EMPTY_RESPONSES catches terse strings
-    that look successful but carry no useful handoff payload.
+    Distinct from `HANDOFF_CONTEXT_LOSS`: that one compares two runs linked by
+    `parent_run_id` for lost context, whereas this fires within a single run when
+    a handoff *tool call* itself fails or returns an empty/insufficient payload.
+
+    Tunable: MIN_OUTPUT_LENGTH, HANDOFF_PATTERNS, EXCLUDED_TOOL_NAMES.
+    KNOWN_EMPTY_RESPONSES catches terse strings that look successful but carry no
+    useful handoff payload.
     """
 
     name = "AGENT_HANDOFF_FAILURE"
@@ -2153,7 +2162,10 @@ class AgentHandoffFailureDetector(BaseDetector):
     MAX_COST_NS = 50_000
 
     MIN_OUTPUT_LENGTH = 10
-    HANDOFF_PATTERNS = ("_agent", "delegate_", "handoff_", "transfer_")
+    HANDOFF_PATTERNS = ("_agent", "delegate_", "handoff_", "transfer_to_")
+    # Names that match a pattern above but are known NOT to be handoffs
+    # (convention collisions). Extend as real traffic surfaces more.
+    EXCLUDED_TOOL_NAMES = frozenset({"user_agent"})
     KNOWN_EMPTY_RESPONSES = frozenset(
         {
             "",
@@ -2169,11 +2181,9 @@ class AgentHandoffFailureDetector(BaseDetector):
     )
 
     def _is_handoff_tool(self, call: ToolCall) -> bool:
-        tags = getattr(call, "tags", ()) or ()
-        if any(str(tag).lower() == "handoff" for tag in tags):
-            return True
-
         name = call.tool_name.lower()
+        if name in self.EXCLUDED_TOOL_NAMES:
+            return False
         return any(
             name.endswith(pattern) if pattern.startswith("_") else name.startswith(pattern)
             for pattern in self.HANDOFF_PATTERNS

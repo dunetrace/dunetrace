@@ -14,7 +14,7 @@ Locally, expose the ingest service first with `ngrok http 8001` and use the prin
 
 ## What this does
 
-Langdock sends an OTLP/HTTP span for every assistant execution. Dunetrace's ingest service accepts those directly at `POST /v1/otlp/traces` and maps them onto its own event model — LLM calls, tool calls, and retrievals all become the same events a code-instrumented agent would produce. All 27 detectors run on every completed execution automatically.
+Langdock sends an OTLP/HTTP span for every assistant execution. Dunetrace's ingest service accepts those directly at `POST /v1/otlp/traces` and maps them onto its own event model — LLM calls, tool calls, and retrievals all become the same events a code-instrumented agent would produce. All 28 detectors run on every completed execution automatically.
 
 ## Verification
 

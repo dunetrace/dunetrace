@@ -84,7 +84,11 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
         "case_sensitive": "CASE_SENSITIVE",
         "detect_behavior_deviation": "DETECT_BEHAVIOR_DEVIATION",
     },
-    "agent_handoff_failure": {"min_output_length": "MIN_OUTPUT_LENGTH"},
+    "agent_handoff_failure": {
+        "min_output_length": "MIN_OUTPUT_LENGTH",
+        "handoff_patterns": "HANDOFF_PATTERNS",
+        "excluded_tool_names": "EXCLUDED_TOOL_NAMES",
+    },
     "handoff_context_loss": {
         "size_drop_threshold": "SIZE_DROP_THRESHOLD",
         "entity_loss_threshold": "ENTITY_LOSS_THRESHOLD",
