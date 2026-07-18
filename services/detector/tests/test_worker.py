@@ -124,6 +124,19 @@ class TestRunBuilder(unittest.TestCase):
         state = build_run_state(events)
         self.assertEqual(state.tool_calls[0].output, "3 results found")
 
+    def test_backfills_tool_output_length_from_tool_responded(self):
+        events = [
+            run_started(),
+            tool_evt("web_search", 1),
+            evt(
+                "tool.responded",
+                2,
+                {"tool_name": "web_search", "success": True, "output_length": 5},
+            ),
+        ]
+        state = build_run_state(events)
+        self.assertEqual(state.tool_calls[0].output_length, 5)
+
     def test_tool_output_none_when_absent_from_tool_responded(self):
         events = [
             run_started(),

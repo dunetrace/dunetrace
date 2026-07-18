@@ -115,6 +115,11 @@ def build_run_state(events: list[dict]) -> RunState:
                         tc.success = bool(success)
                         tc.error = payload.get("error")
                         tc.output = payload.get("output") or None
+                        output_length = payload.get("output_length")
+                        if output_length:
+                            tc.output_length = output_length
+                        else:
+                            tc.output_length = len(tc.output) if tc.output else 0
                         break
 
         # retrieval.responded - append to retrievals list

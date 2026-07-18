@@ -2133,6 +2133,115 @@ class RetrievedContentInjectionDetector(BaseDetector):
         return None
 
 
+# ── AGENT_HANDOFF_FAILURE ────────────────────────────────────────────────────
+
+
+class AgentHandoffFailureDetector(BaseDetector):
+    """
+    A handoff tool completed with no useful response, or reported failure.
+
+    Handoff tools are identified by convention: names ending in `_agent`, names
+    starting with `delegate_`, `handoff_`, or `transfer_`, or an optional
+    future `handoff` tag on the ToolCall object.
+
+    Tunable: MIN_OUTPUT_LENGTH. KNOWN_EMPTY_RESPONSES catches terse strings
+    that look successful but carry no useful handoff payload.
+    """
+
+    name = "AGENT_HANDOFF_FAILURE"
+    SEVERITY = Severity.HIGH
+    MAX_COST_NS = 50_000
+
+    MIN_OUTPUT_LENGTH = 10
+    HANDOFF_PATTERNS = ("_agent", "delegate_", "handoff_", "transfer_")
+    KNOWN_EMPTY_RESPONSES = frozenset(
+        {
+            "",
+            "done",
+            "ok",
+            "complete",
+            "finished",
+            "n/a",
+            "null",
+            "none",
+            "success",
+        }
+    )
+
+    def _is_handoff_tool(self, call: ToolCall) -> bool:
+        tags = getattr(call, "tags", ()) or ()
+        if any(str(tag).lower() == "handoff" for tag in tags):
+            return True
+
+        name = call.tool_name.lower()
+        return any(
+            name.endswith(pattern) if pattern.startswith("_") else name.startswith(pattern)
+            for pattern in self.HANDOFF_PATTERNS
+        )
+
+    def _observed_output_length(self, call: ToolCall) -> Optional[int]:
+        if call.output_length is not None:
+            return call.output_length
+        if call.output is not None:
+            return len(call.output)
+        return None
+
+    def _known_empty_response(self, call: ToolCall) -> Optional[str]:
+        if call.output is None:
+            return None
+        normalized = call.output.strip().lower()
+        if normalized in self.KNOWN_EMPTY_RESPONSES:
+            return normalized
+        return None
+
+    def _is_empty_response(self, call: ToolCall) -> bool:
+        if self._known_empty_response(call) is not None:
+            return True
+        output_length = self._observed_output_length(call)
+        return output_length is not None and output_length < self.MIN_OUTPUT_LENGTH
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        for call in state.tool_calls:
+            if not self._is_handoff_tool(call):
+                continue
+
+            reason = None
+            if call.success is False:
+                reason = "tool_failed"
+            elif call.success is True and self._is_empty_response(call):
+                reason = (
+                    "known_empty_response"
+                    if self._known_empty_response(call) is not None
+                    else "short_output"
+                )
+
+            if reason is None:
+                continue
+
+            output_length = self._observed_output_length(call)
+            known_empty_response = self._known_empty_response(call)
+            return FailureSignal(
+                failure_type=FailureType.AGENT_HANDOFF_FAILURE,
+                severity=self.SEVERITY,
+                run_id=state.run_id,
+                agent_id=state.agent_id,
+                agent_version=state.agent_version,
+                step_index=call.step_index,
+                confidence=0.9 if call.success is False else 0.85,
+                evidence={
+                    "tool_name": call.tool_name,
+                    "step_index": call.step_index,
+                    "output_length": output_length,
+                    "success": call.success,
+                    "reason": reason,
+                    "known_empty_response": known_empty_response,
+                    "min_output_length": self.MIN_OUTPUT_LENGTH,
+                },
+            )
+
+        return None
+
+
 # ── HANDOFF_CONTEXT_LOSS ──────────────────────────────────────────────────────
 
 
@@ -2751,6 +2860,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     UnreadToolErrorDetector(),
     ToolArgumentFabricationDetector(),
     RetrievedContentInjectionDetector(),
+    AgentHandoffFailureDetector(),
     RunawayIterationDetector(),
     ModelFallbackDriftDetector(),
     MemoryPoisonedDetector(),

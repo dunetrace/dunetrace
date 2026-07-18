@@ -97,6 +97,7 @@ class FailureType(str, Enum):
     TOOL_ARGUMENT_FABRICATION = "TOOL_ARGUMENT_FABRICATION"
     RETRIEVED_CONTENT_INJECTION = "RETRIEVED_CONTENT_INJECTION"
     HANDOFF_CONTEXT_LOSS = "HANDOFF_CONTEXT_LOSS"
+    AGENT_HANDOFF_FAILURE = "AGENT_HANDOFF_FAILURE"
     RUNAWAY_ITERATION = "RUNAWAY_ITERATION"
     MODEL_FALLBACK_DRIFT = "MODEL_FALLBACK_DRIFT"
     MEMORY_POISONING = "MEMORY_POISONING"
@@ -154,6 +155,7 @@ class ToolCall:
     timestamp: float
     success: Optional[bool] = None
     error: Optional[str] = None  # raw error message when success=False
+    output_length: Optional[int] = None
     output: Optional[str] = (
         None  # raw tool response body, when the caller passes output= to tool_responded()
     )
