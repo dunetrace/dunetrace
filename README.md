@@ -115,6 +115,9 @@ await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
 ```
 
 **Try the built-in failure scenarios**
+
+For the full examples index, see [`examples/README.md`](examples/README.md).
+
 ```bash
 cd packages/sdk-py
 
