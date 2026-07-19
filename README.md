@@ -67,6 +67,8 @@ none of them run in-path.
 
 ## Quick Start
 
+See the [examples index](examples/README.md) for ready‑to‑run examples.
+
 **1. Start the backend**
 ```bash
 git clone https://github.com/dunetrace/dunetrace
