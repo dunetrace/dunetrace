@@ -1,6 +1,6 @@
 # Detectors
 
-Dunetrace runs 28 structural detectors against every completed agent run — 18 Tier 1 detectors, prompt injection signal detection, plus the additional detectors below. All thresholds are configurable i.e. no code changes required.
+Dunetrace runs 29 structural detectors against every completed agent run — 19 Tier 1 detectors, prompt injection signal detection, plus the additional detectors below. All thresholds are configurable i.e. no code changes required.
 
 **This page is structural detectors only.** Structural detectors are
 zero-LLM, zero-cost, always-on regex/arithmetic checks — the ones that can
@@ -28,6 +28,7 @@ Semantic findings never trigger a policy — see
 | `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
 | `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM |
+| `EXCESSIVE_RETRIEVAL` | Run made at least 8 retrieval calls, indicating inefficient repeated search | MEDIUM |
 | `CONTEXT_BLOAT` | Prompt tokens grow beyond 2× P75 baseline ¹ or static fallback (3× from first to last call) | MEDIUM |
 | `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent ¹ | MEDIUM |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
@@ -98,7 +99,7 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`) by default. The newest few — `SILENT_TRUNCATION`, `MODEL_FALLBACK_DRIFT`, `MEMORY_POISONING`, `DELEGATION_LOOP`, and `AGENT_HANDOFF_FAILURE` — ship in shadow mode pending real-traffic validation (they're absent from `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`; add them there to promote). User-defined custom detectors also always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
+Most built-in detectors are live (`shadow = false`) by default. The newest few — `SILENT_TRUNCATION`, `MODEL_FALLBACK_DRIFT`, `MEMORY_POISONING`, `DELEGATION_LOOP`, `AGENT_HANDOFF_FAILURE`, and `EXCESSIVE_RETRIEVAL` — ship in shadow mode pending real-traffic validation (they're absent from `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`; add them there to promote). User-defined custom detectors also always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
 
 ### Shadow signals in the dashboard
 

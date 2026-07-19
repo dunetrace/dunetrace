@@ -28,6 +28,7 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
     "tool_avoidance": {"min_llm_calls": "MIN_LLM_CALLS"},
     "goal_abandonment": {"stall_steps": "STALL_STEPS"},
     "rag_empty_retrieval": {"min_score": "MIN_SCORE", "min_results": "MIN_RESULTS"},
+    "excessive_retrieval": {"max_retrievals": "MAX_RETRIEVALS"},
     "llm_truncation_loop": {"threshold": "THRESHOLD"},
     "silent_truncation": {
         "min_output_length": "MIN_OUTPUT_LENGTH",

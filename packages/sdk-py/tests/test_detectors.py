@@ -12,6 +12,7 @@ import time
 from dunetrace.models import RunState, ToolCall, RetrievalResult, FailureType
 from dunetrace.detectors import (
     AgentHandoffFailureDetector,
+    ExcessiveRetrievalDetector,
     ToolLoopDetector,
     ToolThrashingDetector,
     ToolAvoidanceDetector,
@@ -387,6 +388,47 @@ class TestRagEmptyRetrievalDetector(unittest.TestCase):
         state.exit_reason = "final_answer"
         state.retrievals = []
         assert self.detector.on_run_completion(state) is None
+
+
+class TestExcessiveRetrievalDetector(unittest.TestCase):
+    def make_retrieval(self, step: int, index: str = "docs") -> RetrievalResult:
+        return RetrievalResult(
+            index_name=index,
+            result_count=3,
+            top_score=0.8,
+            step_index=step,
+        )
+
+    def test_fires_at_threshold_with_bounded_evidence(self):
+        state = make_state(
+            retrievals=[
+                self.make_retrieval(step, "docs" if step % 2 else "tickets")
+                for step in range(1, 9)
+            ]
+        )
+
+        signal = ExcessiveRetrievalDetector().on_run_completion(state)
+
+        assert signal is not None
+        assert signal.failure_type == FailureType.EXCESSIVE_RETRIEVAL
+        assert signal.step_index == 8
+        assert signal.evidence == {
+            "retrieval_count": 8,
+            "threshold": 8,
+            "indexes": ["docs", "tickets"],
+            "first_step": 1,
+            "last_step": 8,
+        }
+
+    def test_no_signal_below_threshold(self):
+        state = make_state(retrievals=[self.make_retrieval(step) for step in range(1, 8)])
+        assert ExcessiveRetrievalDetector().on_run_completion(state) is None
+
+    def test_custom_threshold_is_respected(self):
+        state = make_state(retrievals=[self.make_retrieval(step) for step in range(1, 4)])
+        signal = ExcessiveRetrievalDetector(MAX_RETRIEVALS=3).on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["threshold"] == 3
 
 
 # ── LlmTruncationLoopDetector ─────────────────────────────────────────────────

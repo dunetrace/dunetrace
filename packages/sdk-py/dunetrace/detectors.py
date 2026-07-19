@@ -507,6 +507,44 @@ class RagEmptyRetrievalDetector(BaseDetector):
         )
 
 
+# ── EXCESSIVE_RETRIEVAL ───────────────────────────────────────────────────────
+
+
+class ExcessiveRetrievalDetector(BaseDetector):
+    """A run repeatedly queries retrieval indexes, suggesting inefficient search.
+
+    Tunable: MAX_RETRIEVALS (default 8) — fire at or above this many retrievals.
+    """
+
+    name = "EXCESSIVE_RETRIEVAL"
+    SEVERITY = Severity.MEDIUM
+    MAX_RETRIEVALS = 8
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        retrieval_count = len(state.retrievals)
+        if retrieval_count < self.MAX_RETRIEVALS:
+            return None
+
+        first_step = min(retrieval.step_index for retrieval in state.retrievals)
+        last_step = max(retrieval.step_index for retrieval in state.retrievals)
+        return FailureSignal(
+            failure_type=FailureType.EXCESSIVE_RETRIEVAL,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=last_step,
+            confidence=0.8,
+            evidence={
+                "retrieval_count": retrieval_count,
+                "threshold": self.MAX_RETRIEVALS,
+                "indexes": sorted({retrieval.index_name for retrieval in state.retrievals}),
+                "first_step": first_step,
+                "last_step": last_step,
+            },
+        )
+
+
 # ── LLM_TRUNCATION_LOOP ───────────────────────────────────────────────────────
 
 
@@ -2854,6 +2892,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     ToolAvoidanceDetector(),
     GoalAbandonmentDetector(),
     RagEmptyRetrievalDetector(),
+    ExcessiveRetrievalDetector(),
     LlmTruncationLoopDetector(),
     SilentTruncationDetector(),
     ContextBloatDetector(),
