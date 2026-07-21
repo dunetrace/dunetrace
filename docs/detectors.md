@@ -28,7 +28,7 @@ Semantic findings never trigger a policy — see
 | `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
 | `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM |
-| `EXCESSIVE_RETRIEVAL` | Run made at least 8 retrieval calls, indicating inefficient repeated search | MEDIUM |
+| `EXCESSIVE_RETRIEVAL` | Run made at least 8 retrieval calls — high retrieval volume, indicating inefficient grounding | MEDIUM |
 | `CONTEXT_BLOAT` | Prompt tokens grow beyond 2× P75 baseline ¹ or static fallback (3× from first to last call) | MEDIUM |
 | `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent ¹ | MEDIUM |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |

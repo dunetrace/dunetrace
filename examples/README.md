@@ -4,7 +4,10 @@ This directory contains self-contained example scripts that demonstrate how to u
 
 Each example includes a docstring that describes its purpose, how to run it, and any required environment variables or setup steps.
 
-Below is a summary of all available examples.
+Below is a summary of all available examples. Run commands are relative to the
+directory shown in the **Example** column: run root examples (`examples/…`) from
+the repo root, and SDK examples (`packages/sdk-py/examples/…`) from
+`packages/sdk-py/`.
 
 | Example | Description | Run Command | Stack Requirement |
 |---------|-------------|-------------|-------------------|

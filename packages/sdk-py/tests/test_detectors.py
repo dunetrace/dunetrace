@@ -402,8 +402,7 @@ class TestExcessiveRetrievalDetector(unittest.TestCase):
     def test_fires_at_threshold_with_bounded_evidence(self):
         state = make_state(
             retrievals=[
-                self.make_retrieval(step, "docs" if step % 2 else "tickets")
-                for step in range(1, 9)
+                self.make_retrieval(step, "docs" if step % 2 else "tickets") for step in range(1, 9)
             ]
         )
 
@@ -429,6 +428,17 @@ class TestExcessiveRetrievalDetector(unittest.TestCase):
         signal = ExcessiveRetrievalDetector(MAX_RETRIEVALS=3).on_run_completion(state)
         assert signal is not None
         assert signal.evidence["threshold"] == 3
+
+    def test_confidence_scales_with_volume(self):
+        at_threshold = make_state(retrievals=[self.make_retrieval(s) for s in range(1, 9)])
+        far_over = make_state(retrievals=[self.make_retrieval(s) for s in range(1, 41)])
+
+        base = ExcessiveRetrievalDetector().on_run_completion(at_threshold)
+        heavy = ExcessiveRetrievalDetector().on_run_completion(far_over)
+
+        assert base.confidence == 0.8
+        assert heavy.confidence > base.confidence
+        assert heavy.confidence <= 0.95  # capped
 
 
 # ── LlmTruncationLoopDetector ─────────────────────────────────────────────────

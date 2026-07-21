@@ -511,7 +511,12 @@ class RagEmptyRetrievalDetector(BaseDetector):
 
 
 class ExcessiveRetrievalDetector(BaseDetector):
-    """A run repeatedly queries retrieval indexes, suggesting inefficient search.
+    """A run issues an unusually high volume of retrieval calls.
+
+    This is a volume signal, not a duplication signal: it fires on the total
+    number of retrievals in a run regardless of whether the queries repeat.
+    High retrieval volume is itself a cost/efficiency concern — an agent that
+    needs many searches to answer is often failing to ground efficiently.
 
     Tunable: MAX_RETRIEVALS (default 8) — fire at or above this many retrievals.
     """
@@ -527,6 +532,9 @@ class ExcessiveRetrievalDetector(BaseDetector):
 
         first_step = min(retrieval.step_index for retrieval in state.retrievals)
         last_step = max(retrieval.step_index for retrieval in state.retrievals)
+        # Scale confidence with how far the run runs past the threshold, so a
+        # 40-retrieval run ranks above one that just tips over the line.
+        confidence = min(0.95, 0.8 + 0.01 * (retrieval_count - self.MAX_RETRIEVALS))
         return FailureSignal(
             failure_type=FailureType.EXCESSIVE_RETRIEVAL,
             severity=self.SEVERITY,
@@ -534,7 +542,7 @@ class ExcessiveRetrievalDetector(BaseDetector):
             agent_id=state.agent_id,
             agent_version=state.agent_version,
             step_index=last_step,
-            confidence=0.8,
+            confidence=confidence,
             evidence={
                 "retrieval_count": retrieval_count,
                 "threshold": self.MAX_RETRIEVALS,
