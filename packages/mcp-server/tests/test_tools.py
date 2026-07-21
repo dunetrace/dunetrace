@@ -803,7 +803,7 @@ class TestGetAgentTokenStats(unittest.TestCase):
 
     def test_shows_waste_by_failure_type(self):
         out = srv.get_agent_token_stats("my-agent")
-        self.assertIn("Waste by failure type", out)
+        self.assertIn("Failed-run spend by failure type", out)
         self.assertIn("TOOL_LOOP", out)
         self.assertIn("COST_SPIKE", out)
 

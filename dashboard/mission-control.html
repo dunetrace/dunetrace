@@ -415,6 +415,15 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
 .cb-val{font-family:'IBM Plex Mono',monospace;font-size:2rem;font-weight:600;color:var(--green)}
 .cb-label{font-size:12px;color:var(--chalk3)}
 .cb-sub{font-size:11px;color:var(--chalk4);margin-top:2px}
+/* Info tooltip — hover or focus the "i" badge to see what a metric means + its formula.
+   The content lives hidden inside each .tip; it's rendered into a body-level #tipFloat
+   layer (position:fixed) on hover so it can never be clipped or out-stacked by cards. */
+.tip{position:relative;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;margin-left:4px;border-radius:50%;border:1px solid var(--chalk4);color:var(--chalk4);font-size:9px;font-weight:700;font-style:normal;line-height:1;cursor:help;vertical-align:middle;outline:none}
+.tip:hover,.tip:focus{border-color:var(--amber);color:var(--amber)}
+.tip .tip-box{display:none}
+#tipFloat{position:fixed;visibility:hidden;opacity:0;z-index:100000;width:252px;max-width:min(252px,80vw);background:var(--s1);border:1px solid var(--wire2);border-radius:6px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.55;color:var(--chalk2);box-shadow:0 8px 26px rgba(0,0,0,.45);text-align:left;letter-spacing:normal;text-transform:none;white-space:normal;transition:opacity .12s;pointer-events:none}
+#tipFloat.on{visibility:visible;opacity:1}
+#tipFloat .tip-f{display:block;margin-top:6px;padding-top:5px;border-top:1px solid var(--wire2);font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--amber)}
 
 /* ── RUN GRAPH ── */
 .graph-wrap{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem;margin-bottom:1.25rem}
@@ -976,7 +985,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <thead>
         <tr>
           <th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th>
-          <th>Failure types</th><th>Duration</th><th>Steps</th><th>Wasted tokens</th><th>Wasted $</th><th></th>
+          <th>Failure types</th><th>Duration</th><th>Steps</th><th>Failed-run tokens</th><th>Failed-run $</th><th></th>
         </tr>
       </thead>
       <tbody id="live-feed-tbody">
@@ -1181,11 +1190,11 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <div class="cb-sub" id="analytics-agents-sub">across all agents</div>
       </div>
     </div>
-    <div class="cost-banner" style="background:linear-gradient(135deg,rgba(46,184,114,0.08),rgba(46,184,114,0.02));border-color:rgba(46,184,114,0.25)">
-      <div><div class="cb-val" id="analytics-cost-saved" style="color:var(--green)">—</div></div>
+    <div class="cost-banner" style="background:linear-gradient(135deg,rgba(230,126,34,0.09),rgba(230,126,34,0.02));border-color:rgba(230,126,34,0.26)">
+      <div><div class="cb-val" id="analytics-cost-saved" style="color:#e67e22">—</div></div>
       <div style="flex:1">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
-          <span class="cb-label" style="margin:0">Est. token cost saved this week</span>
+          <span class="cb-label" style="margin:0">Est. avoidable cost this week<span class="tip" tabindex="0">i<span class="tip-box">The recoverable slice of this week's failed-run spend: tokens above each agent's healthy baseline (P75 of its clean runs). Not "saved" — these runs already ran; this is what you'd claw back by fixing them.<span class="tip-f">= Σ excess tokens (7d) × rate</span></span></span></span>
           <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4)">at $</span>
           <input id="cost-rate-input" type="number" min="0.001" max="1000" step="0.001" value="0.010"
             style="width:60px;background:var(--s3);border:1px solid var(--wire2);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:2px 5px;border-radius:3px;outline:none"
@@ -1225,7 +1234,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="sec-head"><span class="sec-title">Top failure patterns across all agents</span></div>
   <div class="table-card">
     <table class="run-table">
-      <thead><tr><th>Pattern</th><th>Signals (unique runs)</th><th>Agents affected</th><th>Est. tokens wasted †</th></tr></thead>
+      <thead><tr><th>Pattern</th><th>Signals (unique runs)</th><th>Agents affected</th><th>Failed-run tokens †</th></tr></thead>
       <tbody id="analytics-patterns-tbody">
         <tr><td colspan="4" class="loading">loading…</td></tr>
       </tbody>
@@ -1239,7 +1248,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="sec-head"><span class="sec-title">Per-agent breakdown</span></div>
   <div class="table-card">
     <table class="run-table">
-      <thead><tr><th>Agent</th><th>Runs</th><th>Signals</th><th>Critical</th><th>High</th><th>Est. tokens wasted</th><th>Top pattern</th></tr></thead>
+      <thead><tr><th>Agent</th><th>Runs</th><th>Signals</th><th>Critical</th><th>High</th><th>Failed-run tokens</th><th>Top pattern</th></tr></thead>
       <tbody id="analytics-agents-tbody">
         <tr><td colspan="7" class="loading">loading…</td></tr>
       </tbody>
@@ -1299,7 +1308,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   </div>
   <div class="table-card">
     <table class="run-table">
-      <thead><tr><th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th><th>Failure types</th><th>Time</th><th>Duration</th><th>Steps</th><th>Wasted tokens</th><th>Wasted $</th><th></th></tr></thead>
+      <thead><tr><th>Run ID</th><th>Agent</th><th>Signals</th><th>Severity</th><th>Failure types</th><th>Time</th><th>Duration</th><th>Steps</th><th>Failed-run tokens</th><th>Failed-run $</th><th></th></tr></thead>
       <tbody id="runs-tbody">
         <tr><td colspan="11" class="loading">loading…</td></tr>
       </tbody>
@@ -1584,7 +1593,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     </div>
   </div>
   <!-- Summary banners -->
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:1.5rem">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:1.5rem">
     <div class="cost-banner">
       <div><div class="cb-val" id="tok-total-tokens">—</div></div>
       <div>
@@ -1593,17 +1602,24 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       </div>
     </div>
     <div class="cost-banner" style="background:linear-gradient(135deg,rgba(212,146,10,0.08),rgba(212,146,10,0.02));border-color:rgba(212,146,10,0.25)">
-      <div><div class="cb-val" id="tok-wasted-tokens" style="color:var(--amber)">—</div></div>
+      <div><div class="cb-val" id="tok-failed-tokens" style="color:var(--amber)">—</div></div>
       <div>
-        <div class="cb-label">Wasted tokens</div>
-        <div class="cb-sub" id="tok-wasted-pct-sub">on runs with failures</div>
+        <div class="cb-label">Tokens on failed runs<span class="tip" tabindex="0">i<span class="tip-box">Every token spent on runs that had at least one signal. This is <b>attribution</b> — spend on runs that had a problem, not tokens literally thrown away.<span class="tip-f">= Σ tokens of all runs with ≥1 signal</span></span></span></div>
+        <div class="cb-sub" id="tok-failed-sub">on runs with failures</div>
+      </div>
+    </div>
+    <div class="cost-banner" style="background:linear-gradient(135deg,rgba(230,126,34,0.10),rgba(230,126,34,0.02));border-color:rgba(230,126,34,0.28)">
+      <div><div class="cb-val" id="tok-excess-tokens" style="color:#e67e22">—</div></div>
+      <div>
+        <div class="cb-label">Excess (avoidable)<span class="tip" tabindex="0">i<span class="tip-box">The <b>avoidable</b> slice of failed-run spend: tokens above a healthy baseline (P75 of that agent version's clean runs). A run that ballooned to 596k when its healthy self is 6k counts ~590k; a normal-size run that tripped one signal counts ~0. This is the realistic "waste" figure.<span class="tip-f">= Σ max(0, run tokens − baseline) on failed runs</span></span></span></div>
+        <div class="cb-sub" id="tok-excess-sub">above healthy baseline</div>
       </div>
     </div>
     <div class="cost-banner" style="background:linear-gradient(135deg,rgba(229,62,62,0.08),rgba(229,62,62,0.02));border-color:rgba(229,62,62,0.25)">
-      <div><div class="cb-val" id="tok-wasted-cost" style="color:var(--red)">—</div></div>
+      <div><div class="cb-val" id="tok-projected-cost" style="color:var(--red)">—</div></div>
       <div>
-        <div class="cb-label">Est. wasted cost</div>
-        <div class="cb-sub" id="tok-total-cost-sub">of total estimated cost</div>
+        <div class="cb-label">Projected 30-day waste<span class="tip" tabindex="0">i<span class="tip-box">If this avoidable waste keeps up, projected spend over the next 30 days. Based on the recent 7-day rate, so it stays the <b>same whichever window</b> you pick.<span class="tip-f">= last-7d excess × (30 ÷ days observed)</span></span></span></div>
+        <div class="cb-sub" id="tok-projected-sub">if unfixed, current rate</div>
       </div>
     </div>
   </div>
@@ -1615,11 +1631,11 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <th>Agent</th>
         <th>Runs (failed)</th>
         <th>Total tokens</th>
-        <th>Wasted tokens</th>
-        <th>Waste %</th>
+        <th>Failed-run tokens</th>
+        <th>Excess (avoidable)</th>
+        <th>Prevented</th>
         <th>Est. total cost</th>
-        <th>Est. wasted cost</th>
-        <th>Top waste cause</th>
+        <th>Top cause</th>
       </tr></thead>
       <tbody id="tok-agents-tbody">
         <tr><td colspan="8" class="loading">loading…</td></tr>
@@ -1870,6 +1886,7 @@ async function loadTokenStats() {
     } catch(e) { /* token stats optional */ }
   }));
   renderTokens();
+  updateCostSaved();  // Analytics avoidable-cost card reads _tokenStats
 }
 
 async function loadIssuesCounts() {
@@ -1907,26 +1924,37 @@ function renderTokens() {
     _tokenCostRate !== null ? tokens * _tokenCostRate / 1000 : (apiUsd || 0);
 
   // Aggregate totals across all agents for banner
-  let totalTok = 0, wastedTok = 0, totalCost = 0, wastedCost = 0;
+  let totalTok = 0, failedTok = 0, excessTok = 0, preventedTok = 0, projTok = 0;
+  let totalCost = 0, failedCost = 0, excessCost = 0, preventedCost = 0, projCost = 0;
   allStats.forEach(ts => {
     const w = ts.windows?.[win] || {};
-    totalTok   += w.total_tokens  || 0;
-    wastedTok  += w.wasted_tokens || 0;
-    totalCost  += tokCost(w.total_tokens  || 0, w.total_cost_usd);
-    wastedCost += tokCost(w.wasted_tokens || 0, w.wasted_cost_usd);
+    totalTok      += w.total_tokens || 0;
+    failedTok     += w.failed_run_tokens ?? w.wasted_tokens ?? 0;
+    excessTok     += w.excess_tokens || 0;
+    preventedTok  += w.prevented_tokens || 0;
+    projTok       += w.projected_monthly_excess_tokens || 0;
+    totalCost     += tokCost(w.total_tokens || 0, w.total_cost_usd);
+    failedCost    += tokCost(w.failed_run_tokens ?? w.wasted_tokens ?? 0, w.failed_run_cost_usd ?? w.wasted_cost_usd);
+    excessCost    += tokCost(w.excess_tokens || 0, w.excess_cost_usd);
+    preventedCost += tokCost(w.prevented_tokens || 0, w.prevented_cost_usd);
+    projCost      += tokCost(w.projected_monthly_excess_tokens || 0, w.projected_monthly_excess_cost_usd);
   });
 
   const totalRunsAll  = allStats.reduce((n, ts) => n + (ts.windows?.[win]?.run_count || 0), 0);
-  const wastedRunsAll = allStats.reduce((n, ts) => n + (ts.windows?.[win]?.wasted_run_count || 0), 0);
-  const wastedPct     = totalTok ? Math.round(wastedTok / totalTok * 100) : 0;
+  const failedRunsAll = allStats.reduce((n, ts) => n + (ts.windows?.[win]?.failed_run_count ?? ts.windows?.[win]?.wasted_run_count ?? 0), 0);
+  const blockedRunsAll = allStats.reduce((n, ts) => n + (ts.windows?.[win]?.blocked_run_count || 0), 0);
+  const failedPct     = totalTok ? Math.round(failedTok / totalTok * 100) : 0;
+  const excessPct     = totalTok ? Math.round(excessTok / totalTok * 100) : 0;
 
   const setEl = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  setEl('tok-total-tokens',   fmtTok(totalTok));
-  setEl('tok-total-runs-sub', `${totalRunsAll} runs across ${allStats.length} agent${allStats.length !== 1 ? 's' : ''}`);
-  setEl('tok-wasted-tokens',  fmtTok(wastedTok));
-  setEl('tok-wasted-pct-sub', `${wastedPct}% of total · ${wastedRunsAll} failed run${wastedRunsAll !== 1 ? 's' : ''}`);
-  setEl('tok-wasted-cost',    fmtUsd(wastedCost));
-  setEl('tok-total-cost-sub', `of ${fmtUsd(totalCost)} total est. cost`);
+  setEl('tok-total-tokens',    fmtTok(totalTok));
+  setEl('tok-total-runs-sub',  `${totalRunsAll} runs across ${allStats.length} agent${allStats.length !== 1 ? 's' : ''}`);
+  setEl('tok-failed-tokens',   fmtTok(failedTok));
+  setEl('tok-failed-sub',      `${fmtUsd(failedCost)} · ${failedRunsAll} failed run${failedRunsAll !== 1 ? 's' : ''} (${failedPct}% of tokens)`);
+  setEl('tok-excess-tokens',   fmtTok(excessTok));
+  setEl('tok-excess-sub',      `${fmtUsd(excessCost)} · ${excessPct}% of total — the avoidable spend`);
+  setEl('tok-projected-cost',  fmtUsd(projCost));
+  setEl('tok-projected-sub',   `~${fmtTok(projTok)} tokens/mo if left unfixed`);
 
   // Per-agent table
   const tbody = document.getElementById('tok-agents-tbody');
@@ -1942,24 +1970,27 @@ function renderTokens() {
     if (!ts) return null;
     const w   = ts.windows?.[win] || {};
     const top = ts.waste_by_failure_type?.[0];
-    const wp  = w.total_tokens ? Math.round((w.wasted_tokens || 0) / w.total_tokens * 100) : 0;
-    const wpColor = wp >= 50 ? 'var(--red)' : wp >= 25 ? 'var(--amber)' : 'var(--chalk4)';
+    const excessTok = w.excess_tokens || 0;
+    const ep  = w.total_tokens ? Math.round(excessTok / w.total_tokens * 100) : 0;
+    const epColor = ep >= 50 ? 'var(--red)' : ep >= 25 ? '#e67e22' : 'var(--chalk4)';
     return {
       agent_id:    a.agent_id,
       run_count:   w.run_count || 0,
-      wasted_runs: w.wasted_run_count || 0,
+      failed_runs: w.failed_run_count ?? w.wasted_run_count ?? 0,
       total_tok:   w.total_tokens || 0,
-      wasted_tok:  w.wasted_tokens || 0,
-      wp, wpColor,
-      total_cost:  tokCost(w.total_tokens  || 0, w.total_cost_usd),
-      wasted_cost: tokCost(w.wasted_tokens || 0, w.wasted_cost_usd),
+      failed_tok:  w.failed_run_tokens ?? w.wasted_tokens ?? 0,
+      excess_tok:  excessTok,
+      ep, epColor,
+      prevented_tok: w.prevented_tokens || 0,
+      total_cost:  tokCost(w.total_tokens || 0, w.total_cost_usd),
+      excess_cost: tokCost(excessTok, w.excess_cost_usd),
       top_ft:      top ? top.failure_type : null,
       waste_by_ft: (ts.waste_by_failure_type || []).map(ft => ({
         ...ft,
         _cost: tokCost(ft.wasted_tokens, ft.wasted_cost_usd),
       })),
     };
-  }).filter(Boolean).sort((a, b) => b.wasted_cost - a.wasted_cost);
+  }).filter(Boolean).sort((a, b) => b.excess_cost - a.excess_cost);
 
   if (!rows.length) {
     tbody.innerHTML = '<tr><td colspan="8" class="loading">no token data — make sure agents are sending LLM events</td></tr>';
@@ -1969,12 +2000,12 @@ function renderTokens() {
   tbody.innerHTML = rows.map(r => `
     <tr style="cursor:pointer" onclick="toggleTokenRow(this,${jsVal(r.agent_id)})">
       <td class="mono" style="font-weight:600">${esc(r.agent_id)}</td>
-      <td class="mono">${r.run_count} <span style="color:var(--amber)">(${r.wasted_runs})</span></td>
+      <td class="mono">${r.run_count} <span style="color:var(--amber)">(${r.failed_runs})</span></td>
       <td class="mono">${fmtTok(r.total_tok)}</td>
-      <td class="mono" style="color:var(--amber)">${fmtTok(r.wasted_tok)}</td>
-      <td class="mono" style="color:${r.wpColor};font-weight:600">${r.wp}%</td>
+      <td class="mono" style="color:var(--amber)">${fmtTok(r.failed_tok)}</td>
+      <td class="mono" style="color:#e67e22">${fmtTok(r.excess_tok)} <span style="color:${r.epColor};font-size:10px">(${r.ep}%)</span></td>
+      <td class="mono" style="color:var(--green)">${r.prevented_tok ? fmtTok(r.prevented_tok) : '—'}</td>
       <td class="mono">${fmtUsd(r.total_cost)}</td>
-      <td class="mono" style="color:var(--red)">${fmtUsd(r.wasted_cost)}</td>
       <td class="mono" style="color:var(--chalk4);font-size:10px">${r.top_ft ? r.top_ft.replace(/_/g,' ') : '—'}</td>
     </tr>
     <tr id="tok-detail-${esc(r.agent_id)}" style="display:none">
@@ -1982,8 +2013,8 @@ function renderTokens() {
         <table class="run-table" style="margin:0;border-top:none">
           <thead style="background:var(--s2)"><tr>
             <th style="padding-left:2rem">Failure type</th>
-            <th>Wasted tokens</th>
-            <th>Est. wasted cost</th>
+            <th>Failed-run tokens</th>
+            <th>Est. cost</th>
             <th>Affected runs</th>
           </tr></thead>
           <tbody>${r.waste_by_ft.map(ft => `
@@ -2005,6 +2036,44 @@ function toggleTokenRow(tr, agentId) {
   if (!detail) return;
   detail.style.display = detail.style.display === 'none' ? '' : 'none';
 }
+
+// ── Floating info tooltips ────────────────────────────────────────────────────
+// Render each .tip's hidden content into a body-level fixed layer, flipping above
+// or below the badge based on available room. Immune to card clipping / stacking.
+(function initTips() {
+  function setup() {
+    let float = document.getElementById('tipFloat');
+    if (!float) {
+      float = document.createElement('div');
+      float.id = 'tipFloat';
+      document.body.appendChild(float);
+    }
+    const GAP = 8;
+    function show(tip) {
+      const src = tip.querySelector('.tip-box');
+      if (!src) return;
+      float.innerHTML = src.innerHTML;
+      float.classList.add('on');
+      const r = tip.getBoundingClientRect();
+      const bw = float.offsetWidth, bh = float.offsetHeight;
+      let left = r.left + r.width / 2 - bw / 2;
+      left = Math.max(GAP, Math.min(left, window.innerWidth - bw - GAP));
+      const roomBelow = window.innerHeight - r.bottom;
+      // Prefer below; flip above when below would overflow and above has room.
+      let top = (roomBelow < bh + GAP && r.top > bh + GAP) ? r.top - bh - GAP : r.bottom + GAP;
+      float.style.left = left + 'px';
+      float.style.top = Math.max(GAP, top) + 'px';
+    }
+    function hide() { float.classList.remove('on'); }
+    document.addEventListener('mouseover', e => { const t = e.target.closest && e.target.closest('.tip'); if (t) show(t); });
+    document.addEventListener('mouseout',  e => { const t = e.target.closest && e.target.closest('.tip'); if (t) hide(); });
+    document.addEventListener('focusin',   e => { const t = e.target.closest && e.target.closest('.tip'); if (t) show(t); });
+    document.addEventListener('focusout',  hide);
+    document.addEventListener('scroll',    hide, true);
+  }
+  if (document.body) setup();
+  else document.addEventListener('DOMContentLoaded', setup);
+})();
 
 async function loadAll() {
   _healthScoresLoaded = false;
@@ -2376,46 +2445,47 @@ function renderAnalytics() {
     : '<tr><td colspan="7" class="loading">no agents yet</td></tr>';
 }
 
-// ── Cost saved (live — recalculates when rate input changes) ──────────────────
+// ── Avoidable cost this week (live — recalculates when rate input changes) ──────
+// The *avoidable* slice of failed-run spend: excess tokens above each agent's healthy
+// baseline over the last 7d. Sums the backend's excess_tokens so it can't drift from
+// the Token Usage page. Not "saved" — post-hoc detection doesn't prevent spend.
 function updateCostSaved() {
   const rateInput = document.getElementById('cost-rate-input');
   const costPer1k = rateInput ? Math.max(0, parseFloat(rateInput.value) || 0) : COST_PER_1M_TK / 1000;
 
-  const now    = Date.now() / 1000;
-  const cut7d  = now - 7 * 86400;
-  const weekSigRunIds = new Set(_allSigs.filter(s => s.detected_at >= cut7d).map(s => s.run_id));
-  const weekRuns      = _allRuns.filter(r => weekSigRunIds.has(r.run_id));
-  const weekTokens    = weekRuns.reduce((sum, r) => sum + realTok(r), 0);
-  // Divide by weekSigRunIds.size (= the displayed "issues stopped" count) so that
-  // issues_stopped × avgTk × rate = savedDollars. Using weekRuns.length would give a
-  // different denominator when some runs are not in the loaded cache.
-  const avgTk         = weekSigRunIds.size ? Math.round(weekTokens / weekSigRunIds.size) : 0;
-  const savedDollars  = weekTokens / 1000 * costPer1k;
+  let excessTokens = 0;
+  Object.values(_tokenStats).forEach(ts => {
+    excessTokens += ts.windows?.['7d']?.excess_tokens || 0;
+  });
+  const dollars = excessTokens / 1000 * costPer1k;
 
   const savedEl = document.getElementById('analytics-cost-saved');
   const subEl   = document.getElementById('analytics-cost-sub');
   if (!savedEl || !subEl) return;
 
-  if (weekSigRunIds.size === 0) {
+  if (!_tokenStatsLoaded) {
+    savedEl.textContent = '—';
+    subEl.textContent   = 'loading token stats…';
+    return;
+  }
+  if (excessTokens === 0) {
     savedEl.textContent = '$0.00';
-    subEl.textContent   = 'no signal runs this week';
+    subEl.textContent   = 'no avoidable spend detected this week';
     return;
   }
 
-  // Format dollar amount
   let dollarStr;
-  if (savedDollars >= 1000)     dollarStr = '$' + (savedDollars / 1000).toFixed(1) + 'k';
-  else if (savedDollars >= 1)   dollarStr = '$' + savedDollars.toFixed(2);
-  else if (savedDollars >= 0.01) dollarStr = '$' + savedDollars.toFixed(3);
-  else                           dollarStr = '<$0.01';
+  if (dollars >= 1000)      dollarStr = '$' + (dollars / 1000).toFixed(1) + 'k';
+  else if (dollars >= 1)    dollarStr = '$' + dollars.toFixed(2);
+  else if (dollars >= 0.01) dollarStr = '$' + dollars.toFixed(3);
+  else                      dollarStr = '<$0.01';
 
   savedEl.textContent = dollarStr;
   subEl.innerHTML =
-    `<span style="color:var(--chalk2)">${weekSigRunIds.size} issue${weekSigRunIds.size !== 1 ? 's' : ''} stopped</span>` +
+    `<span style="color:var(--chalk2)">${fmtTok(excessTokens)} avoidable</span>` +
     ` <span style="color:var(--chalk4)">×</span> ` +
-    `<span style="color:var(--chalk2)">avg ${fmtTok(avgTk)}</span>` +
-    ` <span style="color:var(--chalk4)">×</span> ` +
-    `<span style="color:var(--chalk2)">$${costPer1k.toFixed(3)}/1k tokens</span>`;
+    `<span style="color:var(--chalk2)">$${costPer1k.toFixed(3)}/1k</span>` +
+    ` <span style="color:var(--chalk4)">· spend above healthy baseline</span>`;
 }
 
 // ── Heatmap ───────────────────────────────────────────────────────────────────
@@ -2531,8 +2601,8 @@ function renderRunDetail(run, events, signals) {
   const metaItems = [
     ['Duration', dur],
     ['Steps', run.step_count || events.length],
-    ['Wasted tokens', wastedToks],
-    ['Wasted cost', wastedCost],
+    ['Failed-run tokens', wastedToks],
+    ['Failed-run cost', wastedCost],
     ['Model', model],
     ['Agent', run.agent_id],
     ['Signals', signals.length],
@@ -3306,6 +3376,7 @@ function nav(id, el) {
   if (el)   el.classList.add('active');
   if (id === 'incidents') renderIncidents();
   if (id === 'heatmap')  renderHeatmap();
+  if (id === 'analytics') loadTokenStats();  // avoidable-cost card needs excess data
   if (id === 'agents')   { renderAgents(); loadHealthScores(); loadIssuesCounts(); }
   if (id === 'tokens')   { renderTokens(); loadTokenStats(); }
   if (id === 'policies') loadAndRenderPolicies();

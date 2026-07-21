@@ -2085,15 +2085,19 @@ def get_instrumentation_guide(framework: str) -> str:
 @mcp.tool()
 def get_agent_token_stats(agent_id: str) -> str:
     """
-    Per-window token usage and waste breakdown for an agent (1d / 7d / 30d).
+    Per-window token usage breakdown for an agent (1d / 7d / 30d).
 
-    Shows how many tokens were spent, how many were wasted (on runs with detected
-    failures), and the estimated API cost for each time window.  The 30-day view
-    also breaks waste down by failure type so you can prioritise which failures
-    to fix first.
+    Reports three distinct spend metrics per window:
+      • Failed-run tokens — all spend on runs that had a failure (attribution).
+      • Excess (avoidable) — the portion above a healthy baseline; the realistic
+        "waste" figure and the one worth acting on.
+      • Prevented (saved) — spend actually stopped by an in-path policy/approval
+        block. Post-hoc detectors prevent nothing and never count here.
+    Plus a 30-day projection of avoidable waste, and (30d) a by-failure-type
+    breakdown so you can prioritise which failures to fix first.
 
-    Use this when you want to understand the financial impact of agent failures or
-    answer questions like "how much money is my agent wasting?".
+    Use this to understand the financial impact of agent failures or answer
+    "how much money is my agent wasting, and how much could I actually save?".
 
     Args:
         agent_id: The agent ID to query.
@@ -2129,21 +2133,32 @@ def get_agent_token_stats(agent_id: str) -> str:
         if not w:
             continue
         label = {"1d": "Last 24 h", "7d": "Last 7 days", "30d": "Last 30 days"}[win]
-        cost_wst_pct = int(round((w.get("wasted_pct") or 0) * 100))
         total_tok = w.get("total_tokens") or 0
-        tok_wst_pct = int(round(w.get("wasted_tokens", 0) / total_tok * 100)) if total_tok else 0
+        failed_tok = w.get("failed_run_tokens", w.get("wasted_tokens", 0))
+        failed_cost = w.get("failed_run_cost_usd", w.get("wasted_cost_usd", 0))
+        failed_run_ct = w.get("failed_run_count", w.get("wasted_run_count", 0))
+        excess_tok = w.get("excess_tokens", 0)
+        excess_pct = int(round(excess_tok / total_tok * 100)) if total_tok else 0
+        fail_pct = int(round(failed_tok / total_tok * 100)) if total_tok else 0
+        prevented_tok = w.get("prevented_tokens", 0)
+        blocked_ct = w.get("blocked_run_count", 0)
+        proj_cost = w.get("projected_monthly_excess_cost_usd", 0)
         lines += [
             f"── {label} ──",
-            f"  Runs:            {w.get('run_count', 0):>6}  ({w.get('wasted_run_count', 0)} with failures)",
-            f"  Total tokens:    {_fmt_tok(w.get('total_tokens', 0)):>8}",
-            f"  Wasted tokens:   {_fmt_tok(w.get('wasted_tokens', 0)):>8}  ({tok_wst_pct}% of total)",
-            f"  Total cost:      {_fmt_cost(w.get('total_cost_usd', 0)):>10}",
-            f"  Wasted cost:     {_fmt_cost(w.get('wasted_cost_usd', 0)):>10}  ({cost_wst_pct}% of total)",
-            "",
+            f"  Runs:              {w.get('run_count', 0):>6}  ({failed_run_ct} with failures)",
+            f"  Total tokens:      {_fmt_tok(total_tok):>8}   {_fmt_cost(w.get('total_cost_usd', 0))}",
+            f"  Failed-run tokens: {_fmt_tok(failed_tok):>8}  ({fail_pct}% of total, {_fmt_cost(failed_cost)}) — attribution",
+            f"  Excess (avoidable):{_fmt_tok(excess_tok):>8}  ({excess_pct}% of total, {_fmt_cost(w.get('excess_cost_usd', 0))}) — the realistic waste",
+            f"  Prevented (saved): {_fmt_tok(prevented_tok):>8}  ({blocked_ct} run{'s' if blocked_ct != 1 else ''} stopped in-path, {_fmt_cost(w.get('prevented_cost_usd', 0))})",
         ]
+        if win != "1d":
+            lines.append(
+                f"  Projected/mo:      {_fmt_cost(proj_cost):>10}  avoidable waste if left unfixed"
+            )
+        lines.append("")
 
     if waste_by_ft:
-        lines.append("Waste by failure type (30 days):")
+        lines.append("Failed-run spend by failure type (30 days):")
         for ft in waste_by_ft:
             lines.append(
                 f"  {ft['failure_type']:<35}  "

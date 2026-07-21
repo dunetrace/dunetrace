@@ -3855,14 +3855,29 @@ async def agent_cost_stats(org_id: str, agent_id: str) -> dict:
 
 async def agent_token_stats(org_id: str, agent_id: str) -> dict:
     """
-    Per-window token usage and waste stats for 1d / 7d / 30d.
+    Per-window token usage stats for 1d / 7d / 30d.
+
+    Three distinct spend metrics, because "wasted" means different things:
+
+      • failed_run_tokens — total tokens on runs that had ≥1 live signal. Backward-
+        looking attribution ("spend on runs that had a problem"). Exposed under the
+        legacy ``wasted_*`` keys too, for compatibility.
+      • excess_tokens — the *avoidable* portion: tokens above a healthy baseline
+        (P75 of that agent version's clean runs) on failed runs. A 596k-token
+        runaway whose healthy self is 6k contributes ~590k; a 6k run that tripped
+        one signal contributes ~0.
+      • prevented_tokens — tokens we actually *stopped from being spent*, only for
+        runs a policy/approval halted in-path (``policy.triggered`` action_type=stop,
+        ``approval.denied``/``timeout``). Post-hoc detectors prevent nothing, so they
+        never count here. Estimated as (healthy baseline − tokens already spent).
+
+    Also projects avoidable waste forward (Model 3): projected_monthly_excess_* is
+    the window's excess run-rate extrapolated to 30 days.
 
     Returns:
       windows: {"1d": {...}, "7d": {...}, "30d": {...}}
-        Each window: total_tokens, prompt_tokens, completion_tokens, wasted_tokens,
-                     total_cost_usd, wasted_cost_usd, wasted_pct, run_count, wasted_run_count
       waste_by_failure_type: [{failure_type, wasted_tokens, wasted_cost_usd, affected_runs}]
-        (30d only, sorted by wasted_cost_usd desc)
+        (tokens on failed runs, by type; sorted by wasted_cost_usd desc)
     """
     if not _pool:
         return {"windows": {}, "waste_by_failure_type": []}
@@ -3877,6 +3892,7 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
             """
             SELECT
                 run_id,
+                MAX(agent_version) AS agent_version,
                 MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
                 SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
                 SUM(CASE WHEN event_type = 'llm.responded'
@@ -3906,12 +3922,33 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
             agent_id,
         )
 
+        # Runs a policy/approval actually halted in-path — the only runs with a
+        # genuine "we prevented this spend" counterfactual. A structural detector
+        # that fires on run.completed cannot prevent tokens already spent.
+        block_rows = await conn.fetch(
+            """
+            SELECT DISTINCT run_id
+            FROM events
+            WHERE org_id = $1 AND agent_id = $2
+              AND received_at >= NOW() - INTERVAL '30 days'
+              AND (
+                    (event_type = 'policy.triggered' AND payload->>'action_type' = 'stop')
+                 OR event_type IN ('approval.denied', 'approval.timeout')
+              )
+            """,
+            org_id,
+            agent_id,
+        )
+
     now = time.time()
     cutoffs = {"1d": now - 86400, "7d": now - 7 * 86400, "30d": now - 30 * 86400}
+    window_days = {"1d": 1, "7d": 7, "30d": 30}
 
     run_signals: dict[str, set] = {}
     for r in signal_rows:
         run_signals.setdefault(r["run_id"], set()).add(r["failure_type"])
+
+    blocked_run_ids = {r["run_id"] for r in block_rows}
 
     runs = []
     for r in token_rows:
@@ -3923,41 +3960,166 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
         runs.append(
             {
                 "run_id": r["run_id"],
+                "agent_version": r["agent_version"] or "",
                 "prompt_tokens": prompt,
                 "completion_tokens": comp,
                 "total_tokens": prompt + comp + reasoning,
                 "cost": cost,
                 "ts": ts,
                 "failure_types": run_signals.get(r["run_id"], set()),
+                "blocked": r["run_id"] in blocked_run_ids,
             }
         )
 
-    def _aggregate(filtered: list) -> dict:
-        total_tokens = prompt_tokens = completion_tokens = wasted_tokens = 0
-        total_cost = wasted_cost = 0.0
-        wasted_run_count = 0
+    # ── Healthy baselines. Isolate the *avoidable* (excess) portion of failed-run
+    # spend and value what an in-path block prevented. Preference order:
+    #   1. P75 of this agent version's clean (no-signal) runs
+    #   2. P75 of the agent's clean runs across versions
+    #   3. P50 (median) of ALL the agent's runs — robust last resort so heavily-
+    #      failing agents (which lack a clean sample) still get a "typical run"
+    #      floor. Median ignores the runaway tail, so excess still surfaces.
+    _MIN_BASELINE_RUNS = 3
+
+    def _pct(values: list, q: float) -> "Optional[float]":
+        vals = sorted(values)
+        n = len(vals)
+        if n == 0:
+            return None
+        rank = q * (n - 1)  # linear interpolation — matches PERCENTILE_CONT
+        lo = int(rank)
+        hi = min(lo + 1, n - 1)
+        return float(vals[lo] + (vals[hi] - vals[lo]) * (rank - lo))
+
+    clean_by_version: dict[str, list] = {}
+    clean_all: list = []
+    for r in runs:
+        if not r["failure_types"]:
+            clean_by_version.setdefault(r["agent_version"], []).append(r["total_tokens"])
+            clean_all.append(r["total_tokens"])
+    version_baseline = {
+        v: _pct(tt, 0.75) for v, tt in clean_by_version.items() if len(tt) >= _MIN_BASELINE_RUNS
+    }
+    agent_baseline = _pct(clean_all, 0.75) if len(clean_all) >= _MIN_BASELINE_RUNS else None
+    all_tokens = [r["total_tokens"] for r in runs]
+    fallback_baseline = _pct(all_tokens, 0.50) if len(all_tokens) >= _MIN_BASELINE_RUNS else None
+
+    def _baseline_for(version: str) -> "Optional[float]":
+        b = version_baseline.get(version)
+        if b is None:
+            b = agent_baseline
+        if b is None:
+            b = fallback_baseline
+        return b
+
+    # Effective $/token across the window — used to price hypothetical tokens for
+    # in-path blocks that stopped before any billable LLM call (no rate of their own).
+    _tot_tok = sum(r["total_tokens"] for r in runs)
+    _tot_cost = sum(r["cost"] for r in runs)
+    avg_rate = (_tot_cost / _tot_tok) if _tot_tok else 0.0
+
+    def _excess(r: dict) -> "tuple[int, float]":
+        """Avoidable (tokens, cost) for one run: spend above its healthy baseline."""
+        if not r["failure_types"]:
+            return 0, 0.0
+        base = _baseline_for(r["agent_version"])
+        tt = r["total_tokens"]
+        if base is None or tt <= base:
+            return 0, 0.0
+        ex = tt - base
+        rate = (r["cost"] / tt) if tt else avg_rate
+        return int(ex), rate * ex
+
+    def _aggregate(filtered: list, days: int) -> dict:
+        total_tokens = prompt_tokens = completion_tokens = 0
+        failed_tokens = excess_tokens = prevented_tokens = 0
+        total_cost = failed_cost = excess_cost = prevented_cost = 0.0
+        failed_run_count = blocked_run_count = 0
         for r in filtered:
-            total_tokens += r["total_tokens"]
+            tt = r["total_tokens"]
+            total_tokens += tt
             prompt_tokens += r["prompt_tokens"]
             completion_tokens += r["completion_tokens"]
             total_cost += r["cost"]
+            rate = (r["cost"] / tt) if tt else avg_rate
+            base = _baseline_for(r["agent_version"])
             if r["failure_types"]:
-                wasted_tokens += r["total_tokens"]
-                wasted_cost += r["cost"]
-                wasted_run_count += 1
+                failed_tokens += tt
+                failed_cost += r["cost"]
+                failed_run_count += 1
+                # Avoidable = spend above a healthy run of the same agent version.
+                ex_tok, ex_cost = _excess(r)
+                excess_tokens += ex_tok
+                excess_cost += ex_cost
+            if r["blocked"]:
+                blocked_run_count += 1
+                # Counterfactual: absent the block it would have run to at least a
+                # normal completion. Prevented = normal spend − spend so far.
+                if base is not None:
+                    prev = base - tt
+                    if prev > 0:
+                        prevented_tokens += int(prev)
+                        prevented_cost += (rate or avg_rate) * prev
         return {
             "total_tokens": total_tokens,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
-            "wasted_tokens": wasted_tokens,
             "total_cost_usd": round(total_cost, 4),
-            "wasted_cost_usd": round(wasted_cost, 4),
-            "wasted_pct": round(wasted_cost / total_cost, 3) if total_cost else 0.0,
             "run_count": len(filtered),
-            "wasted_run_count": wasted_run_count,
+            # Attribution: all tokens on runs that had ≥1 signal.
+            "failed_run_tokens": failed_tokens,
+            "failed_run_cost_usd": round(failed_cost, 4),
+            "failed_run_count": failed_run_count,
+            "failed_pct": round(failed_cost / total_cost, 3) if total_cost else 0.0,
+            # Avoidable: spend above the healthy baseline on failed runs.
+            "excess_tokens": excess_tokens,
+            "excess_cost_usd": round(excess_cost, 4),
+            "baseline_tokens": (
+                round(agent_baseline)
+                if agent_baseline is not None
+                else round(fallback_baseline)
+                if fallback_baseline is not None
+                else None
+            ),
+            # Prevented: in-path blocks that stopped a run before it ran on.
+            "prevented_tokens": prevented_tokens,
+            "prevented_cost_usd": round(prevented_cost, 4),
+            "blocked_run_count": blocked_run_count,
+            # Forward projection (Model 3): a single rate, filled in below so it is
+            # identical across windows (a longer window must not project *less*).
+            "projected_monthly_excess_tokens": 0,
+            "projected_monthly_excess_cost_usd": 0.0,
+            # ── Back-compat aliases: legacy "wasted_*" == failed-run attribution ──
+            "wasted_tokens": failed_tokens,
+            "wasted_cost_usd": round(failed_cost, 4),
+            "wasted_pct": round(failed_cost / total_cost, 3) if total_cost else 0.0,
+            "wasted_run_count": failed_run_count,
         }
 
-    windows = {w: _aggregate([r for r in runs if r["ts"] >= cut]) for w, cut in cutoffs.items()}
+    windows = {
+        w: _aggregate([r for r in runs if r["ts"] >= cut], window_days[w])
+        for w, cut in cutoffs.items()
+    }
+
+    # Forward projection: "if this continues unfixed, ~$X/month." It is a *rate*, so
+    # it must not depend on which window the user is viewing. Base it on the recent
+    # 7-day run-rate of avoidable spend, normalised by how many days were actually
+    # observed (guards agents with <7 days of history), then scale to 30 days.
+    recent = [r for r in runs if r["ts"] >= cutoffs["7d"]]
+    recent_ex_tok = 0
+    recent_ex_cost = 0.0
+    for r in recent:
+        et, ec = _excess(r)
+        recent_ex_tok += et
+        recent_ex_cost += ec
+    recent_ts = [r["ts"] for r in recent if r["ts"] > 0]
+    # Floor the observed span at 3 days so a single-day burst can't extrapolate ×30.
+    observed_days = min(7.0, max(3.0, (now - min(recent_ts)) / 86400)) if recent_ts else 7.0
+    proj_scale = 30.0 / observed_days
+    proj_tokens = int(recent_ex_tok * proj_scale)
+    proj_cost = round(recent_ex_cost * proj_scale, 4)
+    for w in windows.values():
+        w["projected_monthly_excess_tokens"] = proj_tokens
+        w["projected_monthly_excess_cost_usd"] = proj_cost
 
     ft_stats: dict[str, dict] = {}
     for r in runs:

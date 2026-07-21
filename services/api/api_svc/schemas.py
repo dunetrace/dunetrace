@@ -385,11 +385,28 @@ if _PYDANTIC:
         total_tokens: int
         prompt_tokens: int
         completion_tokens: int
-        wasted_tokens: int
         total_cost_usd: float
+        run_count: int
+        # Attribution: tokens/cost on runs that had ≥1 live signal.
+        failed_run_tokens: int
+        failed_run_cost_usd: float
+        failed_run_count: int
+        failed_pct: float
+        # Avoidable: spend above the healthy baseline on failed runs.
+        excess_tokens: int
+        excess_cost_usd: float
+        baseline_tokens: Optional[int] = None
+        # Prevented: in-path blocks that stopped a run early.
+        prevented_tokens: int
+        prevented_cost_usd: float
+        blocked_run_count: int
+        # Forward projection of avoidable waste over 30 days.
+        projected_monthly_excess_tokens: int
+        projected_monthly_excess_cost_usd: float
+        # Back-compat aliases (== failed_run_* attribution).
+        wasted_tokens: int
         wasted_cost_usd: float
         wasted_pct: float
-        run_count: int
         wasted_run_count: int
 
     class AgentTokenStats(_Model):

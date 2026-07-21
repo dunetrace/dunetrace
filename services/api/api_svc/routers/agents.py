@@ -103,15 +103,20 @@ async def get_token_stats(
     """
     Token usage broken down by 1-day, 7-day, and 30-day windows.
 
-    Each window returns:
-    - **total_tokens** / **prompt_tokens** / **completion_tokens** — tokens consumed
-    - **wasted_tokens** — tokens from runs that had at least one live failure signal
-    - **total_cost_usd** / **wasted_cost_usd** — estimated API cost
-    - **wasted_pct** — fraction of cost on failed runs (0–1)
-    - **run_count** / **wasted_run_count** — run counts
+    Each window returns three distinct spend metrics:
+    - **failed_run_tokens** / **_cost_usd** — attribution: all tokens on runs with a
+      signal ("spend on runs that had a problem"). Aliased as legacy `wasted_*`.
+    - **excess_tokens** / **_cost_usd** — the *avoidable* portion: spend above a
+      healthy baseline (`baseline_tokens`, P75 of clean runs) on failed runs.
+    - **prevented_tokens** / **_cost_usd** — spend actually *stopped* by an in-path
+      policy/approval block (post-hoc detectors never count here).
+    - **projected_monthly_excess_tokens** / **_cost_usd** — avoidable-waste run-rate
+      projected to 30 days.
+    - **total_tokens** / **prompt_tokens** / **completion_tokens** / **total_cost_usd**
+    - **run_count** / **failed_run_count** / **blocked_run_count**
 
-    `waste_by_failure_type` (30-day) lists which failure types caused the most wasted spend,
-    sorted by wasted_cost_usd descending.
+    `waste_by_failure_type` (30-day) lists which failure types account for the most
+    failed-run spend, sorted by cost descending.
     """
     data = await agent_token_stats(org_id, agent_id)
     return AgentTokenStats(agent_id=agent_id, **data)
