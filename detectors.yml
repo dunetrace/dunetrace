@@ -90,6 +90,9 @@ default:
       threshold: 3
       window_runs: 10
 
+  excessive_retrieval:
+    max_retrievals: 8  # fire when a run makes at least this many retrieval calls
+
   llm_truncation_loop:
     threshold: 2      # number of finish_reason=length events to trigger
     alert_policy:
