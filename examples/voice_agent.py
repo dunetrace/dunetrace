@@ -56,7 +56,10 @@ def run_one_call() -> None:
     ) as run:
         # ── Turn 1: a clean turn ──────────────────────────────────────────
         run.voice_activity_detected("speech_start")
-        run.transcription_received("book me a table for two", confidence=0.94, latency_ms=110)
+        # audio_seconds feeds per-minute STT cost attribution (Phase 2.2).
+        run.transcription_received(
+            "book me a table for two", confidence=0.94, latency_ms=110, audio_seconds=1.4
+        )
         run.voice_activity_detected("speech_end", duration_ms=1400)
         run.turn_taking("user_speaking", to_user=True)
 
@@ -68,7 +71,9 @@ def run_one_call() -> None:
         run.tts_generated(reply, latency_ms=95, truncated=False)
 
         # ── Turn 2: a slow LLM turn that trips the recovery policy ─────────
-        run.transcription_received("actually make it three", confidence=0.88, latency_ms=130)
+        run.transcription_received(
+            "actually make it three", confidence=0.88, latency_ms=130, audio_seconds=1.1
+        )
         run.turn_taking("user_speaking", to_user=True)
 
         run.llm_called("gpt-4o-realtime", prompt_tokens=210)
@@ -88,6 +93,8 @@ def run_one_call() -> None:
             print(f"[policy] escalating to human (reason={run.escalation_reason})")
         if run.stop_tts:
             print("[policy] halting current TTS playback")
+        if run.response_pace:
+            print(f"[policy] slowing response pace ({run.response_pace}): emit a filler token")
 
         run.turn_taking("agent_speaking", from_agent=True)
         run.tts_generated(reply2, latency_ms=90, truncated=False)

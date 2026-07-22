@@ -149,6 +149,7 @@ must read and honor:
 | `switch_model` | Advisory | Sets `run.model_override`. The SDK does **not** swap your LLM call — you must read the attribute and use it. |
 | `inject_prompt` / `inject_recovery_prompt` | Advisory | Appends to `run.prompt_additions` / sets `run.recovery_prompt`. You must read and prepend/speak it. |
 | `escalate_to_human` / `stop_current_tts` | Advisory | Set `run.escalate_to_human` / `run.stop_tts`. Your loop must act on them. |
+| `slow_response_pace` | Advisory | Sets `run.response_pace` (default `"slow"`). Your loop must slow the turn (filler token, lower TTS rate). |
 
 If you configure an advisory action but never read the corresponding attribute in
 your agent code, the action is a silent no-op. See [switch_model](#switch_model) /

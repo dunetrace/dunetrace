@@ -8,3 +8,4 @@ anthropic>=0.40
 openai>=1.0
 cryptography>=42
 PyJWT[crypto]>=2.8
+PyYAML>=6

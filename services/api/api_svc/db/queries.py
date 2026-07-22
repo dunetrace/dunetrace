@@ -1174,6 +1174,410 @@ async def search_conversations(
     )
 
 
+# ── Calls (voice-focused view over conversations, Phase 2.1) ──────────────────
+#
+# A "call" is a conversation for a voice agent: the same conversations/runs tables
+# as the Conversations view, read through a voice lens. No separate storage (see
+# BACKLOG.md V1). Metrics are derived read-time from the call's events.
+
+_VOICE_EVENT_TYPES = (
+    "transcription.received",
+    "tts.generated",
+    "voice_activity.detected",
+    "turn_taking.changed",
+)
+
+# Voice events, the markers that decide completion status, and the LLM events
+# needed for per-call LLM cost (Phase 2.2).
+_CALL_EVENT_TYPES = _VOICE_EVENT_TYPES + (
+    "run.errored",
+    "policy.triggered",
+    "external.signal",
+    "llm.called",
+    "llm.responded",
+    "recording.available",
+)
+
+# endedReason values (Vapi's, plus generic substrings) that mean the call dropped
+# rather than ended naturally. Everything else with a reason is a natural end.
+# Deliberately small; make it configurable per org later (BACKLOG).
+_DROP_REASON_SUBSTRINGS = (
+    "silence-timed-out",
+    "did-not-answer",
+    "no-answer",
+    "exceeded-max-duration",
+    "error",
+    "failed",
+    "provider",
+    "websocket",
+)
+
+# Upper bound on how many recent voice calls one /calls request aggregates.
+# Read-time aggregation is bounded here; precompute into a table if this ceiling
+# becomes limiting (BACKLOG).
+_CALL_CANDIDATE_CAP = 200
+
+
+def _is_drop_reason(reason: Optional[str]) -> bool:
+    if not reason:
+        return False
+    r = reason.lower()
+    return any(sub in r for sub in _DROP_REASON_SUBSTRINGS)
+
+
+def _coerce_payload(v: Any) -> dict:
+    if isinstance(v, str):
+        return _json_mod.loads(v)
+    return dict(v) if v else {}
+
+
+def _compute_call_metrics(events: list, signals: list) -> dict:
+    """Call-level metrics from one call's events (ordered by received_at) and its
+    voice signals. Both are already scoped to a single call."""
+    ts = [e["received_at"] for e in events if e["received_at"] is not None]
+    duration_s = (max(ts) - min(ts)).total_seconds() if len(ts) >= 2 else 0.0
+
+    silence_ms = 0
+    turn_events: list = []
+    escalated = False
+    dropped = False
+    for e in events:
+        et = e["event_type"]
+        p = e["payload"]
+        if et == "voice_activity.detected" and p.get("type") == "silence":
+            silence_ms += int(p.get("duration_ms", 0) or 0)
+        elif et == "turn_taking.changed":
+            turn_events.append(e)
+        elif et == "policy.triggered" and p.get("action_type") == "escalate_to_human":
+            escalated = True
+        elif et == "run.errored":
+            dropped = True
+        elif et == "external.signal" and p.get("signal_name") == "call_ended":
+            if _is_drop_reason((p.get("meta") or {}).get("reason")):
+                dropped = True
+
+    # Talk time: the floor stays with the current speaker until the next
+    # turn_taking transition. Approximate each speaker's time from the gap between
+    # consecutive turn_taking events (the last span runs to the final event). This
+    # is a timestamp-derived approximation, not an exact playback measurement.
+    agent_ms = 0.0
+    caller_ms = 0.0
+    last_ts = max(ts) if ts else None
+    for i, e in enumerate(turn_events):
+        start = e["received_at"]
+        end = turn_events[i + 1]["received_at"] if i + 1 < len(turn_events) else last_ts
+        if start is None or end is None:
+            continue
+        span_ms = max(0.0, (end - start).total_seconds() * 1000.0)
+        action = e["payload"].get("action")
+        if action == "agent_speaking":
+            agent_ms += span_ms
+        elif action == "user_speaking":
+            caller_ms += span_ms
+
+    if any(s["failure_type"] == "VOICE_LATENCY_INDUCED_HANGUP" for s in signals):
+        dropped = True
+
+    status = "escalated" if escalated else ("dropped" if dropped else "natural")
+    talk_total = agent_ms + caller_ms
+    return {
+        "duration_seconds": round(duration_s, 1),
+        "completion_status": status,
+        "silence_pct": round(silence_ms / (duration_s * 1000.0), 3) if duration_s > 0 else 0.0,
+        "agent_talk_ms": int(agent_ms),
+        "caller_talk_ms": int(caller_ms),
+        "agent_talk_ratio": round(agent_ms / talk_total, 3) if talk_total > 0 else None,
+        "voice_signal_count": len(signals),
+        # Sentiment ships in Phase 3 (Feature 6). Placeholder until then.
+        "sentiment_trend": None,
+    }
+
+
+def _compute_call_cost(events: list, agent_id: str, pricing: dict) -> dict:
+    """Per-call cost by category (Phase 2.2). STT from audio_seconds, TTS from
+    character count, telephony from call duration, LLM per token. Categories with
+    no configured provider/rate contribute 0 (never guessed)."""
+    from explainer_svc.cost import estimate_cost
+
+    from api_svc.voice_pricing import (
+        providers_for,
+        stt_cost_usd,
+        telephony_cost_usd,
+        tts_cost_usd,
+    )
+
+    providers = providers_for(agent_id, pricing)
+    ts = [e["received_at"] for e in events if e["received_at"] is not None]
+    duration_min = ((max(ts) - min(ts)).total_seconds() / 60.0) if len(ts) >= 2 else 0.0
+
+    stt = tts = 0.0
+    llm_tokens: dict = {}  # model -> [prompt, completion, reasoning]
+    cur_model = "unknown"
+    for e in events:
+        et = e["event_type"]
+        p = e["payload"]
+        if et == "transcription.received":
+            stt += stt_cost_usd(float(p.get("audio_seconds", 0) or 0), providers["stt"], pricing)
+        elif et == "tts.generated":
+            tts += tts_cost_usd(len(p.get("text", "") or ""), providers["tts"], pricing)
+        elif et == "llm.called":
+            cur_model = p.get("model") or "unknown"
+            acc = llm_tokens.setdefault(cur_model, [0, 0, 0])
+            acc[0] += int(p.get("prompt_tokens", 0) or 0)
+        elif et == "llm.responded":
+            acc = llm_tokens.setdefault(cur_model, [0, 0, 0])
+            acc[0] += int(p.get("prompt_tokens", 0) or 0)
+            acc[1] += int(p.get("completion_tokens", 0) or 0)
+            acc[2] += int(p.get("reasoning_tokens", 0) or 0)
+
+    llm = sum(estimate_cost(m, t[0], t[1], t[2]) for m, t in llm_tokens.items())
+    telephony = telephony_cost_usd(duration_min, providers["telephony"], pricing)
+    return {
+        "cost_usd": round(stt + llm + tts + telephony, 6),
+        "cost_breakdown": {
+            "stt": round(stt, 6),
+            "llm": round(llm, 6),
+            "tts": round(tts, 6),
+            "telephony": round(telephony, 6),
+        },
+    }
+
+
+# Cost buckets for the /calls filter (Phase 2.2).
+def _cost_bucket(cost_usd: float) -> str:
+    if cost_usd < 0.10:
+        return "low"
+    if cost_usd <= 1.0:
+        return "medium"
+    return "high"
+
+
+async def _fetch_call_events_and_signals(conn, org_id: str, run_ids: list) -> tuple[list, list]:
+    event_rows = await conn.fetch(
+        """
+        SELECT run_id, event_type, payload, received_at, step_index
+        FROM events
+        WHERE run_id = ANY($1::text[]) AND event_type = ANY($2::text[])
+        ORDER BY received_at ASC
+        """,
+        run_ids,
+        list(_CALL_EVENT_TYPES),
+    )
+    sig_rows = await conn.fetch(
+        """
+        SELECT run_id, failure_type, step_index FROM failure_signals
+        WHERE org_id = $1 AND run_id = ANY($2::text[]) AND failure_type LIKE 'VOICE%'
+        """,
+        org_id,
+        run_ids,
+    )
+    return event_rows, sig_rows
+
+
+async def list_calls(
+    org_id: str,
+    agent_id: Optional[str] = None,
+    since_ts: Optional[float] = None,
+    status: Optional[str] = None,
+    cost_bucket: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 25,
+) -> tuple[list[dict], int]:
+    """Voice calls (conversations with voice activity) plus per-call metrics and
+    cost. Bounded to the most recent _CALL_CANDIDATE_CAP calls; the status and
+    cost-bucket filters and pagination are applied after read-time computation."""
+    if not _pool:
+        return [], 0
+
+    since_dt = (
+        datetime.datetime.fromtimestamp(since_ts, datetime.timezone.utc) if since_ts else None
+    )
+
+    async with _pool.acquire() as conn:
+        conv_rows = await conn.fetch(
+            """
+            SELECT c.id, c.agent_id, c.external_id, c.first_run_at, c.last_run_at, c.run_count
+            FROM conversations c
+            WHERE c.org_id = $1
+              AND ($2::text IS NULL OR c.agent_id = $2)
+              AND ($3::timestamptz IS NULL OR c.last_run_at >= $3)
+              AND EXISTS (
+                  SELECT 1 FROM runs r JOIN events e ON e.run_id = r.run_id
+                  WHERE r.conversation_id = c.id AND e.event_type = ANY($4::text[])
+              )
+            ORDER BY c.last_run_at DESC
+            LIMIT $5
+            """,
+            org_id,
+            agent_id,
+            since_dt,
+            list(_VOICE_EVENT_TYPES),
+            _CALL_CANDIDATE_CAP,
+        )
+        if not conv_rows:
+            return [], 0
+        conv_ids = [r["id"] for r in conv_rows]
+
+        run_rows = await conn.fetch(
+            "SELECT run_id, conversation_id FROM runs WHERE conversation_id = ANY($1::bigint[])",
+            conv_ids,
+        )
+        run_to_conv = {r["run_id"]: r["conversation_id"] for r in run_rows}
+        run_ids = list(run_to_conv.keys())
+        if not run_ids:
+            return [], 0
+
+        event_rows, sig_rows = await _fetch_call_events_and_signals(conn, org_id, run_ids)
+
+    events_by_conv: dict = {}
+    for e in event_rows:
+        cid = run_to_conv.get(e["run_id"])
+        if cid is not None:
+            events_by_conv.setdefault(cid, []).append(
+                {
+                    "event_type": e["event_type"],
+                    "payload": _coerce_payload(e["payload"]),
+                    "received_at": e["received_at"],
+                }
+            )
+    sigs_by_conv: dict = {}
+    for s in sig_rows:
+        cid = run_to_conv.get(s["run_id"])
+        if cid is not None:
+            sigs_by_conv.setdefault(cid, []).append({"failure_type": s["failure_type"]})
+
+    from api_svc.voice_pricing import load_pricing
+
+    pricing = load_pricing()
+    calls = []
+    for c in conv_rows:
+        cid = c["id"]
+        cevents = events_by_conv.get(cid, [])
+        metrics = _compute_call_metrics(cevents, sigs_by_conv.get(cid, []))
+        cost = _compute_call_cost(cevents, c["agent_id"], pricing)
+        calls.append(
+            {
+                "id": cid,
+                "agent_id": c["agent_id"],
+                "external_id": c["external_id"],
+                "first_run_at": c["first_run_at"].timestamp(),
+                "last_run_at": c["last_run_at"].timestamp(),
+                "run_count": c["run_count"],
+                **metrics,
+                **cost,
+            }
+        )
+
+    if status:
+        calls = [c for c in calls if c["completion_status"] == status]
+    if cost_bucket:
+        calls = [c for c in calls if _cost_bucket(c["cost_usd"]) == cost_bucket]
+    total = len(calls)
+    return calls[offset : offset + limit], total
+
+
+async def get_call_detail(org_id: str, conversation_id: int) -> Optional[dict]:
+    """One call's metrics, its runs, its voice-signal list, and an ordered voice
+    event timeline. Returns None if the conversation is missing or another org's."""
+    if not _pool:
+        return None
+
+    async with _pool.acquire() as conn:
+        conv = await conn.fetchrow(
+            """
+            SELECT id, agent_id, external_id, first_run_at, last_run_at, run_count
+            FROM conversations WHERE id = $1 AND org_id = $2
+            """,
+            conversation_id,
+            org_id,
+        )
+        if not conv:
+            return None
+
+        run_rows = await conn.fetch(
+            "SELECT run_id, agent_version, started_at FROM runs WHERE conversation_id = $1 ORDER BY started_at ASC",
+            conversation_id,
+        )
+        run_ids = [r["run_id"] for r in run_rows]
+        if not run_ids:
+            return None
+
+        event_rows, sig_rows = await _fetch_call_events_and_signals(conn, org_id, run_ids)
+
+    events = [
+        {
+            "event_type": e["event_type"],
+            "payload": _coerce_payload(e["payload"]),
+            "received_at": e["received_at"],
+        }
+        for e in event_rows
+    ]
+    signals = [{"failure_type": s["failure_type"]} for s in sig_rows]
+    metrics = _compute_call_metrics(events, signals)
+
+    from api_svc.voice_pricing import load_pricing
+
+    cost = _compute_call_cost(events, conv["agent_id"], load_pricing())
+
+    # Compact timeline of just the voice events for the detail view.
+    timeline = [
+        {
+            "event_type": e["event_type"],
+            "payload": e["payload"],
+            "at": e["received_at"].timestamp() if e["received_at"] else None,
+        }
+        for e in events
+        if e["event_type"] in _VOICE_EVENT_TYPES
+    ]
+
+    # Recordings + per-signal deep-link offsets (Phase 2.3). Metadata only:
+    # Dunetrace links to the audio, never fetches it.
+    recordings = [
+        _coerce_payload(e["payload"])
+        for e in event_rows
+        if e["event_type"] == "recording.available"
+    ]
+    signal_jumps: list = []
+    if recordings:
+        ev_ts = [e["received_at"] for e in event_rows if e["received_at"] is not None]
+        call_start = min(ev_ts) if ev_ts else None
+        start_offset = float(recordings[0].get("start_offset_seconds", 0) or 0)
+        step_time = {(e["run_id"], e["step_index"]): e["received_at"] for e in event_rows}
+        for s in sig_rows:
+            t = step_time.get((s["run_id"], s["step_index"]))
+            if t is None or call_start is None:
+                continue
+            # Approximate: the signal's structural step time into the call, not a
+            # frame-accurate audio timestamp.
+            secs = (t - call_start).total_seconds() - start_offset
+            signal_jumps.append(
+                {"failure_type": s["failure_type"], "seconds": round(max(0.0, secs), 1)}
+            )
+
+    return {
+        "id": conv["id"],
+        "agent_id": conv["agent_id"],
+        "external_id": conv["external_id"],
+        "first_run_at": conv["first_run_at"].timestamp(),
+        "last_run_at": conv["last_run_at"].timestamp(),
+        "run_count": conv["run_count"],
+        **metrics,
+        **cost,
+        "runs": [
+            {
+                "run_id": r["run_id"],
+                "agent_version": r["agent_version"],
+                "started_at": r["started_at"].timestamp(),
+            }
+            for r in run_rows
+        ],
+        "voice_signals": [s["failure_type"] for s in signals],
+        "timeline": timeline,
+        "recordings": recordings,
+        "signal_jumps": signal_jumps,
+    }
+
+
 # ── Signals ───────────────────────────────────────────────────────────────────
 
 

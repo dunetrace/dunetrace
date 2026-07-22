@@ -34,6 +34,7 @@ class EventType(str, Enum):
     TTS_GENERATED = "tts.generated"
     VOICE_ACTIVITY_DETECTED = "voice_activity.detected"
     TURN_TAKING = "turn_taking.changed"
+    RECORDING_AVAILABLE = "recording.available"
     # Human-in-the-loop approval events (Capability 2). Kept value-for-value in
     # sync with dunetrace.models.EventType — see test_sdk_parity.py.
     APPROVAL_REQUESTED = "approval.requested"

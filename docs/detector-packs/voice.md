@@ -126,7 +126,7 @@ same convention custom Python-class detectors use.
 
 ## 4. Voice policy actions
 
-Three [policy](../policies.md) actions target voice agents. They follow the
+Four [policy](../policies.md) actions target voice agents. They follow the
 same contract as `switch_model`: **Dunetrace sets intent, your agent's own
 loop enforces it** — Dunetrace never touches your audio pipeline. A policy
 fires, Dunetrace sets a structured attribute on the run, and your code reads
@@ -137,6 +137,7 @@ it between turns.
 | `stop_current_tts` | `run.stop_tts = True` | — | halt in-progress TTS playback |
 | `escalate_to_human` | `run.escalate_to_human = True`, `run.escalation_reason` | `reason` (optional) | transfer the call to a human |
 | `inject_recovery_prompt` | `run.recovery_prompt` (last-wins) | `prompt` (required) | speak / prepend the recovery line next turn |
+| `slow_response_pace` | `run.response_pace` (last-wins) | `pace` (optional, default `"slow"`) | slow the turn: emit a filler token while thinking, lower the TTS rate |
 
 These are ordinary policy actions — driven by the existing trigger set
 (`llm_latency_ms`, `error_count`, `step_count`, `signal`, …), not gated on
@@ -157,6 +158,8 @@ with dt.run("voice-agent", model="gpt-4o-realtime") as run:
 
     if run.recovery_prompt:                 # policy fired
         speak(run.recovery_prompt)
+    if run.response_pace == "slow":         # pace-down policy fired
+        emit_filler_token("mm-hmm")
     if run.escalate_to_human:
         transfer_to_agent(reason=run.escalation_reason)
 ```

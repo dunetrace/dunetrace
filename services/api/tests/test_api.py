@@ -508,6 +508,12 @@ class TestVoicePolicyActionValidation(unittest.TestCase):
     def test_escalate_to_human_accepts_optional_reason(self):
         self._validate("escalate_to_human", {"reason": "too many failures"})
 
+    def test_slow_response_pace_needs_no_params(self):
+        self._validate("slow_response_pace")  # must not raise
+
+    def test_slow_response_pace_accepts_optional_pace(self):
+        self._validate("slow_response_pace", {"pace": "slower"})
+
     def test_inject_recovery_prompt_accepts_clean_prompt(self):
         self._validate("inject_recovery_prompt", {"prompt": "Sorry, one moment please."})
 

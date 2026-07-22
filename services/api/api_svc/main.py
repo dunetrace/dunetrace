@@ -38,6 +38,7 @@ from api_svc.routers import (
     integrations,
     external_signals,
     conversations,
+    calls,
     alert_integrations,
     linear_webhook,
     github_integration,
@@ -58,6 +59,10 @@ logger = logging.getLogger("dunetrace.api")
 async def lifespan(app: FastAPI):
     logger.info("Starting — auth_mode=%s", settings.AUTH_MODE)
     await init_pool()
+    # Nudge a rate recheck if voice pricing defaults are >90 days stale (Phase 2.2).
+    from api_svc.voice_pricing import check_pricing_staleness
+
+    check_pricing_staleness()
     yield
     await close_pool()
     logger.info("Shutdown complete")
@@ -122,6 +127,7 @@ def create_app() -> FastAPI:
     app.include_router(integrations.router, dependencies=_auth)
     app.include_router(external_signals.router, dependencies=_auth)
     app.include_router(conversations.router, dependencies=_auth)
+    app.include_router(calls.router, dependencies=_auth)
     app.include_router(alert_integrations.router, dependencies=_auth)
     # No router-level _auth here — /callback is GitHub's own browser
     # redirect (no Dunetrace API key on that request at all); the other

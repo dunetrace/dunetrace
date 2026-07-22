@@ -114,6 +114,7 @@ class RunContext:
         self.escalate_to_human: bool = False  # set by escalate_to_human action
         self.escalation_reason: str | None = None  # from escalate_to_human params.reason
         self.recovery_prompt: str | None = None  # set by inject_recovery_prompt (last-wins)
+        self.response_pace: str | None = None  # set by slow_response_pace action (last-wins)
         self._triggered_policies: set = set()  # policy keys fired in this run
 
         # Detector result cache — signal-trigger policies reuse this within a step
@@ -329,31 +330,34 @@ class RunContext:
     # fire those detectors on any real voice call.
 
     def transcription_received(
-        self, text: str, confidence: float = 1.0, latency_ms: int = 0
+        self, text: str, confidence: float = 1.0, latency_ms: int = 0, audio_seconds: float = 0.0
     ) -> None:
         """Speech-to-text produced a transcript for one user turn. Turn-
-        initiating — advances the step counter."""
-        self._emit(
-            EventType.TRANSCRIPTION_RECEIVED,
-            {
-                "text": text,
-                "confidence": confidence,
-                "latency_ms": latency_ms,
-            },
-        )
+        initiating — advances the step counter.
 
-    def tts_generated(self, text: str, latency_ms: int = 0, truncated: bool = False) -> None:
+        audio_seconds: length of the transcribed audio. Optional, but pass it if
+        you want per-minute STT cost attribution (Phase 2.2) — most STT providers
+        bill per minute of audio, which the transcript text alone can't tell us.
+        Omitted from the payload when 0 (backward compatible)."""
+        payload: dict = {"text": text, "confidence": confidence, "latency_ms": latency_ms}
+        if audio_seconds:
+            payload["audio_seconds"] = audio_seconds
+        self._emit(EventType.TRANSCRIPTION_RECEIVED, payload)
+
+    def tts_generated(
+        self, text: str, latency_ms: int = 0, truncated: bool = False, audio_seconds: float = 0.0
+    ) -> None:
         """Text-to-speech rendered an agent response. Completes the turn —
-        does not advance the step counter (like llm_responded)."""
-        self._emit(
-            EventType.TTS_GENERATED,
-            {
-                "text": text,
-                "latency_ms": latency_ms,
-                "truncated": truncated,
-            },
-            advance=False,
-        )
+        does not advance the step counter (like llm_responded).
+
+        audio_seconds: length of the synthesized audio. Optional. TTS cost
+        (Phase 2.2) is billed per character and derived from ``text``, so this is
+        only needed if your TTS provider bills per audio-second instead. Omitted
+        from the payload when 0 (backward compatible)."""
+        payload: dict = {"text": text, "latency_ms": latency_ms, "truncated": truncated}
+        if audio_seconds:
+            payload["audio_seconds"] = audio_seconds
+        self._emit(EventType.TTS_GENERATED, payload, advance=False)
 
     def voice_activity_detected(self, type: str, duration_ms: int = 0) -> None:
         """A VAD transition (speech_start / speech_end / silence / barge_in).
@@ -388,6 +392,32 @@ class RunContext:
             },
             advance=False,
         )
+
+    def recording_metadata(
+        self,
+        url: str,
+        duration_seconds: float = 0.0,
+        format: str = "",
+        storage_provider: str = "",
+        start_offset_seconds: float = 0.0,
+    ) -> None:
+        """Record where the call audio lives (Phase 2.3). Storage-agnostic: pass
+        the URL and metadata; Dunetrace stores and links them but never fetches
+        the audio, so a presigned or private URL is fine (mind its expiry).
+
+        start_offset_seconds is when the recording began relative to the start of
+        the call/run, used to deep-link a signal's moment into the audio.
+        Annotation event — does not advance the step counter."""
+        payload: dict = {"url": url}
+        if duration_seconds:
+            payload["duration_seconds"] = duration_seconds
+        if format:
+            payload["format"] = format
+        if storage_provider:
+            payload["storage_provider"] = storage_provider
+        if start_offset_seconds:
+            payload["start_offset_seconds"] = start_offset_seconds
+        self._emit(EventType.RECORDING_AVAILABLE, payload, advance=False)
 
     # ── External signal hooks ─────────────────────────────────────────────────
 
@@ -871,6 +901,14 @@ class RunContext:
             if prompt:
                 self.recovery_prompt = prompt  # last-wins, like model_override
                 logger.info("Policy '%s': recovery_prompt set (%d chars)", policy.name, len(prompt))
+            self._triggered_policies.add(policy.key)
+
+        elif action_type == "slow_response_pace":
+            # Advisory, same contract as the other voice actions: Dunetrace sets the
+            # pacing intent, the agent's own loop reads run.response_pace between turns
+            # and slows down (filler token while thinking, lower TTS rate). Last-wins.
+            self.response_pace = params.get("pace", "slow")
+            logger.info("Policy '%s': response_pace → %s", policy.name, self.response_pace)
             self._triggered_policies.add(policy.key)
 
         elif action_type == "log":

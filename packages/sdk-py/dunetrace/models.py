@@ -47,6 +47,7 @@ class EventType(str, Enum):
     TTS_GENERATED = "tts.generated"
     VOICE_ACTIVITY_DETECTED = "voice_activity.detected"
     TURN_TAKING = "turn_taking.changed"
+    RECORDING_AVAILABLE = "recording.available"
     # Human-in-the-loop approval events (Capability 2). Emitted around a
     # require_approval policy gate. Kept value-for-value in sync with
     # dunetrace_schemas.enums.EventType (enforced by test_sdk_parity.py).

@@ -757,6 +757,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h9a1.5 1.5 0 0 1 1.5 1.5V9A1.5 1.5 0 0 1 11 10.5H6l-3 3V10.5h-1A1.5 1.5 0 0 1 .5 9V4.5A1.5 1.5 0 0 1 2 3z"/></svg>
       Conversations
     </div>
+    <div class="sb-item" onclick="nav('calls',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 2.5c0 5 5.5 10.5 10.5 10.5l1.5-2.5-3-2-1.5 1.5C9 8.5 7.5 7 6.5 5.5L8 4 6 1 3.5 2.5z"/></svg>
+      Calls
+    </div>
     <div class="sb-item" onclick="nav('tokens',this)">
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="4" width="14" height="8" rx="1.5"/><path d="M5 8h6M8 6v4"/></svg>
       Token usage
@@ -1811,6 +1815,78 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   </div>
 </div>
 
+<!-- ── CALLS PAGE (Phase 2.1) ── -->
+<div id="page-calls" class="page">
+  <div class="sec-head"><span class="sec-title">Calls</span></div>
+  <p style="font-size:12px;color:var(--chalk4);margin:-.5rem 0 1rem">
+    Voice calls: conversations with voice activity, seen through a voice lens. A
+    call is one conversation (one or more runs) for a voice agent.
+  </p>
+  <div class="runs-filter-row" id="calls-filter-row">
+    <select id="calls-agent" class="trend-select" onchange="setCallAgentFilter(this.value)">
+      <option value="">All agents</option>
+    </select>
+    <select id="calls-status" class="trend-select" onchange="setCallStatusFilter(this.value)">
+      <option value="">All outcomes</option>
+      <option value="natural">Natural end</option>
+      <option value="dropped">Dropped</option>
+      <option value="escalated">Escalated</option>
+    </select>
+    <select id="calls-cost" class="trend-select" onchange="setCallCostFilter(this.value)">
+      <option value="">Any cost</option>
+      <option value="low">&lt; $0.10</option>
+      <option value="medium">$0.10 – $1</option>
+      <option value="high">&gt; $1</option>
+    </select>
+    <select id="calls-range" class="trend-select" onchange="setCallRangeFilter(this.value)">
+      <option value="">All time</option>
+      <option value="1">Last 24h</option>
+      <option value="7">Last 7 days</option>
+      <option value="30">Last 30 days</option>
+    </select>
+  </div>
+  <div class="table-card">
+    <table class="run-table">
+      <thead><tr><th>Call</th><th>Agent</th><th>Duration</th><th>Outcome</th><th>Silence %</th><th>Agent talk</th><th>Cost</th><th>Signals</th><th>Time</th></tr></thead>
+      <tbody id="calls-tbody">
+        <tr><td colspan="9" class="loading">loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── CALL DETAIL PAGE (Phase 2.1) ── -->
+<div id="page-call-detail" class="page">
+  <div class="back-btn" onclick="nav('calls',document.querySelector('[onclick*=\'calls\']'))">← back to calls</div>
+  <div class="run-detail-header">
+    <div class="rdh-left">
+      <div class="rdh-run-id mono" id="call-detail-id">loading…</div>
+      <div class="rdh-title" id="call-detail-title">—</div>
+      <div class="rdh-meta" id="call-detail-meta"></div>
+    </div>
+  </div>
+  <div class="sec-head" style="margin-top:1rem"><span class="sec-title">Cost breakdown</span></div>
+  <div id="call-detail-cost" style="font-size:12px;color:var(--chalk3);margin-bottom:.5rem">—</div>
+  <div class="sec-head" style="margin-top:1rem"><span class="sec-title">Recording</span></div>
+  <div id="call-detail-recording" style="font-size:12px;color:var(--chalk3);margin-bottom:.5rem">—</div>
+  <div class="sec-head" style="margin-top:1rem"><span class="sec-title">Voice signals</span></div>
+  <div id="call-detail-signals" style="font-size:12px;color:var(--chalk3);margin-bottom:.5rem">—</div>
+  <div class="sec-head" style="margin-top:1rem"><span class="sec-title">Runs in this call</span></div>
+  <div class="table-card">
+    <table class="run-table">
+      <thead><tr><th>#</th><th>Run ID</th><th>Started</th><th>Agent version</th></tr></thead>
+      <tbody id="call-detail-runs-tbody"><tr><td colspan="4" class="loading">loading…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="sec-head" style="margin-top:1rem"><span class="sec-title">Voice event timeline</span></div>
+  <div class="table-card">
+    <table class="run-table">
+      <thead><tr><th>At</th><th>Event</th><th>Detail</th></tr></thead>
+      <tbody id="call-detail-timeline-tbody"><tr><td colspan="3" class="loading">loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
 </div><!-- /main -->
 
 <script>
@@ -2610,6 +2686,13 @@ function renderRunDetail(run, events, signals) {
   document.getElementById('detail-meta').innerHTML = metaItems
     .map(([k, v]) => `<div class="rdh-meta-item">${k} <span>${esc(String(v))}</span></div>`).join('');
 
+  // Recording link (Phase 2.3), if this run has one.
+  const recEv = (events || []).find(e => e.event_type === 'recording.available');
+  if (recEv && (recEv.payload || {}).url) {
+    document.getElementById('detail-meta').insertAdjacentHTML('beforeend',
+      `<div class="rdh-meta-item">Recording <a href="${esc(recEv.payload.url)}" target="_blank" rel="noopener" style="color:var(--blue)">▶ open</a></div>`);
+  }
+
   const riskColor = maxConf >= 0.8 ? 'var(--red)' : maxConf >= 0.5 ? 'var(--amber)' : 'var(--green)';
   document.getElementById('detail-risk-val').textContent = maxConf ? maxConf.toFixed(2) : '0.00';
   document.getElementById('detail-risk-val').style.color = riskColor;
@@ -3379,6 +3462,7 @@ function nav(id, el) {
   if (id === 'analytics') loadTokenStats();  // avoidable-cost card needs excess data
   if (id === 'agents')   { renderAgents(); loadHealthScores(); loadIssuesCounts(); }
   if (id === 'tokens')   { renderTokens(); loadTokenStats(); }
+  if (id === 'calls')    loadCalls();
   if (id === 'policies') loadAndRenderPolicies();
   if (id === 'keys')     loadAndRenderKeys();
   if (id === 'config')   loadCustomDetectors();
@@ -4555,6 +4639,171 @@ function renderConversationsTable(conversations) {
       <td>${sig}</td>
     </tr>`;
   }).join('');
+}
+
+// ── Calls (Phase 2.1) ─────────────────────────────────────────────────────────
+let _callAgentFilter  = '';
+let _callStatusFilter = '';
+let _callCostFilter   = '';
+let _callRangeDays    = '';
+let _curCallId        = null;
+
+function setCallAgentFilter(v)  { _callAgentFilter = v; loadCalls(); }
+function setCallStatusFilter(v) { _callStatusFilter = v; loadCalls(); }
+function setCallCostFilter(v)   { _callCostFilter = v; loadCalls(); }
+function setCallRangeFilter(v)  { _callRangeDays = v; loadCalls(); }
+
+function fmtUsdCall(v) {
+  if (!v) return '$0';
+  if (v < 0.01) return '<$0.01';
+  if (v < 1)    return '$' + v.toFixed(3);
+  return '$' + v.toFixed(2);
+}
+
+function populateCallsAgentDropdown() {
+  const sel = document.getElementById('calls-agent');
+  if (!sel) return;
+  const cur = sel.value;
+  const ids = _agents.map(a => a.agent_id).sort();
+  sel.innerHTML = '<option value="">All agents</option>' +
+    ids.map(id => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+  sel.value = cur;
+}
+
+function callStatusBadge(s) {
+  const map = { natural: ['NATURAL','var(--green)'], dropped: ['DROPPED','var(--red)'], escalated: ['ESCALATED','var(--amber)'] };
+  const [label, color] = map[s] || [s, 'var(--chalk4)'];
+  return `<span style="color:${color};font-weight:600;font-size:10px">${label}</span>`;
+}
+
+async function loadCalls() {
+  populateCallsAgentDropdown();
+  const tbody = document.getElementById('calls-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="9" class="loading">loading…</td></tr>';
+  try {
+    const params = new URLSearchParams({ limit: '100' });
+    if (_callAgentFilter)  params.set('agent_id', _callAgentFilter);
+    if (_callStatusFilter) params.set('completion_status', _callStatusFilter);
+    if (_callCostFilter)   params.set('cost_bucket', _callCostFilter);
+    if (_callRangeDays)    params.set('since', String(Date.now()/1000 - Number(_callRangeDays)*86400));
+    const data = await apiFetch('/v1/calls?' + params.toString());
+    renderCallsTable(data.calls || []);
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--red)">Failed to load: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function renderCallsTable(calls) {
+  const tbody = document.getElementById('calls-tbody');
+  if (!calls.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--chalk4)">No calls match these filters. Calls appear once a voice agent sends voice events.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = calls.map(c => {
+    const talk = c.agent_talk_ratio == null ? '—' : Math.round(c.agent_talk_ratio*100) + '%';
+    const sil  = Math.round((c.silence_pct||0)*100) + '%';
+    const sigs = c.voice_signal_count ? `<span style="color:var(--amber)">${c.voice_signal_count}</span>` : '<span style="color:var(--chalk4)">0</span>';
+    return `<tr style="cursor:pointer" onclick="showCallDetail(${c.id})">
+      <td class="mono">${esc(c.external_id)}</td>
+      <td>${esc(c.agent_id)}</td>
+      <td class="mono">${fmtDur(c.duration_seconds)}</td>
+      <td>${callStatusBadge(c.completion_status)}</td>
+      <td class="mono">${sil}</td>
+      <td class="mono">${talk}</td>
+      <td class="mono">${fmtUsdCall(c.cost_usd)}</td>
+      <td class="mono">${sigs}</td>
+      <td>${timeAgo(c.last_run_at)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function showCallDetail(id) {
+  _curCallId = id;
+  nav('call-detail', null);
+  document.getElementById('call-detail-id').textContent = 'loading call #' + id + '…';
+  document.getElementById('call-detail-title').textContent = '—';
+  document.getElementById('call-detail-meta').innerHTML = '';
+  document.getElementById('call-detail-signals').textContent = '—';
+  document.getElementById('call-detail-runs-tbody').innerHTML = '<tr><td colspan="4" class="loading">loading…</td></tr>';
+  document.getElementById('call-detail-timeline-tbody').innerHTML = '<tr><td colspan="3" class="loading">loading…</td></tr>';
+  try {
+    const data = await apiFetch('/v1/calls/' + encodeURIComponent(id));
+    renderCallDetail(data);
+  } catch(e) {
+    document.getElementById('call-detail-id').textContent = 'Error loading call: ' + e.message;
+  }
+}
+
+function renderCallDetail(call) {
+  document.getElementById('call-detail-id').textContent = 'Call ' + call.external_id;
+  document.getElementById('call-detail-title').innerHTML = callStatusBadge(call.completion_status) +
+    ` <span style="color:var(--chalk3)">${esc(call.agent_id)}</span>`;
+  const pct = call.agent_talk_ratio == null ? null : Math.round(call.agent_talk_ratio*100);
+  const talk = pct == null ? '—' : `${pct}% agent / ${100-pct}% caller`;
+  const meta = [
+    ['Duration', fmtDur(call.duration_seconds)],
+    ['Silence', Math.round((call.silence_pct||0)*100) + '%'],
+    ['Talk ratio', talk],
+    ['Runs', String(call.run_count)],
+    ['Voice signals', String(call.voice_signal_count)],
+    ['Cost', fmtUsdCall(call.cost_usd)],
+  ];
+  document.getElementById('call-detail-meta').innerHTML = meta.map(([k,v]) =>
+    `<span style="margin-right:16px"><span style="color:var(--chalk4)">${k}</span> ${esc(v)}</span>`).join('');
+
+  // Cost breakdown by category.
+  const cb = call.cost_breakdown || {};
+  const cbEl = document.getElementById('call-detail-cost');
+  if (cbEl) {
+    const parts = [['STT', cb.stt], ['LLM', cb.llm], ['TTS', cb.tts], ['Telephony', cb.telephony]];
+    cbEl.innerHTML = parts.map(([k,v]) =>
+      `<span style="margin-right:16px"><span style="color:var(--chalk4)">${k}</span> ${fmtUsdCall(v||0)}</span>`).join('')
+      + ` <span style="color:var(--chalk4)">·</span> <span style="font-weight:600">${fmtUsdCall(call.cost_usd)} total</span>`;
+  }
+
+  // Recording (Phase 2.3): link to the audio + per-signal deep-links. Dunetrace
+  // never fetches the audio; the browser opens the customer's URL directly.
+  const recEl = document.getElementById('call-detail-recording');
+  if (recEl) {
+    const recs = call.recordings || [];
+    const fmtT = s => { const m = Math.floor(s/60), ss = Math.round(s%60); return m + ':' + String(ss).padStart(2,'0'); };
+    if (!recs.length) {
+      recEl.innerHTML = '<span style="color:var(--chalk4)">no recording linked</span>';
+    } else {
+      const url = recs[0].url;
+      let html = recs.map(r => {
+        const meta = [r.storage_provider, r.format, r.duration_seconds ? fmtT(r.duration_seconds) : null].filter(Boolean).join(' · ');
+        return `<a href="${esc(r.url)}" target="_blank" rel="noopener" style="color:var(--blue)">▶ recording</a>` + (meta ? ` <span style="color:var(--chalk4)">(${esc(meta)})</span>` : '');
+      }).join('<br>');
+      const jumps = call.signal_jumps || [];
+      if (jumps.length && url) {
+        html += '<div style="margin-top:6px;color:var(--chalk4)">jump to signal: ' + jumps.map(j =>
+          `<a href="${esc(url)}#t=${j.seconds}" target="_blank" rel="noopener" style="color:var(--amber);margin-right:10px">${esc(j.failure_type.replace(/_/g,' '))} @ ${fmtT(j.seconds)}</a>`
+        ).join('') + '</div>';
+      }
+      recEl.innerHTML = html;
+    }
+  }
+
+  document.getElementById('call-detail-signals').innerHTML = (call.voice_signals && call.voice_signals.length)
+    ? call.voice_signals.map(s => `<span class="sev-badge sb-med" style="margin-right:4px">${esc(s.replace(/_/g,' '))}</span>`).join('')
+    : '<span style="color:var(--chalk4)">none</span>';
+
+  document.getElementById('call-detail-runs-tbody').innerHTML = (call.runs||[]).map((r,i) =>
+    `<tr><td>${i+1}</td><td class="mono">${esc(r.run_id)}</td><td>${timeAgo(r.started_at)}</td><td class="mono">${esc(r.agent_version||'—')}</td></tr>`
+  ).join('') || '<tr><td colspan="4" style="color:var(--chalk4)">no runs</td></tr>';
+
+  document.getElementById('call-detail-timeline-tbody').innerHTML = (call.timeline||[]).map(e => {
+    const p = e.payload || {};
+    let detail = '';
+    if (e.event_type === 'transcription.received') detail = esc((p.text||'').slice(0,80));
+    else if (e.event_type === 'tts.generated')     detail = esc((p.text||'').slice(0,80)) + (p.truncated ? ' [truncated]' : '');
+    else if (e.event_type === 'voice_activity.detected') detail = esc(p.type||'') + (p.duration_ms ? ` (${p.duration_ms}ms)` : '');
+    else if (e.event_type === 'turn_taking.changed') detail = esc(p.action||'');
+    const at = e.at ? new Date(e.at*1000).toISOString().slice(11,19) : '—';
+    return `<tr><td class="mono" style="font-size:10px">${at}</td><td style="font-size:10px">${esc(e.event_type.replace(/\./g,' '))}</td><td style="font-size:11px;color:var(--chalk3)">${detail}</td></tr>`;
+  }).join('') || '<tr><td colspan="3" style="color:var(--chalk4)">no voice events</td></tr>';
 }
 
 async function showConversationDetail(id) {

@@ -79,6 +79,15 @@ class TestTranscriptionReceived(unittest.TestCase):
         self.assertEqual(p["confidence"], 1.0)
         self.assertEqual(p["latency_ms"], 0)
 
+    def test_audio_seconds_optional_and_omitted_when_zero(self):
+        # Present when given (for STT cost), absent by default (backward compat).
+        with _CapturingRun() as h:
+            h.run.transcription_received("hi", audio_seconds=3.2)
+            h.run.transcription_received("bye")
+        evts = h.events_of(EventType.TRANSCRIPTION_RECEIVED)
+        self.assertEqual(evts[0].payload["audio_seconds"], 3.2)
+        self.assertNotIn("audio_seconds", evts[1].payload)
+
 
 class TestTtsGenerated(unittest.TestCase):
     def test_emits_event_with_payload(self):
@@ -217,6 +226,36 @@ class TestVoiceCallDoesNotFalseFireBuiltins(unittest.TestCase):
         state.baseline_p75_steps = 38.0
         signal = StepCountInflationDetector().on_run_completion(state)
         self.assertIsNone(signal)
+
+
+class TestRecordingMetadata(unittest.TestCase):
+    def test_emits_event_and_does_not_advance_step(self):
+        with _CapturingRun() as h:
+            before = h.run.step
+            h.run.recording_metadata(
+                "https://s3.example.com/call.wav",
+                duration_seconds=42.5,
+                format="wav",
+                storage_provider="s3",
+                start_offset_seconds=1.0,
+            )
+            after = h.run.step
+        self.assertEqual(after, before)  # annotation, no step advance
+        evts = h.events_of(EventType.RECORDING_AVAILABLE)
+        self.assertEqual(len(evts), 1)
+        p = evts[0].payload
+        self.assertEqual(p["url"], "https://s3.example.com/call.wav")
+        self.assertEqual(p["duration_seconds"], 42.5)
+        self.assertEqual(p["storage_provider"], "s3")
+        self.assertEqual(p["start_offset_seconds"], 1.0)
+
+    def test_optional_fields_omitted_when_default(self):
+        with _CapturingRun() as h:
+            h.run.recording_metadata("https://x/y.mp3")
+        p = h.events_of(EventType.RECORDING_AVAILABLE)[0].payload
+        self.assertEqual(p["url"], "https://x/y.mp3")
+        self.assertNotIn("duration_seconds", p)
+        self.assertNotIn("storage_provider", p)
 
 
 if __name__ == "__main__":

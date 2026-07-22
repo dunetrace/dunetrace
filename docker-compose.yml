@@ -185,6 +185,10 @@ services:
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
       DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+    volumes:
+      # Voice cost rates (Phase 2.2). Optional: the API falls back to built-in
+      # defaults if this file is absent. Mounted so operators can edit rates.
+      - ./voice-pricing.yml:/app/voice-pricing.yml:ro
     depends_on:
       postgres:
         condition: service_healthy

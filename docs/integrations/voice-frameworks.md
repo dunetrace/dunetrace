@@ -118,6 +118,57 @@ if run.recovery_prompt:
 
 ---
 
+## Vapi (shipped adapter)
+
+The sections above are illustrative for any in-process framework. Vapi is
+different: it is cloud-orchestrated, so Vapi runs the audio pipeline and posts
+server messages to your server URL. There is nothing in-process to hook, so
+Dunetrace ships a webhook adapter instead of a long-lived run.
+
+```python
+from dunetrace import Dunetrace
+from dunetrace.integrations.vapi import DunetraceVapiAdapter
+
+dt = Dunetrace()
+adapter = DunetraceVapiAdapter(dt, agent_id="support-line", model="gpt-4o")
+
+@app.post("/vapi/webhook")           # your server URL, registered with Vapi
+async def vapi_webhook(payload: dict):
+    adapter.handle_message(payload)
+    return {}
+```
+
+The adapter buffers each call's messages (keyed by call id) and replays them
+through one `dt.run()` when the call ends (`end-of-call-report`, or a
+`status-update` with `status="ended"`). One Vapi call becomes one run, with the
+call id threaded as `conversation_id`. Runnable example:
+[`examples/vapi_webhook_agent.py`](../../examples/vapi_webhook_agent.py).
+
+**Enforcement caveat.** Vapi owns the audio pipeline, so the voice runtime
+policy actions cannot be enforced in-path for Vapi. Detection is post-hoc, per
+call. The sub-millisecond runtime firewall claim does not apply to Vapi.
+
+**Detector coverage from Vapi.** Vapi server messages carry turn structure,
+transcripts, interruptions, and call lifecycle, but not per-transcript STT
+confidence or per-event latency. So these detectors get no signal from Vapi:
+
+| Detector | Fires from Vapi? | Why |
+|---|---|---|
+| `VOICE_TURN_TAKING_COLLISION` | yes | from `speech-update` |
+| `VOICE_SPEAKER_CONFUSION` | yes | transcript while agent speaking |
+| `VOICE_BARGE_IN_FAILURE` | yes | from `user-interrupted` + following TTS |
+| `VOICE_TTS_TRUNCATION` | yes | truncated TTS without a barge-in |
+| `VOICE_SILENCE_TIMEOUT` | partial | needs silence duration, not always present |
+| `VOICE_TRANSCRIPTION_CONFIDENCE_DROP` | no | Vapi does not surface STT confidence |
+| `VOICE_AUDIO_QUALITY_DEGRADATION` | no | same, confidence-based |
+| `VOICE_LATENCY_INDUCED_HANGUP` | no | Vapi does not surface per-event latency |
+
+This is a Vapi surface limit, not a detector defect. An in-process framework
+(LiveKit, Deepgram Voice Agent) that exposes confidence and latency lights up
+the full pack.
+
+---
+
 ## See also
 
 - [Voice detector pack reference](../detector-packs/voice.md)

@@ -42,6 +42,9 @@ agents; a text agent that never reads the attribute simply ignores it.
                            (str|None from params.reason); agent transfers the call
   inject_recovery_prompt — sets run.recovery_prompt (str, last-wins) from
                            params.prompt; agent speaks/prepends it next turn
+  slow_response_pace     — sets run.response_pace (str, last-wins) from params.pace
+                           (default "slow"); agent slows its turn (filler token
+                           while thinking, lower TTS rate) until it reads "normal"
 
 Human-in-the-loop action (Capability 2) — pairs with the before_tool_call
 trigger:
@@ -117,6 +120,7 @@ class PolicyAction(TypedDict, total=False):
             "stop_current_tts",
             "escalate_to_human",
             "inject_recovery_prompt",
+            "slow_response_pace",
             # Human-in-the-loop (Capability 2)
             "require_approval",
         ]

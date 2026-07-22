@@ -136,6 +136,52 @@ if _PYDANTIC:
         conversations: List[ConversationSummary]
         page: Page
 
+    # ── Calls (voice-focused view over conversations, Phase 2.1) ──
+    class CallSummary(_Model):
+        id: int
+        agent_id: str
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        duration_seconds: float
+        completion_status: str  # natural | dropped | escalated
+        silence_pct: float
+        agent_talk_ms: int
+        caller_talk_ms: int
+        voice_signal_count: int
+        cost_usd: float
+        cost_breakdown: Dict[str, float]  # {stt, llm, tts, telephony}
+        agent_talk_ratio: Optional[float] = None
+        sentiment_trend: Optional[Any] = None  # placeholder until Phase 3
+
+    class CallDetail(_Model):
+        id: int
+        agent_id: str
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        duration_seconds: float
+        completion_status: str
+        silence_pct: float
+        agent_talk_ms: int
+        caller_talk_ms: int
+        voice_signal_count: int
+        cost_usd: float
+        cost_breakdown: Dict[str, float]
+        runs: List[Dict[str, Any]]
+        voice_signals: List[str]
+        timeline: List[Dict[str, Any]]
+        recordings: List[Dict[str, Any]]  # recording.available payloads
+        signal_jumps: List[Dict[str, Any]]  # {failure_type, seconds} deep-links
+        agent_talk_ratio: Optional[float] = None
+        sentiment_trend: Optional[Any] = None
+
+    class CallListResponse(_Model):
+        calls: List[CallSummary]
+        page: Page
+
     class RunListResponse(_Model):
         runs: List[RunSummary]
         page: Page
@@ -645,6 +691,69 @@ else:
     @dataclass
     class ConversationSearchResponse:
         conversations: List[Any]
+        page: Page
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class CallSummary:
+        id: int
+        agent_id: str
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        duration_seconds: float
+        completion_status: str
+        silence_pct: float
+        agent_talk_ms: int
+        caller_talk_ms: int
+        voice_signal_count: int
+        cost_usd: float
+        cost_breakdown: dict
+        agent_talk_ratio: Optional[float] = None
+        sentiment_trend: Optional[Any] = None
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class CallDetail:
+        id: int
+        agent_id: str
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        duration_seconds: float
+        completion_status: str
+        silence_pct: float
+        agent_talk_ms: int
+        caller_talk_ms: int
+        voice_signal_count: int
+        cost_usd: float
+        cost_breakdown: dict
+        runs: List[Any]
+        voice_signals: List[Any]
+        timeline: List[Any]
+        recordings: List[Any]
+        signal_jumps: List[Any]
+        agent_talk_ratio: Optional[float] = None
+        sentiment_trend: Optional[Any] = None
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class CallListResponse:
+        calls: List[Any]
         page: Page
 
         def model_dump(self):

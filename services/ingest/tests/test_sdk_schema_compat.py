@@ -108,6 +108,7 @@ def _record_a_full_run() -> list:
         run.tts_generated("hi there", latency_ms=40)
         run.voice_activity_detected("speech_start", duration_ms=100)
         run.turn_taking("agent_speaking")
+        run.recording_metadata("https://s3.example.com/call.wav", storage_provider="s3")
 
         # Memory channel events.
         run.memory_written("user_prefs", "prefers concise answers", source="user_input")

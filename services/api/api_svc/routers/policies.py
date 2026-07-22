@@ -46,6 +46,7 @@ _VALID_ACTIONS = {
     "stop_current_tts",
     "escalate_to_human",
     "inject_recovery_prompt",
+    "slow_response_pace",
     # Human-in-the-loop (Capability 2)
     "require_approval",
 }
@@ -140,8 +141,9 @@ def _validate(condition: ConditionModel, action: ActionModel, name: str = "") ->
                 f"inject_prompt content rejected: matches injection pattern(s): {matched}",
             )
     # inject_recovery_prompt (Phase 1.3) is injected spoken text — same required
-    # param and same injection-pattern guard as inject_prompt. stop_current_tts
-    # and escalate_to_human take no required params (reason is optional).
+    # param and same injection-pattern guard as inject_prompt. stop_current_tts,
+    # escalate_to_human, and slow_response_pace take no required params (reason and
+    # pace are optional; pace defaults to "slow" in the SDK when absent).
     # require_approval and before_tool_call are only meaningful together — the
     # SDK only evaluates require_approval via the before_tool_call gate, so any
     # other pairing is dead config. Reject it rather than silently never firing.
