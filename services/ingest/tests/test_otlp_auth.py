@@ -223,7 +223,11 @@ class TestEnablement:
 async def test_auth_failure_logging_is_throttled(caplog):
     import ingest_svc.routers.otlp as otlp_mod
 
-    otlp_mod._last_auth_fail_log = 0.0
+    # Put the last-log timestamp a full window in the past so the first call is
+    # guaranteed to log, independent of the monotonic clock's reference point
+    # (on a freshly-booted CI runner monotonic() can be < the window, which made
+    # a plain 0.0 reset non-deterministic).
+    otlp_mod._last_auth_fail_log = otlp_mod.time.monotonic() - otlp_mod._AUTH_FAIL_LOG_WINDOW - 1
     otlp_mod._auth_fail_count = 0
     req = SimpleNamespace(client=SimpleNamespace(host="1.2.3.4"))
 
