@@ -15,7 +15,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      # Pin ruff to the pre-commit-config version so CI matches local linting.
+      # An unpinned `pip install ruff` pulls the latest release, whose newly
+      # stabilized rules fail CI on untouched code even when nothing changed.
+      - run: pip install ruff==0.15.11
       - run: ruff check .
       - run: ruff format --check .
 
