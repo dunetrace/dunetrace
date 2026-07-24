@@ -9,10 +9,69 @@ export type EventType =
   | "retrieval.called"
   | "retrieval.responded"
   | "external.signal"
+  // Voice-agent events (detector pack "voice"). Emitted only by the voice
+  // helpers on DunetraceRun; no built-in detector reads them until the voice
+  // pack is active. Kept value-for-value in sync with the Python SDK.
+  | "transcription.received"
+  | "tts.generated"
+  | "voice_activity.detected"
+  | "turn_taking.changed"
+  | "recording.available"
   // Agent memory channel — see run.memoryWritten/memoryRead/memoryCleared.
   | "memory.written"
   | "memory.read"
   | "memory.cleared";
+
+/** VAD transition kinds accepted by run.voiceActivityDetected(). */
+export type VadType = "speech_start" | "speech_end" | "silence" | "barge_in";
+export const VAD_TYPES: readonly VadType[] = [
+  "speech_start",
+  "speech_end",
+  "silence",
+  "barge_in",
+];
+
+/** Conversational-floor transitions accepted by run.turnTaking(). */
+export type TurnTakingAction = "agent_speaking" | "user_speaking" | "both_speaking" | "neither";
+export const TURN_TAKING_ACTIONS: readonly TurnTakingAction[] = [
+  "agent_speaking",
+  "user_speaking",
+  "both_speaking",
+  "neither",
+];
+
+/** Optional metadata for run.transcriptionReceived(). */
+export interface TranscriptionOptions {
+  confidence?:   number;
+  latencyMs?:    number;
+  /** Length of the transcribed audio. Pass it for per-minute STT cost
+   *  attribution (most STT providers bill per minute of audio). */
+  audioSeconds?: number;
+}
+
+/** Optional metadata for run.ttsGenerated(). */
+export interface TtsOptions {
+  latencyMs?:  number;
+  truncated?:  boolean;
+  audioSeconds?: number;
+  /** Provider-side correlation metadata (Phase 4.1). Pass them when your TTS
+   *  runs on a provider Dunetrace can pull generation history from (ElevenLabs)
+   *  so a stored generation can be matched back to this exact event. */
+  voiceId?:    string;
+  model?:      string;
+  provider?:   string;
+  providerGenerationId?: string;
+}
+
+/** Optional metadata for run.recordingMetadata(). */
+export interface RecordingOptions {
+  durationSeconds?:    number;
+  format?:             string;
+  storageProvider?:    string;
+  /** When the recording began relative to the start of the call/run, used to
+   *  deep-link a signal's moment into the audio. */
+  startOffsetSeconds?: number;
+}
 
 /** Provenance of a value written to agent memory. Feeds the server-side
  *  MEMORY_POISONING detector's risk weighting — content from an
@@ -81,6 +140,18 @@ export interface LlmRespondedOptions {
   /** Pass when prompt token count is only known after the call returns
    *  (e.g. taken from the API response). Overrides the estimate given to llmCalled(). */
   promptTokens?:     number;
+  /** Reasoning/thinking tokens billed on top of visible completion tokens
+   *  (o-series, extended-thinking models). Kept separate from completionTokens so
+   *  cost accounting and the OTel exporter can attribute them distinctly. */
+  reasoningTokens?:  number;
+}
+
+/** A synchronous per-event sink. Each AgentEvent is handed to it as it is
+ *  emitted, in addition to the normal ship-to-ingest path. DunetraceOtelExporter
+ *  implements this; the interface is duck-typed so wiring an OTel exporter never
+ *  makes @opentelemetry/api a hard dependency of the core client. */
+export interface EventSink {
+  handle(event: AgentEvent): void;
 }
 
 export interface ClientOptions {
@@ -95,4 +166,9 @@ export interface ClientOptions {
    *  made pluggable). Pass a DurableRetryEmitter wrapping HttpBatchEmitter to
    *  survive a backend outage across process restarts. */
   emitter?: import("./emitters.js").BatchEmitter;
+  /** Optional OTel span exporter (DunetraceOtelExporter) or any EventSink. Every
+   *  emitted event is also handed to it, so agent runs show up in an OTel backend
+   *  alongside Dunetrace's own ingest. Additive and opt-in; a failure in the sink
+   *  never touches ingest. */
+  exporter?: EventSink;
 }

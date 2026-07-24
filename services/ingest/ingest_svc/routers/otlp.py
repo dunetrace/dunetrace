@@ -291,8 +291,12 @@ async def receive_otlp_traces(
     # ── Per-org span rate limit (noisy-neighbor protection) ───────────────────
     allowed, retry_after = get_span_limiter().allow(org_id, span_count)
     if not allowed:
+        # Per-org attribution is recorded in the stats table (shown on the
+        # receiver dashboard); the org_id is deliberately kept out of this log
+        # line since it is derived from the API key (avoids clear-text logging of
+        # credential-derived data).
         stats.record_rate_limit_hit(org_id)
-        logger.warning("OTLP span rate limit exceeded. org_id=%s spans=%d", org_id, span_count)
+        logger.warning("OTLP span rate limit exceeded. spans=%d", span_count)
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"detail": "Span rate limit exceeded."},

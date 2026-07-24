@@ -1,6 +1,16 @@
 import { randomUUID } from "node:crypto";
-import type { AgentEvent, EventType, LlmRespondedOptions, MemorySource } from "./models.js";
-import { MEMORY_SOURCES } from "./models.js";
+import type {
+  AgentEvent,
+  EventType,
+  LlmRespondedOptions,
+  MemorySource,
+  RecordingOptions,
+  TranscriptionOptions,
+  TtsOptions,
+  TurnTakingAction,
+  VadType,
+} from "./models.js";
+import { MEMORY_SOURCES, TURN_TAKING_ACTIONS, VAD_TYPES } from "./models.js";
 
 export interface EventEmitter {
   _emit(event: AgentEvent): void;
@@ -50,7 +60,8 @@ export class DunetraceRun {
     if (!omitLlmOutputText()) {
       payload["output"] = opts.outputText ?? "";
     }
-    if (opts.promptTokens) payload["prompt_tokens"] = opts.promptTokens;
+    if (opts.promptTokens)    payload["prompt_tokens"]    = opts.promptTokens;
+    if (opts.reasoningTokens) payload["reasoning_tokens"] = opts.reasoningTokens;
     this._emit("llm.responded", payload, false);
   }
 
@@ -105,6 +116,86 @@ export class DunetraceRun {
       latency_ms:   latencyMs,
       content,
     }, false);
+  }
+
+  // ── Voice hooks (detector pack "voice") ────────────────────────────────────
+  //
+  // advance semantics mirror the non-voice hooks: a turn-initiating event
+  // advances the step counter (like llmCalled / toolCalled), while completion
+  // and high-frequency annotation events do not (like llmResponded). This keeps
+  // a normal voice turn at ~one step, so the always-on built-in step detectors
+  // don't false-fire on a real voice call.
+
+  /**
+   * Speech-to-text produced a transcript for one user turn. Turn-initiating —
+   * advances the step counter.
+   */
+  transcriptionReceived(text: string, opts: TranscriptionOptions = {}): void {
+    const payload: Record<string, unknown> = {
+      text,
+      confidence: opts.confidence ?? 1.0,
+      latency_ms: opts.latencyMs ?? 0,
+    };
+    if (opts.audioSeconds) payload["audio_seconds"] = opts.audioSeconds;
+    this._emit("transcription.received", payload);
+  }
+
+  /**
+   * Text-to-speech rendered an agent response. Completes the turn — does not
+   * advance the step counter (like llmResponded).
+   */
+  ttsGenerated(text: string, opts: TtsOptions = {}): void {
+    const payload: Record<string, unknown> = {
+      text,
+      latency_ms: opts.latencyMs ?? 0,
+      truncated:  opts.truncated ?? false,
+    };
+    if (opts.audioSeconds)          payload["audio_seconds"]          = opts.audioSeconds;
+    if (opts.voiceId)               payload["voice_id"]               = opts.voiceId;
+    if (opts.model)                 payload["model"]                  = opts.model;
+    if (opts.provider)              payload["provider"]               = opts.provider;
+    if (opts.providerGenerationId)  payload["provider_generation_id"] = opts.providerGenerationId;
+    this._emit("tts.generated", payload, false);
+  }
+
+  /**
+   * A VAD transition (speech_start / speech_end / silence / barge_in).
+   * High-frequency annotation — does not advance the step counter.
+   */
+  voiceActivityDetected(type: VadType, durationMs = 0): void {
+    if (!VAD_TYPES.includes(type)) {
+      throw new Error(
+        `voiceActivityDetected: type must be one of ${VAD_TYPES.join(", ")}, got ${String(type)}`,
+      );
+    }
+    this._emit("voice_activity.detected", { type, duration_ms: durationMs }, false);
+  }
+
+  /**
+   * A conversational-floor transition (agent_speaking / user_speaking /
+   * both_speaking / neither). State annotation — does not advance the step counter.
+   */
+  turnTaking(action: TurnTakingAction, fromAgent = false, toUser = false): void {
+    if (!TURN_TAKING_ACTIONS.includes(action)) {
+      throw new Error(
+        `turnTaking: action must be one of ${TURN_TAKING_ACTIONS.join(", ")}, got ${String(action)}`,
+      );
+    }
+    this._emit("turn_taking.changed", { action, from_agent: fromAgent, to_user: toUser }, false);
+  }
+
+  /**
+   * Record where the call audio lives. Storage-agnostic: Dunetrace stores and
+   * links the URL but never fetches the audio, so a presigned or private URL is
+   * fine (mind its expiry). Annotation event — does not advance the step counter.
+   */
+  recordingMetadata(url: string, opts: RecordingOptions = {}): void {
+    const payload: Record<string, unknown> = { url };
+    if (opts.durationSeconds)    payload["duration_seconds"]     = opts.durationSeconds;
+    if (opts.format)             payload["format"]               = opts.format;
+    if (opts.storageProvider)    payload["storage_provider"]     = opts.storageProvider;
+    if (opts.startOffsetSeconds) payload["start_offset_seconds"] = opts.startOffsetSeconds;
+    this._emit("recording.available", payload, false);
   }
 
   // ── Infrastructure signals ─────────────────────────────────────────────────

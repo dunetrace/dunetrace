@@ -4,7 +4,7 @@ import { agentVersion } from "./hash.js";
 import { DunetraceRun } from "./run.js";
 import { resultLength as _resultLength, resultText as _resultText } from "./util.js";
 import { HttpBatchEmitter, type BatchEmitter } from "./emitters.js";
-import type { AgentEvent, ClientOptions, RunOptions } from "./models.js";
+import type { AgentEvent, ClientOptions, EventSink, RunOptions } from "./models.js";
 
 const _runStorage = new AsyncLocalStorage<DunetraceRun>();
 
@@ -17,6 +17,7 @@ export class Dunetrace {
   private _drainTimer: ReturnType<typeof setInterval> | null = null;
   private _emitJson:   boolean;
   private _emitter:    BatchEmitter;
+  private _exporter:   EventSink | null;
 
   constructor(opts: ClientOptions = {}) {
     const base      = (opts.endpoint ?? "http://localhost:8001").replace(/\/$/, "");
@@ -26,6 +27,7 @@ export class Dunetrace {
     this._bufferSize = opts.bufferSize ?? 10_000;
     this._timeoutMs  = opts.timeoutMs  ?? 5_000;
     this._emitter    = opts.emitter ?? new HttpBatchEmitter(base, this._apiKey, this._timeoutMs);
+    this._exporter   = opts.exporter ?? null;
 
     const interval = opts.flushIntervalMs ?? 200;
     this._drainTimer = setInterval(() => { this._drain(); }, interval);
@@ -295,6 +297,15 @@ export class Dunetrace {
     // the same buffered event ships the same id and the ingest side dedups it.
     if (!event.event_id) event.event_id = randomUUID();
     if (this._emitJson) this._writeJsonLine(event);
+    // Fan out to the optional OTel exporter. It never throws (see handle()), but
+    // guard anyway so a sink defect can't break the agent's own event path.
+    if (this._exporter) {
+      try {
+        this._exporter.handle(event);
+      } catch (err) {
+        process.stderr.write(`[dunetrace] exporter failed: ${err}\n`);
+      }
+    }
     if (this._buffer.length >= this._bufferSize) return;
     this._buffer.push(event);
   }

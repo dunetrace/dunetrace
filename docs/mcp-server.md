@@ -279,6 +279,43 @@ The alternating 🔴 / ✅ pattern here is a tell: runs with 8 steps consistentl
 
 ---
 
+### `list_voice_calls`
+
+List recent voice calls with call-level metrics: duration, how the call ended, silence percentage, voice signal count, and cost. A "call" is a voice agent's conversation (the runs that share one conversation id).
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | "" | Filter to one voice agent (optional) |
+| `completion_status` | string | "" | `natural`, `dropped`, or `escalated` (optional) |
+| `cost_bucket` | string | "" | `low` (<$0.10), `medium` ($0.10–$1), or `high` (>$1) (optional) |
+| `limit` | int | 20 | Max calls to return (max 100) |
+
+**Example output:**
+```
+Voice calls
+
+ CALL  AGENT              WHEN          DUR SILENCE  SIGS      COST  STATUS
+────────────────────────────────────────────────────────────────────────────────────
+  101  voice-support      5m ago        92s     12%     0 $  0.0423  ✅ natural
+  102  voice-support      15m ago       45s     55%  🔴 2 $  0.5000  🔴 dropped
+```
+
+---
+
+### `get_call_detail`
+
+One voice call's full picture: call-level metrics, per-stage cost breakdown (STT / LLM / TTS / telephony), the voice failure signals detected, and links to the call audio when recorded.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `conversation_id` | int | required | Call id (from `list_voice_calls`) |
+
+---
+
 ### `get_agent_signals`
 
 Recent failure signals for a specific agent, with titles, explanations, and fix suggestions.
@@ -557,9 +594,9 @@ Quick-start code snippet for instrumenting an agent with Dunetrace.
 
 | Argument | Type | Description |
 |---|---|---|
-| `framework` | string | `langchain`, `python`, `typescript`, `tools`, or `otel` |
+| `framework` | string | `langchain`, `python`, `typescript`, `haystack`, `tools`, `voice`, or `otel` |
 
-Aliases: `langgraph`, `lc`, `ts`, `js`, `node`, `otlp`, `opentelemetry`, `langdock`, `dify`, `tool-calls`, `tracking`.
+Aliases: `langgraph`, `lc`, `ts`, `js`, `node`, `haystack-ai`, `voice-agent`, `stt`, `tts`, `speech`, `otlp`, `opentelemetry`, `langdock`, `dify`, `tool-calls`, `tracking`.
 
 ---
 

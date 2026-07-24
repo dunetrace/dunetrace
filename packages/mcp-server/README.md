@@ -318,6 +318,61 @@ RUN ID       STARTED                  DUR  STEPS SIGS  STATUS
 
 ---
 
+### `list_voice_calls`
+
+List recent voice calls with call-level metrics: duration, how the call ended, silence percentage, voice signal count, and cost. A "call" is a voice agent's conversation (the runs that share one conversation id).
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | "" | Filter to one voice agent (optional) |
+| `completion_status` | string | "" | `natural` \| `dropped` \| `escalated` (optional) |
+| `cost_bucket` | string | "" | `low` (<$0.10) \| `medium` ($0.10–$1) \| `high` (>$1) (optional) |
+| `limit` | int | 20 | Max calls to return (max 100) |
+
+**Example output:**
+```
+Voice calls
+
+ CALL  AGENT              WHEN          DUR SILENCE  SIGS      COST  STATUS
+────────────────────────────────────────────────────────────────────────────────────
+  101  voice-support      5m ago        92s     12%     0 $  0.0423  ✅ natural
+  102  voice-support      15m ago       45s     55%  🔴 2 $  0.5000  🔴 dropped
+```
+
+---
+
+### `get_call_detail`
+
+One voice call's full picture: call-level metrics, per-stage cost breakdown (STT / LLM / TTS / telephony), the voice failure signals detected, and links to the call audio when recorded.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `conversation_id` | int | required | Call id (from `list_voice_calls`) |
+
+**Example output:**
+```
+Call #102  (voice-support)
+  Ended:      🔴 dropped
+  Duration:   45s over 2 run(s)
+  Silence:    55%
+  Talk ratio: agent 62% / caller 38%
+  Cost:       $0.5000
+              stt=$0.1000  llm=$0.3000  tts=$0.1000
+
+Voice signals (2):
+  🔴 VOICE_DEAD_AIR
+  🔴 VOICE_TRUNCATED_RESPONSE
+
+Recordings (1):
+  🎧 https://audio.example/conv-def.wav  (45s)
+```
+
+---
+
 ### `get_agent_token_stats`
 
 Per-window token usage and waste breakdown for an agent (1d / 7d / 30d). Shows total tokens consumed, wasted tokens (on runs with at least one live failure signal), and estimated API cost for each window. The 30-day view adds a `Waste by failure type` breakdown so you can see which failure types cost the most to leave unfixed.
@@ -355,15 +410,15 @@ Waste by failure type (30 days):
 
 ### `get_instrumentation_guide`
 
-Get a quick-start code snippet for instrumenting an agent with Dunetrace. Works for Python, LangChain/LangGraph, TypeScript, and plain tool-call tracking.
+Get a quick-start code snippet for instrumenting an agent with Dunetrace. Works for Python, LangChain/LangGraph, TypeScript, Haystack, voice agents, plain tool-call tracking, and OpenTelemetry.
 
 **Arguments:**
 
 | Argument | Type | Default | Description |
 |---|---|---|---|
-| `framework` | string | required | Framework name: `python`, `langchain`, `langgraph`, `typescript`, or `tools` |
+| `framework` | string | required | Framework name: `python`, `langchain`, `langgraph`, `typescript`, `haystack`, `tools`, `voice`, or `otel` |
 
-Aliases accepted: `lc`, `lc-graph`, `lc_graph`, `langgraph`, `ts`, `js`, `javascript`, `node`, `tracking`, `tool_calls` (and more).
+Aliases accepted: `lc`, `lc-graph`, `lc_graph`, `langgraph`, `ts`, `js`, `javascript`, `node`, `tracking`, `tool_calls`, `voice-agent`, `stt`, `tts`, `speech`, `otlp`, `opentelemetry` (and more).
 
 ---
 

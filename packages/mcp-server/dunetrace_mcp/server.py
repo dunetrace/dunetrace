@@ -44,6 +44,7 @@ mcp = FastMCP(
         - "Show me the details of run <id>"
         - "Which failure type is most common across all agents?"
         - "Did a recent deploy cause a spike in errors?"
+        - "How are my voice agents doing? Show me dropped calls."
 
         All timestamps returned are UTC ISO-8601.
         Confidence values are 0–1 (higher = more certain the failure occurred).
@@ -667,6 +668,127 @@ def get_agent_runs(agent_id: str, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
+# ── voice / call tools ───────────────────────────────────────────────────────
+#
+# A "call" is a conversation for a voice agent, read through a voice lens:
+# duration, how the call ended, silence percentage, agent-vs-caller talk ratio,
+# and per-stage cost (STT / LLM / TTS / telephony). These wrap the /v1/calls
+# endpoints so an operator can ask "how are my voice agents doing" without
+# leaving the client. Voice failure signals are reported through the normal
+# signal tools too; these add the voice-specific call metrics on top.
+
+
+_COMPLETION_ICONS = {"natural": "✅", "dropped": "🔴", "escalated": "🟠"}
+
+
+@mcp.tool()
+def list_voice_calls(
+    agent_id: str = "",
+    completion_status: str = "",
+    cost_bucket: str = "",
+    limit: int = 20,
+) -> str:
+    """
+    List recent voice calls with call-level metrics: duration, how the call
+    ended, silence percentage, voice signal count, and cost. A "call" is a voice
+    agent's conversation (the runs that share one conversation id).
+
+    Use this for questions like "how are my voice agents doing", "show me dropped
+    calls", or "which calls escalated to a human".
+
+    Args:
+        agent_id:          Filter to one voice agent (optional).
+        completion_status: Filter by how the call ended:
+                           natural | dropped | escalated (optional).
+        cost_bucket:       Filter by cost: low (<$0.10) | medium ($0.10-$1) |
+                           high (>$1) (optional).
+        limit:             Max calls to return (default 20, max 100).
+    """
+    data = client.get(
+        "/v1/calls",
+        agent_id=agent_id or None,
+        completion_status=completion_status or None,
+        cost_bucket=cost_bucket or None,
+        limit=min(limit, 100),
+    )
+    calls = data.get("calls", [])
+    if not calls:
+        return "No voice calls found for the given filters."
+
+    lines = [
+        "Voice calls\n",
+        f"{'CALL':>5}  {'AGENT':<18} {'WHEN':<10} {'DUR':>6} {'SILENCE':>7} "
+        f"{'SIGS':>5} {'COST':>9}  STATUS",
+        "─" * 84,
+    ]
+    for c in calls:
+        icon = _COMPLETION_ICONS.get(c.get("completion_status", ""), "⚪")
+        dur = f"{c.get('duration_seconds', 0):.0f}s"
+        silence = f"{c.get('silence_pct', 0):.0f}%"
+        sigs = c.get("voice_signal_count", 0)
+        sig_str = f"🔴 {sigs}" if sigs else "0"
+        lines.append(
+            f"{c.get('id', '?'):>5}  {str(c.get('agent_id', ''))[:18]:<18} "
+            f"{_ago(c.get('last_run_at')):<10} {dur:>6} {silence:>7} "
+            f"{sig_str:>5} ${c.get('cost_usd', 0):>8.4f}  {icon} {c.get('completion_status', '?')}"
+        )
+
+    page = data.get("page", {})
+    lines.append(f"\n{len(calls)} of {page.get('total', len(calls))} calls shown.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_call_detail(conversation_id: int) -> str:
+    """
+    One voice call's full picture: call-level metrics, per-stage cost breakdown,
+    the voice failure signals detected, and (when recorded) links to the call
+    audio.
+
+    Args:
+        conversation_id: The integer call id (from list_voice_calls).
+    """
+    try:
+        c = client.get(f"/v1/calls/{conversation_id}")
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    icon = _COMPLETION_ICONS.get(c.get("completion_status", ""), "⚪")
+    lines = [
+        f"Call #{c.get('id')}  ({c.get('agent_id', '')})",
+        f"  Ended:      {icon} {c.get('completion_status', '?')}",
+        f"  Duration:   {c.get('duration_seconds', 0):.0f}s over {c.get('run_count', 0)} run(s)",
+        f"  Silence:    {c.get('silence_pct', 0):.0f}%",
+    ]
+    ratio = c.get("agent_talk_ratio")
+    if ratio is not None:
+        lines.append(f"  Talk ratio: agent {ratio * 100:.0f}% / caller {(1 - ratio) * 100:.0f}%")
+    lines.append(f"  Cost:       ${c.get('cost_usd', 0):.4f}")
+    breakdown = c.get("cost_breakdown") or {}
+    parts = "  ".join(f"{k}=${v:.4f}" for k, v in breakdown.items() if v)
+    if parts:
+        lines.append(f"              {parts}")
+
+    signals = c.get("voice_signals") or []
+    lines.append("")
+    if signals:
+        lines.append(f"Voice signals ({len(signals)}):")
+        lines.extend(f"  🔴 {s}" for s in signals)
+    else:
+        lines.append("Voice signals: ✅ none")
+
+    recordings = c.get("recordings") or []
+    if recordings:
+        lines.append("")
+        lines.append(f"Recordings ({len(recordings)}):")
+        for rec in recordings:
+            dur = rec.get("duration_seconds")
+            suffix = f"  ({dur:.0f}s)" if isinstance(dur, (int, float)) else ""
+            lines.append(f"  🎧 {rec.get('url', '')}{suffix}")
+
+    return "\n".join(lines)
+
+
 # ── fix tracking tools ───────────────────────────────────────────────────────
 
 
@@ -688,7 +810,7 @@ def get_fix_status(signal_id: int, agent_id: str = "") -> str:
     try:
         data = client.get(f"/v1/signals/{signal_id}/fix-status")
     except Exception as exc:
-        return f"Error: \1"
+        return f"Error: {exc}"
 
     verdict = data.get("verdict", "unknown")
     verdict_icons = {
@@ -1930,6 +2052,61 @@ _GUIDES: dict[str, str] = {
 
         Full guide: docs/integrate-haystack-agent.md
     """).strip(),
+    "voice": textwrap.dedent("""
+        # Instrument a voice agent with Dunetrace
+
+        Voice hooks live on the run object — no extra install, `pip install dunetrace`.
+        They sit alongside the LLM / tool / retrieval hooks so a voice turn is
+        captured end to end: speech-to-text in, LLM and tool work, text-to-speech
+        out, plus the VAD and turn-taking signals a voice loop runs on.
+
+        ## Instrument a turn
+        ```python
+        from dunetrace import Dunetrace
+
+        dt = Dunetrace(endpoint="http://localhost:8001")
+
+        # conversation_id (the call id) rolls every turn up into one call
+        with dt.run("voice-support", conversation_id=call_id) as run:
+            # 1. Speech-to-text for the caller's turn (advances the step)
+            run.transcription_received(
+                transcript, confidence=0.92, latency_ms=140, audio_seconds=3.1
+            )
+
+            # 2. Your normal LLM / tool work, tracked as usual
+            run.llm_called("gpt-4o", prompt_tokens=800)
+            reply = generate_reply(transcript)
+            run.llm_responded(completion_tokens=120, latency_ms=900)
+
+            # 3. Text-to-speech for the agent's reply (does NOT advance the step)
+            run.tts_generated(
+                reply, latency_ms=210, audio_seconds=4.4,
+                provider="elevenlabs", voice_id="rachel", model="eleven_turbo_v2",
+            )
+        ```
+
+        ## Real-time signals (annotate the turn, never advance the step)
+        ```python
+        # speech_start | speech_end | silence | barge_in
+        run.voice_activity_detected("barge_in", duration_ms=200)
+        # agent_speaking | user_speaking | both_speaking | neither
+        run.turn_taking("agent_speaking", from_agent=True)
+        run.recording_metadata(
+            "https://audio.example/call.wav", duration_seconds=61, format="wav",
+        )
+        ```
+
+        ## Notes
+        - Only `transcription_received` advances the step counter, so a full voice
+          turn stays ~one step and the always-on step detectors don't false-fire.
+        - `audio_seconds` is optional but enables per-minute STT cost attribution.
+        - `provider` / `voice_id` / `model` on `tts_generated` let Dunetrace pull
+          provider-side generation history (ElevenLabs) back to the exact turn.
+        - Query the resulting calls from an MCP client with `list_voice_calls`
+          and `get_call_detail`.
+
+        Full guide: docs/integrations/voice-frameworks.md
+    """).strip(),
     "otel": textwrap.dedent("""
         # Zero-code monitoring via OpenTelemetry (OTLP receiver)
 
@@ -1996,6 +2173,40 @@ _GUIDES: dict[str, str] = {
         - `service.name` resource attribute → agent_id
         - `service.version` resource attribute → agent_version
         - Override per-request with `X-Dunetrace-Agent-Id` header
+
+        ## Also from the Python SDK (`pip install 'dunetrace[otel]'`)
+
+        If you already run the Dunetrace Python SDK, it bridges OpenTelemetry in
+        both directions in-process — no OTLP endpoint or network hop needed.
+
+        ### Export Dunetrace's own events to your OTel backend
+        Ship every run / LLM / tool / retrieval / voice event to Datadog, Grafana
+        Tempo, Honeycomb, Signoz, etc. as OTel spans (GenAI semantic conventions),
+        alongside Dunetrace's normal ingest. Env-driven, zero code change:
+        ```bash
+        export DUNETRACE_OTEL_ENABLED=1
+        export DUNETRACE_OTEL_ENDPOINT=https://otlp.example:4317
+        export DUNETRACE_OTEL_HEADERS="DD-API-KEY=xxxxx"   # provider auth
+        export DUNETRACE_OTEL_PROTOCOL=grpc                # or http/protobuf
+        ```
+        Export runs on a bounded background pipeline with a circuit breaker, so a
+        slow or dead collector never blocks or breaks the agent.
+
+        ### Feed an existing OTel pipeline into Dunetrace's detectors
+        Already instrumented with OpenLLMetry / Traceloop / OpenLIT? Attach the
+        receiver as a second span processor — no dt.run() calls required:
+        ```python
+        from opentelemetry.sdk.trace import TracerProvider
+        from dunetrace import Dunetrace
+        from dunetrace.integrations.otel_receiver import DunetraceOTelReceiver
+
+        dt = Dunetrace(api_key="dt_live_...")
+        provider = TracerProvider()          # your existing pipeline, unchanged
+        DunetraceOTelReceiver.attach(provider, dt, agent_id="my-agent")
+        ```
+        gen_ai.* spans are translated to Dunetrace events and run through the full
+        detector suite — same result as the HTTP endpoint above, without leaving
+        the process.
     """).strip(),
 }
 
@@ -2025,6 +2236,13 @@ _ALIASES: dict[str, str] = {
     "haystack-ai": "haystack",
     "haystack2": "haystack",
     "hs": "haystack",
+    "voice": "voice",
+    "voice-agent": "voice",
+    "voice_agent": "voice",
+    "voice-agents": "voice",
+    "stt": "voice",
+    "tts": "voice",
+    "speech": "voice",
     "otel": "otel",
     "otlp": "otel",
     "opentelemetry": "otel",
@@ -2049,15 +2267,17 @@ def get_instrumentation_guide(framework: str) -> str:
             - "typescript"  — TypeScript / Node.js agents (raw HTTP ingest)
             - "tools"       — How to track tool calls specifically (all languages)
             - "haystack"    — Haystack 2.x pipelines (simple, RAG, Agent component)
-            - "otel"        — Zero-code OTel/OTLP receiver (Langdock, Dify, OpenLLMetry,
-                              any platform that emits OTLP traces)
+            - "voice"       — Voice agents (STT / TTS / VAD / turn-taking hooks)
+            - "otel"        — OpenTelemetry: zero-code OTLP receiver plus the SDK's
+                              in-process export and receiver bridge (dunetrace[otel])
 
     Aliases accepted: langgraph, lc, custom-python, ts, javascript, js, node,
-    tool-calls, tracking, haystack-ai, hs, otlp, opentelemetry, langdock, dify, no-code.
+    tool-calls, tracking, haystack-ai, hs, voice-agent, stt, tts, speech,
+    otlp, opentelemetry, langdock, dify, no-code.
     """
     key = _ALIASES.get(framework.lower().strip())
     if key is None:
-        supported = "langchain, python, typescript, tools, haystack"
+        supported = "langchain, python, typescript, tools, haystack, voice, otel"
         return (
             f"Unknown framework '{framework}'. Supported values: {supported}.\n\n"
             "Use list_agents to check what agents are already instrumented."
@@ -2072,6 +2292,7 @@ def get_instrumentation_guide(framework: str) -> str:
         "typescript": "integrate-typescript-agent.md",
         "tools": "integrate-custom-python-agent.md",
         "haystack": "integrate-haystack-agent.md",
+        "voice": "integrations/voice-frameworks.md",
         "otel": "integrate-langdock.md",
     }
     doc_path = _DOCS / doc_map[key]

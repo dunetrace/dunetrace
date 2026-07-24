@@ -732,6 +732,182 @@ class TestGetAgentRuns(unittest.TestCase):
         self.assertIn("No runs found", out)
 
 
+class TestVoiceCalls(unittest.TestCase):
+    """Smoke tests for the voice call tools (list_voice_calls / get_call_detail)."""
+
+    CALL_LIST = {
+        "calls": [
+            {
+                "id": 101,
+                "agent_id": "voice-support",
+                "external_id": "conv-abc",
+                "first_run_at": time.time() - 600,
+                "last_run_at": time.time() - 300,
+                "run_count": 4,
+                "duration_seconds": 92.0,
+                "completion_status": "natural",
+                "silence_pct": 12.0,
+                "agent_talk_ms": 40000,
+                "caller_talk_ms": 38000,
+                "voice_signal_count": 0,
+                "cost_usd": 0.0423,
+                "cost_breakdown": {"stt": 0.01, "llm": 0.02, "tts": 0.0123, "telephony": 0.0},
+                "agent_talk_ratio": 0.51,
+            },
+            {
+                "id": 102,
+                "agent_id": "voice-support",
+                "external_id": "conv-def",
+                "first_run_at": time.time() - 1200,
+                "last_run_at": time.time() - 900,
+                "run_count": 2,
+                "duration_seconds": 45.0,
+                "completion_status": "dropped",
+                "silence_pct": 55.0,
+                "agent_talk_ms": 5000,
+                "caller_talk_ms": 3000,
+                "voice_signal_count": 2,
+                "cost_usd": 0.5,
+                "cost_breakdown": {"stt": 0.1, "llm": 0.3, "tts": 0.1, "telephony": 0.0},
+                "agent_talk_ratio": 0.62,
+            },
+        ],
+        "page": {"total": 2, "offset": 0, "limit": 20, "has_more": False},
+    }
+
+    CALL_DETAIL = {
+        "id": 102,
+        "agent_id": "voice-support",
+        "external_id": "conv-def",
+        "first_run_at": time.time() - 1200,
+        "last_run_at": time.time() - 900,
+        "run_count": 2,
+        "duration_seconds": 45.0,
+        "completion_status": "dropped",
+        "silence_pct": 55.0,
+        "agent_talk_ms": 5000,
+        "caller_talk_ms": 3000,
+        "voice_signal_count": 2,
+        "cost_usd": 0.5,
+        "cost_breakdown": {"stt": 0.1, "llm": 0.3, "tts": 0.1, "telephony": 0.0},
+        "agent_talk_ratio": 0.62,
+        "runs": [{"run_id": "run-x"}, {"run_id": "run-y"}],
+        "voice_signals": ["VOICE_DEAD_AIR", "VOICE_TRUNCATED_RESPONSE"],
+        "timeline": [],
+        "recordings": [{"url": "https://audio.example/conv-def.wav", "duration_seconds": 45.0}],
+        "signal_jumps": [],
+    }
+
+    def test_list_shows_calls(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.CALL_LIST):
+            out = srv.list_voice_calls()
+        self.assertIn("101", out)
+        self.assertIn("102", out)
+        self.assertIn("voice-support", out)
+
+    def test_list_shows_completion_status(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.CALL_LIST):
+            out = srv.list_voice_calls()
+        self.assertIn("natural", out)
+        self.assertIn("dropped", out)
+
+    def test_list_shows_cost_and_signal_count(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.CALL_LIST):
+            out = srv.list_voice_calls()
+        self.assertIn("$  0.0423", out)  # call 101 cost, right-aligned
+        self.assertIn("🔴 2", out)  # call 102 signal count
+
+    def test_list_passes_filters(self):
+        captured: dict = {}
+
+        def _cap(path, **params):
+            captured.update(params)
+            return self.CALL_LIST
+
+        with patch("dunetrace_mcp.client.get", side_effect=_cap):
+            srv.list_voice_calls(
+                agent_id="voice-support", completion_status="dropped", cost_bucket="high", limit=5
+            )
+        self.assertEqual(captured.get("agent_id"), "voice-support")
+        self.assertEqual(captured.get("completion_status"), "dropped")
+        self.assertEqual(captured.get("cost_bucket"), "high")
+        self.assertEqual(captured.get("limit"), 5)
+
+    def test_list_omits_blank_filters(self):
+        captured: dict = {}
+
+        def _cap(path, **params):
+            captured.update(params)
+            return self.CALL_LIST
+
+        with patch("dunetrace_mcp.client.get", side_effect=_cap):
+            srv.list_voice_calls()
+        # blank string filters must be sent as None so the client drops them
+        self.assertIsNone(captured.get("agent_id"))
+        self.assertIsNone(captured.get("completion_status"))
+        self.assertIsNone(captured.get("cost_bucket"))
+
+    def test_list_caps_limit_at_100(self):
+        captured: dict = {}
+
+        def _cap(path, **params):
+            captured.update(params)
+            return self.CALL_LIST
+
+        with patch("dunetrace_mcp.client.get", side_effect=_cap):
+            srv.list_voice_calls(limit=999)
+        self.assertEqual(captured.get("limit"), 100)
+
+    def test_list_empty(self):
+        with patch("dunetrace_mcp.client.get", return_value={"calls": [], "page": {"total": 0}}):
+            out = srv.list_voice_calls()
+        self.assertIn("No voice calls found", out)
+
+    def test_detail_shows_metrics(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.CALL_DETAIL):
+            out = srv.get_call_detail(102)
+        self.assertIn("Call #102", out)
+        self.assertIn("dropped", out)
+        self.assertIn("45s", out)
+        self.assertIn("55%", out)
+
+    def test_detail_shows_talk_ratio(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.CALL_DETAIL):
+            out = srv.get_call_detail(102)
+        self.assertIn("Talk ratio", out)
+        self.assertIn("62%", out)
+
+    def test_detail_shows_cost_breakdown(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.CALL_DETAIL):
+            out = srv.get_call_detail(102)
+        self.assertIn("stt=$", out)
+        self.assertIn("llm=$", out)
+
+    def test_detail_shows_voice_signals(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.CALL_DETAIL):
+            out = srv.get_call_detail(102)
+        self.assertIn("VOICE_DEAD_AIR", out)
+        self.assertIn("VOICE_TRUNCATED_RESPONSE", out)
+
+    def test_detail_shows_recording(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.CALL_DETAIL):
+            out = srv.get_call_detail(102)
+        self.assertIn("audio.example/conv-def.wav", out)
+
+    def test_detail_no_signals(self):
+        clean = {**self.CALL_DETAIL, "voice_signals": []}
+        with patch("dunetrace_mcp.client.get", return_value=clean):
+            out = srv.get_call_detail(101)
+        self.assertIn("✅ none", out)
+
+    def test_detail_api_error(self):
+        with patch(
+            "dunetrace_mcp.client.get", side_effect=RuntimeError("API error 404: not found")
+        ):
+            out = srv.get_call_detail(999)
+        self.assertIn("Error", out)
+
+
 class TestGetAgentTokenStats(unittest.TestCase):
     def setUp(self):
         self.patcher = patch("dunetrace_mcp.client.get", side_effect=_mock_get)
@@ -1275,6 +1451,31 @@ class TestGetInstrumentationGuideExtra(unittest.TestCase):
         out = srv.get_instrumentation_guide("nodejs")
         self.assertIn("sendEvent", out)
 
+    def test_voice_guide(self):
+        out = srv.get_instrumentation_guide("voice")
+        self.assertIn("transcription_received", out)
+        self.assertIn("tts_generated", out)
+        self.assertIn("voice_activity_detected", out)
+        self.assertIn("turn_taking", out)
+
+    def test_voice_aliases(self):
+        for alias in ("voice-agent", "voice_agent", "stt", "tts", "speech"):
+            out = srv.get_instrumentation_guide(alias)
+            self.assertIn(
+                "transcription_received", out, f"alias {alias!r} did not resolve to voice"
+            )
+
+    def test_otel_guide_covers_sdk_export(self):
+        # The otel guide must document the SDK's own OTel export, not just the
+        # zero-code OTLP receiver endpoint.
+        out = srv.get_instrumentation_guide("otel")
+        self.assertIn("DUNETRACE_OTEL_ENABLED", out)
+        self.assertIn("dunetrace[otel]", out)
+
+    def test_otel_guide_covers_inprocess_receiver(self):
+        out = srv.get_instrumentation_guide("otel")
+        self.assertIn("DunetraceOTelReceiver", out)
+
 
 class TestClientHelpers(unittest.TestCase):
     """Tests for the new post / patch / delete helpers in client.py."""
@@ -1400,6 +1601,9 @@ class TestGetFixStatus(unittest.TestCase):
         ):
             out = srv.get_fix_status(9999)
         self.assertIn("Error", str(out))
+        # the actual exception text must be surfaced, not a stray backreference
+        self.assertIn("API error 404: not found", str(out))
+        self.assertNotIn("\1", str(out))
 
 
 class TestTriggerExplain(unittest.TestCase):

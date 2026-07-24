@@ -26,6 +26,12 @@ export type {
   RunOptions,
   LlmRespondedOptions,
   ClientOptions,
+  EventSink,
   MemorySource,
+  VadType,
+  TurnTakingAction,
+  TranscriptionOptions,
+  TtsOptions,
+  RecordingOptions,
 } from "./models.js";
-export { MEMORY_SOURCES } from "./models.js";
+export { MEMORY_SOURCES, VAD_TYPES, TURN_TAKING_ACTIONS } from "./models.js";
