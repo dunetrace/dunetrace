@@ -249,7 +249,7 @@ class _DunetraceSpan:
         self._tracer = tracer
         self._operation = operation_name
         self._tags: Dict[str, Any] = dict(tags)
-        self._ctags: Dict[str, Any] = {}  # content tags (locally only, never transmitted)
+        self._ctags: Dict[str, Any] = {}  # component I/O scratch, used locally to derive metrics
         self._parent = parent_span
         self._start = time.time()
         # Set by root pipeline spans:

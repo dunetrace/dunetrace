@@ -53,7 +53,7 @@ Same pattern with `await query_engine.aquery(question)` inside an `async def` tr
 
 ### What's captured
 
-Run boundaries and latency, raw query text, retrieval result count and top score, model/tool names declared in `@dt.trace`. Not captured by this integration (not a privacy restriction — just not wired up): retrieved document text, the generated answer text, node metadata/embeddings.
+Run boundaries and latency, raw query text, retrieval result count and top score, model/tool names declared in `@dt.trace`. Not captured by this integration (just not wired up): retrieved document text, the generated answer text, node metadata/embeddings.
 
 ### Troubleshooting
 

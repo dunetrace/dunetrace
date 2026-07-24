@@ -91,6 +91,9 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
   border-right:1px solid var(--wire);
   padding:1.25rem 0;z-index:50;
   display:flex;flex-direction:column;
+  /* Scroll the nav when it is taller than the viewport so lower items
+     (OTel Receiver and below) stay reachable. */
+  overflow-y:auto;overflow-x:hidden;
 }
 .sb-section{margin-bottom:1.5rem}
 .sb-label{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--orange);letter-spacing:3px;text-transform:uppercase;padding:0 1rem;margin-bottom:.5rem}
@@ -114,9 +117,9 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
   position:fixed;top:var(--top);left:var(--sidebar);right:0;bottom:0;
   overflow-y:auto;padding:1.5rem;z-index:1;
 }
-#main::-webkit-scrollbar{width:4px}
-#main::-webkit-scrollbar-track{background:transparent}
-#main::-webkit-scrollbar-thumb{background:var(--wire);border-radius:2px}
+#main::-webkit-scrollbar,#sidebar::-webkit-scrollbar{width:4px}
+#main::-webkit-scrollbar-track,#sidebar::-webkit-scrollbar-track{background:transparent}
+#main::-webkit-scrollbar-thumb,#sidebar::-webkit-scrollbar-thumb{background:var(--wire);border-radius:2px}
 
 /* ── PAGES ── */
 .page{display:none}
@@ -761,6 +764,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 2.5c0 5 5.5 10.5 10.5 10.5l1.5-2.5-3-2-1.5 1.5C9 8.5 7.5 7 6.5 5.5L8 4 6 1 3.5 2.5z"/></svg>
       Calls
     </div>
+    <div class="sb-item" onclick="nav('voice-analytics',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v14M4 4v8M12 4v8M1 6.5v3M15 6.5v3"/></svg>
+      Voice analytics
+    </div>
     <div class="sb-item" onclick="nav('tokens',this)">
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="4" width="14" height="8" rx="1.5"/><path d="M5 8h6M8 6v4"/></svg>
       Token usage
@@ -782,6 +789,14 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="sb-item" onclick="nav('packs',this)">
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
       Packs
+    </div>
+    <div class="sb-item" onclick="nav('integrations',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 10l4-4M5.5 8.5l-2 2a2.5 2.5 0 003.5 3.5l2-2M10.5 7.5l2-2a2.5 2.5 0 00-3.5-3.5l-2 2"/></svg>
+      Integrations
+    </div>
+    <div class="sb-item" onclick="nav('otel-receiver',this)">
+      <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 8h3l2-4 2 8 2-4h3"/></svg>
+      OTel Receiver
     </div>
     <div class="sb-item" onclick="nav('approvals',this)">
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8.5l3.5 3.5L13 5"/></svg>
@@ -1066,6 +1081,9 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="signals-grid" id="detail-signals-grid">
       <div class="loading" style="grid-column:1/-1">loading…</div>
     </div>
+    <!-- ElevenLabs correlated generations (Phase 5.1). Populated only when this
+         run has correlated TTS; empty and invisible otherwise. -->
+    <div id="detail-elevenlabs" style="margin-bottom:1.25rem"></div>
     <div class="explain-card" id="detail-explain">
       <div class="explain-title">Why this triggered</div>
       <div class="explain-text" id="detail-explain-text">—</div>
@@ -1421,6 +1439,41 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div id="packs-list">
     <div class="loading">loading…</div>
   </div>
+</div>
+
+<div id="page-otel-receiver" class="page">
+  <div class="sec-head"><span class="sec-title">OTel Receiver</span></div>
+  <p style="font-size:12px;color:var(--chalk4);margin:-.5rem 0 1rem">
+    Activity for spans sent to Dunetrace's OTLP receiver (/v1/otlp/traces) in the last 24h.
+    The rejection breakdown tells you why spans were turned away when an integration isn't landing.
+  </p>
+  <div id="otel-receiver-body"><div class="loading">loading…</div></div>
+</div>
+
+<div id="page-integrations" class="page">
+  <div class="sec-head"><span class="sec-title">Integrations</span></div>
+  <p style="font-size:12px;color:var(--chalk4);margin:-.5rem 0 1rem">
+    Connect a voice provider so Dunetrace can pull its generation data and correlate it
+    with agent behavior. ElevenLabs stays the source of truth. Dunetrace pulls a copy to
+    match against your tts_generated events.
+  </p>
+  <div id="integrations-list">
+    <div class="loading">loading…</div>
+  </div>
+  <!-- Correlated-generations explorer (Phase 5.1). Populated only when ElevenLabs
+       is connected and has correlated data. -->
+  <div id="elevenlabs-generations-panel" style="margin-top:1.25rem"></div>
+</div>
+
+<div id="page-voice-analytics" class="page">
+  <div class="sec-head"><span class="sec-title">Voice analytics</span></div>
+  <p style="font-size:12px;color:var(--chalk4);margin:-.5rem 0 1rem">
+    Cross-tool views that join ElevenLabs generation data with Dunetrace agent behavior.
+    Needs ElevenLabs connected and generations correlated to runs.
+  </p>
+  <div id="va-cost" class="table-card" style="padding:1.25rem;margin-bottom:1rem"><div class="loading">loading…</div></div>
+  <div id="va-voice" class="table-card" style="padding:1.25rem;margin-bottom:1rem"><div class="loading">loading…</div></div>
+  <div id="va-truncation" class="table-card" style="padding:1.25rem"><div class="loading">loading…</div></div>
 </div>
 
 <div id="page-approvals" class="page">
@@ -1867,6 +1920,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   </div>
   <div class="sec-head" style="margin-top:1rem"><span class="sec-title">Cost breakdown</span></div>
   <div id="call-detail-cost" style="font-size:12px;color:var(--chalk3);margin-bottom:.5rem">—</div>
+  <div id="call-detail-elevenlabs-cost" style="font-size:12px;margin-bottom:.5rem"></div>
   <div class="sec-head" style="margin-top:1rem"><span class="sec-title">Recording</span></div>
   <div id="call-detail-recording" style="font-size:12px;color:var(--chalk3);margin-bottom:.5rem">—</div>
   <div class="sec-head" style="margin-top:1rem"><span class="sec-title">Voice signals</span></div>
@@ -2157,12 +2211,24 @@ async function loadAll() {
   _issuesLoaded       = false;
   try {
     hideErrorBanner();
-    const agentsData = await apiFetch('/v1/agents?limit=50');
+    // Fetch ALL agents (was limit=50): the Overview headline stats sum per-agent
+    // counts from this summary, so a cap here undercounted CRITICAL/HIGH/SIGNALS/
+    // RUNS for orgs with more than 50 agents. These summary rows are lightweight.
+    const agentsData = await apiFetch('/v1/agents?limit=500');
     _agents = agentsData.agents || [];
+    _agents.forEach(a => { a._runs = []; a._signals = []; a._shadowSignals = []; });
 
-    // Fetch runs + signals for all agents in parallel.
+    // The heavier per-agent runs/signals load (for the runs/analytics/heatmap
+    // detail views) is bounded by a safety cap so a very large org doesn't fire
+    // hundreds of requests on load. At typical sizes every agent still loads, so
+    // the detail views stay consistent with the headline. Most-active agents first.
+    const DETAIL_AGENT_CAP = 250;
+    const detailAgents = _agents.length <= DETAIL_AGENT_CAP
+      ? _agents
+      : [..._agents].sort((a, b) => (b.signal_count || 0) - (a.signal_count || 0)).slice(0, DETAIL_AGENT_CAP);
+
     // Health scores are deferred — loaded lazily on first visit to the Agents page.
-    await Promise.all(_agents.map(async a => {
+    await Promise.all(detailAgents.map(async a => {
       try {
         const [rd, sd] = await Promise.all([
           apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/runs?limit=200'),
@@ -2177,9 +2243,9 @@ async function loadAll() {
       }
     }));
 
-    _allRuns       = _agents.flatMap(a => a._runs.map(r => ({ ...r, _agentId: a.agent_id })));
-    _allSigs       = _agents.flatMap(a => a._signals);
-    _allShadowSigs = _agents.flatMap(a => a._shadowSignals);
+    _allRuns       = _agents.flatMap(a => (a._runs || []).map(r => ({ ...r, _agentId: a.agent_id })));
+    _allSigs       = _agents.flatMap(a => a._signals || []);
+    _allShadowSigs = _agents.flatMap(a => a._shadowSignals || []);
 
     populateRunsAgentDropdown();
     renderOverview();
@@ -2730,6 +2796,10 @@ function renderRunDetail(run, events, signals) {
   renderSignalCards(signals);
   loadRunVerdicts(signals);
 
+  // ElevenLabs generations correlated to this run (Phase 5.1). Separate fetch so
+  // non-ElevenLabs runs are unaffected and a failing/absent integration is silent.
+  loadRunElevenLabs(run.run_id);
+
   // Explanation
   renderExplain(signals);
 
@@ -2867,10 +2937,10 @@ function renderExplain(signals) {
 let _replayRunId = null;
 
 const _REPLAY_MODS = [
-  { type: 'break_tool_loop',   label: 'De-duplicate tool args',    targets: ['TOOL_LOOP','TOOL_THRASHING'] },
+  { type: 'break_tool_loop',   label: 'Thin repeated tool calls',   targets: ['TOOL_LOOP','TOOL_THRASHING'] },
   { type: 'fix_truncation',    label: 'Fix context truncation',     targets: ['LLM_TRUNCATION_LOOP'] },
   { type: 'fix_tool_failures', label: 'Fix tool failures',          targets: ['RETRY_STORM','CASCADING_TOOL_FAILURE'] },
-  { type: 'reduce_context',    label: 'Compress context (50%)',     targets: ['CONTEXT_BLOAT'] },
+  { type: 'reduce_context',    label: 'Cap context growth',         targets: ['CONTEXT_BLOAT'] },
   { type: 'fix_rag_retrieval', label: 'Fix empty retrieval',        targets: ['RAG_EMPTY_RETRIEVAL'] },
   { type: 'add_final_answer',  label: 'Add terminal answer',        targets: ['GOAL_ABANDONMENT'] },
 ];
@@ -3463,10 +3533,13 @@ function nav(id, el) {
   if (id === 'agents')   { renderAgents(); loadHealthScores(); loadIssuesCounts(); }
   if (id === 'tokens')   { renderTokens(); loadTokenStats(); }
   if (id === 'calls')    loadCalls();
+  if (id === 'voice-analytics') loadVoiceAnalytics();
   if (id === 'policies') loadAndRenderPolicies();
   if (id === 'keys')     loadAndRenderKeys();
   if (id === 'config')   loadCustomDetectors();
   if (id === 'packs')    loadPacks();
+  if (id === 'integrations') loadIntegrations();
+  if (id === 'otel-receiver') loadOtelReceiver();
   if (id === 'approvals') loadApprovals();
   if (id === 'conversations') { populateConvAgentDropdown(); loadConversations(); }
 }
@@ -4762,6 +4835,11 @@ function renderCallDetail(call) {
       + ` <span style="color:var(--chalk4)">·</span> <span style="font-weight:600">${fmtUsdCall(call.cost_usd)} total</span>`;
   }
 
+  // ElevenLabs actual cost as a separate line item (Phase 5.1). Fetched
+  // separately: it is what ElevenLabs actually billed for this call's correlated
+  // generations, distinct from the TTS estimate above. Silent if none.
+  loadCallElevenLabsCost(_curCallId);
+
   // Recording (Phase 2.3): link to the audio + per-signal deep-links. Dunetrace
   // never fetches the audio; the browser opens the customer's URL directly.
   const recEl = document.getElementById('call-detail-recording');
@@ -5323,6 +5401,512 @@ async function deactivatePackUI(packName) {
   } catch(e) { alert('Failed to disable pack: ' + e); }
 }
 
+// ── OTel Receiver observability (Phase 5) ─────────────────────────────────────
+
+const _OTEL_BORDER = '1px solid rgba(255,255,255,.08)';
+
+function _otelEsc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function _otelBtn(size) {
+  const p = size === 'sm' ? '3px 8px' : '6px 12px', f = size === 'sm' ? '11px' : '12px';
+  return 'background:transparent;border:1px solid rgba(255,255,255,.15);color:var(--chalk2);border-radius:6px;padding:' + p + ';font-size:' + f + ';cursor:pointer';
+}
+async function otelCopy(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const orig = btn.textContent; btn.textContent = 'copied'; setTimeout(() => { btn.textContent = orig; }, 1200);
+  } catch (e) { /* clipboard unavailable */ }
+}
+function otelCopyId(id, btn) {
+  const el = document.getElementById(id);
+  if (el) otelCopy((el.dataset && el.dataset.copy) || el.textContent, btn);
+}
+async function otelSetEnabled(enabled) {
+  try {
+    await fetch(API + '/v1/orgs/otel-receiver/enabled', {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+  } catch (e) { /* ignore */ }
+  loadOtelReceiver();
+}
+
+function _otelMaskKey(k) {
+  return (k && k.length >= 12) ? (k.slice(0, 7) + '••••' + k.slice(-4)) : 'YOUR_API_KEY';
+}
+function _otelYaml(k) {
+  const key = (k && k.length >= 8) ? k : 'dt_live_...';
+  return 'exporters:\n  otlphttp/dunetrace:\n    endpoint: https://YOUR-DUNETRACE-INGEST\n    headers:\n      Authorization: "Bearer ' + key + '"\n\nservice:\n  pipelines:\n    traces:\n      exporters: [otlphttp/dunetrace]';
+}
+function _otelRow(id, display, copyVal) {
+  return '<div style="display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.25);border:' + _OTEL_BORDER + ';border-radius:6px;padding:8px 10px">' +
+    '<code id="' + id + '"' + (copyVal ? ' data-copy="' + _otelEsc(copyVal) + '"' : '') + ' style="font-size:12px;flex:1;overflow-x:auto;white-space:nowrap">' + _otelEsc(display) + '</code>' +
+    '<button onclick="otelCopyId(\'' + id + '\',this)" style="' + _otelBtn('sm') + '">copy</button></div>';
+}
+function _otelSetupPanel() {
+  const key = (typeof KEY !== 'undefined') ? KEY : '';
+  const yaml = _otelYaml(key);
+  return '<div style="border:' + _OTEL_BORDER + ';border-radius:10px;padding:16px 18px;margin-bottom:18px">' +
+    '<div style="font-size:14px;font-weight:600;margin-bottom:6px">Connect your OTel pipeline</div>' +
+    '<div style="font-size:12px;color:var(--chalk4);margin-bottom:14px">Point your collector at Dunetrace. Your gen_ai spans become monitored runs, no SDK changes.</div>' +
+    '<div style="font-size:11px;color:var(--chalk4);margin-bottom:3px">Endpoint (replace host with your ingest URL)</div>' +
+    _otelRow('otel-ep', 'https://YOUR-DUNETRACE-INGEST/v1/otlp/traces') +
+    '<div style="font-size:11px;color:var(--chalk4);margin:12px 0 3px">API key</div>' +
+    _otelRow('otel-key', _otelMaskKey(key), key || 'YOUR_API_KEY') +
+    '<div style="font-size:11px;color:var(--chalk4);margin:12px 0 3px">Collector config</div>' +
+    '<pre id="otel-yaml" style="background:rgba(0,0,0,.25);border:' + _OTEL_BORDER + ';border-radius:6px;padding:10px;font-size:11px;overflow-x:auto;margin:0"><code>' + _otelEsc(yaml) + '</code></pre>' +
+    '<div style="margin-top:10px;display:flex;gap:8px">' +
+      '<button onclick="otelCopyId(\'otel-yaml\',this)" style="' + _otelBtn() + '">copy collector config</button>' +
+      '<a href="https://github.com/dunetrace/dunetrace/blob/main/docs/integrations/otel-ingestion.md" target="_blank" style="' + _otelBtn() + ';text-decoration:none">docs</a>' +
+    '</div></div>';
+}
+function _otelToggle(enabled) {
+  if (enabled === null || enabled === undefined) return '';
+  const on = !!enabled;
+  return '<div style="display:flex;align-items:center;justify-content:space-between;border:' + _OTEL_BORDER + ';border-radius:8px;padding:10px 14px;margin-bottom:16px">' +
+    '<div><div style="font-size:13px;font-weight:600">OTel ingestion</div>' +
+    '<div style="font-size:11px;color:var(--chalk4)">' + (on ? 'Accepting spans for this org.' : 'Disabled. Incoming OTLP spans are rejected with 403.') + ' Changes apply within a few minutes.</div></div>' +
+    '<button onclick="otelSetEnabled(' + (!on) + ')" style="' + _otelBtn() + (on ? '' : ';color:var(--orange);border-color:var(--orange)') + '">' + (on ? 'Disable' : 'Enable') + '</button></div>';
+}
+
+async function loadOtelReceiver() {
+  const el = document.getElementById('otel-receiver-body');
+  el.innerHTML = '<div class="loading">loading…</div>';
+
+  let enabled = null, data = null, statsErr = false;
+  try { enabled = (await apiFetch('/v1/orgs/otel-receiver/enabled')).enabled; } catch (e) { /* optional */ }
+  try { data = await apiFetch('/v1/orgs/otel-receiver/stats?hours=24'); } catch (e) { statsErr = true; }
+
+  const t = (data && data.totals) || {}, anomalies = (data && data.anomalies) || [], rej = t.rejections || {};
+  const border = _OTEL_BORDER;
+  const activity = (t.spans_received || 0) + (t.spans_rejected || 0) + (t.auth_failures || 0) + (t.rate_limit_hits || 0);
+
+  let html = _otelToggle(enabled);
+
+  if (statsErr) {
+    html += '<div style="font-size:12px;color:var(--chalk4);margin-bottom:14px">Could not reach the receiver stats endpoint. Is the API running with the OTel receiver deployed?</div>';
+    el.innerHTML = html + _otelSetupPanel();
+    return;
+  }
+  if (!activity) {
+    html += '<div style="font-size:12px;color:var(--chalk4);margin-bottom:14px">No spans received yet.</div>';
+    el.innerHTML = html + _otelSetupPanel();
+    return;
+  }
+
+  if (anomalies.length) {
+    html += '<div style="border:1px solid #b45309;background:rgba(180,83,9,.12);border-radius:8px;padding:10px 12px;margin-bottom:16px">';
+    html += anomalies.map(a =>
+      '<div style="font-size:12px;color:#f59e0b">⚠ ' + a.type.replace(/_/g, ' ') + ' — ' + a.detail + '</div>'
+    ).join('');
+    html += '</div>';
+  }
+
+  const rate = (t.translation_success_rate == null) ? '—' : (t.translation_success_rate * 100).toFixed(1) + '%';
+  const tiles = [
+    ['Spans received (24h)', t.spans_received || 0],
+    ['Events translated', t.events_translated || 0],
+    ['Translation success', rate],
+    ['Spans rejected', t.spans_rejected || 0],
+    ['Auth failures', t.auth_failures || 0],
+    ['Rate-limit hits', t.rate_limit_hits || 0],
+  ];
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:18px">';
+  html += tiles.map(([k, v]) =>
+    '<div style="border:' + border + ';border-radius:8px;padding:10px 12px">' +
+    '<div style="font-size:11px;color:var(--chalk4)">' + k + '</div>' +
+    '<div style="font-size:20px;font-weight:600">' + v + '</div></div>'
+  ).join('');
+  html += '</div>';
+
+  html += '<div class="sec-head"><span class="sec-title">Why spans were rejected</span></div>';
+  const reasons = Object.keys(rej).sort((a, b) => rej[b] - rej[a]);
+  if (reasons.length) {
+    html += '<div style="margin-bottom:18px">' + reasons.map(r =>
+      '<div style="display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:' + border + '">' +
+      '<span style="color:var(--chalk4)">' + r.replace(/_/g, ' ') + '</span><span>' + rej[r] + '</span></div>'
+    ).join('') + '</div>';
+  } else {
+    html += '<div style="font-size:12px;color:var(--chalk4);margin-bottom:18px">No rejections in the last 24h.</div>';
+  }
+
+  html += '<div class="sec-head"><span class="sec-title">Hourly activity</span></div>';
+  const series = (data.series || []).slice(-12);
+  if (series.length) {
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="color:var(--chalk4);text-align:left">' +
+      '<th style="padding:4px 0">Hour</th><th>Received</th><th>Translated</th><th>Rejected</th></tr></thead><tbody>';
+    html += series.map(h =>
+      '<tr><td style="padding:4px 0">' + new Date(h.hour_bucket).toLocaleString() + '</td>' +
+      '<td>' + (h.spans_received || 0) + '</td><td>' + (h.events_translated || 0) + '</td>' +
+      '<td>' + (h.spans_rejected || 0) + '</td></tr>'
+    ).join('');
+    html += '</tbody></table>';
+  } else {
+    html += '<div style="font-size:12px;color:var(--chalk4)">No receiver activity yet. Point your OTel collector at /v1/otlp/traces.</div>';
+  }
+
+  el.innerHTML = html;
+}
+
+// ── Integrations: ElevenLabs (Phase 4.1) ──────────────────────────────────────
+
+async function loadIntegrations() {
+  const list = document.getElementById('integrations-list');
+  if (!list) return;
+  list.innerHTML = '<div class="loading">loading…</div>';
+  let status = null;
+  try {
+    status = await apiFetch('/v1/orgs/integrations/elevenlabs');
+  } catch(e) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--chalk4)">Failed to load integrations.</div>';
+    return;
+  }
+  list.innerHTML = renderElevenLabsCard(status || { configured: false });
+  // Show the correlated-generations explorer only when connected.
+  const panel = document.getElementById('elevenlabs-generations-panel');
+  if (panel) {
+    if (status && status.configured) renderElevenLabsExplorer();
+    else panel.innerHTML = '';
+  }
+}
+
+function renderElevenLabsCard(s) {
+  const configured = !!s.configured;
+  const statusColor = configured ? 'var(--green)' : 'var(--chalk4)';
+  const statusLabel = configured ? 'connected' : 'not connected';
+  // A failing poll is worth surfacing honestly rather than showing a bare
+  // "connected" while nothing is actually coming through.
+  const failing = configured && s.consecutive_failures > 0;
+  const health = failing
+    ? `<div style="font-size:11px;color:var(--orange);margin-top:.5rem">Last ${s.consecutive_failures} poll(s) failed. Dunetrace keeps retrying. Your other data is unaffected.</div>`
+    : '';
+  const pollMins = configured && s.poll_interval_secs ? (s.poll_interval_secs / 60) : 5;
+  const lastSuccess = configured && s.last_success_at
+    ? new Date(s.last_success_at * 1000).toLocaleString()
+    : 'never';
+  const meta = configured
+    ? `<div style="font-size:11px;color:var(--chalk4);margin-top:.4rem">
+         Polling every ${esc(String(pollMins))} min · last successful pull: ${esc(lastSuccess)}
+       </div>`
+    : '';
+  const actions = configured
+    ? `<button class="act-btn act-secondary" onclick="removeElevenLabs()" style="font-size:11px">Disconnect</button>`
+    : '';
+  return `
+    <div class="table-card" style="padding:1.25rem;margin-bottom:.75rem">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.35rem">
+            <span class="mono" style="font-size:12px;color:var(--orange)">ElevenLabs</span>
+            <span style="font-size:10px;color:${statusColor};padding:1px 6px;border-radius:3px;border:1px solid ${statusColor}">${statusLabel}</span>
+          </div>
+          <div style="font-size:12px;color:var(--chalk3)">
+            Pull generation history to correlate TTS cost and voice choices with agent outcomes.
+          </div>
+          ${meta}
+          ${health}
+        </div>
+        <div style="display:flex;gap:.4rem;align-items:center;margin-left:1rem;flex-shrink:0">
+          ${actions}
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--wire);margin-top:1rem;padding-top:1rem">
+        <div style="display:flex;gap:.75rem;align-items:flex-end;flex-wrap:wrap">
+          <div style="flex:1;min-width:220px">
+            <label style="display:block;font-size:11px;color:var(--chalk4);margin-bottom:.25rem">API key</label>
+            <input id="el-api-key" type="password" autocomplete="off" placeholder="${configured ? 'enter a new key to rotate' : 'xi-...'}"
+              style="width:100%;box-sizing:border-box;font-size:12px;padding:.5rem;background:var(--wire);border:1px solid var(--wire2,var(--wire));border-radius:4px;color:var(--chalk1,inherit)">
+          </div>
+          <div style="width:150px">
+            <label style="display:block;font-size:11px;color:var(--chalk4);margin-bottom:.25rem">Poll every (min)</label>
+            <input id="el-poll-min" type="number" min="1" max="60" value="${esc(String(pollMins))}"
+              style="width:100%;box-sizing:border-box;font-size:12px;padding:.5rem;background:var(--wire);border:1px solid var(--wire2,var(--wire));border-radius:4px;color:var(--chalk1,inherit)">
+          </div>
+          <button class="act-btn" id="el-save-btn" onclick="saveElevenLabs()" style="font-size:11px">${configured ? 'Update' : 'Connect'}</button>
+        </div>
+        <div id="el-save-msg" style="font-size:11px;margin-top:.5rem"></div>
+        <div style="font-size:11px;color:var(--chalk4);margin-top:.5rem">
+          Your key is validated against ElevenLabs on save, encrypted at rest, and never shown again.
+        </div>
+      </div>
+    </div>`;
+}
+
+async function saveElevenLabs() {
+  const keyEl = document.getElementById('el-api-key');
+  const pollEl = document.getElementById('el-poll-min');
+  const msg = document.getElementById('el-save-msg');
+  const btn = document.getElementById('el-save-btn');
+  const apiKey = (keyEl.value || '').trim();
+  if (!apiKey) { msg.style.color = 'var(--orange)'; msg.textContent = 'Enter an API key.'; return; }
+  const mins = Math.max(1, Math.min(60, parseInt(pollEl.value || '5', 10) || 5));
+  btn.disabled = true;
+  msg.style.color = 'var(--chalk4)';
+  msg.textContent = 'Validating key with ElevenLabs…';
+  try {
+    const r = await fetch(API + '/v1/orgs/integrations/elevenlabs', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey, poll_interval_secs: mins * 60 }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.detail || ('HTTP ' + r.status));
+    }
+    keyEl.value = '';
+    msg.style.color = 'var(--green)';
+    msg.textContent = 'Connected. ElevenLabs data will start correlating on the next poll.';
+    await loadIntegrations();
+  } catch(e) {
+    msg.style.color = 'var(--orange)';
+    msg.textContent = 'Could not connect: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function removeElevenLabs() {
+  if (!confirm('Disconnect ElevenLabs? Correlated data already stored stays; no new data is pulled.')) return;
+  try {
+    const r = await fetch(API + '/v1/orgs/integrations/elevenlabs', {
+      method: 'DELETE', headers: { Authorization: 'Bearer ' + KEY },
+    });
+    if (!r.ok && r.status !== 204) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || r.status); }
+    await loadIntegrations();
+  } catch(e) { alert('Failed to disconnect: ' + e); }
+}
+
+// ── ElevenLabs correlated generations: shared rendering (Phase 5.1) ────────────
+
+function correlationLabel(method) {
+  return method === 'char_time' ? 'timestamp match only, verify' : 'low-confidence match, verify';
+}
+
+function elVerifyBadge(g) {
+  if (!g.uncertain) return '';
+  const hint = 'Matched to this run by ' + (g.correlation_method === 'char_time'
+    ? 'timestamp and character count only (no voice id or exact-text signal). Confirm against generation ' + (g.generation_id || '')
+    : 'a weaker signal. Confirm against generation ' + (g.generation_id || ''));
+  return `<span title="${esc(hint)}" style="font-size:10px;color:var(--amber);border:1px solid var(--amber);border-radius:3px;padding:1px 5px;margin-left:6px">⚠ ${esc(correlationLabel(g.correlation_method))}</span>`;
+}
+
+function elVoiceLabel(g) {
+  if (g.voice_name) return esc(g.voice_name) + (g.voice_id ? ' · ' + esc(g.voice_id) : '');
+  return esc(g.voice_id || 'unknown voice');
+}
+
+// Run detail: inline ElevenLabs metadata for a run's correlated generations.
+async function loadRunElevenLabs(runId) {
+  const el = document.getElementById('detail-elevenlabs');
+  if (!el) return;
+  el.innerHTML = '';
+  let gens;
+  try {
+    gens = await apiFetch('/v1/orgs/integrations/elevenlabs/generations?run_id=' + encodeURIComponent(runId));
+  } catch(e) { return; }  // not configured, or error -> render nothing
+  if (!gens || !gens.length) return;
+  const rows = gens.map(g => `
+    <div style="border:1px solid var(--wire);border-radius:6px;padding:.6rem .9rem;margin-bottom:.5rem">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
+        <div style="font-size:12px;color:var(--chalk2)">
+          <span style="color:var(--orange)">${elVoiceLabel(g)}</span>
+          <span style="color:var(--chalk4)">·</span> ${esc(g.model || '—')}
+          <span style="color:var(--chalk4)">·</span> ${g.character_count} chars${elVerifyBadge(g)}
+        </div>
+        <div style="font-size:12px">
+          <span style="font-weight:600">${fmtUsd(g.cost_usd || 0)}</span>
+          <span style="color:var(--chalk4)">(${g.cost_credits != null ? g.cost_credits + ' credits' : '—'})</span>
+          <a href="${esc(g.dashboard_url)}" target="_blank" rel="noopener" title="generation ${esc(g.generation_id)}" style="color:var(--blue);margin-left:8px">ElevenLabs ↗</a>
+        </div>
+      </div>
+    </div>`).join('');
+  el.innerHTML = `
+    <div class="table-card" style="padding:1.25rem">
+      <div class="sec-head" style="margin-bottom:.6rem"><span class="sec-title">ElevenLabs generations</span></div>
+      <div style="font-size:11px;color:var(--chalk4);margin-bottom:.75rem">
+        Pulled from ElevenLabs and correlated to this run's tts_generated events.
+      </div>
+      ${rows}
+    </div>`;
+}
+
+// Call detail: ElevenLabs actual cost as a separate line under the estimate.
+async function loadCallElevenLabsCost(callId) {
+  const el = document.getElementById('call-detail-elevenlabs-cost');
+  if (!el || callId == null) return;
+  el.innerHTML = '';
+  let c;
+  try {
+    c = await apiFetch('/v1/orgs/integrations/elevenlabs/calls/' + encodeURIComponent(callId) + '/cost');
+  } catch(e) { return; }
+  if (!c || !c.generation_count) return;  // nothing correlated -> show nothing
+  el.innerHTML =
+    `<span style="color:var(--orange)">ElevenLabs (actual)</span> ` +
+    `<span style="font-weight:600">${fmtUsdCall(c.cost_usd || 0)}</span> ` +
+    `<span style="color:var(--chalk4)">· ${c.cost_credits} credits · ${c.generation_count} generation(s)</span>`;
+}
+
+// Integrations page: correlated-generations explorer with filters.
+async function loadElevenLabsGenerations() {
+  const panel = document.getElementById('elevenlabs-generations-panel');
+  if (!panel) return;
+  const voice = (document.getElementById('el-filter-voice') || {}).value || '';
+  const model = (document.getElementById('el-filter-model') || {}).value || '';
+  const minCredits = (document.getElementById('el-filter-mincredits') || {}).value || '';
+  const params = new URLSearchParams();
+  if (voice) params.set('voice_id', voice);
+  if (model) params.set('model', model);
+  if (minCredits) params.set('min_credits', minCredits);
+  let gens = [];
+  try {
+    gens = await apiFetch('/v1/orgs/integrations/elevenlabs/generations' + (params.toString() ? '?' + params : ''));
+  } catch(e) { gens = []; }
+  const body = document.getElementById('el-gen-tbody');
+  if (!body) return;
+  if (!gens.length) {
+    body.innerHTML = '<tr><td colspan="6" style="color:var(--chalk4);padding:.5rem">No correlated generations match.</td></tr>';
+    return;
+  }
+  body.innerHTML = gens.map(g => `
+    <tr>
+      <td>${elVoiceLabel(g)}${elVerifyBadge(g)}</td>
+      <td>${esc(g.model || '—')}</td>
+      <td style="text-align:right">${g.character_count}</td>
+      <td style="text-align:right">${fmtUsd(g.cost_usd || 0)}</td>
+      <td>${g.run_id ? `<a onclick="showDetail('${esc(g.run_id)}','${esc(g.agent_id||'')}')" style="color:var(--blue);cursor:pointer" class="mono">${esc(g.run_id.slice(0,8))}</a>` : '—'}</td>
+      <td><a href="${esc(g.dashboard_url)}" target="_blank" rel="noopener" title="generation ${esc(g.generation_id)}" style="color:var(--blue)">↗</a></td>
+    </tr>`).join('');
+}
+
+function renderElevenLabsExplorer() {
+  const panel = document.getElementById('elevenlabs-generations-panel');
+  if (!panel) return;
+  panel.innerHTML = `
+    <div class="table-card" style="padding:1.25rem">
+      <div class="sec-head" style="margin-bottom:.75rem"><span class="sec-title">Correlated generations</span></div>
+      <div style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:.75rem">
+        <div><label style="display:block;font-size:11px;color:var(--chalk4)">Voice ID</label>
+          <input id="el-filter-voice" placeholder="any" style="font-size:12px;padding:.4rem;background:var(--wire);border:1px solid var(--wire);border-radius:4px;color:inherit"></div>
+        <div><label style="display:block;font-size:11px;color:var(--chalk4)">Model</label>
+          <input id="el-filter-model" placeholder="any" style="font-size:12px;padding:.4rem;background:var(--wire);border:1px solid var(--wire);border-radius:4px;color:inherit"></div>
+        <div><label style="display:block;font-size:11px;color:var(--chalk4)">Min credits (high-cost)</label>
+          <input id="el-filter-mincredits" type="number" min="0" placeholder="any" style="width:140px;font-size:12px;padding:.4rem;background:var(--wire);border:1px solid var(--wire);border-radius:4px;color:inherit"></div>
+        <button class="act-btn" onclick="loadElevenLabsGenerations()" style="font-size:11px">Apply</button>
+      </div>
+      <table class="run-table" style="width:100%;font-size:12px">
+        <thead><tr>
+          <th style="text-align:left">Voice</th><th style="text-align:left">Model</th>
+          <th style="text-align:right">Chars</th><th style="text-align:right">Cost (USD)</th>
+          <th style="text-align:left">Run</th><th></th>
+        </tr></thead>
+        <tbody id="el-gen-tbody"><tr><td colspan="6" class="loading">loading…</td></tr></tbody>
+      </table>
+    </div>`;
+  loadElevenLabsGenerations();
+}
+
+// ── Voice analytics (Phase 6.1): three cross-tool views ────────────────────────
+
+function _vaPct(x) { return x == null ? '—' : (x * 100).toFixed(1) + '%'; }
+function _vaEmpty(el, msg) { el.innerHTML = `<div style="font-size:12px;color:var(--chalk4)">${esc(msg)}</div>`; }
+
+async function loadVoiceAnalytics() {
+  loadVaCost();
+  loadVaVoice();
+  loadVaTruncation();
+}
+
+// Analytic 1: expensive TTS on failed conversations.
+async function loadVaCost() {
+  const el = document.getElementById('va-cost');
+  if (!el) return;
+  el.innerHTML = '<div class="loading">loading…</div>';
+  let d;
+  try { d = await apiFetch('/v1/orgs/integrations/elevenlabs/analytics/cost-by-outcome'); }
+  catch(e) { _vaEmpty(el, 'Connect ElevenLabs to see cost by outcome.'); return; }
+  const s = d.summary || {};
+  if (!s.call_count) { el.innerHTML = _vaHeader('Expensive TTS on failed conversations') + '<div style="font-size:12px;color:var(--chalk4)">No correlated ElevenLabs cost yet.</div>'; return; }
+  const rows = (d.calls || []).filter(c => c.cost_usd > 0).slice(0, 25).map(c => `
+    <tr style="${c.unsuccessful ? 'background:rgba(224,108,80,0.06)' : ''}">
+      <td class="mono"><a onclick="showCallDetail(${c.conversation_id})" style="color:var(--blue);cursor:pointer">${esc(c.external_id || ('#'+c.conversation_id))}</a></td>
+      <td style="text-align:right">${fmtUsd(c.cost_usd)}</td>
+      <td style="text-align:right">${c.credits}</td>
+      <td>${c.unsuccessful ? `<span style="color:var(--orange)">flagged · ${c.signal_count} signal(s)</span>` : '<span style="color:var(--green)">clean</span>'}</td>
+    </tr>`).join('');
+  el.innerHTML = _vaHeader('Expensive TTS on failed conversations') + `
+    <div style="display:flex;gap:1.5rem;flex-wrap:wrap;margin-bottom:1rem">
+      ${_vaStat('Spend on flagged calls', fmtUsd(s.unsuccessful_cost_usd), 'var(--orange)')}
+      ${_vaStat('Total TTS spend', fmtUsd(s.total_cost_usd))}
+      ${_vaStat('Flagged share', _vaPct(s.wasted_share))}
+      ${_vaStat('Flagged calls', s.unsuccessful_call_count + ' / ' + s.call_count)}
+    </div>
+    <table class="run-table" style="width:100%;font-size:12px">
+      <thead><tr><th style="text-align:left">Call</th><th style="text-align:right">Cost</th><th style="text-align:right">Credits</th><th style="text-align:left">Outcome</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// Analytic 2: voice choice impact.
+async function loadVaVoice() {
+  const el = document.getElementById('va-voice');
+  if (!el) return;
+  el.innerHTML = '<div class="loading">loading…</div>';
+  let d;
+  try { d = await apiFetch('/v1/orgs/integrations/elevenlabs/analytics/voice-impact'); }
+  catch(e) { _vaEmpty(el, 'Connect ElevenLabs to compare voices.'); return; }
+  const voices = d.voices || [];
+  if (!voices.length) { el.innerHTML = _vaHeader('Voice choice impact') + '<div style="font-size:12px;color:var(--chalk4)">No correlated generations with a voice id yet.</div>'; return; }
+  const rows = voices.map(v => `
+    <tr>
+      <td><span style="color:var(--orange)">${esc(v.voice_name || v.voice_id)}</span> <span class="mono" style="color:var(--chalk4);font-size:10px">${esc(v.voice_id)}</span></td>
+      <td style="text-align:right">${v.run_count}</td>
+      <td style="text-align:right">${_vaPct(v.signal_rate)}${v.insufficient_data ? ' <span style="color:var(--amber)" title="Fewer than 20 runs — not yet a reliable comparison">⚠</span>' : ''}</td>
+    </tr>`).join('');
+  el.innerHTML = _vaHeader('Voice choice impact') + `
+    <div style="font-size:11px;color:var(--chalk4);margin-bottom:.75rem">Signal rate is the share of a voice's runs that fired at least one signal. Lower is better. ⚠ marks voices with too few runs to trust yet.</div>
+    <table class="run-table" style="width:100%;font-size:12px">
+      <thead><tr><th style="text-align:left">Voice</th><th style="text-align:right">Runs</th><th style="text-align:right">Signal rate</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// Analytic 3: TTS truncation downstream impact.
+async function loadVaTruncation() {
+  const el = document.getElementById('va-truncation');
+  if (!el) return;
+  el.innerHTML = '<div class="loading">loading…</div>';
+  let d;
+  try { d = await apiFetch('/v1/orgs/integrations/elevenlabs/analytics/truncation-impact'); }
+  catch(e) { _vaEmpty(el, 'Connect ElevenLabs to see truncation impact.'); return; }
+  el.innerHTML = _vaHeader('TTS truncation downstream impact');
+  if (d.insufficient_data) {
+    el.innerHTML += `<div style="font-size:12px;color:var(--chalk4)">Not enough data to compare yet (truncated runs: ${d.truncated_runs}, clean runs: ${d.clean_runs}). Need more correlated runs with and without truncation.</div>`;
+    return;
+  }
+  const liftColor = d.lift > 0 ? 'var(--orange)' : 'var(--green)';
+  el.innerHTML += `
+    <div style="font-size:11px;color:var(--chalk4);margin-bottom:1rem">Frustration/abandonment signal rate on runs where TTS was truncated vs runs where it was not, within the ElevenLabs-correlated population (${d.population} runs).</div>
+    <div style="display:flex;gap:1.5rem;flex-wrap:wrap">
+      ${_vaStat('Truncated runs → frustration', _vaPct(d.truncated_frustration_rate), 'var(--orange)')}
+      ${_vaStat('Clean runs → frustration', _vaPct(d.clean_frustration_rate), 'var(--green)')}
+      ${_vaStat('Lift from truncation', (d.lift > 0 ? '+' : '') + _vaPct(d.lift), liftColor)}
+    </div>
+    <div style="font-size:12px;color:var(--chalk3);margin-top:1rem">${
+      d.lift > 0.05
+        ? 'Truncated calls show a higher frustration rate. Candidates appear to notice when TTS gets cut off.'
+        : 'No meaningful increase in frustration on truncated calls in this sample.'
+    }</div>`;
+}
+
+function _vaHeader(title) {
+  return `<div class="sec-head" style="margin-bottom:.75rem"><span class="sec-title">${esc(title)}</span></div>`;
+}
+function _vaStat(label, value, color) {
+  return `<div><div style="font-size:20px;font-weight:600;color:${color||'var(--chalk1,inherit)'}">${esc(String(value))}</div><div style="font-size:11px;color:var(--chalk4)">${esc(label)}</div></div>`;
+}
+
 // ── Approvals (Capability 2, Phase 2.4) ───────────────────────────────────────
 async function loadApprovals() {
   const list = document.getElementById('approvals-list');
@@ -5428,7 +6012,12 @@ function openPatternDrillDown(ft) {
 }
 
 function renderPatternDrillDown(body, ft, data, agentId) {
-  const trend  = data.daily_counts || [];
+  // Map the real /failure-patterns response shape: daily_trend[] (objects with
+  // affected_runs), evidence_aggregates[] (tool rows), co_occurring[] (objects),
+  // top_runs[] (objects with run_id). The old field names (daily_counts,
+  // top_tools, co_occurring_signals, example_run_ids) don't exist on the response,
+  // so this modal rendered empty once the endpoint started returning real data.
+  const trend  = (data.daily_trend || []).map(d => d.affected_runs || 0);
   const maxTrnd = Math.max(...trend, 1);
   const trendBars = trend.slice(-14).map(v => {
     const h  = v === 0 ? 2 : Math.max(4, Math.round(v / maxTrnd * 52));
@@ -5436,19 +6025,19 @@ function renderPatternDrillDown(body, ft, data, agentId) {
     return `<div style="flex:1;height:${h}px;background:${bg};border-radius:2px 2px 0 0;min-width:0"></div>`;
   }).join('');
 
-  const tools = (data.top_tools || []).map(t =>
+  const tools = (data.evidence_aggregates || []).filter(e => e.tool).map(t =>
     `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">
-      <span class="mono" style="color:var(--orange);flex:1">${esc(t.tool || t.name || '')}</span>
-      <span class="mono" style="color:var(--chalk4)">${t.count || 0}x</span>
+      <span class="mono" style="color:var(--orange);flex:1">${esc(t.tool)}</span>
+      <span class="mono" style="color:var(--chalk4)">avg ${t.avg_count != null ? t.avg_count : (t.count || 0)}x</span>
     </div>`
   ).join('') || '<div style="font-size:11px;color:var(--chalk4)">no tool data</div>';
 
-  const coSigs = (data.co_occurring_signals || []).map(c =>
-    `<span class="sev-badge" style="background:var(--s3);color:var(--chalk3);margin-right:4px;margin-bottom:4px">${esc(c)}</span>`
+  const coSigs = (data.co_occurring || []).map(c =>
+    `<span class="sev-badge" style="background:var(--s3);color:var(--chalk3);margin-right:4px;margin-bottom:4px">${esc((c.failure_type || '').replace(/_/g, ' '))}${c.co_count ? ' (' + c.co_count + ')' : ''}</span>`
   ).join('');
 
-  const exampleRuns = (data.example_run_ids || []).slice(0, 3).map(rid =>
-    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail(${jsVal(rid)},${jsVal(agentId)})">${shortId(rid)}</span>`
+  const exampleRuns = (data.top_runs || []).slice(0, 3).map(r =>
+    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail(${jsVal(r.run_id)},${jsVal(agentId)})">${shortId(r.run_id)}</span>`
   ).join('');
 
   body.innerHTML =

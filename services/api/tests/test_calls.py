@@ -88,6 +88,16 @@ class TestDerivedMetrics(unittest.TestCase):
         ]
         self.assertEqual(_compute_call_metrics(events, [])["silence_pct"], 0.3)
 
+    def test_silence_pct_clamped_to_one(self):
+        # Two 4s silences in a 5s span would be 160%; must clamp to 100%.
+        events = [
+            _ev("transcription.received", 0, text="a"),
+            _ev("voice_activity.detected", 1, type="silence", duration_ms=4000),
+            _ev("voice_activity.detected", 2, type="silence", duration_ms=4000),
+            _ev("tts.generated", 5, text="b"),
+        ]
+        self.assertEqual(_compute_call_metrics(events, [])["silence_pct"], 1.0)
+
     def test_talk_ratio_from_turn_taking_spans(self):
         # agent floor for 2s, then caller floor for 6s, final event at t=8.
         events = [

@@ -344,6 +344,70 @@ CREATE TABLE IF NOT EXISTS external_evaluation_processed (
 );
 """
 
+# Phase 4.1 — ElevenLabs pull integration credentials (bring-your-own API key
+# per org, encrypted at rest). Deliberately a DEDICATED table, not a row in
+# external_evaluation_integrations: ElevenLabs is not an evaluation provider
+# (it yields TTS generations we correlate to tts.generated events by
+# timestamp/character-count/voice, not scores we join by trace_id), so it
+# stores different state (a generation high-water mark, no endpoint_url — the
+# base URL is fixed). It still reuses the same Fernet encrypt-at-rest infra and
+# the same failure-tracking columns as external_evaluation_integrations so the
+# Phase 4.3 poller gets identical failure-isolation/backoff behavior for free.
+# Primarily owned by elevenlabs_worker's own migration (Phase 4.3); duplicated
+# here defensively, same whichever-starts-first convention as every other
+# cross-service table in this schema.
+_ELEVENLABS_DDL = """
+CREATE TABLE IF NOT EXISTS elevenlabs_integrations (
+    id                      BIGSERIAL        PRIMARY KEY,
+    org_id                  TEXT             NOT NULL UNIQUE,
+    encrypted_credentials   TEXT             NOT NULL,
+    poll_interval_secs      INTEGER          NOT NULL DEFAULT 300,
+    enabled                 BOOLEAN          NOT NULL DEFAULT TRUE,
+    last_polled_at          TIMESTAMPTZ,
+    last_success_at         TIMESTAMPTZ,
+    last_seen_generation_at DOUBLE PRECISION,
+    consecutive_failures    INTEGER          NOT NULL DEFAULT 0,
+    first_failure_at        TIMESTAMPTZ,
+    last_alerted_at         TIMESTAMPTZ,
+    created_at              TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
+    updated_at              TIMESTAMPTZ       NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_elevenlabs_integrations_enabled
+    ON elevenlabs_integrations(enabled) WHERE enabled = TRUE;
+
+-- elevenlabs_generations is owned by elevenlabs_worker (Phase 4.3/4.4);
+-- duplicated here defensively so api_svc's Phase 5 read paths (run/call detail,
+-- filter listing) never hit a missing table when an org has ElevenLabs
+-- configured but this service started first. Column-for-column identical to
+-- integrations_svc/db.py's copy.
+CREATE TABLE IF NOT EXISTS elevenlabs_generations (
+    id                     BIGSERIAL        PRIMARY KEY,
+    org_id                 TEXT             NOT NULL,
+    generation_id          TEXT             NOT NULL,
+    voice_id               TEXT,
+    voice_name             TEXT,
+    model                  TEXT,
+    character_count        INTEGER          NOT NULL DEFAULT 0,
+    cost_credits           INTEGER,
+    text                   TEXT,
+    source                 TEXT,
+    generated_at           DOUBLE PRECISION NOT NULL,
+    correlated_to_event_id BIGINT,
+    correlation_method     TEXT,
+    correlation_confidence REAL,
+    correlated_at          TIMESTAMPTZ,
+    unmatched_reason       TEXT,
+    run_id                 TEXT,
+    agent_id               TEXT,
+    fetched_at             TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
+    UNIQUE (org_id, generation_id)
+);
+ALTER TABLE elevenlabs_generations ADD COLUMN IF NOT EXISTS run_id TEXT;
+ALTER TABLE elevenlabs_generations ADD COLUMN IF NOT EXISTS agent_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_elevenlabs_gen_run
+    ON elevenlabs_generations(org_id, run_id);
+"""
+
 _ALERT_INTEGRATIONS_DDL = """
 -- Phase 4.1 — per-org Slack/Linear alert destinations, both bring-your-own
 -- (a customer's own Slack incoming webhook / Linear API key + webhook
@@ -560,6 +624,7 @@ async def init_pool() -> None:
         await conn.execute(_SEMANTIC_FEEDBACK_DDL)
         await conn.execute(_SEMANTIC_QUOTA_DDL)
         await conn.execute(_INTEGRATIONS_DDL)
+        await conn.execute(_ELEVENLABS_DDL)
         await conn.execute(_ALERT_INTEGRATIONS_DDL)
         await conn.execute(_ISSUES_RESOLUTION_DDL)
         await conn.execute(_GITHUB_APP_DDL)
@@ -586,6 +651,69 @@ async def check_db() -> str:
         return "ok"
     except Exception as exc:
         return str(exc)
+
+
+async def get_org_otel_ingestion_enabled(org_id: str) -> bool:
+    """Whether OTel ingestion is enabled for the org. Fail-open (True) when there
+    is no row or no pool, matching how ingest enforces it."""
+    if not _pool:
+        return True
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT otel_ingestion_enabled FROM organizations WHERE id = $1", org_id
+        )
+    return bool(row["otel_ingestion_enabled"]) if row is not None else True
+
+
+async def set_org_otel_ingestion_enabled(org_id: str, enabled: bool) -> None:
+    """Set the org's own OTel ingestion flag (the self-service toggle in the
+    dashboard). Inserts the organizations row if it does not exist yet, so a
+    disable always takes effect. ingest picks the change up within its enablement
+    cache TTL."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO organizations (id, name, otel_ingestion_enabled)
+            VALUES ($1, $1, $2)
+            ON CONFLICT (id) DO UPDATE SET otel_ingestion_enabled = EXCLUDED.otel_ingestion_enabled
+            """,
+            org_id,
+            enabled,
+        )
+
+
+async def fetch_otel_receiver_stats(org_id: str, hours: int = 24) -> list[dict]:
+    """Ascending hourly OTLP-receiver counters for one org over the last `hours`
+    (written by ingest, read here). Returns [] when no pool. rejections is
+    decoded from JSONB into a plain dict."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT hour_bucket, batches_received, spans_received, events_translated,
+                   spans_rejected, auth_failures, rate_limit_hits, rejections
+            FROM otel_receiver_stats
+            WHERE org_id = $1
+              AND hour_bucket >= NOW() - make_interval(hours => $2)
+            ORDER BY hour_bucket ASC
+            """,
+            org_id,
+            hours,
+        )
+    out: list[dict] = []
+    for row in rows:
+        record = dict(row)
+        rejections = record.get("rejections")
+        if isinstance(rejections, str):
+            try:
+                record["rejections"] = _json_mod.loads(rejections)
+            except Exception:
+                record["rejections"] = {}
+        out.append(record)
+    return out
 
 
 async def verify_api_key(key: str) -> Optional[str]:
@@ -1283,7 +1411,11 @@ def _compute_call_metrics(events: list, signals: list) -> dict:
     return {
         "duration_seconds": round(duration_s, 1),
         "completion_status": status,
-        "silence_pct": round(silence_ms / (duration_s * 1000.0), 3) if duration_s > 0 else 0.0,
+        # Clamp to 1.0: summed silence durations can exceed the event span (long or
+        # overlapping VAD silences), and a call can't be more than 100% silent.
+        "silence_pct": round(min(1.0, silence_ms / (duration_s * 1000.0)), 3)
+        if duration_s > 0
+        else 0.0,
         "agent_talk_ms": int(agent_ms),
         "caller_talk_ms": int(caller_ms),
         "agent_talk_ratio": round(agent_ms / talk_total, 3) if talk_total > 0 else None,
@@ -2486,7 +2618,11 @@ async def agent_failure_pattern(org_id: str, agent_id: str, failure_type: str) -
         return {}
 
     def _ts(v):
-        return v.isoformat() if v else None
+        # Epoch seconds, not ISO: FailureOverview.first_seen/last_seen and
+        # TopRun.detected_at are typed Optional[float], and the dashboard's timeAgo
+        # expects epoch. Returning isoformat here 500'd the whole endpoint whenever
+        # the failure type actually had signals.
+        return v.timestamp() if v else None
 
     async with _pool.acquire() as conn:
         # 1. Overview
@@ -2747,7 +2883,9 @@ async def agent_failure_pattern(org_id: str, agent_id: str, failure_type: str) -
                 "severity": r["severity"],
                 "step_index": int(r["step_index"]),
                 "detected_at": _ts(r["detected_at"]),
-                "evidence": dict(r["evidence"]),
+                # asyncpg returns jsonb as a str unless a codec is set; dict() on a
+                # str raises "dictionary update sequence element #0 has length 1".
+                "evidence": _coerce_payload(r["evidence"]),
             }
             for r in run_rows
         ],
@@ -2949,6 +3087,315 @@ async def delete_external_integration(org_id: str, provider: str) -> bool:
             provider,
         )
     return result != "DELETE 0"
+
+
+# ── ElevenLabs pull integration (Phase 4.1) ────────────────────────────────────
+
+
+async def upsert_elevenlabs_integration(
+    org_id: str,
+    encrypted_credentials: str,
+    poll_interval_secs: int,
+) -> int:
+    """Create or replace this org's ElevenLabs config. Replacing (rather than a
+    separate update path) re-encrypts a freshly-supplied key in one call, which
+    is the "I rotated my ElevenLabs key" path. Resets failure tracking so new
+    credentials start with a clean slate instead of inheriting a stale outage
+    streak. Does NOT reset last_seen_generation_at: the generation high-water
+    mark belongs to the org's history, not to a particular key, so rotating the
+    key must not re-pull and re-correlate everything already seen."""
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO elevenlabs_integrations
+                (org_id, encrypted_credentials, poll_interval_secs)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (org_id) DO UPDATE
+                SET encrypted_credentials = EXCLUDED.encrypted_credentials,
+                    poll_interval_secs    = EXCLUDED.poll_interval_secs,
+                    enabled               = TRUE,
+                    consecutive_failures  = 0,
+                    first_failure_at      = NULL,
+                    updated_at            = NOW()
+            RETURNING id
+            """,
+            org_id,
+            encrypted_credentials,
+            poll_interval_secs,
+        )
+    return row["id"]
+
+
+async def get_elevenlabs_integration_status(org_id: str) -> Optional[dict]:
+    """Configuration + health status for this org's ElevenLabs integration.
+    Never returns the credential itself, even encrypted. Returns None when the
+    org has never configured ElevenLabs (distinct from configured-but-failing,
+    which is a real dict with consecutive_failures > 0)."""
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT poll_interval_secs, enabled, last_polled_at,
+                   last_success_at, consecutive_failures
+            FROM elevenlabs_integrations
+            WHERE org_id = $1
+            """,
+            org_id,
+        )
+    if row is None:
+        return None
+    return {
+        "poll_interval_secs": row["poll_interval_secs"],
+        "enabled": row["enabled"],
+        "last_polled_at": row["last_polled_at"],
+        "last_success_at": row["last_success_at"],
+        "consecutive_failures": row["consecutive_failures"],
+    }
+
+
+async def delete_elevenlabs_integration(org_id: str) -> bool:
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM elevenlabs_integrations WHERE org_id = $1",
+            org_id,
+        )
+    return result != "DELETE 0"
+
+
+# ── ElevenLabs correlated-generation reads (Phase 5.1) ─────────────────────────
+#
+# All read only correlated rows (correlated_to_event_id IS NOT NULL) and use the
+# denormalized run_id/agent_id, so none of them join the big partitioned events
+# table. Returns [] / zeros for orgs with no ElevenLabs data, so callers stay
+# backward compatible.
+
+_GEN_SELECT = """
+    generation_id, voice_id, voice_name, model, character_count, cost_credits,
+    source, generated_at, run_id, agent_id, correlation_method, correlation_confidence
+"""
+
+
+async def get_run_elevenlabs_generations(org_id: str, run_id: str) -> list[dict]:
+    """Correlated ElevenLabs generations for one run, in generation-time order.
+    Empty when the run has no correlated TTS (non-ElevenLabs run, or not yet
+    correlated)."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT {_GEN_SELECT}
+            FROM elevenlabs_generations
+            WHERE org_id = $1 AND run_id = $2 AND correlated_to_event_id IS NOT NULL
+            ORDER BY generated_at
+            """,
+            org_id,
+            run_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def list_elevenlabs_generations(
+    org_id: str,
+    voice_id: Optional[str],
+    model: Optional[str],
+    min_credits: Optional[int],
+    limit: int,
+) -> list[dict]:
+    """Correlated generations for an org, filterable by voice / model / minimum
+    credits, ordered by cost descending so the 'high-cost generations' view is
+    just this with a min_credits threshold or no filter at all."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT {_GEN_SELECT}
+            FROM elevenlabs_generations
+            WHERE org_id = $1
+              AND correlated_to_event_id IS NOT NULL
+              AND ($2::text IS NULL OR voice_id = $2)
+              AND ($3::text IS NULL OR model = $3)
+              AND ($4::int  IS NULL OR cost_credits >= $4)
+            ORDER BY cost_credits DESC NULLS LAST, generated_at DESC
+            LIMIT $5
+            """,
+            org_id,
+            voice_id,
+            model,
+            min_credits,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_call_elevenlabs_cost(org_id: str, conversation_id: int) -> dict:
+    """Aggregate ElevenLabs cost for one call (all its runs). Org-scoped through
+    conversations so another org's call id yields zeros, not another org's data.
+    Returns {generation_count, character_count, cost_credits}."""
+    if not _pool:
+        return {"generation_count": 0, "character_count": 0, "cost_credits": 0}
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT count(*)                              AS generation_count,
+                   COALESCE(sum(g.character_count), 0)   AS character_count,
+                   COALESCE(sum(g.cost_credits), 0)      AS cost_credits
+            FROM elevenlabs_generations g
+            JOIN runs r          ON r.run_id = g.run_id
+            JOIN conversations c ON c.id = r.conversation_id AND c.org_id = g.org_id
+            WHERE g.org_id = $1
+              AND c.id = $2
+              AND g.correlated_to_event_id IS NOT NULL
+            """,
+            org_id,
+            conversation_id,
+        )
+    return {
+        "generation_count": row["generation_count"] or 0,
+        "character_count": row["character_count"] or 0,
+        "cost_credits": row["cost_credits"] or 0,
+    }
+
+
+# ── ElevenLabs cross-tool analytics (Phase 6.1) ────────────────────────────────
+#
+# All three aggregate ElevenLabs generation data against Dunetrace signals. They
+# use the denormalized run_id and separate CTEs per metric so joining cost and
+# signals never multiplies into a cartesian product. "Unsuccessful" is defined
+# as "the call carries at least one non-shadow failure signal": completion status
+# is computed from events per call (not stored), so signals are the stored,
+# query-able proxy at 10k-call scale.
+
+
+async def analytics_cost_by_outcome(org_id: str, limit: int) -> list[dict]:
+    """Per conversation: correlated ElevenLabs cost and its non-shadow signal
+    count. Only conversations that actually have correlated ElevenLabs cost are
+    returned, ordered most-expensive first."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH conv_cost AS (
+                SELECT r.conversation_id AS cid,
+                       SUM(g.character_count) AS chars,
+                       SUM(g.cost_credits)    AS credits,
+                       COUNT(*)               AS gen_count
+                FROM elevenlabs_generations g
+                JOIN runs r ON r.run_id = g.run_id
+                WHERE g.org_id = $1 AND g.correlated_to_event_id IS NOT NULL
+                GROUP BY r.conversation_id
+            ),
+            conv_sig AS (
+                SELECT r.conversation_id AS cid, COUNT(*) AS signal_count
+                FROM failure_signals s
+                JOIN runs r ON r.run_id = s.run_id
+                WHERE s.org_id = $1 AND s.shadow = FALSE
+                GROUP BY r.conversation_id
+            )
+            SELECT c.id AS conversation_id, c.external_id, c.agent_id,
+                   cc.chars, cc.credits, cc.gen_count,
+                   COALESCE(cs.signal_count, 0) AS signal_count
+            FROM conversations c
+            JOIN conv_cost cc ON cc.cid = c.id
+            LEFT JOIN conv_sig cs ON cs.cid = c.id
+            WHERE c.org_id = $1
+            ORDER BY cc.credits DESC NULLS LAST
+            LIMIT $2
+            """,
+            org_id,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def analytics_voice_impact(org_id: str) -> list[dict]:
+    """Per voice_id: how many correlated runs used it and how many of those runs
+    carried at least one non-shadow signal. The signal rate (computed by the
+    caller) is the 'does this voice correlate with worse outcomes' proxy."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH voice_runs AS (
+                SELECT DISTINCT g.voice_id, g.voice_name, g.run_id
+                FROM elevenlabs_generations g
+                WHERE g.org_id = $1
+                  AND g.correlated_to_event_id IS NOT NULL
+                  AND g.voice_id IS NOT NULL
+            ),
+            run_sig AS (
+                SELECT run_id, COUNT(*) AS sig_count
+                FROM failure_signals
+                WHERE org_id = $1 AND shadow = FALSE
+                GROUP BY run_id
+            )
+            SELECT vr.voice_id,
+                   MAX(vr.voice_name) AS voice_name,
+                   COUNT(DISTINCT vr.run_id) AS run_count,
+                   COUNT(DISTINCT vr.run_id) FILTER (WHERE COALESCE(rs.sig_count, 0) > 0)
+                       AS runs_with_signals
+            FROM voice_runs vr
+            LEFT JOIN run_sig rs ON rs.run_id = vr.run_id
+            GROUP BY vr.voice_id
+            ORDER BY run_count DESC
+            """,
+            org_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def analytics_truncation_impact(org_id: str, frustration_types: list) -> dict:
+    """Within the ElevenLabs-correlated run population, compare the frustration/
+    abandonment signal rate of runs where VOICE_TTS_TRUNCATION fired against runs
+    where it did not. Returns the raw counts; the caller computes the rates."""
+    if not _pool:
+        return {
+            "truncated_runs": 0,
+            "truncated_with_frustration": 0,
+            "clean_runs": 0,
+            "clean_with_frustration": 0,
+        }
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            WITH tts_runs AS (
+                SELECT DISTINCT run_id FROM elevenlabs_generations
+                WHERE org_id = $1 AND correlated_to_event_id IS NOT NULL AND run_id IS NOT NULL
+            ),
+            truncated AS (
+                SELECT DISTINCT run_id FROM failure_signals
+                WHERE org_id = $1 AND failure_type = 'VOICE_TTS_TRUNCATION'
+            ),
+            frustration AS (
+                SELECT DISTINCT run_id FROM failure_signals
+                WHERE org_id = $1 AND failure_type = ANY($2::text[])
+            )
+            SELECT
+                COUNT(*) FILTER (WHERE t.run_id IS NOT NULL) AS truncated_runs,
+                COUNT(*) FILTER (WHERE t.run_id IS NOT NULL AND f.run_id IS NOT NULL)
+                    AS truncated_with_frustration,
+                COUNT(*) FILTER (WHERE t.run_id IS NULL)  AS clean_runs,
+                COUNT(*) FILTER (WHERE t.run_id IS NULL AND f.run_id IS NOT NULL)
+                    AS clean_with_frustration
+            FROM tts_runs tr
+            LEFT JOIN truncated   t ON t.run_id = tr.run_id
+            LEFT JOIN frustration f ON f.run_id = tr.run_id
+            """,
+            org_id,
+            frustration_types,
+        )
+    return (
+        dict(row)
+        if row
+        else {
+            "truncated_runs": 0,
+            "truncated_with_frustration": 0,
+            "clean_runs": 0,
+            "clean_with_frustration": 0,
+        }
+    )
 
 
 # ── Alert destination integrations (Phase 4.1) ─────────────────────────────────

@@ -10,6 +10,8 @@ from .postgres import (
     close_pool,
     create_api_key,
     ensure_schema,
+    fetch_otel_ingestion_enabled,
+    flush_otel_stats,
     fetch_policies,
     get_agent_quota,
     get_pool,
@@ -18,6 +20,7 @@ from .postgres import (
     insert_events,
     retention_looks_stale,
     set_agent_quota,
+    set_otel_ingestion_enabled,
     verify_api_key,
 )
 
@@ -32,6 +35,9 @@ __all__ = [
     "get_pool",
     "insert_deploy_event",
     "insert_events",
+    "fetch_otel_ingestion_enabled",
+    "flush_otel_stats",
+    "set_otel_ingestion_enabled",
     "retention_looks_stale",
     "set_agent_quota",
     "verify_api_key",

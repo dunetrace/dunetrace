@@ -220,6 +220,25 @@ CREATE TABLE IF NOT EXISTS agent_rate_quotas (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (key_id, agent_id)
 );
+
+-- OTel receiver observability (Phase 5). One row per (org, hour): what the OTLP
+-- receiver did, drained here from ingest's in-memory counters. org_id='_system'
+-- holds events that predate org attribution (auth failures, malformed bodies).
+CREATE TABLE IF NOT EXISTS otel_receiver_stats (
+    org_id            TEXT        NOT NULL,
+    hour_bucket       TIMESTAMPTZ NOT NULL,
+    batches_received  BIGINT      NOT NULL DEFAULT 0,
+    spans_received    BIGINT      NOT NULL DEFAULT 0,
+    events_translated BIGINT      NOT NULL DEFAULT 0,
+    spans_rejected    BIGINT      NOT NULL DEFAULT 0,
+    auth_failures     BIGINT      NOT NULL DEFAULT 0,
+    rate_limit_hits   BIGINT      NOT NULL DEFAULT 0,
+    rejections        JSONB       NOT NULL DEFAULT '{}',
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (org_id, hour_bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_otel_receiver_stats_org_hour
+    ON otel_receiver_stats(org_id, hour_bucket DESC);
 """
 
 # ── Multi-tenancy unification (v0.5.0) ──────────────────────────────────────────
@@ -258,6 +277,11 @@ ON CONFLICT (id) DO NOTHING;
 -- necessarily waiting on api_svc to have started.
 ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_auto_suppress BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- OTel ingestion opt-out per org (Phase 2). Defaults TRUE so every org that
+-- accepts OTLP today keeps working; an admin flips it FALSE to stop accepting a
+-- specific org's OTLP traffic (a per-org kill switch on top of rate limiting).
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS otel_ingestion_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
 DO $$
 BEGIN
@@ -957,3 +981,92 @@ async def verify_api_key(api_key: str) -> Optional[str]:
         # live credential in plaintext logs.
         logger.error("verify_api_key failed: %s", type(exc).__name__)
         return None
+
+
+async def fetch_otel_ingestion_enabled(org_id: str) -> bool:
+    """Whether OTel ingestion is enabled for org_id.
+
+    Fail-open: returns True on any error, a missing row, or no configured pool.
+    A transient DB problem must never silently drop a customer's OTLP traffic,
+    so only a row that explicitly reads FALSE disables ingestion.
+    """
+    if not _pool:
+        return True
+    try:
+        async with _pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT otel_ingestion_enabled FROM organizations WHERE id = $1", org_id
+            )
+        return bool(row["otel_ingestion_enabled"]) if row is not None else True
+    except Exception as exc:
+        logger.debug("otel_ingestion_enabled lookup failed: %s", type(exc).__name__)
+        return True
+
+
+async def set_otel_ingestion_enabled(org_id: str, enabled: bool) -> None:
+    """Enable or disable OTel ingestion for org_id. Raises RuntimeError if the
+    org does not exist (so the admin endpoint can 404 rather than silently no-op)."""
+    if not _pool:
+        raise RuntimeError("no database configured")
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE organizations SET otel_ingestion_enabled = $2 WHERE id = $1",
+            org_id,
+            enabled,
+        )
+    if result.rsplit(" ", 1)[-1] == "0":
+        raise RuntimeError(f"unknown org_id: {org_id}")
+
+
+async def flush_otel_stats(buckets: dict) -> int:
+    """Additively upsert drained OTLP-receiver counters into
+    otel_receiver_stats. `buckets` is {(org_id, hour_epoch): counter_dict} from
+    OtelStats.drain(). Returns the number of (org, hour) rows written; a no-op
+    when nothing drained or no pool is configured. Best-effort telemetry — the
+    caller (the maintenance loop) tolerates failure and retries next tick."""
+    if not buckets or not _pool:
+        return 0
+    written = 0
+    async with _pool.acquire() as conn:
+        for (org_id, hour_epoch), b in buckets.items():
+            await conn.execute(
+                """
+                INSERT INTO otel_receiver_stats (
+                    org_id, hour_bucket, batches_received, spans_received,
+                    events_translated, spans_rejected, auth_failures,
+                    rate_limit_hits, rejections
+                ) VALUES ($1, to_timestamp($2), $3, $4, $5, $6, $7, $8, $9::jsonb)
+                ON CONFLICT (org_id, hour_bucket) DO UPDATE SET
+                    batches_received  = otel_receiver_stats.batches_received  + EXCLUDED.batches_received,
+                    spans_received    = otel_receiver_stats.spans_received    + EXCLUDED.spans_received,
+                    events_translated = otel_receiver_stats.events_translated + EXCLUDED.events_translated,
+                    spans_rejected    = otel_receiver_stats.spans_rejected    + EXCLUDED.spans_rejected,
+                    auth_failures     = otel_receiver_stats.auth_failures     + EXCLUDED.auth_failures,
+                    rate_limit_hits   = otel_receiver_stats.rate_limit_hits   + EXCLUDED.rate_limit_hits,
+                    -- Sum the per-reason counts across the stored and incoming
+                    -- rejection maps rather than overwriting keys.
+                    rejections        = (
+                        SELECT COALESCE(jsonb_object_agg(k, v), '{}'::jsonb)
+                        FROM (
+                            SELECT k, SUM(val::bigint) AS v
+                            FROM (
+                                SELECT k, val FROM jsonb_each_text(otel_receiver_stats.rejections) AS a(k, val)
+                                UNION ALL
+                                SELECT k, val FROM jsonb_each_text(EXCLUDED.rejections) AS b(k, val)
+                            ) merged GROUP BY k
+                        ) summed
+                    ),
+                    updated_at = NOW()
+                """,
+                org_id,
+                hour_epoch,
+                b["batches_received"],
+                b["spans_received"],
+                b["events_translated"],
+                b["spans_rejected"],
+                b["auth_failures"],
+                b["rate_limit_hits"],
+                json.dumps(b["rejections"]),
+            )
+            written += 1
+    return written

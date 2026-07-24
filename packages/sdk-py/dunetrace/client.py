@@ -159,7 +159,27 @@ class Dunetrace:
         self._emit_json = emit_as_json
         self._stdout_lock = Lock()  # one JSON line per write, no interleaving
 
-        self._otel_exporter = otel_exporter  # kept separate for notify_run_state lifecycle calls
+        # OTel export (opt-in via DUNETRACE_OTEL_* env). When enabled and the
+        # caller didn't wire an exporter explicitly, build one on the shared
+        # tracer. dunetrace.otel.init() never raises and returns False when
+        # unconfigured, so this is a no-op for anyone not using OTel.
+        if otel_exporter is None:
+            from dunetrace import otel as _otel
+
+            if _otel.init():
+                from dunetrace.integrations.otel import DunetraceOTelExporter
+
+                try:
+                    _cfg = _otel.active_config()
+                    otel_exporter = DunetraceOTelExporter(
+                        tracer=_otel.get_tracer(),
+                        capture_content=(_cfg.capture_content if _cfg else True),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Dunetrace: OTel exporter init failed (%s); OTel export disabled.", exc
+                    )
+        self._otel_exporter = otel_exporter
         self._exporters: List[Exporter] = list(exporters or [])
         self._default_agent_id = ""  # set by init()
         self._policy_engine = PolicyEngine()
@@ -273,6 +293,15 @@ class Dunetrace:
             conversation_id=conversation_id,
         )
 
+        # Stamp the run with its OTel correlation ids (deterministic from run_id)
+        # so a customer can jump from an OTel backend to the Dunetrace run and
+        # back. Set only when OTel export is active; None otherwise.
+        if self._otel_exporter is not None:
+            from dunetrace.integrations.otel import root_span_id_hex, trace_id_hex
+
+            ctx.otel_trace_id = trace_id_hex(ctx.run_id)
+            ctx.otel_span_id = root_span_id_hex(ctx.run_id)
+
         # In-process content inspection: the injection detector runs here, against
         # raw user_input, before the run.started event is built. Only the match
         # evidence (pattern names + count) needs to reach this point — the check
@@ -317,10 +346,7 @@ class Dunetrace:
         try:
             yield ctx
             ctx._warn_unread_advisory()  # audit Finding 25
-            # Sync RunState fields detectors read before notifying the OTel exporter.
             ctx.state.current_step = ctx.step
-            if self._otel_exporter is not None:
-                self._otel_exporter.notify_run_state(ctx.run_id, ctx.state)
             self._emit(
                 AgentEvent(
                     event_type=EventType.RUN_COMPLETED,
@@ -340,8 +366,6 @@ class Dunetrace:
         except PolicyViolation as exc:
             ctx.state.current_step = ctx.step
             ctx.state.exit_reason = "policy_violation"
-            if self._otel_exporter is not None:
-                self._otel_exporter.notify_run_state(ctx.run_id, ctx.state)
             self._emit(
                 AgentEvent(
                     event_type=EventType.RUN_ERRORED,
@@ -364,8 +388,6 @@ class Dunetrace:
         except Exception as exc:
             ctx.state.current_step = ctx.step
             ctx.state.exit_reason = "error"
-            if self._otel_exporter is not None:
-                self._otel_exporter.notify_run_state(ctx.run_id, ctx.state)
             self._emit(
                 AgentEvent(
                     event_type=EventType.RUN_ERRORED,

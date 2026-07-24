@@ -103,9 +103,18 @@ def _record_a_full_run() -> list:
         run.retrieval_responded("docs", result_count=3, top_score=0.9)
         run.external_signal("rate_limit", source="openai")
 
-        # Voice-pack events.
+        # Voice-pack events. tts_generated carries the Phase 4.1 provider
+        # correlation fields so the real ingest schema is exercised with them
+        # present, proving the wire format tolerates the new optional keys.
         run.transcription_received("hello", confidence=0.95)
-        run.tts_generated("hi there", latency_ms=40)
+        run.tts_generated(
+            "hi there",
+            latency_ms=40,
+            voice_id="21m00Tcm4TlvDq8ikWAM",
+            model="eleven_multilingual_v2",
+            provider="elevenlabs",
+            provider_generation_id="hist_abc123",
+        )
         run.voice_activity_detected("speech_start", duration_ms=100)
         run.turn_taking("agent_speaking")
         run.recording_metadata("https://s3.example.com/call.wav", storage_provider="s3")

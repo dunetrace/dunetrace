@@ -42,6 +42,30 @@ class Settings:
         "INTEGRATIONS_WORKER_ENABLED", "false"
     ).lower() in ("1", "true", "yes")
 
+    # The ElevenLabs poller (elevenlabs_worker) is a separate process/flag from
+    # the evaluation-provider worker above, so an org can run one without the
+    # other, and a failure in one never touches the other. Same OSS-friendly
+    # default: an install that never sets this never opens a DB pool for it.
+    ELEVENLABS_WORKER_ENABLED: bool = os.getenv("ELEVENLABS_WORKER_ENABLED", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+    # ── Correlation tuning (Phase 4.4) ──────────────────────────────────────────
+    # Half-width of the timestamp window (seconds) a Dunetrace tts.generated event
+    # may sit from an ElevenLabs generation's create time. Generous by default to
+    # absorb the clock-domain gap: the event is emitted after the audio returns,
+    # so it lags the generation by network + synthesis latency.
+    CORRELATION_WINDOW_SECS: float = float(os.getenv("CORRELATION_WINDOW_SECS", "60"))
+    # Relative character-count tolerance (0.10 = within 10%) for the fallback
+    # match when neither generation id nor exact text is available.
+    CORRELATION_CHAR_TOLERANCE: float = float(os.getenv("CORRELATION_CHAR_TOLERANCE", "0.10"))
+    # A generation still uncorrelated this long after it was generated is declared
+    # unmatched (recorded as drift) rather than retried forever. Events ingest in
+    # near real time, so an hour with no match means there genuinely is none.
+    CORRELATION_GIVEUP_SECS: float = float(os.getenv("CORRELATION_GIVEUP_SECS", "3600"))
+
     # Must match api_svc's own DUNETRACE_MASTER_KEY exactly — that service
     # encrypts customer credentials, this one is the only thing that ever
     # decrypts them (see crypto.py).

@@ -217,6 +217,44 @@ async def _delegation_signal_from_chain(
     )
 
 
+def _emit_otel_findings(
+    run_id: str,
+    org_id: str,
+    signals: list,
+    events: list,
+    is_reprocess: bool,
+) -> None:
+    """Emit signal + policy spans for a processed run into its OTel trace.
+
+    Best-effort and fully isolated: a no-op when OTel export is off (or the
+    opentelemetry packages aren't installed in this service), and never raises
+    into detection. Policy spans are emitted on first-process only, so a
+    reprocess doesn't re-emit them (signals are already deduped by the caller).
+    """
+    try:
+        import dunetrace.otel as _otel
+
+        tracer = _otel.get_tracer()
+        if tracer is None:
+            return
+        from dunetrace.integrations.otel import emit_run_findings
+
+        cfg = _otel.active_config()
+        policy_events = (
+            [] if is_reprocess else [e for e in events if e.get("event_type") == "policy.triggered"]
+        )
+        emit_run_findings(
+            tracer,
+            run_id,
+            signals=signals,
+            policy_events=policy_events,
+            org_id=org_id,
+            capture_content=(cfg.capture_content if cfg else True),
+        )
+    except Exception as exc:
+        logger.debug("OTel findings emission skipped for run_id=%s: %s", run_id, exc)
+
+
 async def process_run(
     run_id: str,
     agent_id: str,
@@ -347,6 +385,18 @@ async def process_run(
         is_live = signal.failure_type.value in LIVE_DETECTORS
         written = await write_signals([signal], shadow=not is_live, org_id=org_id)
         count += written
+
+    # OTel export (Phase 4): emit dunetrace.signal.* / dunetrace.policy.* child
+    # spans into each run's trace so signals decided here show up in the
+    # customer's OTel backend alongside the SDK-emitted run/LLM/tool spans. Only
+    # LIVE, newly-fired signals (same filter issue tracking uses) so shadow
+    # detectors and reprocess duplicates don't leak. No-op when OTel is disabled.
+    live_new_signals = [
+        s
+        for s in signals
+        if s.failure_type.value in LIVE_DETECTORS and s.failure_type.value not in existing_types
+    ]
+    _emit_otel_findings(run_id, org_id, live_new_signals, events, is_reprocess)
 
     # Issue persistence: track open/resolved lifecycle per (org_id, agent_id, failure_type).
     # audit Finding 15: on a reprocess, only NEW fired types matter, and the
@@ -479,6 +529,16 @@ async def run_worker() -> None:
     loaded = load_custom_detector_plugins()
     if loaded:
         logger.info("Loaded %d custom detector plugin file(s).", loaded)
+    # OTel export (Phase 4): reuse the SDK's config module so signal/policy spans
+    # ship to the same OTLP endpoint. Opt-in via DUNETRACE_OTEL_* env; a no-op
+    # here when unset. Never raises.
+    try:
+        import dunetrace.otel as _otel
+
+        if _otel.init():
+            logger.info("OTel export enabled for detector signals/policies.")
+    except Exception as exc:
+        logger.debug("OTel init skipped: %s", exc)
     logger.info("Detector worker started. poll_interval=%ss", settings.POLL_INTERVAL)
     try:
         while True:

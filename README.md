@@ -318,6 +318,8 @@ Agent Code
 ## Integrations
 
 **Evaluation & tracing**
+- [OpenTelemetry export (Datadog, Grafana, Honeycomb, Signoz, any OTLP backend)](docs/integrations/opentelemetry.md)
+- [OpenTelemetry ingestion (send your existing OTel traces to Dunetrace: OpenLIT, Traceloop, OTel contrib)](docs/integrations/otel-ingestion.md)
 - [External evaluation (Langfuse, LangSmith, Braintrust, generic push)](docs/integrations/external-evaluation.md)
 - [Semantic evaluation (Dunetrace's own DeepEval-backed layer)](docs/semantic-evaluation.md)
 
@@ -325,6 +327,10 @@ Agent Code
 - [GitHub App (automated draft PRs)](docs/integrations/github-app.md)
 - [Slack & Linear alerts](docs/alerts.md)
 - [Coding agents — Claude Code, Cursor, Codex (MCP)](docs/integrations/coding-agents.md)
+
+**Voice**
+- [ElevenLabs (correlate TTS cost and voice choices with agent behavior)](docs/integrations/elevenlabs.md)
+- [Wiring a voice framework](docs/integrations/voice-frameworks.md)
 
 <details>
 <summary>Agent frameworks: LangChain, CrewAI, AutoGen, Haystack, LlamaIndex, TypeScript, and more</summary>

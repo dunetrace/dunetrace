@@ -62,6 +62,26 @@ async def _rate_limit_heartbeat_loop() -> None:
         await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
 
+async def _otlp_maintenance_loop() -> None:
+    """Drain the OTLP retry buffer (batches whose DB persist failed while the DB
+    was down), flush receiver stat counters to the DB, and evict idle per-org
+    span-rate buckets. Best-effort: a failing tick is logged and retried."""
+    from ingest_svc.db import flush_otel_stats
+    from ingest_svc.otel_stats import get_otel_stats
+    from ingest_svc.otlp_limits import get_persist_retry, get_span_limiter
+
+    while True:
+        await asyncio.sleep(5.0)
+        try:
+            flushed = await get_persist_retry().retry_once()
+            if flushed:
+                logger.info("OTLP retry flushed %d buffered batch(es)", flushed)
+            await flush_otel_stats(get_otel_stats().drain())
+            get_span_limiter().evict_stale()
+        except Exception as exc:
+            logger.debug("OTLP maintenance tick failed: %s", exc)
+
+
 async def _run_prune_once() -> int:
     """One retention pass. A DB error here must not kill the loop — retention
     is enforced on a best-effort basis, and a transient failure just means
@@ -120,10 +140,12 @@ async def lifespan(app: FastAPI):
     evict_task = asyncio.create_task(_evict_loop())
     heartbeat_task = asyncio.create_task(_rate_limit_heartbeat_loop())
     prune_task = asyncio.create_task(_prune_loop())
+    otlp_maint_task = asyncio.create_task(_otlp_maintenance_loop())
     yield
     evict_task.cancel()
     heartbeat_task.cancel()
     prune_task.cancel()
+    otlp_maint_task.cancel()
     await close_pool()
     logger.info("Shutdown complete")
 

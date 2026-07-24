@@ -1,0 +1,40 @@
+# OTel Collector config that fans out to Datadog AND Grafana Cloud at once, for
+# the live Phase 5 backend verification. Secrets come from the collector's env
+# (DD_API_KEY, DD_SITE, OTEL_EXPORTER_OTLP_ENDPOINT, GRAFANA_AUTH), never the SDK.
+# The debug exporter prints received spans so you can see them arrive.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+
+exporters:
+  debug:
+    verbosity: detailed
+  datadog:
+    api:
+      key: ${env:DD_API_KEY}
+      site: ${env:DD_SITE}
+  otlphttp/grafana:
+    endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT}
+    headers:
+      Authorization: ${env:GRAFANA_AUTH}
+
+service:
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, datadog, otlphttp/grafana]

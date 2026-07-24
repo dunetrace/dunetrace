@@ -106,6 +106,42 @@ class TestTtsGenerated(unittest.TestCase):
             after = h.run.step
         self.assertEqual(after, before)
 
+    def test_captures_provider_correlation_fields(self):
+        """Phase 4.1 correlation metadata is captured on the payload when the
+        caller provides it (e.g. from an ElevenLabs-backed TTS call)."""
+        with _CapturingRun() as h:
+            h.run.tts_generated(
+                "your order shipped",
+                latency_ms=90,
+                voice_id="21m00Tcm4TlvDq8ikWAM",
+                model="eleven_multilingual_v2",
+                provider="elevenlabs",
+                provider_generation_id="hist_abc123",
+            )
+        p = h.events_of(EventType.TTS_GENERATED)[0].payload
+        self.assertEqual(p["voice_id"], "21m00Tcm4TlvDq8ikWAM")
+        self.assertEqual(p["model"], "eleven_multilingual_v2")
+        self.assertEqual(p["provider"], "elevenlabs")
+        self.assertEqual(p["provider_generation_id"], "hist_abc123")
+
+    def test_omits_correlation_fields_when_not_provided(self):
+        """Backward compat: a call that passes none of the new fields ships the
+        original payload exactly, with no null keys, so the wire format for
+        existing callers is unchanged."""
+        with _CapturingRun() as h:
+            h.run.tts_generated("done", latency_ms=10)
+        p = h.events_of(EventType.TTS_GENERATED)[0].payload
+        self.assertEqual(set(p), {"text", "latency_ms", "truncated"})
+
+    def test_correlation_fields_are_keyword_only(self):
+        """The new metadata is keyword-only, so no existing positional call can
+        accidentally bind a value into one of these slots."""
+        with _CapturingRun() as h:
+            with self.assertRaises(TypeError):
+                # A 5th positional arg would have landed in voice_id if these
+                # fields were not keyword-only.
+                h.run.tts_generated("hi", 40, False, 0.0, "21m00Tcm4TlvDq8ikWAM")
+
 
 class TestVoiceActivityDetected(unittest.TestCase):
     def test_emits_event_with_payload(self):

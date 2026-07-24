@@ -1,0 +1,41 @@
+# OTel Collector config for the Dunetrace export test harness.
+# Receives OTLP from the Dunetrace SDK and fans out to the local backends plus a
+# debug log so you can see spans arrive without opening any UI. For Datadog, use
+# collector-config.datadog.yaml instead (needs DD_API_KEY).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+
+exporters:
+  # Prints every span (name + attributes) to the collector log.
+  debug:
+    verbosity: detailed
+  # Jaeger (open-source, OTel-native) over OTLP.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  # Grafana Tempo over OTLP.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlp/jaeger, otlp/tempo]
+  telemetry:
+    logs:
+      level: info

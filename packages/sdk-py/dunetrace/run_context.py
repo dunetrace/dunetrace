@@ -93,6 +93,13 @@ class RunContext:
         # trace_id, threaded onto every event the same way.
         self._conversation_id = conversation_id
 
+        # OTel correlation ids for this run, set by the client when OTel export
+        # is active (deterministic from run_id, W3C hex format). None when OTel
+        # is off. Distinct from self._trace_id above, which is the external
+        # evaluation trace id (Langfuse/LangSmith), not the OTel trace id.
+        self.otel_trace_id: Optional[str] = None
+        self.otel_span_id: Optional[str] = None
+
         self.state = RunState(
             run_id=self.run_id,
             agent_id=agent_id,
@@ -345,7 +352,16 @@ class RunContext:
         self._emit(EventType.TRANSCRIPTION_RECEIVED, payload)
 
     def tts_generated(
-        self, text: str, latency_ms: int = 0, truncated: bool = False, audio_seconds: float = 0.0
+        self,
+        text: str,
+        latency_ms: int = 0,
+        truncated: bool = False,
+        audio_seconds: float = 0.0,
+        *,
+        voice_id: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        provider_generation_id: Optional[str] = None,
     ) -> None:
         """Text-to-speech rendered an agent response. Completes the turn —
         does not advance the step counter (like llm_responded).
@@ -353,10 +369,29 @@ class RunContext:
         audio_seconds: length of the synthesized audio. Optional. TTS cost
         (Phase 2.2) is billed per character and derived from ``text``, so this is
         only needed if your TTS provider bills per audio-second instead. Omitted
-        from the payload when 0 (backward compatible)."""
+        from the payload when 0 (backward compatible).
+
+        voice_id / model / provider / provider_generation_id: optional
+        provider-side correlation metadata (Phase 4.1). Pass them when your TTS
+        runs on a provider Dunetrace can pull generation history from (ElevenLabs
+        today) so a stored generation can be matched back to this exact event.
+        provider_generation_id is the provider's own id for the generation and
+        gives a deterministic match; voice_id and model narrow an otherwise
+        timestamp-plus-character-count match. All four are optional and
+        keyword-only: a call that omits them ships the original payload
+        unchanged, and each is left out of the payload when not set (backward
+        compatible)."""
         payload: dict = {"text": text, "latency_ms": latency_ms, "truncated": truncated}
         if audio_seconds:
             payload["audio_seconds"] = audio_seconds
+        if voice_id:
+            payload["voice_id"] = voice_id
+        if model:
+            payload["model"] = model
+        if provider:
+            payload["provider"] = provider
+        if provider_generation_id:
+            payload["provider_generation_id"] = provider_generation_id
         self._emit(EventType.TTS_GENERATED, payload, advance=False)
 
     def voice_activity_detected(self, type: str, duration_ms: int = 0) -> None:

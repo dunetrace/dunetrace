@@ -25,10 +25,13 @@ startTimeUnixNano and assigned sequential step_index values.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import time
 import uuid
 from typing import Any
+
+from ingest_svc.config import settings
 
 logger = logging.getLogger("dunetrace.ingest.otel")
 
@@ -165,6 +168,7 @@ def _classify(name: str, ad: dict[str, Any]) -> str:
     # ── Attribute-based (definitive) ──────────────────────────────────────────
     if (
         ad.get("gen_ai.system")
+        or ad.get("gen_ai.provider.name")  # current GenAI convention; gen_ai.system is deprecated
         or ad.get("gen_ai.request.model")
         or ad.get("llm.request.model")
         or ad.get("llm.vendor")
@@ -223,6 +227,126 @@ def _trace_to_uuid(trace_id: str) -> str:
     return f"{t[0:8]}-{t[8:12]}-{t[12:16]}-{t[16:20]}-{t[20:32]}"
 
 
+# ── Content extraction ───────────────────────────────────────────────────────────
+#
+# Content (LLM output, tool args/result, retrieved docs) lives under different
+# attribute keys across instrumentation libraries. Each helper tries the Gen AI
+# semconv keys first, then the widely-used OpenLLMetry / Traceloop keys. A
+# non-string value (a kvlist or array) is JSON-serialized so it survives as the
+# string the Dunetrace event schema expects. Detectors read this content
+# (TOOL_LOOP dedups on args, TOOL_ARGUMENT_FABRICATION and the content-injection
+# detectors read output text), so populating it is fidelity, not decoration.
+
+
+def _as_text(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, default=str)
+    except Exception:
+        return str(value)
+
+
+def _truncate(text: str) -> str:
+    """Cap a content string at OTLP_MAX_ATTR_CHARS so one oversized span can't
+    bloat storage. Truncation is silent; length-based detectors still see a
+    representative prefix."""
+    limit = settings.OTLP_MAX_ATTR_CHARS
+    return text[:limit] if limit and len(text) > limit else text
+
+
+def _first_present(ad: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        text = _as_text(ad.get(key))
+        if text:
+            return _truncate(text)
+    return ""
+
+
+def _messages_content(value: Any) -> str:
+    """Extract text from the gen_ai.output.messages / gen_ai.input.messages
+    structure (current GenAI convention, emitted by Traceloop and newer OTel
+    content capture): a list of messages, each with a `parts` list of
+    {type, content}. Accepts a JSON string or an already-parsed list."""
+    try:
+        data = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        return ""
+    if not isinstance(data, list):
+        return ""
+    texts: list[str] = []
+    for msg in data:
+        if not isinstance(msg, dict):
+            continue
+        parts = msg.get("parts")
+        if isinstance(parts, list):
+            for part in parts:
+                if isinstance(part, dict) and part.get("content"):
+                    texts.append(str(part["content"]))
+        elif msg.get("content"):
+            texts.append(str(msg["content"]))
+    return " ".join(t for t in texts if t)
+
+
+def _llm_output_text(ad: dict[str, Any]) -> str:
+    text = _first_present(
+        ad,
+        (
+            "gen_ai.completion",
+            "gen_ai.completion.0.content",
+            "gen_ai.response.0.content",
+            "traceloop.entity.output",
+            "llm.completions",
+        ),
+    )
+    if text:
+        return text
+    # Structured form (Traceloop's current output, and OTel content capture):
+    # the assistant reply lives under gen_ai.output.messages as message parts.
+    messages = ad.get("gen_ai.output.messages")
+    if messages:
+        return _truncate(_messages_content(messages))
+    return ""
+
+
+def _tool_args(ad: dict[str, Any]) -> str:
+    return _first_present(
+        ad,
+        (
+            "gen_ai.tool.call.arguments",
+            "tool.arguments",
+            "tool.parameters",
+            "traceloop.entity.input",
+            "input.value",
+        ),
+    )
+
+
+def _tool_output(ad: dict[str, Any]) -> str:
+    return _first_present(
+        ad,
+        (
+            "gen_ai.tool.call.result",
+            "tool.result",
+            "traceloop.entity.output",
+            "output.value",
+        ),
+    )
+
+
+def _retrieval_content(ad: dict[str, Any]) -> str:
+    return _first_present(
+        ad,
+        (
+            "retrieval.documents",
+            "db.query.results",
+            "traceloop.entity.output",
+        ),
+    )
+
+
 # ── Core converter ─────────────────────────────────────────────────────────────
 
 
@@ -252,8 +376,11 @@ def otlp_to_events(
     for rs in resource_spans:
         try:
             res_attrs = _attrs(rs.get("resource", {}).get("attributes", []))
-            agent_id = agent_id_override or res_attrs.get("service.name", "unknown-agent")
-            version = agent_version_override or res_attrs.get("service.version", "unknown")
+            # `or`, not .get(default): a present-but-empty service.name would
+            # otherwise become agent_id="" and fail IngestEvent's min_length,
+            # sinking the whole batch. Fall back to a placeholder instead.
+            agent_id = agent_id_override or res_attrs.get("service.name") or "unknown-agent"
+            version = agent_version_override or res_attrs.get("service.version") or "unknown"
 
             for scope_span in rs.get("scopeSpans", []):
                 for span in scope_span.get("spans", []):
@@ -337,22 +464,36 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
 
     step = 1
     for span in spans:
-        if span is root:
-            continue
-
         ad = _attrs(span.get("attributes", []))
         name = span.get("name", "")
         kind = _classify(name, ad)
+
+        # The root span usually just bounds the run (an agent/chain container) and
+        # is skipped. But many real emitters (a bare chat.completions.create with
+        # no surrounding agent span) emit a single span that IS the LLM call and
+        # has no parent. When the root classifies as a real operation, translate
+        # it too so that LLM call isn't lost; when it's a lifecycle span, skip it.
+        if span is root and kind not in ("llm", "tool", "retrieval"):
+            continue
+
+        start_ts = _ns(span.get("startTimeUnixNano"))
+        end_ts = _ns(span.get("endTimeUnixNano")) or time.time()
+        lat_ms = _latency_ms(span.get("startTimeUnixNano"), span.get("endTimeUnixNano"))
+        span_ok = span.get("status", {}).get("code") != 2
         start_ts = _ns(span.get("startTimeUnixNano"))
         end_ts = _ns(span.get("endTimeUnixNano")) or time.time()
         lat_ms = _latency_ms(span.get("startTimeUnixNano"), span.get("endTimeUnixNano"))
         span_ok = span.get("status", {}).get("code") != 2
 
         if kind == "llm":
+            # Model resolution: the requested model, then the response model
+            # (differs on a fallback), then OpenLLMetry's llm.request.model, then
+            # the root span's. gen_ai.system is the PROVIDER (openai, anthropic),
+            # not the model — it must never be used as the model value.
             model = (
                 ad.get("gen_ai.request.model")
+                or ad.get("gen_ai.response.model")
                 or ad.get("llm.request.model")
-                or ad.get("gen_ai.system")
                 or root_model
                 or ""
             )
@@ -369,6 +510,7 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
                 if isinstance(finish_reasons, list) and finish_reasons
                 else ad.get("llm.response.finish_reason") or "stop"
             )
+            output_text = _llm_output_text(ad)
 
             events.append(
                 _ev(
@@ -381,21 +523,19 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
                     },
                 )
             )
-            events.append(
-                _ev(
-                    "llm.responded",
-                    step,
-                    end_ts,
-                    {
-                        "model": model,
-                        "prompt_tokens": prompt_tok,
-                        "completion_tokens": completion_tok,
-                        "finish_reason": finish_reason,
-                        "latency_ms": lat_ms,
-                        "output_length": completion_tok,
-                    },
-                )
-            )
+            responded = {
+                "model": model,
+                "prompt_tokens": prompt_tok,
+                "completion_tokens": completion_tok,
+                "finish_reason": finish_reason,
+                "latency_ms": lat_ms,
+                # Character length of the output when we captured the text; fall
+                # back to the token count when the emitter sent no output text.
+                "output_length": len(output_text) if output_text else completion_tok,
+            }
+            if output_text:
+                responded["output"] = output_text
+            events.append(_ev("llm.responded", step, end_ts, responded))
 
         elif kind == "tool":
             tool_name = (
@@ -404,29 +544,26 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
                 or ad.get("traceloop.entity.name")
                 or name
             )
-            events.append(
-                _ev(
-                    "tool.called",
-                    step,
-                    start_ts,
-                    {
-                        "tool_name": tool_name,
-                    },
-                )
-            )
-            events.append(
-                _ev(
-                    "tool.responded",
-                    step,
-                    end_ts,
-                    {
-                        "tool_name": tool_name,
-                        "success": span_ok,
-                        "latency_ms": lat_ms,
-                        "output_length": 0,
-                    },
-                )
-            )
+            tool_args = _tool_args(ad)
+            tool_output = _tool_output(ad)
+
+            called = {"tool_name": tool_name}
+            if tool_args:
+                # Real args matter: TOOL_LOOP dedups on (tool, args), so an empty
+                # args string across repeated calls can false-fire the loop
+                # detector. Populating it keeps that detection honest.
+                called["args"] = tool_args
+            events.append(_ev("tool.called", step, start_ts, called))
+
+            responded = {
+                "tool_name": tool_name,
+                "success": span_ok,
+                "latency_ms": lat_ms,
+                "output_length": len(tool_output),
+            }
+            if tool_output:
+                responded["output"] = tool_output
+            events.append(_ev("tool.responded", step, end_ts, responded))
 
         elif kind == "retrieval":
             index = (
@@ -437,6 +574,7 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
             )
             result_count = int(ad.get("retrieval.result_count") or ad.get("db.result_count") or 0)
             top_score = ad.get("retrieval.top_score")
+            content = _retrieval_content(ad)
 
             events.append(
                 _ev(
@@ -448,19 +586,15 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
                     },
                 )
             )
-            events.append(
-                _ev(
-                    "retrieval.responded",
-                    step,
-                    end_ts,
-                    {
-                        "index_name": index,
-                        "result_count": result_count,
-                        "top_score": top_score,
-                        "latency_ms": lat_ms,
-                    },
-                )
-            )
+            responded = {
+                "index_name": index,
+                "result_count": result_count,
+                "top_score": top_score,
+                "latency_ms": lat_ms,
+            }
+            if content:
+                responded["content"] = content
+            events.append(_ev("retrieval.responded", step, end_ts, responded))
 
         else:
             # lifecycle / skip — not a distinct Dunetrace event type
@@ -476,7 +610,5 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
             {"exit_reason": "error" if errored else "completed"},
         )
     )
-
-    return events
 
     return events

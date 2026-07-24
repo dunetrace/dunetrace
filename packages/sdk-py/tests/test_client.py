@@ -773,9 +773,6 @@ class TestCustomExporters(unittest.TestCase):
             def handle(self, event):
                 otel_calls.append(event)
 
-            def notify_run_state(self, run_id, state):
-                pass
-
         custom_calls = []
 
         class MyExporter:

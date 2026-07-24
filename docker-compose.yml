@@ -162,6 +162,29 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  elevenlabs:
+    build:
+      context: .
+      dockerfile: services/integrations/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      WAKE_INTERVAL: 60
+      ELEVENLABS_WORKER_ENABLED: ${ELEVENLABS_WORKER_ENABLED:-false}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+      PYTHONPATH: /app/services/integrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+    command: ["python", "-m", "integrations_svc.elevenlabs_worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
       start_period: 20s
 
   api:

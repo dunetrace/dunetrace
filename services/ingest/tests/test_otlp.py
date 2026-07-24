@@ -9,6 +9,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import sys
 import os
 
@@ -280,6 +281,161 @@ def test_multiple_traces_in_one_batch():
     assert "agent-a" in agent_ids
     assert "agent-b" in agent_ids
     assert len(run_ids) == 2
+
+
+# ── Phase 1: convention completeness ─────────────────────────────────────────────
+
+
+def test_llm_model_is_not_taken_from_gen_ai_system():
+    """gen_ai.system is the provider, not the model. A span carrying only the
+    provider must not record model='openai' (the old fallback bug)."""
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    llm = _span(
+        "llm1",
+        "root",
+        "openai.chat",
+        1_100_000_000_000,
+        1_900_000_000_000,
+        attrs=[_attr("gen_ai.system", "stringValue", "openai")],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, llm])])
+    called = next(e for e in events if e["event_type"] == "llm.called")
+    assert called["payload"]["model"] != "openai"
+    assert called["payload"]["model"] == ""
+
+
+def test_llm_model_falls_back_to_response_model():
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    llm = _span(
+        "llm1",
+        "root",
+        "chat",
+        1_100_000_000_000,
+        1_900_000_000_000,
+        attrs=[
+            _attr("gen_ai.system", "stringValue", "anthropic"),
+            _attr("gen_ai.response.model", "stringValue", "claude-3-5-sonnet-20241022"),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, llm])])
+    called = next(e for e in events if e["event_type"] == "llm.called")
+    assert called["payload"]["model"] == "claude-3-5-sonnet-20241022"
+
+
+def test_llm_output_text_extracted_and_length_set():
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    llm = _span(
+        "llm1",
+        "root",
+        "chat",
+        1_100_000_000_000,
+        1_900_000_000_000,
+        attrs=[
+            _attr("gen_ai.request.model", "stringValue", "gpt-4o"),
+            _attr("gen_ai.completion", "stringValue", "The answer is 42."),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, llm])])
+    resp = next(e for e in events if e["event_type"] == "llm.responded")
+    assert resp["payload"]["output"] == "The answer is 42."
+    assert resp["payload"]["output_length"] == len("The answer is 42.")
+
+
+def test_tool_args_and_output_extracted():
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    tool = _span(
+        "t1",
+        "root",
+        "search",
+        1_200_000_000_000,
+        1_500_000_000_000,
+        attrs=[
+            _attr("gen_ai.tool.name", "stringValue", "web_search"),
+            _attr("traceloop.entity.input", "stringValue", '{"query": "otel"}'),
+            _attr("tool.result", "stringValue", "3 results"),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, tool])])
+    called = next(e for e in events if e["event_type"] == "tool.called")
+    resp = next(e for e in events if e["event_type"] == "tool.responded")
+    assert called["payload"]["args"] == '{"query": "otel"}'
+    assert resp["payload"]["output"] == "3 results"
+    assert resp["payload"]["output_length"] == len("3 results")
+
+
+def test_tool_args_serialized_from_kvlist():
+    """Structured (non-string) args are JSON-serialized to the string the event
+    schema expects."""
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    tool = _span(
+        "t1",
+        "root",
+        "search",
+        1_200_000_000_000,
+        1_500_000_000_000,
+        attrs=[
+            _attr("tool.name", "stringValue", "search"),
+            {
+                "key": "tool.arguments",
+                "value": {
+                    "kvlistValue": {"values": [{"key": "q", "value": {"stringValue": "hello"}}]}
+                },
+            },
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, tool])])
+    called = next(e for e in events if e["event_type"] == "tool.called")
+    assert json.loads(called["payload"]["args"]) == {"q": "hello"}
+
+
+def test_retrieval_content_extracted():
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    ret = _span(
+        "r1",
+        "root",
+        "vectorstore.query",
+        1_300_000_000_000,
+        1_600_000_000_000,
+        attrs=[
+            _attr("retrieval.index_name", "stringValue", "kb"),
+            _attr("retrieval.result_count", "intValue", "2"),
+            _attr("retrieval.documents", "stringValue", "doc A. doc B."),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, ret])])
+    resp = next(e for e in events if e["event_type"] == "retrieval.responded")
+    assert resp["payload"]["content"] == "doc A. doc B."
+
+
+# ── Phase 3: robustness ──────────────────────────────────────────────────────────
+
+
+def test_long_content_is_truncated(monkeypatch):
+    monkeypatch.setattr("ingest_svc.config.settings.OTLP_MAX_ATTR_CHARS", 5)
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    llm = _span(
+        "llm1",
+        "root",
+        "chat",
+        1_100_000_000_000,
+        1_900_000_000_000,
+        attrs=[
+            _attr("gen_ai.request.model", "stringValue", "gpt-4o"),
+            _attr("gen_ai.completion", "stringValue", "x" * 10_000),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, llm])])
+    resp = next(e for e in events if e["event_type"] == "llm.responded")
+    assert len(resp["payload"]["output"]) == 5
+
+
+def test_empty_service_name_does_not_sink_the_batch():
+    """A present-but-empty service.name must not produce agent_id='' (which would
+    fail IngestEvent validation and drop the whole batch)."""
+    root = _span("root", "", "root", 1_000_000_000_000, 2_000_000_000_000)
+    events = otlp_to_events([_make_resource_span("t", [root], service_name="")])
+    assert events  # not dropped
+    assert all(e["agent_id"] == "unknown-agent" for e in events)
 
 
 # ── protobuf_to_resource_spans (D11) ────────────────────────────────────────────

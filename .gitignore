@@ -47,6 +47,10 @@ coverage.xml
 CLAUDE.md
 .claude/
 .claude.json
+# Cursor MCP config holds a local API key; commit .cursor/mcp.json.example instead
+.cursor/mcp.json
+# Stray CLAUDE.md that was committed as bare ".md" (root only)
+/.md
 
 # macOS
 .DS_Store

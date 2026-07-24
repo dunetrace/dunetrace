@@ -36,6 +36,7 @@ from api_svc.routers import (
     keys,
     orgs,
     integrations,
+    elevenlabs,
     external_signals,
     conversations,
     calls,
@@ -45,6 +46,7 @@ from api_svc.routers import (
     performance_trends,
     packs,
     approvals,
+    otel_receiver,
 )
 from api_svc.schemas import HealthResponse
 
@@ -125,6 +127,8 @@ def create_app() -> FastAPI:
     app.include_router(keys.router, dependencies=_auth)
     app.include_router(orgs.router, dependencies=_auth)
     app.include_router(integrations.router, dependencies=_auth)
+    app.include_router(elevenlabs.router, dependencies=_auth)
+    app.include_router(otel_receiver.router, dependencies=_auth)
     app.include_router(external_signals.router, dependencies=_auth)
     app.include_router(conversations.router, dependencies=_auth)
     app.include_router(calls.router, dependencies=_auth)

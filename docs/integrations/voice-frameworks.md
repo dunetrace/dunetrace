@@ -29,6 +29,16 @@ the matching Dunetrace hook:
 barge_in}`; `turn_taking` `action` ∈ `{agent_speaking, user_speaking,
 both_speaking, neither}`.
 
+### Capturing TTS provider metadata
+
+`tts_generated` takes four optional, keyword-only fields for correlating a
+generation back to its TTS provider: `voice_id`, `model`, `provider`, and
+`provider_generation_id`. They are unused by the voice pack itself, but if you
+run on ElevenLabs, capturing them lets Dunetrace pull ElevenLabs' generation
+history and line up cost and voice choices against agent behavior. See the
+[ElevenLabs integration](elevenlabs.md). Existing calls that omit them are
+unchanged.
+
 ---
 
 ## One long-lived run per call

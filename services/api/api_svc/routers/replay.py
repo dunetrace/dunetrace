@@ -61,22 +61,24 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
             continue
 
         if mod_type == "break_tool_loop":
-            # Remove duplicate tool.called events (same tool_name + args).
-            # ToolLoopDetector counts tool_name occurrences in the window; we need
-            # to reduce the call count below THRESHOLD, not just mutate args.
-            # Also drop the paired tool.responded at the same step so build_run_state
-            # doesn't see orphaned responses.
-            seen_tool_args: set[tuple] = set()
+            # Simulate the agent not looping: keep at most THRESHOLD-1 calls of any
+            # one tool. TOOL_LOOP counts by tool_name (not by args), so an
+            # arg-varying loop has to be thinned by name — deduping (name, args)
+            # left arg-varying loops firing. Drop each surplus tool.called and its
+            # paired tool.responded (same step) so build_run_state sees no orphans.
+            from dunetrace.detectors import ToolLoopDetector  # noqa: PLC0415
+
+            cap = max(1, ToolLoopDetector.THRESHOLD - 1)
+            per_tool: dict[str, int] = {}
             dropped_steps: set[int] = set()
             filtered: list[dict] = []
             for e in events:
                 if e["event_type"] == "tool.called":
-                    p = e.get("payload") or {}
-                    key = (p.get("tool_name", ""), p.get("args", ""))
-                    if key in seen_tool_args:
+                    name = (e.get("payload") or {}).get("tool_name", "")
+                    per_tool[name] = per_tool.get(name, 0) + 1
+                    if per_tool[name] > cap:
                         dropped_steps.add(e.get("step_index", -1))
                         continue
-                    seen_tool_args.add(key)
                 elif e["event_type"] == "tool.responded":
                     if e.get("step_index", -1) in dropped_steps:
                         continue
@@ -99,14 +101,34 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
                         p.pop("error", None)
 
         elif mod_type == "reduce_context":
-            factor = float(mod_params.get("factor", 0.5))
-            factor = max(0.1, min(1.0, factor))
+            # Simulate effective context compression by capping prompt-token GROWTH,
+            # not by uniformly scaling every call. CONTEXT_BLOAT fires on the
+            # last/first ratio, which is scale-invariant — multiplying every call by
+            # the same factor (the old behavior) never changed the ratio, so the
+            # signal never resolved. Cap each later call so growth stays under the
+            # detector's threshold.
+            from dunetrace.detectors import ContextBloatDetector  # noqa: PLC0415
+
+            factor = max(0.1, min(1.0, float(mod_params.get("factor", 0.5))))
+            # Allowed growth headroom scaled by factor: factor=0.5 -> ~2x (< 3x).
+            cap_ratio = 1.0 + (ContextBloatDetector.GROWTH_FACTOR - 1.0) * factor
+            # prompt_tokens can live on llm.called (direct SDK) or llm.responded
+            # (e.g. LangChain, where llm.called carries 0). build_run_state uses
+            # whichever is non-zero, so cap both to actually flatten the effective
+            # growth the detector reads.
+            first_pt: int | None = None
             for e in events:
-                if e["event_type"] == "llm.called":
+                if e["event_type"] in ("llm.called", "llm.responded"):
                     p = e.get("payload") or {}
                     pt = p.get("prompt_tokens")
-                    if pt:
-                        p["prompt_tokens"] = max(1, int(pt * factor))
+                    if not pt:
+                        continue
+                    if first_pt is None:
+                        first_pt = pt
+                        continue
+                    cap = max(1, int(first_pt * cap_ratio))
+                    if pt > cap:
+                        p["prompt_tokens"] = cap
 
         elif mod_type == "fix_rag_retrieval":
             for e in events:

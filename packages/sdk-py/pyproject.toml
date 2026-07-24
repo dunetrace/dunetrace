@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace"
-version = "0.5.1"
+version = "0.5.2"
 description = "Real-time monitoring for AI agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -30,8 +30,10 @@ langchain = ["langchain>=1.0", "langgraph>=0.2"]
 haystack = ["haystack-ai>=2.0"]
 openai-agents = ["openai-agents>=0.1,<1.0"]
 otel = [
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
+    "opentelemetry-api>=1.28.0",
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
 ]
 dev = [
     "pytest>=7",
