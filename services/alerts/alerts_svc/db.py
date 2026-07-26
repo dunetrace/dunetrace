@@ -56,38 +56,135 @@ async def ensure_semantic_signal_column() -> None:
         )
 
 
-async def fetch_unalerted_signals(limit: int = 50) -> list[dict[str, Any]]:
-    """Scan unalerted live signals across ALL orgs in one poll — mirrors
-    detector_svc's fetch_completed_runs/fetch_stalled_runs, which also scan
-    globally rather than per-org. org_id is returned per-row so the worker
-    can group and scope downstream policy/dedup checks correctly."""
+async def ensure_alert_claim_columns() -> None:
+    """Add the claim bookkeeping columns this worker uses to take exclusive
+    ownership of a signal before delivering it.
+
+    `alerted` alone can't serve as the claim: it's only set *after* a successful
+    send, so between the SELECT and the send a second worker sees the same row as
+    unclaimed and delivers a duplicate alert to the customer's Slack. These two
+    columns close that window — see claim_unalerted_signals."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS alert_claimed_at TIMESTAMPTZ"
+        )
+        await conn.execute(
+            "ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS alert_claimed_by TEXT"
+        )
+        # Sized for the claim scan: the driving predicate is alerted = FALSE,
+        # ordered by detected_at, with the claim state read per candidate row.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_signals_alert_claim "
+            "ON failure_signals (detected_at, alert_claimed_at) "
+            "WHERE alerted = FALSE"
+        )
+
+
+async def claim_unalerted_signals(
+    limit: int = 50,
+    shard_count: int = 1,
+    shard_index: int = 0,
+    worker_id: str = "",
+    claim_timeout_secs: float = 300.0,
+) -> list[dict[str, Any]]:
+    """Atomically claim up to `limit` unalerted live signals for this worker.
+
+    Scans across ALL orgs in one poll — mirrors detector_svc's
+    fetch_completed_runs/fetch_stalled_runs, which also scan globally rather
+    than per-org. org_id is returned per-row so the worker can group and scope
+    downstream policy/dedup checks correctly.
+
+    Two independent mechanisms make this safe to run on N replicas:
+
+    1. **Shard filter** (`abs(hashtext(agent_id)) % shard_count = shard_index`),
+       identical to detector_svc's. This is the one that matters for
+       correctness of *content*: this worker groups signals by
+       (org_id, agent_id, failure_type) and emits one alert per group, so a
+       group must never be split across replicas or each would send its own
+       alert for the same group. Hashing on agent_id keeps every group whole.
+
+    2. **Claim** (`alert_claimed_at`/`alert_claimed_by` set inside the same
+       statement that selects, with FOR UPDATE SKIP LOCKED). This is the
+       backstop for the cases sharding can't cover: two replicas accidentally
+       given the same SHARD_INDEX, an overlapping rolling deploy, or a plain
+       `--scale alerts=2` with the default SHARD_COUNT=1.
+
+    Claims expire after `claim_timeout_secs` so a worker that dies mid-delivery
+    doesn't strand its rows — they become claimable again on a later poll. That
+    keeps delivery at-least-once (unchanged, and documented in worker.py's
+    module docstring) rather than making it exactly-once, which would require
+    the receiver-side idempotency we don't control.
+    """
     if not _pool:
         return []
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT
-                id,
-                failure_type,
-                severity,
-                run_id,
-                agent_id,
-                org_id,
-                agent_version,
-                step_index,
-                confidence,
-                evidence,
-                detected_at,
-                COALESCE(source, 'structural') AS source
-            FROM failure_signals
-            WHERE alerted = FALSE
-              AND COALESCE(shadow, TRUE) = FALSE
-            ORDER BY detected_at ASC
-            LIMIT $1
+            WITH claimable AS (
+                SELECT id
+                FROM failure_signals
+                WHERE alerted = FALSE
+                  AND COALESCE(shadow, TRUE) = FALSE
+                  AND (
+                      alert_claimed_at IS NULL
+                      OR alert_claimed_at < NOW() - ($5 || ' seconds')::INTERVAL
+                  )
+                  AND ($2::int = 1 OR abs(hashtext(agent_id)) % $2 = $3)
+                ORDER BY detected_at ASC
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE failure_signals s
+            SET alert_claimed_at = NOW(),
+                alert_claimed_by = $4
+            FROM claimable c
+            WHERE s.id = c.id
+            RETURNING
+                s.id,
+                s.failure_type,
+                s.severity,
+                s.run_id,
+                s.agent_id,
+                s.org_id,
+                s.agent_version,
+                s.step_index,
+                s.confidence,
+                s.evidence,
+                s.detected_at,
+                COALESCE(s.source, 'structural') AS source
             """,
             limit,
+            shard_count,
+            shard_index,
+            worker_id,
+            str(claim_timeout_secs),
         )
-    return [dict(r) for r in rows]
+    # RETURNING order isn't guaranteed to follow the CTE's ORDER BY, and the
+    # caller's "highest-confidence signal in the batch wins" grouping reads
+    # better against a stable oldest-first sequence.
+    return sorted((dict(r) for r in rows), key=lambda r: r["detected_at"])
+
+
+async def release_claims(signal_ids: list[int]) -> None:
+    """Hand back claims for signals this poll did not deliver, so the next poll
+    (or another replica) can retry immediately instead of waiting out the claim
+    timeout. Called for delivery failures; successful sends set alerted = TRUE
+    and never need releasing."""
+    if not signal_ids or not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE failure_signals
+            SET alert_claimed_at = NULL,
+                alert_claimed_by = NULL
+            WHERE id = ANY($1::bigint[])
+              AND alerted = FALSE
+            """,
+            signal_ids,
+        )
 
 
 async def mark_alerted_batch(signal_ids: list[int]) -> None:

@@ -31,7 +31,9 @@ class Settings:
         "DATABASE_URL",
         "postgresql://dunetrace:dunetrace@localhost:5432/dunetrace",
     )
-    AUTH_MODE: str = os.getenv("AUTH_MODE", "dev")
+    # Fails CLOSED — see api_svc/config.py for the full rationale. Unset means
+    # ingest requires a valid API key; `dev` (explicit) accepts anonymous writes.
+    AUTH_MODE: str = os.getenv("AUTH_MODE", "prod")
     INTERNAL_TOKEN: str = os.getenv("INTERNAL_TOKEN", "")
     MAX_BATCH_SIZE: int = int(os.getenv("MAX_BATCH_SIZE", "500"))
     RATE_LIMIT_REQUESTS: int = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))  # per IP per minute

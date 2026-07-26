@@ -13,10 +13,17 @@ Scenarios (set SCENARIO env var):
 Default is to run all synthetic scenarios.
 
 Synthetic scenarios fire Hermes hooks directly — no LLM API key needed.
-The real scenario requires: pip install hermes-agent && OPENAI_API_KEY=sk-...
+The real scenarios make billable OpenAI calls and read OPENAI_API_KEY from the
+ambient environment only — unlike the other framework examples, this one does
+not load the repo-root .env.
+
+Install:
+    pip install dunetrace hermes-agent
+
+Run from packages/sdk-py/:
 
     # All synthetic scenarios (no credentials needed):
-    PYTHONPATH=packages/sdk-py python examples/hermes_agent.py
+    python examples/hermes_agent.py
 
     # Real Hermes agent:
     SCENARIO=real OPENAI_API_KEY=sk-... python examples/hermes_agent.py
@@ -48,7 +55,13 @@ plugin = DunetraceHermesPlugin(
     system_prompt="You are a research assistant. Use tools before answering.",
     tools=["web_search", "calculator", "read_file"],
 )
-plugin.attach()
+try:
+    plugin.attach()
+except ImportError as exc:
+    # attach() is what actually imports hermes-agent — the plugin constructs
+    # fine without it. Surface the one-line fix rather than a traceback.
+    # The SDK integration's own message already names the fix.
+    raise SystemExit(f"This example needs Hermes Agent — {exc}") from None
 
 # ── Synthetic scenario helpers ─────────────────────────────────────────────────
 # Fire Hermes hooks directly to test the integration logic without LLM credentials.

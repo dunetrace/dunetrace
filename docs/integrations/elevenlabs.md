@@ -32,6 +32,23 @@ fetch of the next.
 
 ## Setup
 
+### 0. Enable the worker
+
+Call ingestion is served by the `elevenlabs` container, which ships in both
+compose files but is **off by default**:
+
+```bash
+ELEVENLABS_WORKER_ENABLED=true        # in .env
+DUNETRACE_MASTER_KEY=<same value the Customer API uses>
+docker compose up -d
+```
+
+`DUNETRACE_MASTER_KEY` must match the Customer API's exactly — the API encrypts
+your stored ElevenLabs key and this worker is what decrypts it. With the flag
+off the container logs one line and exits 0, so `Exited (0)` is the expected
+state, not a failure. It runs the same image as the `integrations` worker with a
+different entrypoint.
+
 ### 1. Get an ElevenLabs API key
 
 In your ElevenLabs account, open the profile menu and copy your API key. Any key

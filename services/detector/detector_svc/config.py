@@ -38,6 +38,20 @@ class Settings:
     SHARD_COUNT: int = int(os.getenv("SHARD_COUNT", "1"))
     SHARD_INDEX: int = int(os.getenv("SHARD_INDEX", "0"))
 
+    # Re-scan overlap for the poll watermark (see db.py::advance_watermark).
+    # Larger = more redundant scanning per poll but a wider safety margin for
+    # late-arriving events still triggering a re-detection. The effective
+    # lookback is up to 2x this, since the watermark is set to NOW() - grace and
+    # the next poll scans everything after it.
+    WATERMARK_GRACE_SECS: float = float(os.getenv("WATERMARK_GRACE_SECS", "3600"))
+
+    # processed_runs retention. Rows are only deleted once the run's events are
+    # gone (see db.py::prune_processed_runs), so this is a scan bound rather than
+    # the safety mechanism — it sits beyond ingest's 90-day EVENT_RETENTION_DAYS
+    # default so the anti-join only considers rows that can plausibly qualify.
+    PROCESSED_RUNS_RETENTION_DAYS: int = int(os.getenv("PROCESSED_RUNS_RETENTION_DAYS", "120"))
+    PRUNE_BATCH_SIZE: int = int(os.getenv("PRUNE_BATCH_SIZE", "10000"))
+
 
 settings = Settings()
 
@@ -47,4 +61,14 @@ if not (0 <= settings.SHARD_INDEX < settings.SHARD_COUNT):
     raise ValueError(
         f"SHARD_INDEX must be in [0, SHARD_COUNT), "
         f"got SHARD_INDEX={settings.SHARD_INDEX} SHARD_COUNT={settings.SHARD_COUNT}"
+    )
+# A grace below the stall timeout would let the watermark advance past a run
+# before it has even become stall-eligible, so the stalled-run scan could never
+# see it — the run would sit undetected forever.
+if settings.WATERMARK_GRACE_SECS < settings.STALL_TIMEOUT_SECS:
+    raise ValueError(
+        f"WATERMARK_GRACE_SECS ({settings.WATERMARK_GRACE_SECS}) must be >= "
+        f"STALL_TIMEOUT_SECS ({settings.STALL_TIMEOUT_SECS}) — a smaller grace "
+        f"window can advance the poll watermark past runs before they qualify "
+        f"as stalled, and they would never be detected."
     )

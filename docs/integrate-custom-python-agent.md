@@ -30,7 +30,7 @@ Start the backend once, locally, before running this: `docker compose up -d`.
 
 ## What this does
 
-Wrap your agent's entry point with `@dt.trace` and your tool functions with `@dt.tool`. Dunetrace then auto-traces every tool and LLM call made inside that function, ships the trace to the backend, and detects behavioral failures (tool loops, retry storms, cost spikes, and 20 more) within ~15 seconds — no other code changes.
+Wrap your agent's entry point with `@dt.trace` and your tool functions with `@dt.tool`. Dunetrace then auto-traces every tool and LLM call made inside that function, ships the trace to the backend, and detects structural failures (tool loops, retry storms, cost spikes, and 26 more) within ~15 seconds — no other code changes.
 
 ## Recommended usage pattern
 
@@ -62,7 +62,18 @@ INSERT INTO api_keys (key, org_id) VALUES ('dt_live_<random-string>', 'my-compan
 python3 -c "import secrets; print('dt_live_' + secrets.token_hex(16))"
 ```
 
-Always call `dt.shutdown()` before your process exits (or `atexit.register(dt.shutdown)`) — this flushes any buffered events.
+Events are shipped from a background thread, so anything still buffered when the
+process exits needs flushing. The SDK registers an `atexit` hook that does this
+for you, which is what makes short-lived scripts, CLIs and one-shot jobs work
+without ceremony.
+
+Still call `dt.shutdown()` explicitly where you can — it flushes at a point you
+control, with a full timeout rather than the shorter at-exit one, and surfaces
+delivery problems while your process is still alive to log them. Calling it
+cancels the at-exit hook, so events are never sent twice.
+
+Set `DUNETRACE_ATEXIT_TIMEOUT` to change how long the at-exit flush may block
+interpreter shutdown (seconds, default `2`), or to `0` to disable it entirely.
 
 ## Auto instrumentation
 

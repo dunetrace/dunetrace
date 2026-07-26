@@ -995,6 +995,8 @@ class TestShardConfig(unittest.IsolatedAsyncioTestCase):
         with (
             patch("detector_svc.worker.fetch_completed_runs", mock_completed),
             patch("detector_svc.worker.fetch_stalled_runs", mock_stalled),
+            patch("detector_svc.worker.get_watermark", AsyncMock(return_value=None)),
+            patch("detector_svc.worker.advance_watermark", AsyncMock()),
             patch("detector_svc.worker.settings") as mock_settings,
         ):
             mock_settings.BATCH_SIZE = 100
@@ -1002,13 +1004,102 @@ class TestShardConfig(unittest.IsolatedAsyncioTestCase):
             mock_settings.DETECTOR_CONCURRENCY = 8
             mock_settings.SHARD_COUNT = 3
             mock_settings.SHARD_INDEX = 1
+            mock_settings.WATERMARK_GRACE_SECS = 3600
             from detector_svc.worker import poll_once
 
             await poll_once()
-        mock_completed.assert_called_once_with(limit=100, shard_count=3, shard_index=1)
-        mock_stalled.assert_called_once_with(
-            stall_timeout_secs=90, limit=100, shard_count=3, shard_index=1
+        mock_completed.assert_called_once_with(
+            limit=100, shard_count=3, shard_index=1, watermark=None
         )
+        mock_stalled.assert_called_once_with(
+            stall_timeout_secs=90, limit=100, shard_count=3, shard_index=1, watermark=None
+        )
+
+
+class TestPollWatermark(unittest.IsolatedAsyncioTestCase):
+    """The watermark is what bounds the poll scan. Advancing it while work is
+    still queued would skip runs permanently, so the drain check is the load-
+    bearing part of this feature, not the SQL."""
+
+    async def _poll(self, completed_rows, stalled_rows, batch_size=100, watermark=None):
+        advance = AsyncMock()
+        with (
+            patch(
+                "detector_svc.worker.fetch_completed_runs",
+                AsyncMock(return_value=completed_rows),
+            ),
+            patch(
+                "detector_svc.worker.fetch_stalled_runs",
+                AsyncMock(return_value=stalled_rows),
+            ),
+            patch("detector_svc.worker.get_watermark", AsyncMock(return_value=watermark)),
+            patch("detector_svc.worker.advance_watermark", advance),
+            patch("detector_svc.worker.process_run", AsyncMock(return_value=0)),
+            patch("detector_svc.worker.settings") as mock_settings,
+        ):
+            mock_settings.BATCH_SIZE = batch_size
+            mock_settings.STALL_TIMEOUT_SECS = 90
+            mock_settings.DETECTOR_CONCURRENCY = 8
+            mock_settings.SHARD_COUNT = 1
+            mock_settings.SHARD_INDEX = 0
+            mock_settings.WATERMARK_GRACE_SECS = 3600
+            from detector_svc.worker import poll_once
+
+            await poll_once()
+        return advance
+
+    def _rows(self, n):
+        return [
+            {
+                "run_id": f"r{i}",
+                "agent_id": "a",
+                "agent_version": "v1",
+                "org_id": "default",
+                "trigger": "run.completed",
+            }
+            for i in range(n)
+        ]
+
+    async def test_advances_when_nothing_found(self):
+        advance = await self._poll([], [])
+        advance.assert_awaited_once_with(0, 3600)
+
+    async def test_advances_on_partial_batch(self):
+        advance = await self._poll(self._rows(3), [], batch_size=100)
+        advance.assert_awaited_once_with(0, 3600)
+
+    async def test_does_not_advance_when_completed_batch_is_full(self):
+        """A full batch means more work is behind it — advancing here would move
+        the window past runs that were never processed."""
+        advance = await self._poll(self._rows(10), [], batch_size=10)
+        advance.assert_not_awaited()
+
+    async def test_does_not_advance_when_stalled_batch_is_full(self):
+        advance = await self._poll([], self._rows(10), batch_size=10)
+        advance.assert_not_awaited()
+
+    async def test_watermark_from_db_is_passed_through(self):
+        import datetime
+
+        wm = datetime.datetime(2026, 7, 1, 12, 0, 0)
+        mock_completed = AsyncMock(return_value=[])
+        with (
+            patch("detector_svc.worker.fetch_completed_runs", mock_completed),
+            patch("detector_svc.worker.fetch_stalled_runs", AsyncMock(return_value=[])),
+            patch("detector_svc.worker.get_watermark", AsyncMock(return_value=wm)),
+            patch("detector_svc.worker.advance_watermark", AsyncMock()),
+            patch("detector_svc.worker.settings") as mock_settings,
+        ):
+            mock_settings.BATCH_SIZE = 100
+            mock_settings.STALL_TIMEOUT_SECS = 90
+            mock_settings.DETECTOR_CONCURRENCY = 8
+            mock_settings.SHARD_COUNT = 1
+            mock_settings.SHARD_INDEX = 0
+            mock_settings.WATERMARK_GRACE_SECS = 3600
+            from detector_svc.worker import poll_once
+
+            await poll_once()
+        self.assertEqual(mock_completed.call_args.kwargs["watermark"], wm)
 
     def test_default_shard_count_is_one(self):
         from detector_svc.config import Settings

@@ -20,7 +20,7 @@ except ImportError:
 
 from api_svc.config import settings
 from dunetrace.models import FailureSignal, FailureType, Severity
-from explainer_svc.explainer import explain
+from explainer_svc.explainer import coerce_failure_type, explain
 
 logger = logging.getLogger("dunetrace.api.db")
 _pool = None
@@ -1053,7 +1053,9 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
 
         exp = None
         try:
-            ft = FailureType(s["failure_type"])
+            ft, explain_evidence = coerce_failure_type(
+                s["failure_type"], dict(evidence) if evidence else {}
+            )
             fs = FailureSignal(
                 failure_type=ft,
                 severity=Severity(s["severity"]),
@@ -1062,12 +1064,10 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
                 agent_version=dict(pr)["agent_version"],
                 step_index=s["step_index"],
                 confidence=s["confidence"],
-                evidence=dict(evidence) if evidence else {},
+                evidence=explain_evidence,
                 detected_at=detected_at,
             )
             exp = explain(fs)
-        except ValueError:
-            pass  # custom failure types (CUSTOM_*) are not in the FailureType enum
         except Exception as exc:
             logger.error("Explain failed for signal %d: %s", s["id"], exc)
 
@@ -1746,15 +1746,18 @@ async def get_signal_by_id(org_id: str, signal_id: int) -> Optional[dict]:
         detected_at = detected_at.timestamp()
 
     try:
+        ft, explain_evidence = coerce_failure_type(
+            row["failure_type"], dict(evidence) if evidence else {}
+        )
         fs = FailureSignal(
-            failure_type=FailureType(row["failure_type"]),
+            failure_type=ft,
             severity=Severity(row["severity"]),
             run_id=row["run_id"],
             agent_id=row["agent_id"],
             agent_version=row["agent_version"],
             step_index=row["step_index"],
             confidence=row["confidence"],
-            evidence=dict(evidence) if evidence else {},
+            evidence=explain_evidence,
             detected_at=detected_at,
         )
         exp = explain(fs)
@@ -1848,15 +1851,18 @@ async def list_signals(
             detected_at = detected_at.timestamp()
 
         try:
+            ft, explain_evidence = coerce_failure_type(
+                s["failure_type"], dict(evidence) if evidence else {}
+            )
             fs = FailureSignal(
-                failure_type=FailureType(s["failure_type"]),
+                failure_type=ft,
                 severity=Severity(s["severity"]),
                 run_id=s["run_id"],
                 agent_id=s["agent_id"],
                 agent_version=s["agent_version"],
                 step_index=s["step_index"],
                 confidence=s["confidence"],
-                evidence=dict(evidence) if evidence else {},
+                evidence=explain_evidence,
                 detected_at=detected_at,
             )
             exp = explain(fs)

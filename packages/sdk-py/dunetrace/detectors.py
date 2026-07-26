@@ -423,18 +423,81 @@ _INJECTION_PATTERNS_COMPILED = [
 class PromptInjectionDetector(BaseDetector):
     """
     Pattern-matches user input against known injection signatures, before any LLM call.
-    No tunable parameters — extend by adding entries to _INJECTION_PATTERNS_COMPILED.
+    Extend the signature set by adding entries to _INJECTION_PATTERNS_COMPILED.
+
+    Unlike every other detector in this module, this one runs **in-path** — the
+    SDK calls it inside ``dt.run()`` before the agent does any work (see
+    client.py), because the signal has to exist by the time ``run.started`` is
+    emitted. That makes its cost the caller's latency, so the scan is bounded:
+    see SCAN_HEAD_CHARS/SCAN_TAIL_CHARS.
+
+    SCAN_HEAD_CHARS / SCAN_TAIL_CHARS (default 16384 each) set how much text is
+    scanned from each end; an input at or below their sum is scanned whole, with
+    no gap. The 18 patterns cost roughly 0.3µs per character scanned, so the
+    defaults cap the scan at ~10ms — against an LLM call of 500ms or more, i.e.
+    ~2%. Lower them if you run latency-critical agents (voice, realtime) on large
+    inputs and would rather trade edge coverage for a tighter run-start; raise
+    them if inputs routinely exceed 32K characters and you want full coverage.
+
+    Unlike every other detector's tunables these are *not* settable from
+    detectors.yml — that file configures the detector worker, and this scan runs
+    in the SDK, in the customer's process, which never reads it. Set them on this
+    class (or a subclass) instead.
     """
 
     name = "PROMPT_INJECTION_SIGNAL"
     SEVERITY = Severity.CRITICAL
 
+    # Bound the in-path scan. Cost is linear in characters scanned (~0.3µs/char
+    # across the 18 patterns), so an unbounded scan makes dt.run()'s latency a
+    # function of input size — a 1 MB input (a document, a stuffed RAG context)
+    # cost ~340ms of synchronous, blocking time before the agent ran at all.
+    #
+    # The sizing goal is coverage, not a fixed microsecond budget: the cost that
+    # matters is the fraction of a real agent step, and an LLM call is 500ms+.
+    # 16K+16K caps the scan at ~10ms (~2% of one LLM call) while scanning any
+    # input up to 32K characters *in full* — which is most of them — so the
+    # head/tail split only degrades coverage for genuinely large inputs.
+    #
+    # Beyond that, head and tail are scanned because injections cluster at the
+    # edges: a prefix override ("ignore all previous instructions...") or a
+    # payload appended after legitimate content. Text between the two windows is
+    # not scanned. This is a detection *signal*, not a security boundary.
+    SCAN_HEAD_CHARS: int = 16_384
+    SCAN_TAIL_CHARS: int = 16_384
+
+    def _scan_windows(self, input_text: str) -> tuple:
+        """Return the slices of input_text to scan, and whether it was truncated.
+
+        Windows are scanned as separate strings rather than concatenated, so no
+        pattern can match across the join between head and tail and produce a
+        match that isn't in the real input.
+        """
+        head_n, tail_n = self.SCAN_HEAD_CHARS, self.SCAN_TAIL_CHARS
+        if len(input_text) <= head_n + tail_n:
+            return (input_text,), False
+        return (input_text[:head_n], input_text[-tail_n:]), True
+
     def check_input(self, input_text: str, state: RunState) -> Optional[FailureSignal]:
+        windows, truncated = self._scan_windows(input_text)
         matched = [
-            label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(input_text)
+            label
+            for label, pattern in _INJECTION_PATTERNS_COMPILED
+            if any(pattern.search(w) for w in windows)
         ]
         if not matched:
             return None
+
+        evidence = {
+            "matched_pattern_count": len(matched),
+            "matched_patterns": matched[:5],
+            "input_length": len(input_text),
+        }
+        if truncated:
+            # Tells a reader of this signal that absence of a pattern is not
+            # proof of absence in the full input.
+            evidence["scanned_chars"] = self.SCAN_HEAD_CHARS + self.SCAN_TAIL_CHARS
+            evidence["scan_truncated"] = True
 
         return FailureSignal(
             failure_type=FailureType.PROMPT_INJECTION_SIGNAL,
@@ -444,11 +507,7 @@ class PromptInjectionDetector(BaseDetector):
             agent_version=state.agent_version,
             step_index=0,
             confidence=_scale_confidence(len(matched)),
-            evidence={
-                "matched_pattern_count": len(matched),
-                "matched_patterns": matched[:5],
-                "input_length": len(input_text),
-            },
+            evidence=evidence,
         )
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:

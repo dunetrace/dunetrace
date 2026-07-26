@@ -14,7 +14,6 @@ extracted/
 pip-log.txt
 pip-delete-this-directory.txt
 .installed.cfg
-config
 
 # Virtual environments
 .venv/
@@ -101,5 +100,10 @@ docker-compose.override.yaml
 *.orig
 *.rej
 
-# Marketing drafts — not part of the tracked docs
+# Marketing drafts
 docs/blog/
+
+# Docs copied into the MCP server package at build time (see
+# packages/mcp-server/setup.py). Generated from docs/ — never edit or commit;
+# docs/ is the single source of truth.
+packages/mcp-server/dunetrace_mcp/_docs/

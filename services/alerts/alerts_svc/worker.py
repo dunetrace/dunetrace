@@ -11,6 +11,13 @@ Delivery is at-least-once: if the process crashes between send and mark_alerted,
 the signal will be re-sent on the next restart.
     Idempotency is the receiver's responsibility.
 
+Horizontally scalable by agent_id, the same way detector_svc is: set SHARD_COUNT=N
+and run N replicas with SHARD_INDEX=0..N-1. Signals are also *claimed* before
+delivery (failure_signals.alert_claimed_at), which is what makes a second replica
+safe even when it is misconfigured onto the same shard — without the claim, two
+workers both see alerted = FALSE and both deliver the same alert, because
+`alerted` is only set after a successful send. See db.py::claim_unalerted_signals.
+
 Run:
     cd services/alerts
     python -m alerts_svc.worker
@@ -21,11 +28,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import socket
 import time
 
 from dunetrace.models import FailureSignal, FailureType, Severity
 
-from explainer_svc.explainer import explain
+from explainer_svc.explainer import coerce_failure_type, explain
 from explainer_svc.models import Explanation
 from alerts_svc.formatters.slack import format_slack
 from alerts_svc.formatters.webhook import build_signed_request, sign_payload  # type: ignore
@@ -36,7 +45,9 @@ from alerts_svc.crypto import decrypt_credentials
 from alerts_svc.db import (
     init_pool,
     close_pool,
-    fetch_unalerted_signals,
+    claim_unalerted_signals,
+    release_claims,
+    ensure_alert_claim_columns,
     mark_alerted_batch,
     fetch_signal_rate_context,
     fetch_run_tokens,
@@ -72,6 +83,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("dunetrace.alerts")
 
+# Identifies this process in failure_signals.alert_claimed_by. Diagnostic only —
+# correctness comes from the claim being set atomically, not from the value —
+# but it's what tells you *which* replica is sitting on a stuck claim.
+WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:shard{settings.SHARD_INDEX}"
+
 
 # Signal reconstruction
 
@@ -90,16 +106,10 @@ def _row_to_signal(row: dict) -> FailureSignal:
         else (row.get("evidence") or {})
     )
 
-    raw_ft = row["failure_type"]
-    try:
-        failure_type = FailureType(raw_ft)
-    except ValueError:
-        # Custom detector signal — raw type not in the built-in FailureType enum.
-        # Use the CUSTOM sentinel so the explainer's fallback template fires.
-        # Preserve the raw name in evidence so the alert displays it correctly.
-        failure_type = FailureType.CUSTOM
-        evidence = dict(evidence)
-        evidence.setdefault("raw_failure_type", raw_ft)
+    # Custom detector, pack, and semantic signals store failure types outside the
+    # built-in enum; the CUSTOM sentinel plus evidence["raw_failure_type"] is what
+    # makes the explainer's fallback template render them correctly.
+    failure_type, evidence = coerce_failure_type(row["failure_type"], evidence)
 
     return FailureSignal(
         failure_type=failure_type,
@@ -297,11 +307,22 @@ async def deliver_pending_approvals() -> int:
 
 async def poll_once() -> tuple[int, int]:
     """One poll cycle. Returns (signals_found, signals_delivered)."""
-    rows = await fetch_unalerted_signals(limit=settings.BATCH_SIZE)
+    rows = await claim_unalerted_signals(
+        limit=settings.BATCH_SIZE,
+        shard_count=settings.SHARD_COUNT,
+        shard_index=settings.SHARD_INDEX,
+        worker_id=WORKER_ID,
+        claim_timeout_secs=settings.CLAIM_TIMEOUT_SECS,
+    )
     if not rows:
         return 0, 0
 
-    logger.info("Found %d unalerted signal(s)", len(rows))
+    # Everything this poll took ownership of. Any of these not marked alerted by
+    # the end must have its claim handed back, or it waits out CLAIM_TIMEOUT_SECS
+    # before anyone retries it.
+    claimed_ids = [r["id"] for r in rows]
+
+    logger.info("Claimed %d unalerted signal(s)", len(rows))
 
     # ── Group + policy + dedup ────────────────────────────────────────────────
     # Flow per (agent_id, failure_type) group:
@@ -465,6 +486,7 @@ async def poll_once() -> tuple[int, int]:
                 policy_cnt,
                 dedup_cnt,
             )
+        await release_claims(claimed_ids)
         return len(rows), 0
 
     # ── Build explanations ────────────────────────────────────────────────────
@@ -504,6 +526,7 @@ async def poll_once() -> tuple[int, int]:
             logger.error("Failed to build explanation for signal_id=%d: %s", row["id"], exc)
 
     if not work:
+        await release_claims(claimed_ids)
         return len(rows), 0
 
     # ── Deliver concurrently ───────────────────────────────────────────────────
@@ -589,6 +612,14 @@ async def poll_once() -> tuple[int, int]:
     if total_suppressed:
         logger.info("Suppressed %d signal(s) within dedup window", total_suppressed)
 
+    # Hand back claims on anything that didn't get delivered — rows dropped while
+    # reconstructing the signal or building the explanation, and destinations that
+    # failed outright. release_claims is guarded on alerted = FALSE, so the rows
+    # just marked above are untouched. Without this they'd sit claimed until the
+    # timeout expired instead of being retried on the next poll, which is the
+    # behaviour this path had before claiming existed.
+    await release_claims(claimed_ids)
+
     return len(rows), len(delivered_ids)
 
 
@@ -601,6 +632,7 @@ async def run_worker() -> None:
     await ensure_dedup_schema()
     await ensure_semantic_signal_column()
     await ensure_alert_integrations_schema()
+    await ensure_alert_claim_columns()
 
     enabled = []
     if settings.slack_enabled:
@@ -644,7 +676,29 @@ async def run_worker() -> None:
         )
     else:
         logger.info("Alert dedup disabled (ALERT_DEDUP_WINDOW=0)")
-    logger.info("Alert worker started. poll_interval=%ss", settings.POLL_INTERVAL)
+    if settings.SHARD_COUNT > 1:
+        # Sharding splits signals across replicas by agent_id, so a bucket with no
+        # worker is a bucket whose alerts are never delivered — silently, since
+        # nothing is failing. Worth a startup line because the most likely cause
+        # is a SHARD_COUNT meant for the detector leaking in via the shared .env.
+        logger.warning(
+            "SHARD_COUNT=%d — this worker only alerts on agents hashing to bucket "
+            "%d. All %d indices (0..%d) must be running or signals in the missing "
+            "buckets will never be delivered. Set ALERTS_SHARD_COUNT to scale the "
+            "alerts worker independently of the detector.",
+            settings.SHARD_COUNT,
+            settings.SHARD_INDEX,
+            settings.SHARD_COUNT,
+            settings.SHARD_COUNT - 1,
+        )
+    logger.info(
+        "Alert worker started. poll_interval=%ss worker_id=%s shard=%d/%d claim_timeout=%ss",
+        settings.POLL_INTERVAL,
+        WORKER_ID,
+        settings.SHARD_INDEX,
+        settings.SHARD_COUNT,
+        settings.CLAIM_TIMEOUT_SECS,
+    )
 
     try:
         while True:

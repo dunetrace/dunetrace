@@ -662,7 +662,7 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         )
 
     system = (
-        "You are analyzing an AI agent behavioral failure. "
+        "You are analyzing an AI agent structural failure. "
         "Given a detection signal and the agent's execution trace, identify the "
         "specific root cause and the single most important fix.\n"
         "Respond ONLY in JSON with exactly three fields:\n"

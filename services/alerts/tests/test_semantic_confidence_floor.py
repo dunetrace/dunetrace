@@ -110,7 +110,7 @@ class TestPollOnceSemanticConfidenceGate(unittest.IsolatedAsyncioTestCase):
     async def _run(self, rows, floors):
         mark_mock = AsyncMock()
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=rows)),
             patch("alerts_svc.worker.mark_alerted_batch", mark_mock),
             patch("alerts_svc.worker.load_semantic_confidence_floors", return_value=floors),
             patch(

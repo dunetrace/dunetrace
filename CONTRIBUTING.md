@@ -45,8 +45,8 @@ make test-detector     # one service (also: test-api / test-explainer / test-ale
 env -u PYTHONPATH PYTHONPATH=packages/sdk-py python -m pytest packages/sdk-py/tests/ -q
 ```
 
-The `PYTHONPATH` for each service is documented at the top of
-[`CLAUDE.md`](CLAUDE.md) if you run a suite by hand.
+The `PYTHONPATH` for each service is the one in its `make test-*` target — see
+the [`Makefile`](Makefile) if you run a suite by hand.
 
 ## Before you push
 

@@ -1,6 +1,6 @@
 {
   "name": "dunetrace",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Real-time monitoring for AI agents",
   "author": "Dunetrace <dunetrace@gmail.com>",
   "license": "Apache-2.0",
@@ -45,8 +45,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "example:langfuse": "tsx examples/langfuse_agent.ts",
-    "example:langfuse:loop": "SCENARIO=tool_loop tsx examples/langfuse_agent.ts",
     "example:vercel-ai": "tsx examples/vercel_ai_agent.ts",
     "example:vercel-ai:loop": "SCENARIO=tool_loop tsx examples/vercel_ai_agent.ts"
   },
@@ -81,8 +79,6 @@
     "ai": "^7.0.2",
     "better-sqlite3": "^12.11.1",
     "dotenv": "^17.4.2",
-    "langfuse": "^3.38.20",
-    "openai": "^6.37.0",
     "tsx": "^4.21.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0",

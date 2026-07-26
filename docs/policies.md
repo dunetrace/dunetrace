@@ -13,8 +13,9 @@ below) can only ever match a **structural** detector signal — never a
 [semantic evaluation](semantic-evaluation.md) finding. This isn't a policy
 choice enforced by a check somewhere; it's true by construction: `trigger="signal"`
 runs the SDK's own in-process detector battery
-(`dunetrace.detectors.run_detectors`, the same 28 structural detectors
-described in [docs/detectors.md](detectors.md)) synchronously, inside your
+(`dunetrace.detectors.run_detectors`, which defaults to the 26 detectors in
+`TIER1_DETECTORS` — the subset of the 29 in [docs/detectors.md](detectors.md)
+that can be evaluated in-path) synchronously, inside your
 agent's process, before the run has even finished. Semantic evaluation runs
 entirely after a run completes, in a separate `semantic_worker` service the
 SDK never calls into — there is no code path by which an in-process policy

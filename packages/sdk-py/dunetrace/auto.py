@@ -73,6 +73,7 @@ import time
 from typing import TYPE_CHECKING, List, Optional
 
 from dunetrace.context import _current_run, _in_framework_call
+from dunetrace.policies import ApprovalDenied, PolicyViolation
 
 if TYPE_CHECKING:
     from dunetrace.client import Dunetrace
@@ -81,6 +82,33 @@ logger = logging.getLogger("dunetrace.auto")
 
 # Tracks which frameworks have already been patched (prevents double-wrapping).
 _PATCHED: set[str] = set()
+
+
+def _safe_emit(action, *, swallow_control_flow: bool = False) -> None:
+    """Run one Dunetrace-side emit, swallowing any error it raises.
+
+    Auto-instrumentation wraps calls the *host application* depends on — an
+    LLM request, an HTTP request, a framework entry point. Instrumentation is
+    strictly additive: a bug on our side must never stop that call from
+    happening, never discard its (already paid-for) result, and never replace
+    the exception it raised with one of ours. Every ``run.*`` / ``_emit_*``
+    call inside a patched wrapper therefore goes through here.
+
+    ``PolicyViolation`` and ``ApprovalDenied`` are *not* failures — they are the
+    runtime-prevention feature working as designed (a ``stop`` policy, a denied
+    approval), so by default they propagate to the caller. Pass
+    ``swallow_control_flow=True`` on the error path of a wrapper, where the
+    host's original exception is the more important signal and must win.
+    """
+    try:
+        action()
+    except (PolicyViolation, ApprovalDenied):
+        if swallow_control_flow:
+            logger.debug("dunetrace: policy control-flow suppressed on error path", exc_info=True)
+            return
+        raise
+    except Exception:
+        logger.debug("dunetrace instrumentation emit failed", exc_info=True)
 
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
@@ -105,18 +133,21 @@ def _patch_openai(
         run = None if _in_framework_call.get() else _current_run.get()
         t0 = time.monotonic()
         if run:
-            run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
+            _safe_emit(lambda: run.llm_called(model, prompt_tokens=_estimate_tokens(messages)))
         try:
             resp = _orig_create(self, messages=messages, model=model, **kwargs)
         except Exception:
             if run:
-                run.llm_responded(
-                    finish_reason="error",
-                    latency_ms=int((time.monotonic() - t0) * 1000),
+                _safe_emit(
+                    lambda: run.llm_responded(
+                        finish_reason="error",
+                        latency_ms=int((time.monotonic() - t0) * 1000),
+                    ),
+                    swallow_control_flow=True,
                 )
             raise
         if run:
-            _emit_openai_response(run, resp, t0)
+            _safe_emit(lambda: _emit_openai_response(run, resp, t0))
         return resp
 
     _mod.Completions.create = _patched_create
@@ -130,18 +161,21 @@ def _patch_openai(
             run = None if _in_framework_call.get() else _current_run.get()
             t0 = time.monotonic()
             if run:
-                run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
+                _safe_emit(lambda: run.llm_called(model, prompt_tokens=_estimate_tokens(messages)))
             try:
                 resp = await _orig_acreate(self, messages=messages, model=model, **kwargs)
             except Exception:
                 if run:
-                    run.llm_responded(
-                        finish_reason="error",
-                        latency_ms=int((time.monotonic() - t0) * 1000),
+                    _safe_emit(
+                        lambda: run.llm_responded(
+                            finish_reason="error",
+                            latency_ms=int((time.monotonic() - t0) * 1000),
+                        ),
+                        swallow_control_flow=True,
                     )
                 raise
             if run:
-                _emit_openai_response(run, resp, t0)
+                _safe_emit(lambda: _emit_openai_response(run, resp, t0))
             return resp
 
         _mod.AsyncCompletions.create = _patched_acreate
@@ -216,20 +250,23 @@ def _patch_anthropic(
         run = None if _in_framework_call.get() else _current_run.get()
         t0 = time.monotonic()
         if run:
-            run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
+            _safe_emit(lambda: run.llm_called(model, prompt_tokens=_estimate_tokens(messages)))
         try:
             resp = _orig_create(
                 self, model=model, messages=messages, max_tokens=max_tokens, **kwargs
             )
         except Exception:
             if run:
-                run.llm_responded(
-                    finish_reason="error",
-                    latency_ms=int((time.monotonic() - t0) * 1000),
+                _safe_emit(
+                    lambda: run.llm_responded(
+                        finish_reason="error",
+                        latency_ms=int((time.monotonic() - t0) * 1000),
+                    ),
+                    swallow_control_flow=True,
                 )
             raise
         if run:
-            _emit_anthropic_response(run, resp, t0)
+            _safe_emit(lambda: _emit_anthropic_response(run, resp, t0))
         return resp
 
     _mod.Messages.create = _patched_create
@@ -245,7 +282,7 @@ def _patch_anthropic(
             run = None if _in_framework_call.get() else _current_run.get()
             t0 = time.monotonic()
             if run:
-                run.llm_called(model, prompt_tokens=_estimate_tokens(messages))
+                _safe_emit(lambda: run.llm_called(model, prompt_tokens=_estimate_tokens(messages)))
             try:
                 resp = await _orig_acreate(
                     self,
@@ -256,13 +293,16 @@ def _patch_anthropic(
                 )
             except Exception:
                 if run:
-                    run.llm_responded(
-                        finish_reason="error",
-                        latency_ms=int((time.monotonic() - t0) * 1000),
+                    _safe_emit(
+                        lambda: run.llm_responded(
+                            finish_reason="error",
+                            latency_ms=int((time.monotonic() - t0) * 1000),
+                        ),
+                        swallow_control_flow=True,
                     )
                 raise
             if run:
-                _emit_anthropic_response(run, resp, t0)
+                _safe_emit(lambda: _emit_anthropic_response(run, resp, t0))
             return resp
 
         _mod.AsyncMessages.create = _patched_acreate
@@ -319,19 +359,24 @@ def _patch_httpx(
         tool_name = _http_tool_name(request)
         t0 = time.monotonic()
         if run:
-            run.tool_called(tool_name, {"url": str(request.url)})
+            # Not swallow_control_flow: a `stop` policy on this tool call must
+            # still prevent the request from going out.
+            _safe_emit(lambda: run.tool_called(tool_name, {"url": str(request.url)}))
         try:
             resp = _orig_send(self, request, **kwargs)
         except Exception:
             if run:
-                run.tool_responded(
-                    tool_name,
-                    success=False,
-                    latency_ms=int((time.monotonic() - t0) * 1000),
+                _safe_emit(
+                    lambda: run.tool_responded(
+                        tool_name,
+                        success=False,
+                        latency_ms=int((time.monotonic() - t0) * 1000),
+                    ),
+                    swallow_control_flow=True,
                 )
             raise
         if run:
-            _emit_http_response(run, tool_name, resp, t0)
+            _safe_emit(lambda: _emit_http_response(run, tool_name, resp, t0))
         return resp
 
     httpx.Client.send = _patched_send
@@ -345,19 +390,22 @@ def _patch_httpx(
         tool_name = _http_tool_name(request)
         t0 = time.monotonic()
         if run:
-            run.tool_called(tool_name, {"url": str(request.url)})
+            _safe_emit(lambda: run.tool_called(tool_name, {"url": str(request.url)}))
         try:
             resp = await _orig_asend(self, request, **kwargs)
         except Exception:
             if run:
-                run.tool_responded(
-                    tool_name,
-                    success=False,
-                    latency_ms=int((time.monotonic() - t0) * 1000),
+                _safe_emit(
+                    lambda: run.tool_responded(
+                        tool_name,
+                        success=False,
+                        latency_ms=int((time.monotonic() - t0) * 1000),
+                    ),
+                    swallow_control_flow=True,
                 )
             raise
         if run:
-            _emit_http_response(run, tool_name, resp, t0)
+            _safe_emit(lambda: _emit_http_response(run, tool_name, resp, t0))
         return resp
 
     httpx.AsyncClient.send = _patched_asend
@@ -387,31 +435,42 @@ def _patch_requests(
         run = None if _in_framework_call.get() else _current_run.get()
         t0 = time.monotonic()
         if run:
-            run.tool_called(
-                _requests_tool_name(request),
-                {"url": request.url},
+            # Not swallow_control_flow: a `stop` policy on this tool call must
+            # still prevent the request from going out.
+            _safe_emit(
+                lambda: run.tool_called(
+                    _requests_tool_name(request),
+                    {"url": request.url},
+                )
             )
         try:
             resp = _orig_send(self, request, **kwargs)
         except Exception:
             if run:
-                run.tool_responded(
-                    _requests_tool_name(request),
-                    success=False,
-                    latency_ms=int((time.monotonic() - t0) * 1000),
+                _safe_emit(
+                    lambda: run.tool_responded(
+                        _requests_tool_name(request),
+                        success=False,
+                        latency_ms=int((time.monotonic() - t0) * 1000),
+                    ),
+                    swallow_control_flow=True,
                 )
             raise
         if run:
-            tool_name = _requests_tool_name(request)
-            success = resp.status_code < 400
-            output_len = int(resp.headers.get("content-length", 0) or 0)
-            run.tool_responded(
-                tool_name,
-                success=success,
-                output_length=output_len,
-                latency_ms=int((time.monotonic() - t0) * 1000),
-                error=str(resp.status_code) if not success else None,
-            )
+            # Reading status_code/headers off the response is part of the emit,
+            # so it belongs inside the guard too.
+            def _emit_requests_response() -> None:
+                success = resp.status_code < 400
+                output_len = int(resp.headers.get("content-length", 0) or 0)
+                run.tool_responded(
+                    _requests_tool_name(request),
+                    success=success,
+                    output_length=output_len,
+                    latency_ms=int((time.monotonic() - t0) * 1000),
+                    error=str(resp.status_code) if not success else None,
+                )
+
+            _safe_emit(_emit_requests_response)
         return resp
 
     requests.Session.send = _patched_send
@@ -727,13 +786,20 @@ def _patch_crewai(
     _orig_crew_kickoff = Crew.kickoff
 
     def _crew_agent_id(crew, inputs) -> str:
-        native = crew.name if crew.name and crew.name != "crew" else None
-        return resolve_agent_id(
-            per_call_agent_id=(inputs or {}).get("agent_id"),
-            framework_native_agent_id=native,
-            default_agent_id=default_agent_id,
-            integration="crewai",
-        )
+        """Resolve the agent_id for this kickoff. Reads framework internals we
+        don't control, so it falls back to a usable default rather than letting
+        a resolution error escape into the caller's kickoff."""
+        try:
+            native = crew.name if crew.name and crew.name != "crew" else None
+            return resolve_agent_id(
+                per_call_agent_id=(inputs or {}).get("agent_id"),
+                framework_native_agent_id=native,
+                default_agent_id=default_agent_id,
+                integration="crewai",
+            )
+        except Exception:
+            logger.debug("dunetrace: crewai agent_id resolution failed", exc_info=True)
+            return default_agent_id or "crewai-agent"
 
     @functools.wraps(_orig_crew_kickoff)
     def _patched_crew_kickoff(self, inputs=None, **kwargs):
@@ -746,7 +812,7 @@ def _patch_crewai(
                 result = _orig_crew_kickoff(self, inputs, **kwargs)
             finally:
                 _in_framework_call.reset(token)
-            run.final_answer()
+            _safe_emit(run.final_answer)
             return result
 
     Crew.kickoff = _patched_crew_kickoff
@@ -765,7 +831,7 @@ def _patch_crewai(
                     result = await _orig_crew_kickoff_async(self, inputs, **kwargs)
                 finally:
                     _in_framework_call.reset(token)
-                run.final_answer()
+                _safe_emit(run.final_answer)
                 return result
 
         Crew.kickoff_async = _patched_crew_kickoff_async
@@ -789,7 +855,7 @@ def _patch_crewai(
                     result = _orig_agent_kickoff(self, messages, *args, **kwargs)
                 finally:
                     _in_framework_call.reset(token)
-                run.final_answer()
+                _safe_emit(run.final_answer)
                 return result
 
         Agent.kickoff = _patched_agent_kickoff
@@ -812,7 +878,7 @@ def _patch_crewai(
                     result = await _orig_agent_kickoff_async(self, messages, *args, **kwargs)
                 finally:
                     _in_framework_call.reset(token)
-                run.final_answer()
+                _safe_emit(run.final_answer)
                 return result
 
         Agent.kickoff_async = _patched_agent_kickoff_async
@@ -832,11 +898,10 @@ _MEMORY_VALUE_LIMIT = 4000
 def _safe_memory(action) -> None:
     """Run a memory-event emit, swallowing any error. Memory instrumentation is
     strictly additive observability — a bug here must never break the framework
-    call it is wrapping."""
-    try:
-        action()
-    except Exception:
-        logger.debug("dunetrace memory instrumentation emit failed", exc_info=True)
+    call it is wrapping. Thin alias for _safe_emit, kept for readability at the
+    memory call sites; no memory.* event currently reaches policy evaluation,
+    but routing through _safe_emit means it behaves correctly if one ever does."""
+    _safe_emit(action)
 
 
 def _mem_text(value) -> str:

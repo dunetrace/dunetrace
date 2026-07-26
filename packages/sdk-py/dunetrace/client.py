@@ -5,6 +5,7 @@ All network I/O runs on a background drain thread so the agent is never blocked.
 
 from __future__ import annotations
 
+import atexit
 import datetime
 import functools
 import inspect
@@ -13,6 +14,7 @@ import logging
 import os
 import sys
 import time
+import weakref
 from types import FrameType
 import urllib.error
 import urllib.parse
@@ -89,6 +91,78 @@ def _capture_caller_source_file() -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+# How long the at-exit flush may block the interpreter shutting down. Deliberately
+# shorter than shutdown()'s own default: at this point the process is trying to
+# exit, and a slow or unreachable collector must not hold it open. Override with
+# DUNETRACE_ATEXIT_TIMEOUT (seconds); set to 0 to disable the at-exit flush.
+_ATEXIT_FLUSH_TIMEOUT = 2.0
+
+
+def _atexit_timeout() -> float:
+    raw = os.environ.get("DUNETRACE_ATEXIT_TIMEOUT", "")
+    if not raw:
+        return _ATEXIT_FLUSH_TIMEOUT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.debug("Dunetrace: bad DUNETRACE_ATEXIT_TIMEOUT=%r, using default", raw)
+        return _ATEXIT_FLUSH_TIMEOUT
+
+
+def _make_atexit_flush(client: "Dunetrace"):
+    """Build the at-exit flush callback for *client*, or None if disabled.
+
+    Holds only a weak reference: a strong one would park every client ever
+    constructed in the atexit registry, so none could be collected even after
+    the caller dropped it.
+    """
+    timeout = _atexit_timeout()
+    if timeout <= 0:
+        return None
+
+    ref = weakref.ref(client)
+
+    def _flush_on_exit() -> None:
+        c = ref()
+        if c is None:
+            return
+        try:
+            c.shutdown(timeout=timeout)
+        except Exception:
+            # Interpreter teardown is a hostile place — modules may already be
+            # torn down. Never let this surface as a crash on the way out.
+            pass
+
+    return _flush_on_exit
+
+
+def _coerce_text(value: Any) -> str:
+    """Best-effort string form of a caller-supplied text field.
+
+    ``user_input``/``system_prompt`` are typed ``str``, but callers pass whatever
+    their agent actually has — a message dict, a list of messages, an int id,
+    bytes off a socket. Those flow into a regex scan (the injection detector) and
+    into the event payload, and an un-coerced non-str used to raise straight out
+    of ``dt.run()`` into the caller. Coerce once, here, so every downstream
+    consumer sees text. Returns "" if even ``str()`` fails (objects with a
+    raising ``__str__``/``__repr__``).
+    """
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return value.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+    try:
+        return str(value)
+    except Exception:
+        logger.debug("Dunetrace: could not coerce %s to text", type(value).__name__, exc_info=True)
+        return ""
 
 
 class Dunetrace:
@@ -202,12 +276,30 @@ class Dunetrace:
 
         self._flush_gate = Event()  # set to wake drain thread immediately
 
+        # Weakref, not the bound method — see _drain_loop's docstring for why.
         self._drain_thread = Thread(
-            target=self._drain_loop,
+            target=Dunetrace._drain_loop,
+            args=(weakref.ref(self),),
             daemon=True,
             name="dunetrace-drain",
         )
         self._drain_thread.start()
+
+        # Flush whatever is still buffered when the process exits. The drain
+        # thread is a daemon, so without this the interpreter kills it mid-flight
+        # and a short-lived process — a script, a CLI, a one-shot job, a test —
+        # ships *nothing*: the events sit in the ring buffer until the process
+        # dies. atexit handlers run before daemon threads are torn down, so this
+        # is the last point at which a flush can still succeed.
+        #
+        # Registered via a weakref so the atexit registry doesn't itself keep
+        # every client alive for the life of the process. An explicit
+        # shutdown() unregisters it, so the common "flush once, cleanly" path
+        # doesn't run twice.
+        self._atexit_hook = _make_atexit_flush(self)
+        if self._atexit_hook is not None:
+            atexit.register(self._atexit_hook)
+
         logger.debug(
             "Dunetrace started. emitter=%s emit_as_json=%s otel=%s exporters=%d",
             type(self._emitter).__name__,
@@ -263,7 +355,15 @@ class Dunetrace:
         agent_version's hash, same rationale as trace_id.
         """
         tools = tools or []
-        version = agent_version(system_prompt, model, tools)
+        # Normalize caller-supplied text once, up front — see _coerce_text.
+        user_input = _coerce_text(user_input)
+        system_prompt = _coerce_text(system_prompt)
+        try:
+            version = agent_version(system_prompt, model, tools)
+        except Exception:
+            # Grouping degrades to a single bucket; starting the run matters more.
+            logger.debug("Dunetrace: agent_version failed, using 'unknown'", exc_info=True)
+            version = "unknown"
 
         # Auto-thread parent_run_id: if this run opens while another run is
         # already active on this task/thread and the caller didn't pass
@@ -308,9 +408,14 @@ class Dunetrace:
         # itself never needs the event pipeline to see raw text to do its job.
         _injection_evidence = None
         if user_input:
-            _sig = PROMPT_INJECTION_DETECTOR.check_input(user_input, ctx.state)
-            if _sig:
-                _injection_evidence = _sig.evidence
+            try:
+                _sig = PROMPT_INJECTION_DETECTOR.check_input(user_input, ctx.state)
+                if _sig:
+                    _injection_evidence = _sig.evidence
+            except Exception:
+                # Losing one injection signal is strictly better than failing the
+                # caller's run — the scan is additive detection, not a gate.
+                logger.debug("Dunetrace: injection scan failed", exc_info=True)
 
         payload: dict = {
             "input_text": user_input,
@@ -324,87 +429,115 @@ class Dunetrace:
         if _source_file:
             payload["source_file"] = _source_file
 
-        self._emit(
-            AgentEvent(
-                event_type=EventType.RUN_STARTED,
-                run_id=ctx.run_id,
-                agent_id=agent_id,
-                agent_version=version,
-                step_index=0,
-                parent_run_id=parent_run_id,
-                trace_id=trace_id,
-                conversation_id=conversation_id,
-                payload=payload,
+        # _emit() guards itself, but the AgentEvent construction around it does
+        # not — and nothing on the run-start path may stop the caller's run from
+        # starting. Belt and braces: an untraced run beats a broken one.
+        try:
+            self._emit(
+                AgentEvent(
+                    event_type=EventType.RUN_STARTED,
+                    run_id=ctx.run_id,
+                    agent_id=agent_id,
+                    agent_version=version,
+                    step_index=0,
+                    parent_run_id=parent_run_id,
+                    trace_id=trace_id,
+                    conversation_id=conversation_id,
+                    payload=payload,
+                )
             )
-        )
+        except Exception:
+            logger.debug("Dunetrace: failed to record run start", exc_info=True)
 
         # Fetch remote policies in a background thread so run start isn't delayed.
-        if self._ingest_url and self._api_key and self._policy_engine.needs_fetch(agent_id):
-            Thread(target=self._fetch_policies, args=(agent_id,), daemon=True).start()
+        try:
+            if self._ingest_url and self._api_key and self._policy_engine.needs_fetch(agent_id):
+                Thread(target=self._fetch_policies, args=(agent_id,), daemon=True).start()
+        except Exception:
+            # Thread() can raise RuntimeError under thread exhaustion; policies
+            # are best-effort, the run proceeds with whatever is already loaded.
+            logger.debug("Dunetrace: policy prefetch could not start", exc_info=True)
 
         _token = _current_run.set(ctx)
         try:
             yield ctx
-            ctx._warn_unread_advisory()  # audit Finding 25
-            ctx.state.current_step = ctx.step
-            self._emit(
-                AgentEvent(
-                    event_type=EventType.RUN_COMPLETED,
-                    run_id=ctx.run_id,
-                    agent_id=agent_id,
-                    agent_version=version,
-                    step_index=ctx.step,
-                    trace_id=trace_id,
-                    conversation_id=conversation_id,
-                    payload={
-                        "total_steps": ctx.step,
-                        "exit_reason": ctx.exit_reason or "completed",
-                        "tool_call_count": len(ctx.state.tool_calls),
-                    },
-                )
-            )
         except PolicyViolation as exc:
-            ctx.state.current_step = ctx.step
-            ctx.state.exit_reason = "policy_violation"
-            self._emit(
-                AgentEvent(
-                    event_type=EventType.RUN_ERRORED,
-                    run_id=ctx.run_id,
-                    agent_id=agent_id,
-                    agent_version=version,
-                    step_index=ctx.step,
-                    trace_id=trace_id,
-                    conversation_id=conversation_id,
-                    payload={
-                        "error_type": "PolicyViolation",
-                        "error": str(exc),
-                        "exit_reason": "policy_violation",
-                        "policy_name": exc.policy_name,
-                        "step_index": ctx.step,
-                    },
+            # Guarded: the caller's PolicyViolation must reach them even if
+            # recording it fails. Same for the generic path below.
+            try:
+                ctx.state.current_step = ctx.step
+                ctx.state.exit_reason = "policy_violation"
+                self._emit(
+                    AgentEvent(
+                        event_type=EventType.RUN_ERRORED,
+                        run_id=ctx.run_id,
+                        agent_id=agent_id,
+                        agent_version=version,
+                        step_index=ctx.step,
+                        trace_id=trace_id,
+                        conversation_id=conversation_id,
+                        payload={
+                            "error_type": "PolicyViolation",
+                            "error": str(exc),
+                            "exit_reason": "policy_violation",
+                            "policy_name": exc.policy_name,
+                            "step_index": ctx.step,
+                        },
+                    )
                 )
-            )
+            except Exception:
+                logger.debug("Dunetrace: failed to record policy violation", exc_info=True)
             raise
         except Exception as exc:
-            ctx.state.current_step = ctx.step
-            ctx.state.exit_reason = "error"
-            self._emit(
-                AgentEvent(
-                    event_type=EventType.RUN_ERRORED,
-                    run_id=ctx.run_id,
-                    agent_id=agent_id,
-                    agent_version=version,
-                    step_index=ctx.step,
-                    trace_id=trace_id,
-                    conversation_id=conversation_id,
-                    payload={
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                        "step_index": ctx.step,
-                    },
+            try:
+                ctx.state.current_step = ctx.step
+                ctx.state.exit_reason = "error"
+                self._emit(
+                    AgentEvent(
+                        event_type=EventType.RUN_ERRORED,
+                        run_id=ctx.run_id,
+                        agent_id=agent_id,
+                        agent_version=version,
+                        step_index=ctx.step,
+                        trace_id=trace_id,
+                        conversation_id=conversation_id,
+                        payload={
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "step_index": ctx.step,
+                        },
+                    )
                 )
-            )
+            except Exception:
+                logger.debug("Dunetrace: failed to record run error", exc_info=True)
             raise
+        else:
+            # Success path. Runs only when nothing escaped the `yield`, and an
+            # exception raised in an `else` block is NOT caught by the handlers
+            # above — so without this guard an SDK-internal failure here would be
+            # reported as if the caller's code had errored, and then re-raised
+            # into a caller whose code actually succeeded.
+            try:
+                ctx._warn_unread_advisory()  # audit Finding 25
+                ctx.state.current_step = ctx.step
+                self._emit(
+                    AgentEvent(
+                        event_type=EventType.RUN_COMPLETED,
+                        run_id=ctx.run_id,
+                        agent_id=agent_id,
+                        agent_version=version,
+                        step_index=ctx.step,
+                        trace_id=trace_id,
+                        conversation_id=conversation_id,
+                        payload={
+                            "total_steps": ctx.step,
+                            "exit_reason": ctx.exit_reason or "completed",
+                            "tool_call_count": len(ctx.state.tool_calls),
+                        },
+                    )
+                )
+            except Exception:
+                logger.debug("Dunetrace: failed to record run completion", exc_info=True)
         finally:
             _current_run.reset(_token)
 
@@ -544,7 +677,13 @@ class Dunetrace:
         """
         Background fetch of remote policies for agent_id.
 
-        Calls GET {ingest_url_base}/v1/policies?agent_id=...&api_key=...
+        Calls GET {ingest_url_base}/v1/policies?agent_id=..., authenticating with
+        ``Authorization: Bearer <key>``. The key is deliberately **not** put in
+        the query string: URLs are logged verbatim by web servers and proxies, so
+        a key sent that way ends up in access logs on every single request. The
+        server still accepts ?api_key= from older SDK builds, but this one never
+        sends it.
+
         Silently ignores all errors — policies are best-effort.
         """
         if not self._ingest_url or not self._api_key:
@@ -556,11 +695,7 @@ class Dunetrace:
 
         try:
             base = self._ingest_url.replace("/v1/ingest", "")
-            url = (
-                f"{base}/v1/policies"
-                f"?agent_id={urllib.parse.quote(agent_id, safe='')}"
-                f"&api_key={urllib.parse.quote(self._api_key, safe='')}"
-            )
+            url = f"{base}/v1/policies?agent_id={urllib.parse.quote(agent_id, safe='')}"
             req = urllib.request.Request(
                 url,
                 headers={
@@ -1038,7 +1173,21 @@ class Dunetrace:
                 time.sleep(0.01)
 
     def shutdown(self, timeout: float = 5.0) -> None:
-        """Flush remaining events and stop the drain thread."""
+        """Flush remaining events and stop the drain thread.
+
+        Idempotent, and safe to call even though an at-exit flush is registered:
+        calling it explicitly cancels that hook, so the flush happens once, at
+        the point you chose, with your timeout rather than the shorter at-exit
+        one. Still worth calling explicitly — it gives the flush a full timeout
+        and surfaces problems while your process is still alive to log them.
+        """
+        hook = getattr(self, "_atexit_hook", None)
+        if hook is not None:
+            try:
+                atexit.unregister(hook)
+            except Exception:
+                pass
+            self._atexit_hook = None
         self._stop_evt.set()
         self._flush_gate.set()  # wake the drain thread so shutdown is immediate
         self._drain_thread.join(timeout=timeout)
@@ -1092,20 +1241,50 @@ class Dunetrace:
             sys.stdout.write(serialised + "\n")
             sys.stdout.flush()
 
-    def _drain_loop(self) -> None:
-        while not self._stop_evt.is_set():
-            batch = self._buffer.drain(100)
+    @staticmethod
+    def _drain_loop(ref: "weakref.ReferenceType") -> None:
+        """Ship buffered events until shutdown, or until the client is collected.
+
+        Takes a *weak* reference rather than running as a bound method. A bound
+        method holds the client strongly, and the thread holds the bound method,
+        so a client the caller merely dropped could never be collected — its
+        drain thread ran for the life of the process, keeping the whole client
+        (buffer, emitter, sockets) alive with it. Anything constructing clients
+        dynamically — per tenant, per request, per test — leaked one thread each.
+
+        The strong reference is re-acquired each iteration and released before
+        every wait, so the client stays collectable while this thread is parked.
+        """
+        # These are owned by the client but don't reference it back, so holding
+        # them across the wait is safe — and lets us wait without a strong ref.
+        client = ref()
+        if client is None:
+            return
+        stop_evt, flush_gate = client._stop_evt, client._flush_gate
+        flush_interval = client._flush_interval
+        del client
+
+        while not stop_evt.is_set():
+            client = ref()
+            if client is None:
+                return  # caller dropped the client — nothing left to ship for
+            batch = client._buffer.drain(100)
             if batch:
-                self._ship(batch)
+                client._ship(batch)
+                del client
             else:
+                del client
                 # Wait until either flush() signals us, shutdown() fires, or the
                 # interval expires. This lets flush() wake the thread immediately.
-                self._flush_gate.wait(timeout=self._flush_interval)
-                self._flush_gate.clear()
+                flush_gate.wait(timeout=flush_interval)
+                flush_gate.clear()
 
-        remaining = self._buffer.drain_all()
+        client = ref()
+        if client is None:
+            return
+        remaining = client._buffer.drain_all()
         if remaining:
-            self._ship(remaining)
+            client._ship(remaining)
 
     def _ship(self, batch: List[AgentEvent]) -> bool:
         """Delegates to the configured BatchingEmitter (see dunetrace.emitters).

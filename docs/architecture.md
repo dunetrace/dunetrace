@@ -56,7 +56,7 @@ Dunetrace is a pipeline of independent services communicating through a shared P
 │           │  │ Fetches       │  │  by default)        │  │  by default)        │
 │ Reconstr. │  │ unalerted     │  │                      │  │                     │
 │ RunState  │  │ shadow=FALSE  │  │  Adaptive sampling   │  │  Pulls Langfuse /   │
-│ Runs 17   │  │ signals       │  │  → DeepEval          │  │  LangSmith /        │
+│ Runs 29   │  │ signals       │  │  → DeepEval          │  │  LangSmith /        │
 │ detectors │  │ → explain()   │  │  evaluators →        │  │  Braintrust results │
 │ Writes    │  │ → Slack /     │  │  failure_signals     │  │  → failure_signals  │
 │ signals   │  │ webhook       │  │  (source=semantic)   │  │  (source=provider)  │
@@ -417,7 +417,7 @@ A background polling loop that runs every 5 seconds. It is the only process that
 1. Fetches runs completed since last poll (terminal events `run.completed` or `run.errored`) plus any runs that have stalled (no new events for `STALL_TIMEOUT_SECS`, default 90s)
 2. Checks `processed_runs` to skip already-processed runs
 3. Reconstructs `RunState` by fetching and replaying all events for each run
-4. Runs 18 Tier 1 detectors against the `RunState`. `PROMPT_INJECTION_SIGNAL` is handled separately — the SDK detects injection on raw input at run-start and embeds evidence in the `run.started` payload; the worker extracts it from there rather than running the detector on `RunState`
+4. Runs all 29 structural detectors against the `RunState` (`_DETECTOR_CLASSES` in `detector_svc/detectors.py`), then any active custom detectors and any detectors belonging to a pack this org has enabled. Three of the 29 don't evaluate off `RunState` alone: `PROMPT_INJECTION_SIGNAL` is detected by the SDK on raw input at run-start and embedded in the `run.started` payload, so the worker extracts it from there; `HANDOFF_CONTEXT_LOSS` and `DELEGATION_LOOP` need a second run's data and are evaluated against the cross-run delegation graph (`_handoff_signal_from_parent` / `_delegation_signal_from_chain` in `worker.py`)
 5. Writes any `FailureSignal` rows to Postgres
 6. Updates the `issues` table: UPSERTs an issue row for each live signal fired (`upsert_fired_issues`) and increments the clean-run counter for any open issues that did not fire this run (`advance_clean_runs`). An issue auto-resolves after 5 consecutive clean runs. Issue tracking failures are caught and logged — they do not affect run processing.
 7. Marks the run as processed
@@ -426,7 +426,37 @@ Signals are written with `shadow=TRUE` unless the detector is in `LIVE_DETECTORS
 
 **Why polling instead of streaming?** Simplicity and reliability. A polling worker requires no message broker, survives restarts gracefully, and is trivial to reason about. At current scale (sub-100 runs/sec), 5-second polling latency is acceptable. ClickHouse and Kafka are future considerations.
 
-**Horizontal scaling:** Set `SHARD_COUNT=N` and run N replicas each with a distinct `SHARD_INDEX`. Each replica polls only its `agent_id` hash bucket. See [Detector Sharding](#detector-sharding) below.
+**Horizontal scaling:** Set `SHARD_COUNT=N` and run N replicas each with a distinct `SHARD_INDEX`. Each replica polls only its `agent_id` hash bucket. See [Worker Sharding](#worker-sharding) below.
+
+**Poll watermark.** Run discovery is bounded by a persisted per-shard watermark
+(`detector_watermarks`). Without it the queries have no lower time bound, so each
+5-second poll rescans every terminal event in the whole retention window and
+anti-joins it against `processed_runs` — work proportional to *total history*
+rather than to new runs. It also defeats the `events` partitioning: the partition
+key is `received_at`, and a predicate that never mentions `received_at` can't
+prune, so the hottest queries in the system touch every partition.
+
+Two details make the bound safe:
+
+- The window is expressed as *"runs touched by a recent event"*, not *"terminal
+  events that are recent"*. Those differ for late-arriving events: a straggler on
+  an old run has a new `received_at` but its run's terminal event is old, so
+  filtering on the terminal event's timestamp would silently stop re-detecting
+  those runs. Selecting the `run_id` set first keeps that path intact while still
+  pruning.
+- The watermark advances **only after a poll that drained its backlog** (neither
+  query hit its `LIMIT`). A full batch means more work sits behind it, and moving
+  the window forward would step over runs that were never processed. This is also
+  what makes downtime safe: the watermark is persisted and stays put while the
+  worker is down, so a restart sees the whole backlog rather than skipping it.
+
+A `NULL` watermark means "never drained" and reproduces the original unbounded
+scan — correct for a first poll, which may have arbitrarily old pending work, and
+self-correcting after one drained cycle.
+
+| Env var | Default | Description |
+|---|---|---|
+| `WATERMARK_GRACE_SECS` | `3600` | Re-scan overlap. Effective lookback is up to 2× this. Must be `>= STALL_TIMEOUT_SECS` or the worker refuses to start — a smaller grace could advance the watermark past a run before it qualifies as stalled |
 
 ---
 
@@ -504,7 +534,7 @@ A background polling loop that runs every 10 seconds. It is the only process tha
 A read-only FastAPI service. Powers the dashboard and any customer integrations.
 
 - All endpoints require `Authorization: Bearer <api_key>`
-- In `AUTH_MODE=dev`, auth is skipped entirely i.e. no token required
+- In `AUTH_MODE=dev`, auth is skipped entirely i.e. no token required. **`AUTH_MODE` defaults to `prod`** in both the ingest and customer API — dev mode disables authentication outright, so it has to be an explicit opt-in and a deployment that forgets to set the variable gets a locked-down API rather than an open one. Both compose files set `dev` for the local quickstart (`docker-compose.ghcr.yml` reads it as `${AUTH_MODE:-dev}`, so `AUTH_MODE=prod` in the environment is enough to lock it down without editing the file). Each service logs a `WARNING` at startup whenever dev mode is active
 - All signal responses include the full explanation (title, what, why, fixes)
 - Pagination via `offset` / `limit` query params
 
@@ -767,13 +797,32 @@ DROP TABLE events_old;
 
 ### Other tables
 
-`failure_signals` and `processed_runs` grow proportionally to run volume and are not yet partitioned. At moderate scale (< 50M rows), the existing indexes on `(agent_id, detected_at DESC)` and the `run_id TEXT PRIMARY KEY` are sufficient. Partitioning or periodic pruning of these tables follows the same pattern as `events` when needed.
+`failure_signals` and `processed_runs` grow proportionally to run volume and are not partitioned. At moderate scale (< 50M rows), the existing indexes on `(agent_id, detected_at DESC)` and the `run_id TEXT PRIMARY KEY` are sufficient. Partitioning follows the same pattern as `events` when needed.
+
+**`processed_runs` is pruned**, unlike `failure_signals`. It's one row per run and
+it's the anti-join target in the detector's run-discovery query, so unbounded growth
+directly slows the hottest query in the service. `prune_processed_runs()` runs daily
+from the detector worker (shard 0 only — the table isn't shard-partitioned, so extra
+replicas would only contend).
+
+The ordering constraint is the subtle part, and it runs opposite to what you'd
+expect: a `processed_runs` row may only be deleted **once its run's events are
+already gone**. Delete it while the events remain and the run reads as unprocessed
+— every detector runs against it again and writes a duplicate set of signals. So
+the delete carries a `NOT EXISTS` against `events` rather than trusting a retention
+constant, which makes the invariant hold whatever `EVENT_RETENTION_DAYS` is actually
+set to, including a value this service never sees.
+
+| Env var | Default | Description |
+|---|---|---|
+| `PROCESSED_RUNS_RETENTION_DAYS` | `120` | Age bound on the prune scan. Sits beyond the 90-day event default so the anti-join only considers rows that can plausibly qualify. Not the safety mechanism — the `NOT EXISTS` is |
+| `PRUNE_BATCH_SIZE` | `10000` | Rows per delete batch. A pass keeps going while batches come back full, so a neglected table catches up over one pass rather than one batch per day |
 
 ---
 
-## Detector Sharding
+## Worker Sharding
 
-The detector worker is horizontally scalable by `agent_id`. Set `SHARD_COUNT=N` and run N replicas, each with a different `SHARD_INDEX` (0 through N-1):
+Both the detector and the alerts worker are horizontally scalable by `agent_id`, using the same scheme and the same env var names. Set `SHARD_COUNT=N` and run N replicas, each with a different `SHARD_INDEX` (0 through N-1):
 
 ```
 docker compose up --scale detector=4 -d   # not enough — each replica needs its own SHARD_INDEX
@@ -799,14 +848,57 @@ AND ($n::int = 1 OR abs(hashtext(e.agent_id)) % $n = $m)
 - A run belongs to exactly one agent, so there is no cross-shard coordination. Sharding is by `agent_id` hash bucket only, not `org_id` — an org's agents can land on different shards.
 - `processed_runs` deduplication still works — a run can only be claimed by the shard whose bucket matches its `agent_id`.
 - Baseline queries (`fetch_step_count_baseline`, `fetch_token_growth_baseline`, etc.) are scoped by `(org_id, agent_id, agent_version)` — `org_id` is required, since `agent_id`/`agent_version` are not guaranteed unique across orgs.
-- The alerts worker and customer API are stateless readers — they do not need sharding.
+- The customer API needs no sharding — each request is independent, so replicas don't coordinate.
 
-**Validation:** The detector worker raises `ValueError` at startup if `SHARD_COUNT < 1` or `SHARD_INDEX` is outside `[0, SHARD_COUNT)`, so misconfigured replicas crash immediately rather than silently claiming no work.
+**Validation:** Both workers raise `ValueError` at startup if `SHARD_COUNT < 1` or `SHARD_INDEX` is outside `[0, SHARD_COUNT)`, so misconfigured replicas crash immediately rather than silently claiming no work.
 
 | Env var | Default | Description |
 |---|---|---|
-| `SHARD_COUNT` | `1` | Total number of detector replicas |
+| `SHARD_COUNT` | `1` | Total number of replicas of this worker |
 | `SHARD_INDEX` | `0` | This replica's bucket index (0-based) |
+
+### Alerts worker: sharding plus claiming
+
+The alerts worker is **not** a stateless reader, and replicating it needs more than
+a shard filter. It writes (`alerted`, `alert_dedup`, `digest_log`) and it has an
+external side effect — the Slack/webhook/Linear call. `alerted` is only set *after*
+a successful send, so it can't double as a claim: two workers scanning the same
+window both see `alerted = FALSE`, both deliver, and the customer gets duplicate
+alerts. `alert_dedup` doesn't save it either — the window is read before either
+worker writes it, so both pass the check.
+
+Two mechanisms cover that, and both matter:
+
+1. **Shard filter** on `agent_id`, as above. This is what makes the *content*
+   correct: the worker groups signals by `(org_id, agent_id, failure_type)` and
+   emits one alert per group, so a group must never be split across replicas.
+   Hashing on `agent_id` keeps every group whole on one worker.
+
+2. **Claiming.** `claim_unalerted_signals` sets `failure_signals.alert_claimed_at`
+   and `alert_claimed_by` in the *same statement* that selects the rows, using
+   `FOR UPDATE SKIP LOCKED`. This is the backstop for what sharding can't cover:
+   two replicas accidentally given the same `SHARD_INDEX`, an overlapping rolling
+   deploy, or a plain `--scale alerts=2` with the default `SHARD_COUNT=1`.
+
+Claims expire after `CLAIM_TIMEOUT_SECS` so a worker that dies mid-delivery doesn't
+strand its rows, and a poll that ends without delivering hands its claims back
+immediately (`release_claims`) rather than waiting out the timeout. Delivery stays
+**at-least-once** — receiver-side idempotency is still the receiver's job.
+
+| Env var | Default | Description |
+|---|---|---|
+| `CLAIM_TIMEOUT_SECS` | `300` | How long a claim stays valid. Must exceed the worst-case delivery time for one batch, or a slow-but-alive worker's rows get stolen and double-delivered |
+| `ALERTS_SHARD_COUNT` | falls back to `SHARD_COUNT` | Shard the alerts worker independently of the detector |
+| `ALERTS_SHARD_INDEX` | falls back to `SHARD_INDEX` | As above |
+
+**Scale the two workers independently with the `ALERTS_`-prefixed vars.** The
+alerts worker reads the shared `SHARD_COUNT`/`SHARD_INDEX` when no prefixed value is
+set, which is convenient when both are scaled together and a trap when they aren't:
+the service also loads the repo-root `.env`, so a `SHARD_COUNT=4` intended for four
+detector replicas would leave a lone alerts worker claiming only bucket 0 — three
+quarters of signals would never alert, and nothing would look broken. The worker logs
+a `WARNING` at startup whenever `SHARD_COUNT > 1` naming the indices that must be
+running.
 
 ---
 
@@ -847,6 +939,8 @@ With `emit_as_json=True` or an OTel exporter, `_emit()` also serialises to JSON 
 ---
 
 ## Failure Modes
+
+**Client lifecycle:** The drain thread holds only a *weak* reference to its client, so a client the caller drops is garbage-collected and its thread exits on the next poll — code that builds a client per tenant, per request, or per test doesn't accumulate one OS thread each. Anything still buffered when a client is dropped that way is lost; call `shutdown()` (or rely on the at-exit flush, which covers process exit) to ship it.
 
 **Ingest API down:** The drain thread drains events from the buffer before shipping. With the default emitter, a failed batch is dropped — no retry, no persistence. New events continue to buffer (up to 10,000) and will be shipped once the API recovers. The agent is never blocked. To survive an outage that outlasts the buffer (or a process restart mid-outage), wrap the emitter with a durable retry queue — same design in both SDKs, backed by a local SQLite queue, retried roughly every 30s (±5s jitter) once the backend is reachable again, bounded (100k events / 100MB by default, oldest evicted first) with a rate-limited eviction warning so a long outage doesn't silently lose data without a trace in the logs:
 

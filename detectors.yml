@@ -190,6 +190,12 @@ default:
       window_runs: 10
 
   prompt_injection_signal:
+    # The scan window (SCAN_HEAD_CHARS / SCAN_TAIL_CHARS) is deliberately NOT
+    # configurable here. This detector's scan runs in-path inside the SDK's
+    # dt.run(), in the customer's own process, which never reads this file —
+    # the server-side instance built from this section never calls check_input()
+    # at all. Set it on PromptInjectionDetector (or a subclass) in the SDK
+    # instead; see docs/detectors.md footnote 2.
     alert_policy:
       mode: immediate   # security signal — always alert on first occurrence
       threshold: 1

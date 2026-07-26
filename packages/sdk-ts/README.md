@@ -107,6 +107,42 @@ function myHelper() {
 }
 ```
 
+## Auto-instrument the OpenAI / Anthropic SDKs
+
+Patch once at startup and every client instance is tracked inside a `dt.run()` — including clients constructed by code you don't control:
+
+```typescript
+import OpenAI from "openai";
+import { Dunetrace, autoInstrument } from "dunetrace";
+
+const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+autoInstrument({ openai: OpenAI });   // → ["openai"]
+
+const openai = new OpenAI();          // constructed after the patch — still tracked
+await dt.run("my-agent", {}, async () => {
+  await openai.chat.completions.create({ model: "gpt-4o", messages });
+});
+```
+
+`autoInstrument()` with no arguments auto-detects via `require`, which only resolves under CommonJS — **pass the imported class if you use ESM or a bundler**. It patches the resource prototype shared by every client, which works under ESM, CommonJS, and bundlers alike. Idempotent, and safe to combine with `dt.wrapOpenAI()`.
+
+It covers three targets — `openai`, `anthropic`, and `http` — narrowable via `targets`.
+
+**Streaming is tracked.** `llm.called` fires at call time; the stream comes back through a pass-through proxy that observes chunks as you pull them and emits `llm.responded` when it ends. Nothing is consumed on your behalf, and `.tee()` / `.controller` still work. Pass `stream_options: { include_usage: true }` for OpenAI or the API never sends token counts.
+
+**HTTP is tracked** via the global `fetch` — `tool.called` / `tool.responded` named by hostname, the Node counterpart to the Python SDK's `httpx`/`requests` patches. Requests made *by* an instrumented LLM SDK are excluded, so one LLM call doesn't also count as a tool call; so is Dunetrace's own ingest traffic.
+
+Emission failures never propagate into your call.
+
+To instrument a single client rather than the whole SDK:
+
+```typescript
+const openai = dt.wrapOpenAI(new OpenAI());
+const claude = dt.wrapAnthropic(new Anthropic());
+```
+
+See [docs/integrate-typescript-agent.md](../../docs/integrate-typescript-agent.md#auto-instrumentation) for the full picture, including what isn't covered.
+
 ## Deploy markers
 
 ```typescript

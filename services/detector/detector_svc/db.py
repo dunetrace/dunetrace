@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Optional
 
 try:
@@ -250,6 +251,25 @@ CREATE INDEX IF NOT EXISTS idx_rsm_agent
     ON run_state_metrics(org_id, agent_id, run_started_at);
 """
 
+# Per-shard poll watermark. Without it the run-discovery queries have no lower
+# time bound, so every 5s poll rescans every terminal event in the whole
+# retention window and anti-joins it against processed_runs — work proportional
+# to total history rather than to new runs. It also makes `events`' monthly
+# partitioning useless for the hottest queries in the system: the partition key
+# is received_at, and a predicate that never mentions received_at can't prune.
+#
+# NULL watermark means "never drained" and reproduces the original unbounded
+# scan, so a fresh install (or one migrating in) picks up all pending history on
+# its first poll and only then starts bounding. One row per shard because shards
+# progress independently.
+_WATERMARK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS detector_watermarks (
+    shard_index  INT         PRIMARY KEY,
+    watermark    TIMESTAMPTZ,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
 
 async def _backfill_org_id(conn) -> None:
     """See module docstring above. No-ops (leaves org_id nullable) until
@@ -376,6 +396,7 @@ async def ensure_detector_schema() -> None:
         await conn.execute(_PACKS_SCHEMA)
         await _seed_packs(conn)
         await conn.execute(_RUN_STATE_METRICS_SCHEMA)
+        await conn.execute(_WATERMARK_SCHEMA)
     logger.info("Detector schema ready")
 
 
@@ -823,16 +844,131 @@ async def fetch_duration_baseline(
     return float(row["p75"]) if row["p75"] is not None else None
 
 
+async def prune_processed_runs(
+    min_age_days: int = 120,
+    batch_size: int = 10_000,
+) -> int:
+    """Delete processed_runs rows whose events are already gone. Returns the count.
+
+    `processed_runs` is one row per run, forever — nothing pruned it, while
+    `events` drops partitions at EVENT_RETENTION_DAYS. It's also the anti-join
+    target in fetch_completed_runs, so unbounded growth directly slows the
+    hottest query in the service.
+
+    The ordering constraint is the subtle part: a processed_runs row may only be
+    deleted once its run's events are gone. Delete it while the events remain and
+    the run looks unprocessed again — the detector re-runs every detector against
+    it and writes a second full set of duplicate signals.
+
+    Rather than couple this to ingest_svc's EVENT_RETENTION_DAYS (a value this
+    service doesn't own and could disagree with), the NOT EXISTS makes the
+    invariant hold by construction whatever retention is actually configured.
+    `min_age_days` only keeps the anti-join cheap by restricting it to rows old
+    enough to plausibly qualify; it is not the safety mechanism, so its default
+    sits comfortably beyond the 90-day event default.
+    """
+    if not _pool:
+        return 0
+    async with _pool.acquire() as conn:
+        deleted = await conn.fetchval(
+            """
+            WITH doomed AS (
+                SELECT run_id
+                FROM processed_runs
+                WHERE processed_at < NOW() - ($1 || ' days')::INTERVAL
+                ORDER BY processed_at
+                LIMIT $2
+            ),
+            removed AS (
+                DELETE FROM processed_runs p
+                USING doomed d
+                WHERE p.run_id = d.run_id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM events e WHERE e.run_id = p.run_id
+                  )
+                RETURNING 1
+            )
+            SELECT count(*) FROM removed
+            """,
+            str(min_age_days),
+            batch_size,
+        )
+    return int(deleted or 0)
+
+
+async def get_watermark(shard_index: int) -> Optional[datetime]:
+    """This shard's poll watermark, or None if it has never fully drained.
+
+    None deliberately reproduces the unbounded scan — see _WATERMARK_SCHEMA. It's
+    the correct behaviour for a first poll (there may be arbitrarily old pending
+    work) and it self-corrects after one drained cycle.
+    """
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT watermark FROM detector_watermarks WHERE shard_index = $1",
+            shard_index,
+        )
+
+
+async def advance_watermark(shard_index: int, grace_secs: float) -> None:
+    """Move this shard's watermark up to NOW() - grace_secs.
+
+    `grace_secs` is the re-scan overlap: events that landed in the last
+    grace_secs stay inside the next poll's window, which covers a run whose
+    terminal event is written a moment after its earlier events and, more
+    importantly, keeps the late-event re-detection path (see
+    fetch_completed_runs) working for anything arriving within the window.
+
+    GREATEST means the watermark only ever moves forward, so a concurrent poll
+    or a clock adjustment can't drag it backwards into a wider scan.
+
+    Call this ONLY after a poll that drained its backlog. Advancing while runs
+    are still queued would move the window past unprocessed work — those runs
+    would never be detected.
+    """
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO detector_watermarks (shard_index, watermark, updated_at)
+            VALUES ($1, NOW() - ($2 || ' seconds')::INTERVAL, NOW())
+            ON CONFLICT (shard_index) DO UPDATE
+            SET watermark  = GREATEST(
+                    detector_watermarks.watermark,
+                    NOW() - ($2 || ' seconds')::INTERVAL
+                ),
+                updated_at = NOW()
+            """,
+            shard_index,
+            str(grace_secs),
+        )
+
+
 async def fetch_completed_runs(
     limit: int,
     shard_count: int = 1,
     shard_index: int = 0,
+    watermark: Optional[datetime] = None,
 ) -> list[dict]:
     """Runs with a terminal event (run.completed or run.errored) that haven't been processed yet.
 
     When shard_count > 1 each worker instance claims only the runs whose agent_id
     hashes to its bucket: abs(hashtext(agent_id)) % shard_count = shard_index.
     shard_count=1 (default) bypasses the filter entirely.
+
+    `watermark` bounds the scan to runs touched by an event newer than it, which
+    is what lets Postgres prune `events` partitions instead of walking the whole
+    retention window on every poll. None = unbounded (first poll after install).
+
+    The bound is deliberately expressed as "runs with a recent event" rather than
+    "terminal events that are recent". Those differ for the late-event
+    re-detection path: a straggler event on an old run arrives with a *new*
+    received_at but its run's terminal event is old, so filtering on the terminal
+    event's timestamp would silently stop re-detecting those runs. Selecting the
+    run_id set first keeps that path intact while still pruning.
 
     Intentionally not org_id-scoped: this worker processes every org's runs in one
     poll loop (sharding is by agent_id hash bucket, not by org). org_id is returned
@@ -841,6 +977,12 @@ async def fetch_completed_runs(
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
+            WITH touched AS (
+                SELECT DISTINCT run_id
+                FROM events
+                WHERE ($4::timestamptz IS NULL OR received_at > $4::timestamptz)
+                  AND ($2::int = 1 OR abs(hashtext(agent_id)) % $2 = $3)
+            )
             SELECT DISTINCT ON (e.run_id)
                 e.run_id,
                 e.agent_id,
@@ -848,6 +990,7 @@ async def fetch_completed_runs(
                 e.org_id,
                 e.event_type AS trigger
             FROM events e
+            JOIN touched t ON t.run_id = e.run_id
             WHERE e.event_type IN ('run.completed', 'run.errored')
               AND (
                   -- not yet processed …
@@ -857,13 +1000,13 @@ async def fetch_completed_runs(
                   OR (SELECT count(*) FROM events e2 WHERE e2.run_id = e.run_id)
                      > (SELECT p.event_count FROM processed_runs p WHERE p.run_id = e.run_id)
               )
-              AND ($2::int = 1 OR abs(hashtext(e.agent_id)) % $2 = $3)
             ORDER BY e.run_id, e.received_at ASC
             LIMIT $1
             """,
             limit,
             shard_count,
             shard_index,
+            watermark,
         )
     return [dict(r) for r in rows]
 
@@ -873,11 +1016,22 @@ async def fetch_stalled_runs(
     limit: int,
     shard_count: int = 1,
     shard_index: int = 0,
+    watermark: Optional[datetime] = None,
 ) -> list[dict]:
     """Runs that started, never completed, and haven't received a new event in stall_timeout_secs — likely agents stuck mid-run.
 
     When shard_count > 1 only the runs whose agent_id hashes to shard_index are returned.
     Not org_id-scoped — see fetch_completed_runs.
+
+    `watermark` bounds the driving `run.started` scan the same way
+    fetch_completed_runs is bounded; None = unbounded. Bounding is safe here even
+    though a stalled run's `run.started` ages out of the window: a run becomes
+    stall-eligible stall_timeout_secs after its last event (90s by default), which
+    is orders of magnitude inside the grace window, so it is always caught while
+    still visible. The one case that could outrun the window — the worker being
+    down longer than the grace period — is covered because the watermark is
+    persisted and only advances on a drained poll, so downtime leaves it behind
+    rather than skipping past the backlog.
     """
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
@@ -890,6 +1044,7 @@ async def fetch_stalled_runs(
                 'stalled' AS trigger
             FROM events e
             WHERE e.event_type = 'run.started'
+              AND ($5::timestamptz IS NULL OR e.received_at > $5::timestamptz)
               AND NOT EXISTS (
                   SELECT 1 FROM events t
                   WHERE t.run_id = e.run_id
@@ -910,6 +1065,7 @@ async def fetch_stalled_runs(
             limit,
             shard_count,
             shard_index,
+            watermark,
         )
     return [dict(r) for r in rows]
 

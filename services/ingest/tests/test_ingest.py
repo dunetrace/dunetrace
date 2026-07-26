@@ -616,6 +616,58 @@ class TestRateLimitMiddleware:
         assert r.status_code != 429
 
 
+class TestPolicyFetchAuth:
+    """GET /v1/policies authenticates by header, not by query string.
+
+    A key in a query string is written verbatim into web-server and proxy
+    access logs on every request. The query param is still accepted so an older
+    SDK build keeps working, but the header is the supported path and the one
+    the current SDK sends.
+    """
+
+    async def test_bearer_header_authenticates(self, client):
+        r = await client.get(
+            "/v1/policies",
+            params={"agent_id": "agent-xyz"},
+            headers={"Authorization": "Bearer dt_live_header"},
+        )
+        assert r.status_code == 200
+        assert "policies" in r.json()
+
+    async def test_x_dunetrace_api_key_header_authenticates(self, client):
+        r = await client.get(
+            "/v1/policies",
+            params={"agent_id": "agent-xyz"},
+            headers={"X-Dunetrace-API-Key": "dt_live_header"},
+        )
+        assert r.status_code == 200
+
+    async def test_query_param_still_accepted_for_older_sdks(self, client):
+        r = await client.get(
+            "/v1/policies", params={"agent_id": "agent-xyz", "api_key": "dt_live_legacy"}
+        )
+        assert r.status_code == 200
+
+    async def test_header_wins_when_both_are_present(self, client, monkeypatch):
+        seen = []
+
+        async def _spy(key):
+            seen.append(key)
+            return "org-1"
+
+        monkeypatch.setattr("ingest_svc.routers.ingest.verify_api_key", _spy)
+        await client.get(
+            "/v1/policies",
+            params={"agent_id": "agent-xyz", "api_key": "from-query"},
+            headers={"Authorization": "Bearer from-header"},
+        )
+        assert seen == ["from-header"]
+
+    async def test_no_key_at_all_is_rejected(self, client):
+        r = await client.get("/v1/policies", params={"agent_id": "agent-xyz"})
+        assert r.status_code == 401
+
+
 # ── verify_api_key (real implementation, not the router-level mock) ────────────
 
 

@@ -3,7 +3,7 @@
  *
  * Translates incoming OpenTelemetry spans (gen_ai.* semantic conventions) into
  * Dunetrace AgentEvents and ships them through the normal Dunetrace client, so
- * the behavioral detectors run on them server-side. Span content (prompts,
+ * the structural detectors run on them server-side. Span content (prompts,
  * completions, tool arguments) is carried through as-is, same as the native SDK.
  *
  * Use this when an agent is already instrumented with an OTel-based tracer
@@ -70,7 +70,7 @@ const RETRIEVAL_KEYS = [
 ] as const;
 
 /**
- * OTel SpanExporter that translates gen_ai.* spans into Dunetrace behavioral
+ * OTel SpanExporter that translates gen_ai.* spans into Dunetrace structural
  * events and ships each completed trace as one Dunetrace run. Add it as a
  * SimpleSpanProcessor (or BatchSpanProcessor) exporter alongside your existing
  * OTel pipeline — no changes to agent code required.
@@ -283,7 +283,7 @@ function toolArgsRecord(argsStr: string): Record<string, unknown> {
 // ── Translation ────────────────────────────────────────────────────────────────
 
 /** Emit the Dunetrace call(s) for one span. LLM and tool spans feed the
- *  behavioral detectors most heavily; retrieval spans feed the RAG detectors.
+ *  structural detectors most heavily; retrieval spans feed the RAG detectors.
  *  Chains, agents, and other lifecycle spans have no distinct Dunetrace event and
  *  are skipped. */
 function emitSpan(run: DunetraceRun, span: ReadableSpan): void {

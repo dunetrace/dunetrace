@@ -14,7 +14,15 @@ The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](
 - *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
 - *"Walk me through run `019e2314-6b7` step by step."*
 
-All data is read-only, sourced from the Customer API over your existing Dunetrace deployment.
+All data is sourced from the Customer API over your existing Dunetrace deployment.
+
+**Most tools are read-only, but not all.** Nine tools write through to your
+deployment: `create_policy`, `toggle_policy`, `delete_policy`,
+`create_custom_detector`, `activate_custom_detector`, `pause_custom_detector`,
+`delete_custom_detector`, `resolve_issue`, and `trigger_explain` (which spends
+an LLM call). They're flagged **✎ writes** in the tool reference below. If you
+want a strictly read-only setup, issue the MCP server an API key scoped to
+reads — the server itself does not gate on tool category.
 
 ---
 
@@ -114,6 +122,22 @@ For production, set `DUNETRACE_API_KEY` to your real API key.
 ---
 
 ## Tools
+
+31 tools. **✎** marks a tool that writes to your deployment.
+
+| Area | Tools |
+|---|---|
+| Agents | `list_agents`, `summarize_agent`, `get_agent_health`, `get_agent_patterns`, `get_agent_token_stats` |
+| Runs | `get_agent_runs`, `get_run_detail`, `compare_runs` |
+| Signals | `get_agent_signals`, `get_signal_detail`, `search_signals`, `get_failure_pattern_detail` |
+| Root cause & fixes | `trigger_explain` ✎, `get_fix_status`, `list_agent_fixes` |
+| Issues | `list_agent_issues`, `get_issue`, `search_issues`, `resolve_issue` ✎ |
+| Policies | `list_policies`, `create_policy` ✎, `toggle_policy` ✎, `delete_policy` ✎ |
+| Custom detectors | `list_custom_detectors`, `create_custom_detector` ✎, `activate_custom_detector` ✎, `pause_custom_detector` ✎, `delete_custom_detector` ✎ |
+| Voice | `list_voice_calls`, `get_call_detail` |
+| Onboarding | `get_instrumentation_guide` |
+
+`search_signals` is also registered under the alias `list_all_signals`.
 
 ### `list_agents`
 
@@ -534,7 +558,7 @@ Issues matching filters (2 total, showing 2):
 
 ---
 
-### `resolve_issue`
+### `resolve_issue` ✎
 
 Manually mark an issue resolved with notes on what fixed it — for when you've made a code/prompt change and want to close the loop, distinct from Dunetrace's automatic resolve-after-5-clean-runs detection.
 
@@ -597,6 +621,233 @@ Quick-start code snippet for instrumenting an agent with Dunetrace.
 | `framework` | string | `langchain`, `python`, `typescript`, `haystack`, `tools`, `voice`, or `otel` |
 
 Aliases: `langgraph`, `lc`, `ts`, `js`, `node`, `haystack-ai`, `voice-agent`, `stt`, `tts`, `speech`, `otlp`, `opentelemetry`, `langdock`, `dify`, `tool-calls`, `tracking`.
+
+---
+
+### `compare_runs`
+
+Compare two runs side by side — duration, step count, token usage, signals, and exit reason. Useful for spotting a regression between a known-good run and a bad one, or for comparing runs either side of a deploy.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `run_id_1` | string | First run UUID |
+| `run_id_2` | string | Second run UUID |
+| `agent_id` | string | Agent ID (optional; informational only) |
+
+---
+
+### `get_failure_pattern_detail`
+
+Deep dive into one failure type for one agent: evidence aggregates, a 14-day trend with an ASCII bar chart, signals that co-occur with this failure, and the top example runs. Use it after `get_agent_patterns` tells you *which* failure dominates and you want to know *why*.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID (from `list_agents`) |
+| `failure_type` | string | Detector type, e.g. `TOOL_LOOP`, `COST_SPIKE`, `CONTEXT_BLOAT` |
+
+---
+
+### `trigger_explain` ✎
+
+Run root-cause analysis on a signal and return a fix suggestion. Calls `POST /v1/signals/{id}/explain`, which **spends an LLM call** on your configured provider — this is the one read-shaped tool that costs money.
+
+Returns either a suggested Dunetrace policy (for `dunetrace_native` fixes) or a diff (for `customer_code` fixes). See [Root cause and fix classification](detectors.md) for what determines which.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `signal_id` | int | The integer signal ID to analyze |
+| `agent_id` | string | Agent ID (optional; not required for lookup) |
+
+---
+
+### `get_fix_status`
+
+Check whether a fix applied for a signal actually reduced recurrence.
+
+| Verdict | Meaning |
+|---|---|
+| `verified` | Signal has not recurred since the fix was applied |
+| `likely_fixed` | Recurrence dropped significantly but not to zero |
+| `still_occurring` | Signal is still firing at a similar rate |
+| `insufficient_data` | Not enough post-fix runs to make a determination |
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `signal_id` | int | The integer signal ID to check |
+| `agent_id` | string | Agent ID (optional; not required for lookup) |
+
+---
+
+### `list_agent_fixes`
+
+List every fix applied for an agent's signals — which signal, the fix type, how it was applied (clipboard copy or GitHub PR), and whether it was verified effective.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID (from `list_agents`) |
+
+**Example output:**
+```
+Fixes for: langchain-example-agent  (2 total)
+
+ SIGNAL  TYPE                VIA         VERDICT               WHEN
+───────────────────────────────────────────────────────────────────────────
+    518  prompt_addition     clipboard   verified              3d ago
+    502  code_change         github_pr   still_occurring       9d ago
+```
+
+---
+
+### `list_policies`
+
+List runtime policies configured for your agents. Policies act *during* a live run — they stop it, switch the model, inject a corrective prompt, or log — when a condition is met. See [policies.md](policies.md).
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Filter to one agent. Empty = all agents. |
+
+**Example output:**
+```
+Policies (2):
+
+NAME                       AGENT            TRIGGER       OP    VALUE       ACTION              STATUS
+────────────────────────────────────────────────────────────────────────────────────────────────────
+cap-tool-calls             support-bot      tool_call_c   gt    5           stop                enabled
+downgrade-on-cost          *                cost_usd      gt    0.5         switch_model        enabled
+```
+
+---
+
+### `create_policy` ✎
+
+Create a runtime policy. **This takes effect on live agent runs** as soon as the SDK next pulls policies at run start — a `stop` action will terminate real runs.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `name` | string | Human-readable policy name |
+| `agent_id` | string | Agent to apply to (`*` for all agents) |
+| `condition` | string | JSON: `{"metric": ..., "operator": ..., "threshold": ...}` |
+| `action` | string | JSON: `{"type": "stop"}`, `{"type": "switch_model", "model": ...}`, `{"type": "inject_prompt", "text": ...}`, or `{"type": "log"}` |
+
+Operators: `gt`, `gte`, `lt`, `lte`, `eq`. For the full condition and action reference — including the `match` block for gating on tool-argument values — see [policies.md](policies.md#condition-reference).
+
+---
+
+### `toggle_policy` ✎
+
+Enable or disable an existing policy without deleting it.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `policy_id` | string | The policy ID to toggle |
+| `enabled` | bool | `true` to enable, `false` to disable |
+
+---
+
+### `delete_policy` ✎
+
+Delete a runtime policy permanently. Prefer `toggle_policy` if you may want it back.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `policy_id` | string | The policy ID to delete |
+
+---
+
+### `list_custom_detectors`
+
+List custom detectors with status, fire rate, and run counts.
+
+| Status | Meaning |
+|---|---|
+| `shadow` | Evaluating silently — results stored, no alerts fire |
+| `active` | Firing live alerts when triggered |
+| `paused` | Evaluation suspended |
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Filter to one agent. Empty = all. |
+
+**Example output:**
+```
+Custom detectors (2):
+
+NAME                            STATUS     AGENT            FIRE RATE  TOTAL RUNS
+────────────────────────────────────────────────────────────────────────────────
+excessive-tool-calls            [shadow]   support-bot      3/120 (2%)  120
+refund-over-10k                 [active]   billing-bot      1/40 (2%)   40
+```
+
+---
+
+### `create_custom_detector` ✎
+
+Create a custom detector from a plain-English description. The tool translates the description to a structured config via LLM (**spends an LLM call**), then creates the detector **in shadow mode** — it evaluates on every matching run but fires no alerts until you call `activate_custom_detector`.
+
+If the description can't be expressed with the supported metrics and content fields, the tool returns the translator's reason instead of creating anything. See [detectors.md](detectors.md#custom-detectors) for what's expressible.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `description` | string | Plain English, e.g. "Alert when total tool calls exceed 20 in a single run" |
+| `agent_id` | string | Agent to apply to (`*` for all agents, the default) |
+
+---
+
+### `activate_custom_detector` ✎
+
+Promote a shadow or paused detector to `active` so it fires live alerts. Check its shadow fire rate with `list_custom_detectors` first — that's what shadow mode is for.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `detector_id` | string | The custom detector ID to activate |
+
+---
+
+### `pause_custom_detector` ✎
+
+Pause a custom detector so it stops evaluating entirely, without deleting it or losing its history.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `detector_id` | string | The custom detector ID to pause |
+
+---
+
+### `delete_custom_detector` ✎
+
+Delete a custom detector permanently, **including all its historical evaluation results** (`custom_detector_results` cascades). Use `pause_custom_detector` if you only want to stop evaluation.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `detector_id` | string | The custom detector ID to delete |
 
 ---
 
@@ -743,6 +994,14 @@ All data served by the MCP tools comes from the Dunetrace Customer API:
 
 The `evidence` dict in signal responses contains the actual content the detector used, not a hash of it.
 
+**Writes.** Nine tools mutate your deployment rather than just reading it — see
+the ✎ markers in the tool index above. Two of them have effects outside
+Dunetrace itself: `create_policy` and `toggle_policy` change how **live agent
+runs** behave (a `stop` policy terminates real runs from the moment the SDK
+next pulls policies), and `trigger_explain` / `create_custom_detector` each
+spend an LLM call against your configured provider. Everything else is scoped
+to Dunetrace's own records.
+
 ---
 
 ## Troubleshooting
@@ -781,7 +1040,7 @@ python -m pytest tests/ -v
 dunetrace_mcp/
   __init__.py
   client.py      # thin httpx wrapper around the Customer API
-  server.py      # FastMCP server with 10 tools + 7 doc resources
+  server.py      # FastMCP server with 31 tools + 8 doc resources
 tests/
   test_tools.py  # 105 unit tests (all offline)
 pyproject.toml

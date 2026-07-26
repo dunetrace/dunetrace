@@ -145,4 +145,3 @@ on the run so the decision shows up in the run timeline.
 
 - [`examples/approval_agent.py`](../examples/approval_agent.py) — runnable end-to-end
 - [Policies](policies.md) — the engine approvals build on
-- [Blog: shipping human-in-the-loop for agents](blog/human-in-the-loop-approvals.md)

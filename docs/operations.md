@@ -107,6 +107,41 @@ curl -s -X POST "http://localhost:8001/admin/prune-events" \
 
 ---
 
+## processed_runs retention
+
+`processed_runs` is the detector's idempotency ledger — one row per run, recording
+that the run has been analysed. It's also the anti-join target in run discovery, so
+letting it grow forever slows the detector's hottest query.
+
+The detector worker prunes it daily (shard 0 only — the table isn't
+shard-partitioned, so extra replicas would only contend on the same rows). A pass
+keeps deleting while batches come back full, so a long-neglected table catches up in
+one pass rather than one batch per day.
+
+**The ordering constraint runs opposite to intuition.** A `processed_runs` row may
+only be deleted *after* its run's events are gone. Delete it while the events remain
+and the run reads as unprocessed: the detector re-analyses it and writes a second,
+duplicate set of signals — which then alert. The delete therefore carries a
+`NOT EXISTS` against `events` rather than trusting a retention constant, so the
+invariant holds no matter what `EVENT_RETENTION_DAYS` is set to, including values
+the detector never sees.
+
+| Env var | Default | Description |
+|---|---|---|
+| `PROCESSED_RUNS_RETENTION_DAYS` | `120` | Age bound on the scan. Keep it beyond `EVENT_RETENTION_DAYS` (90) — it's a scan bound for cheapness, not the safety mechanism |
+| `PRUNE_BATCH_SIZE` | `10000` | Rows per delete batch |
+
+Lowering `PROCESSED_RUNS_RETENTION_DAYS` below `EVENT_RETENTION_DAYS` is not
+dangerous — the `NOT EXISTS` still refuses to delete rows whose events survive — it
+just wastes work re-examining rows that can't yet qualify.
+
+There's no manual trigger endpoint; the loop runs on worker startup and every 24h.
+To verify it's working, watch for `Pruned N processed_runs row(s)` in the detector
+logs, or compare `SELECT count(*) FROM processed_runs` against the retained run
+count over time.
+
+---
+
 ## Rate limiting
 
 `ingest_svc` enforces a per-API-key sliding-window rate limit (60s window, `rate_limit_rpm` from the `api_keys` table) on `POST /v1/ingest`, `POST /v1/deploy`, and `POST /v1/otlp/traces`. Keys are org-scoped, not agent-scoped — one key can carry traffic for many agents. Without any further limiting, one runaway agent under a shared key can consume the entire key's budget and starve its siblings.

@@ -1,4 +1,13 @@
-export { Dunetrace, getCurrentRun } from "./client.js";
+export { Dunetrace } from "./client.js";
+export { getCurrentRun } from "./context.js";
+export {
+  autoInstrument,
+  instrumentHttp,
+  registerOwnEndpoint,
+  wrapOpenAIClient,
+  wrapAnthropicClient,
+  type AutoInstrumentOptions,
+} from "./auto.js";
 export { DunetraceRun } from "./run.js";
 export { agentVersion } from "./hash.js";
 export {

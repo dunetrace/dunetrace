@@ -1,6 +1,6 @@
 # Dunetrace MCP Server
 
-Query agent signals, run details, and health scores directly from Claude Code, Cursor, Codex, or any MCP-compatible client — without leaving your editor. Read-only for signals/runs; write operations (create/update/delete) are available for policies and custom detectors.
+Query agent signals, run details, and health scores directly from Claude Code, Cursor, Codex, or any MCP-compatible client — without leaving your editor. Read-only for signals and runs; nine tools write — the policy and custom-detector lifecycle operations, plus `resolve_issue` and `trigger_explain`. See the ✎ markers in [docs/mcp-server.md](../../docs/mcp-server.md) for which ones, and what each affects.
 
 Setup (install, client config for Claude Code / Cursor / Codex, environment variables) is covered in **[docs/mcp-server.md](../../docs/mcp-server.md)** — the quick version:
 
@@ -569,6 +569,55 @@ List open or resolved issues for an agent. Issues are aggregated across runs —
 
 ---
 
+### `search_issues`
+
+Search issues across **all** agents in your org — fleet-wide triage, where `list_agent_issues` is scoped to one agent.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `query` | string | `""` | Substring match against agent_id / failure_type / resolution_notes. Empty matches everything |
+| `status` | string | `""` | Filter: `open`, `resolved`, or `reopened`. Empty = all |
+| `agent_id` | string | `""` | Restrict to one agent. Empty = all agents |
+| `failure_type` | string | `""` | Restrict to one detector, e.g. `TOOL_LOOP` |
+| `limit` | int | 20 | Max issues to return |
+
+`query` is a plain substring match, not full-text search or relevance ranking — issues have no free-text title beyond `resolution_notes`, which is only populated once an issue has been manually resolved.
+
+---
+
+### `get_issue`
+
+Full context for a single issue — metadata, affected runs, root cause, and a suggested fix. The deep-dive tool for one issue found via `search_issues` or `list_agent_issues`.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `issue_id` | int | required | Integer issue ID |
+
+**Note:** may trigger an LLM call to generate the root cause/fix (the same native analysis `trigger_explain` uses) and can take 5–15 seconds. With no LLM key configured on the backend, `root_cause`/`suggested_fix` are omitted and the rest of the report still returns.
+
+`code_references` is always empty for now — Dunetrace has no source-mapping capability yet.
+
+---
+
+### `resolve_issue` ✎
+
+Manually mark an issue resolved with notes on what fixed it — for when you've made a code/prompt change and want to close the loop, distinct from Dunetrace's automatic resolve-after-5-clean-runs detection.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `issue_id` | int | required | Integer issue ID to resolve |
+| `resolution_notes` | string | required | What fixed it, e.g. "Added a per-tool call limit of 3 in the agent's retry loop." |
+
+If the failure recurs later the issue reopens automatically, whether it was auto- or manually-resolved — `resolution_notes` is kept as a historical record either way.
+
+---
+
 ### `get_failure_pattern_detail`
 
 Deep dive into a specific failure type: evidence aggregates, a 14-day trend with ASCII bar chart, co-occurring signals, and top example runs.
@@ -684,7 +733,7 @@ cd packages/mcp-server
 python -m pytest tests/ -v
 ```
 
-154 tests, all offline — no running stack required.
+188 tests, all offline — no running stack required.
 
 ---
 
@@ -696,9 +745,9 @@ python -m pytest tests/ -v
 dunetrace_mcp/
   __init__.py
   client.py      # thin httpx wrapper around the Customer API
-  server.py      # FastMCP server with 26 tools + 6 doc resources
+  server.py      # FastMCP server with 31 tools + 8 doc resources
 tests/
-  test_tools.py  # 154 unit tests (all offline)
+  test_tools.py  # 188 unit tests (all offline)
 pyproject.toml
 README.md
 ```

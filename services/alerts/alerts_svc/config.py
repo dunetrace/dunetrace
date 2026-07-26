@@ -58,6 +58,29 @@ class Settings:
     POLL_INTERVAL: float = float(os.getenv("POLL_INTERVAL", "10"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "50"))
 
+    # Horizontal sharding by agent_id — same scheme as detector_svc. Run N
+    # replicas with SHARD_COUNT=N and SHARD_INDEX=0..N-1; each only claims
+    # signals whose agent_id hashes to its bucket, which keeps every
+    # (org_id, agent_id, failure_type) alert group whole on one worker.
+    # SHARD_COUNT=1 (default) disables the filter and relies on the claim alone.
+    #
+    # ALERTS_-prefixed vars win over the shared ones. Both workers reading the
+    # same SHARD_COUNT is convenient when they're scaled together and dangerous
+    # when they aren't: _load_dotenv() above pulls in the repo-root .env, so a
+    # `SHARD_COUNT=4` meant for four detector replicas would silently leave a
+    # lone alerts worker claiming only bucket 0 — three quarters of signals would
+    # never alert, with nothing in the logs to say so. The prefix is the escape
+    # hatch for scaling the two independently.
+    SHARD_COUNT: int = int(os.getenv("ALERTS_SHARD_COUNT") or os.getenv("SHARD_COUNT", "1"))
+    SHARD_INDEX: int = int(os.getenv("ALERTS_SHARD_INDEX") or os.getenv("SHARD_INDEX", "0"))
+
+    # How long a claim on a signal stays valid. A worker that dies between
+    # claiming and delivering strands its rows for at most this long; after it
+    # they're reclaimable. Must comfortably exceed the worst-case delivery time
+    # for one batch (explain + Slack/webhook/Linear round-trips with retries),
+    # or a slow-but-alive worker's rows get stolen and double-delivered.
+    CLAIM_TIMEOUT_SECS: float = float(os.getenv("CLAIM_TIMEOUT_SECS", "300"))
+
     # Alert deduplication — same (agent_id, failure_type) silenced for this window after first alert.
     # Set to 0 to disable. Suppressed count is reported when the window re-opens.
     ALERT_DEDUP_WINDOW: int = int(os.getenv("ALERT_DEDUP_WINDOW", "3600"))  # seconds
@@ -88,6 +111,18 @@ class Settings:
 
 
 settings = Settings()
+
+# Fail fast on misconfigured replicas rather than silently claiming no work —
+# mirrors detector_svc/config.py's identical guard.
+if settings.SHARD_COUNT < 1:
+    raise ValueError(f"SHARD_COUNT must be >= 1, got {settings.SHARD_COUNT}")
+if not (0 <= settings.SHARD_INDEX < settings.SHARD_COUNT):
+    raise ValueError(
+        f"SHARD_INDEX must be in [0, SHARD_COUNT), "
+        f"got SHARD_INDEX={settings.SHARD_INDEX} SHARD_COUNT={settings.SHARD_COUNT}"
+    )
+if settings.CLAIM_TIMEOUT_SECS <= 0:
+    raise ValueError(f"CLAIM_TIMEOUT_SECS must be > 0, got {settings.CLAIM_TIMEOUT_SECS}")
 
 # Severity order for threshold comparisons
 SEVERITY_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}

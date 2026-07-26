@@ -15,9 +15,10 @@ false-positive cost of detectors that don't apply to them.
 
 There are three kinds of detector in Dunetrace; packs are the middle one:
 
-- **Built-in detectors** — the always-on battery (23 of them) that runs for
+- **Built-in detectors** — the always-on battery (29 of them) that runs for
   every org on every completed run. Packs never change these; they always run.
-  See [detectors.md](../detectors.md).
+  23 of the 29 are live; the newest 6 are still in shadow mode. See
+  [detectors.md](../detectors.md).
 - **Pack detectors** — first-party, Dunetrace-owned, activated per org as a
   whole. This page.
 - **Custom detectors** — *your* detector logic, either written in plain

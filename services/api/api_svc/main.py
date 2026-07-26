@@ -60,6 +60,17 @@ logger = logging.getLogger("dunetrace.api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting — auth_mode=%s", settings.AUTH_MODE)
+    if settings.is_dev:
+        # Loud, not debug-level: in dev mode every endpoint is unauthenticated,
+        # including the ones that mutate policies and spend LLM credit. Anyone
+        # who can reach the port is effectively an admin of every org.
+        logger.warning(
+            "AUTH_MODE=%s — AUTHENTICATION IS DISABLED. Every endpoint is open, "
+            "including policy writes and LLM-spending routes, and all requests "
+            "resolve to the default org. Do not expose this port beyond "
+            "localhost. Set AUTH_MODE=prod for any shared or public deployment.",
+            settings.AUTH_MODE,
+        )
     await init_pool()
     # Nudge a rate recheck if voice pricing defaults are >90 days stale (Phase 2.2).
     from api_svc.voice_pricing import check_pricing_staleness

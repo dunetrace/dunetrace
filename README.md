@@ -33,7 +33,7 @@ AI agents fail silently:
 
 Tracers answer "what happened?" — after you already know it broke.
 Dunetrace answers **"is something breaking right now?"** and fires an alert in 15 seconds,
-using zero-LLM structural checks that run in-path with sub-500μs overhead.
+using zero-LLM structural checks that run in-path with sub-500μs per-hook overhead.¹
 
 ---
 
@@ -44,10 +44,16 @@ Dunetrace covers the full agent reliability lifecycle, not just one slice of it:
 | | Pillar | What it does |
 |---|---|---|
 | 1 | **Sessions & Events** | Every run, every tool call, every LLM exchange — the raw data everything else is built on |
-| 2 | **Structural Detection** | 27 zero-LLM detectors, in-path, sub-500μs — the always-on first line |
+| 2 | **Structural Detection** | 29 zero-LLM detectors, in-path, sub-500μs per hook ¹ — the always-on first line |
 | 3 | **Semantic Evaluation** | LLM-based judgment (hallucination, task completion, cross-turn frustration) — post-hoc, sampling-based, opt-in → [docs/semantic-evaluation.md](docs/semantic-evaluation.md) |
 | 4 | **Runtime Prevention** | Policies that stop, redirect, or downgrade a run *while it's happening* — the differentiator no tracer offers → [docs/policies.md](docs/policies.md) |
 | 5 | **Root Cause & Fix** | Native root-cause analysis, auto-applied policy fixes, or a one-click draft PR → [Diagnose & fix](#diagnose--fix) |
+
+¹ Per instrumentation hook (`tool_called`, `llm_responded`, …) — benchmarked in
+`packages/sdk-py/tests/test_benchmark.py`. The one exception is the prompt-injection
+scan at run start, which is bounded rather than sub-millisecond: it scans up to 32K
+characters of input, ~10ms worst case against an LLM call of 500ms+. See
+[docs/detectors.md](docs/detectors.md) footnote 2.
 
 **Where tracers fit in:** if you already run Langfuse, LangSmith, or Braintrust,
 Dunetrace pulls their evaluation results in alongside its own (pillar 3) rather
@@ -104,19 +110,25 @@ def my_agent(question: str) -> str:
 
 **TypeScript / Node.js**
 ```typescript
-import { Dunetrace } from "dunetrace";
+import { Dunetrace, autoInstrument } from "dunetrace";
 import OpenAI from "openai";
 
-const dt     = new Dunetrace();
-const openai = dt.wrapOpenAI(new OpenAI());
+const dt = new Dunetrace();
+autoInstrument({ openai: OpenAI });   // patches OpenAI + outbound fetch; add `anthropic: Anthropic` if you use it
 
-await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
+const openai = new OpenAI();          // constructed after the patch — still tracked
+
+await dt.run("support-agent", { model: "gpt-4o" }, async (run) => {
   await openai.chat.completions.create({ model: "gpt-4o", messages });
-  run.finalAnswer();
+  run.finalAnswer();                  // LLM + tool calls tracked automatically, streaming included
 });
 ```
 
+To instrument a single client instead, use `dt.wrapOpenAI(new OpenAI())`. See [docs/integrate-typescript-agent.md](docs/integrate-typescript-agent.md#auto-instrumentation).
+
 **Try the built-in failure scenarios**
+
+Python — run from `packages/sdk-py`:
 ```bash
 cd packages/sdk-py
 
@@ -125,13 +137,24 @@ SCENARIO=tool_loop python examples/langchain_agent.py   # TOOL_LOOP via LangChai
 SCENARIO=failures python examples/decorator_agent.py    # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
 ```
 
+TypeScript: run from `packages/sdk-ts`. Drives the Vercel AI SDK against a local Ollama, so no API key is needed:
+```bash
+cd packages/sdk-ts
+npm install && ollama pull llama3.2
+
+npm run example:vercel-ai                               # Happy path
+npm run example:vercel-ai:loop                          # TOOL_LOOP, then prints the root cause and fix
+```
+
+The `:loop` variant provokes a tool loop, polls until the detector picks it up, then calls `POST /v1/signals/{id}/explain` — so it exercises the full detect → explain path end to end. That explain call spends one LLM call on whatever provider the *stack* is configured with; the agent's own calls are free.
+
 Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ---
 
 ## Detectors
 
-28 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
+29 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Signal | What it catches |
 |---|---|
@@ -147,7 +170,7 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 Each alert includes: what fired, why it matters, a concrete fix, and a rate context line (first occurrence / recurring / systemic).
 
-→ [docs/detectors.md](docs/detectors.md) for the full list of 28 detectors
+→ [docs/detectors.md](docs/detectors.md) for the full list of 29 detectors
 
 **Multi-agent systems** — instrument each agent as its own `dt.run()` and Dunetrace auto-links them into a delegation graph (`parent_run_id` is threaded automatically for nested runs). Two detectors read that graph: `DELEGATION_LOOP` (agents cycling without converging) and `HANDOFF_CONTEXT_LOSS` (a handoff dropping the parent's context). → [docs/multi-agent.md](docs/multi-agent.md)
 
@@ -176,6 +199,10 @@ calibrated before ship (see `scripts/calibration/`).
 ```bash
 SEMANTIC_WORKER_ENABLED=true
 ```
+
+The semantic worker runs as its own container. It's in both compose files and
+off by default — set the flag in `.env` and bring the stack back up. Same for
+the external-evaluation and ElevenLabs workers.
 
 → [docs/semantic-evaluation.md](docs/semantic-evaluation.md)
 
@@ -259,7 +286,7 @@ pip install dunetrace-mcp
 ```
 
 <details>
-<summary>29 tools for signals, runs, policies, and custom detectors. Ask your editor things like "what failed in the last 24 hours?" A representative 10:</summary>
+<summary>31 tools for signals, runs, policies, and custom detectors. Ask your editor things like "what failed in the last 24 hours?" A representative 10:</summary>
 
 | Tool | What you can ask |
 |---|---|
@@ -304,7 +331,7 @@ pip install dunetrace-mcp
 Agent Code
   └─► Dunetrace SDK        (raw content → ingest events)
         └─► Ingest API      (POST /v1/ingest → Postgres)
-                ├─► Detector          (poll → 28 detectors → signals)
+                ├─► Detector          (poll → 29 detectors → signals)
                 ├─► Semantic Worker   (optional — poll → DeepEval → signals)
                 ├─► Integrations      (optional — pull Langfuse/LangSmith/Braintrust)
                 ├─► Alerts            (poll → explain → Slack / webhook)
@@ -312,6 +339,7 @@ Agent Code
 ```
 
 → [docs/architecture.md](docs/architecture.md) for the full service breakdown
+· [operations guide](docs/operations.md) (retention, rate limiting, quotas)
 
 ---
 
@@ -331,6 +359,8 @@ Agent Code
 **Voice**
 - [ElevenLabs (correlate TTS cost and voice choices with agent behavior)](docs/integrations/elevenlabs.md)
 - [Wiring a voice framework](docs/integrations/voice-frameworks.md)
+- [Voice metrics (call-level view of a voice agent)](docs/voice-metrics.md)
+- [Voice detector pack (9 detectors)](docs/detector-packs/voice.md)
 
 <details>
 <summary>Agent frameworks: LangChain, CrewAI, AutoGen, Haystack, LlamaIndex, TypeScript, and more</summary>
@@ -347,6 +377,9 @@ Agent Code
 - [smolagents (Hugging Face)](docs/integrate-smolagents.md)
 - [TypeScript / JavaScript](docs/integrate-typescript-agent.md)
 - [Langdock](docs/integrate-langdock.md)
+- [Dify](docs/integrate-dify.md)
+- [LiteLLM](docs/integrate-litellm.md)
+- [Vercel AI SDK](docs/integrate-vercel-ai.md)
 - [Policies](docs/policies.md)
 - [Human-in-the-loop approvals](docs/approvals.md)
 - [Agent state machine](docs/state-machine.md)
@@ -359,7 +392,7 @@ Agent Code
 
 Fork, branch, change, `make test`, PR. For larger changes (new integrations, architecture changes), open an issue first.
 
-New here? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup and workflow, browse the [good first issues](https://github.com/dunetrace/dunetrace/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) (most are "add one detector"), and follow the step-by-step **[Adding a detector guide](docs/contributing/adding-a-detector.md)**.
+New here? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup and workflow, browse the [good first issues](https://github.com/dunetrace/dunetrace/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22), and if required, follow the step-by-step **[Adding a detector guide](docs/contributing/adding-a-detector.md)**. 
 
 Requires Python 3.11+, Node.js 22+, Docker + Docker Compose.
 

@@ -35,7 +35,12 @@ class Settings:
     # audit Finding 34: real build version reported by /health (was hardcoded
     # 0.1.0). Set APP_VERSION (or GIT_COMMIT) in deploy to identify the build.
     APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
-    AUTH_MODE: str = os.getenv("AUTH_MODE", "dev")
+    # Fails CLOSED: an unset AUTH_MODE means full auth, not skipped auth. Dev
+    # mode disables authentication entirely, so it must be an explicit opt-in —
+    # a deployment that forgets to set this gets a locked-down API rather than
+    # an open one. Both compose files set `dev` explicitly for the local
+    # quickstart; anything else (k8s, systemd, bare uvicorn) inherits `prod`.
+    AUTH_MODE: str = os.getenv("AUTH_MODE", "prod")
 
     # Trusted-upstream bypass — mirrors ingest_svc's INTERNAL_TOKEN. When set, requests
     # carrying a matching x-internal-token header skip this service's own api_keys

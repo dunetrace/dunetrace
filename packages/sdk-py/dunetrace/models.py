@@ -269,7 +269,7 @@ class RiskScore:
     """
     Aggregate run-level risk assessment produced by RiskEngine.
 
-    Captures the overall confidence that this run contains a behavioral failure,
+    Captures the overall confidence that this run contains a structural failure,
     along with the per-feature breakdown that explains why. Used by the alert
     layer to gate, prioritize, and explain alerts — not a replacement for
     individual FailureSignals.

@@ -23,6 +23,7 @@ import pathlib
 import re
 import textwrap
 from datetime import datetime, timezone
+from importlib import resources
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -1671,8 +1672,30 @@ def compare_runs(run_id_1: str, run_id_2: str, agent_id: str = "") -> str:
 
 
 def _read_doc(name: str) -> str:
+    """Return a bundled doc, preferring the copy shipped inside the package.
+
+    Two lookups, in this order, because the two install modes put the docs in
+    different places:
+
+    1. ``dunetrace_mcp/_docs/`` — written into the wheel at build time (see
+       setup.py). This is the only copy a `pip install dunetrace-mcp` has;
+       resolving relative to ``__file__`` lands in site-packages, where there is
+       no repo and every doc resource returned "(doc not found)".
+    2. ``<repo-root>/docs/`` — an editable install or a source checkout, where
+       the package dir has no ``_docs`` and the real docs sit four levels up.
+       Reading them live means local edits show up without a rebuild.
+    """
+    try:
+        packaged = resources.files("dunetrace_mcp").joinpath("_docs", name)
+        if packaged.is_file():
+            return packaged.read_text(encoding="utf-8")
+    except (ModuleNotFoundError, FileNotFoundError, OSError):
+        pass  # fall through to the source checkout
+
     p = _DOCS / name
-    return p.read_text(encoding="utf-8") if p.exists() else f"(doc not found: {p})"
+    if p.exists():
+        return p.read_text(encoding="utf-8")
+    return f"(doc not found: {name} — not packaged in this build and no repo checkout at {_DOCS})"
 
 
 @mcp.resource("dunetrace://docs/integrate-python")
@@ -1820,7 +1843,9 @@ _GUIDES: dict[str, str] = {
                 run.llm_responded(completion_tokens=80, latency_ms=900)
         ```
 
-        ## Option C — auto-instrumentation (patches openai / anthropic / httpx)
+        ## Option C — auto-instrumentation (simplest for existing code)
+        Patches every installed client: openai, anthropic, langchain, crewai,
+        httpx, requests. No call-site changes.
         ```python
         dt.init(agent_id="my-agent")   # patches clients globally
 
@@ -1833,7 +1858,7 @@ _GUIDES: dict[str, str] = {
         ```python
         run.tool_called("my_tool", {"arg": value})   # before calling
         result = my_tool(value)
-        run.tool_responded("my_tool", success=True, result=result, latency_ms=50)
+        run.tool_responded("my_tool", success=True, output=str(result), latency_ms=50)
         ```
 
         Full guide: docs/integrate-custom-python-agent.md
@@ -1841,9 +1866,56 @@ _GUIDES: dict[str, str] = {
     "typescript": textwrap.dedent("""
         # Instrument a TypeScript / Node.js agent with Dunetrace
 
-        No SDK required — post events directly to the ingest HTTP endpoint.
+        ```bash
+        npm install dunetrace
+        ```
 
-        ## Minimal client
+        ## Option A — auto-instrumentation (simplest)
+        Patches the OpenAI and Anthropic SDKs plus outbound `fetch`, so every
+        client is tracked — including ones constructed inside a library you
+        don't control. Streaming calls are tracked too.
+        ```typescript
+        import { Dunetrace, autoInstrument } from "dunetrace";
+        import OpenAI from "openai";
+
+        const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+        autoInstrument({ openai: OpenAI });   // add `anthropic: Anthropic` if used
+
+        const openai = new OpenAI();          // built after the patch — still tracked
+
+        await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
+          await openai.chat.completions.create({ model: "gpt-4o", messages });
+          run.finalAnswer();
+        });
+        await dt.shutdown();
+        ```
+        Pass the imported class as shown. The zero-argument `autoInstrument()`
+        auto-detects via `require`, which only resolves under CommonJS.
+
+        ## Option B — wrap one client
+        ```typescript
+        const openai = dt.wrapOpenAI(new OpenAI());
+        const claude = dt.wrapAnthropic(new Anthropic());
+        const search = dt.tool(webSearch);     // emits tool.called + tool.responded
+        ```
+
+        ## Option C — wrap a whole agent function
+        ```typescript
+        const agent = dt.trace(myAgent, "my-agent", { model: "gpt-4o" });
+        await agent(question);                 // opens and closes its own run
+        ```
+
+        ## Vercel AI SDK
+        ```typescript
+        import { generateText } from "ai";
+        import { traceGenerateText } from "dunetrace";
+
+        await traceGenerateText(dt, "my-agent", {}, generateText, { model, prompt });
+        ```
+
+        ## Option D — no SDK, raw HTTP
+        Only if you can't add the dependency. Post events to the ingest endpoint
+        yourself:
         ```typescript
         import { randomUUID } from "crypto";
 
@@ -1957,19 +2029,27 @@ _GUIDES: dict[str, str] = {
         # on_tool_start / on_tool_end are captured automatically
         ```
 
-        ## TypeScript — manual events
+        ## TypeScript — wrap the function (automatic)
         ```typescript
-        // Before calling
-        await sendEvent({ event_type: "tool.called", payload: {
-          tool_name: "web_search", args: JSON.stringify(args)
-        }, ... });
+        import { Dunetrace } from "dunetrace";
 
-        const result = await webSearch(args);
+        const dt = new Dunetrace();
+        const search = dt.tool(webSearch);          // emits tool.called + tool.responded
 
-        // After calling
-        await sendEvent({ event_type: "tool.responded", payload: {
-          tool_name: "web_search", success: true, latency_ms: 150
-        }, ... });
+        await dt.run("my-agent", {}, async () => {
+          const results = await search(query);      // tracked automatically
+        });
+        ```
+        Outbound HTTP is tracked too once `autoInstrument()` has run — each
+        request emits tool.called / tool.responded named by hostname.
+
+        ## TypeScript — explicit events
+        ```typescript
+        await dt.run("my-agent", {}, async (run) => {
+          run.toolCalled("web_search", { query });
+          const result = await webSearch(query);
+          run.toolResponded("web_search", true, String(result).length, 150);
+        });
         ```
 
         ## What the detectors watch for
@@ -2264,7 +2344,7 @@ def get_instrumentation_guide(framework: str) -> str:
             - "langchain"   — LangChain / LangGraph agents
             - "python"      — Custom Python agents (decorator, context manager,
                               auto-instrumentation, FastAPI, Flask)
-            - "typescript"  — TypeScript / Node.js agents (raw HTTP ingest)
+            - "typescript"  — TypeScript / Node.js agents (npm SDK, auto-instrumentation)
             - "tools"       — How to track tool calls specifically (all languages)
             - "haystack"    — Haystack 2.x pipelines (simple, RAG, Agent component)
             - "voice"       — Voice agents (STT / TTS / VAD / turn-taking hooks)

@@ -1260,12 +1260,29 @@ class TestResources(unittest.TestCase):
         self.assertIn("toolCalled", content)
 
     def test_missing_doc_returns_error_string(self):
+        # Has to be a name that exists in neither lookup. Breaking _DOCS alone no
+        # longer suffices: _read_doc now checks the copy bundled into the package
+        # first, which is what makes doc resources work on a `pip install` where
+        # there is no repo to fall back to.
+        content = srv._read_doc("definitely-not-a-real-doc.md")
+        self.assertIn("doc not found", content)
+
+    def test_repo_docs_still_used_when_nothing_is_bundled(self):
+        """Source checkouts must keep reading docs/ live, so local edits show up
+        without rebuilding the package."""
         import pathlib
         from unittest.mock import patch
 
-        with patch.object(srv, "_DOCS", pathlib.Path("/nonexistent")):
-            content = srv.doc_integrate_python()
-        self.assertIn("doc not found", content)
+        # Simulate a tree where the build hook has never run.
+        with patch.object(srv.resources, "files", side_effect=FileNotFoundError):
+            content = srv._read_doc("integrate-custom-python-agent.md")
+        self.assertNotIn("doc not found", content)
+        self.assertIn("Dunetrace", content)
+
+    def test_reports_both_lookup_locations_when_missing(self):
+        content = srv._read_doc("definitely-not-a-real-doc.md")
+        self.assertIn("not packaged", content)
+        self.assertIn("definitely-not-a-real-doc.md", content)
 
 
 class TestGetRunDetailExtra(unittest.TestCase):

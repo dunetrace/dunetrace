@@ -87,6 +87,29 @@ The alerts worker polls every 10 seconds for unalerted signals (`shadow=FALSE AN
 
 If the worker crashes between sending and marking, the signal will be re-sent on restart. Design receivers to be idempotent.
 
+### Running more than one alerts worker
+
+Safe, but only because signals are **claimed** before delivery. `alerted` is set
+after a successful send, so it can't serve as the claim on its own — two workers
+scanning the same window would both see `alerted = FALSE`, both deliver, and you'd
+get duplicate Slack messages. The `ALERT_DEDUP_WINDOW` check doesn't prevent it
+either, since both read the window before either writes it.
+
+`claim_unalerted_signals` stamps `failure_signals.alert_claimed_at` in the same
+statement that selects the rows (`FOR UPDATE SKIP LOCKED`), so a row can only be
+picked up by one worker. To actually scale throughput, also shard: set
+`SHARD_COUNT=N` and give each replica a distinct `SHARD_INDEX`, exactly as with the
+detector. Sharding on `agent_id` matters beyond throughput — the worker sends one
+alert per `(org_id, agent_id, failure_type)` group, so a group must stay whole on
+one worker.
+
+Claims expire after `CLAIM_TIMEOUT_SECS` (default 300) so a worker that dies
+mid-delivery doesn't strand its rows. Set it comfortably above your worst-case
+delivery time for a full batch: if it expires while a worker is still alive and
+working, another replica takes the row and the alert goes out twice.
+
+See [architecture.md](architecture.md#alerts-worker-sharding-plus-claiming).
+
 ---
 
 ## Weekly digest

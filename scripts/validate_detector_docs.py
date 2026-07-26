@@ -53,6 +53,25 @@ _ALLOWLIST = {
     "MIN_MESSAGE_LENGTH",
     "NULL",
     "SHADOW",
+    # SDK constants that name *collections of* detectors, or detector tunables —
+    # all defined in packages/sdk-py/dunetrace/detectors.py.
+    "TIER1_DETECTORS",  # the 26-detector in-path battery, not a detector itself
+    "SCAN_HEAD_CHARS",  # injection scan window bound
+    "SCAN_TAIL_CHARS",  # injection scan window bound
+    # Custom-detector translator vocabulary (detector_svc/custom_detector.py and
+    # api_svc/custom_detector_translator.py) — the fields a content condition may
+    # inspect, not a detector.
+    "CONTENT_FIELDS",
+    # Per-evaluator model overrides read by semantic_svc/worker.py. These are env
+    # var names shaped like <EVALUATOR>_MODEL; the evaluator itself is already a
+    # known name, the _MODEL suffix makes it a distinct token to this checker.
+    "HALLUCINATION_MODEL",
+    "TASK_COMPLETION_MODEL",
+    "TASK_UNDERSTANDING_FAILURE_MODEL",
+    "OFF_TOPIC_DRIFT_MODEL",
+    "USER_FRUSTRATION_MODEL",
+    "CONFUSION_LOOP_MODEL",
+    "SYCOPHANCY_SIGNAL_MODEL",
 }
 
 # Backticked ALL-CAPS token: multi-segment snake (`TOOL_LOOP`) or a single word

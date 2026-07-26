@@ -24,6 +24,7 @@ from detector_svc.custom_detector import evaluate_custom_detector
 from detector_svc.custom_python_detectors import load_custom_detector_plugins
 from detector_svc.db import (
     LIVE_DETECTORS,
+    advance_watermark,
     close_pool,
     ensure_detector_schema,
     fetch_completed_runs,
@@ -38,6 +39,8 @@ from detector_svc.db import (
     fetch_step_count_baseline,
     fetch_token_growth_baseline,
     fetch_total_tokens_baseline,
+    get_watermark,
+    prune_processed_runs,
     init_pool,
     mark_run_processed,
     record_custom_detector_results,
@@ -492,18 +495,38 @@ async def process_run(
 
 
 async def poll_once() -> tuple[int, int]:
+    watermark = await get_watermark(settings.SHARD_INDEX)
     completed = await fetch_completed_runs(
         limit=settings.BATCH_SIZE,
         shard_count=settings.SHARD_COUNT,
         shard_index=settings.SHARD_INDEX,
+        watermark=watermark,
     )
     stalled = await fetch_stalled_runs(
         stall_timeout_secs=settings.STALL_TIMEOUT_SECS,
         limit=settings.BATCH_SIZE,
         shard_count=settings.SHARD_COUNT,
         shard_index=settings.SHARD_INDEX,
+        watermark=watermark,
     )
     runs = completed + stalled
+
+    # Only advance the watermark when neither query hit its LIMIT. A full batch
+    # means there is more work behind it, and moving the window forward would
+    # step over runs that were never processed. Draining first and advancing
+    # later costs a few redundant scans; advancing early loses runs.
+    drained = len(completed) < settings.BATCH_SIZE and len(stalled) < settings.BATCH_SIZE
+    if drained:
+        await advance_watermark(settings.SHARD_INDEX, settings.WATERMARK_GRACE_SECS)
+    elif watermark is None:
+        logger.info(
+            "Backlog present (completed=%d stalled=%d, batch=%d) — poll watermark "
+            "stays unbounded until a cycle drains it.",
+            len(completed),
+            len(stalled),
+            settings.BATCH_SIZE,
+        )
+
     if not runs:
         return 0, 0
 
@@ -523,6 +546,44 @@ async def poll_once() -> tuple[int, int]:
     return len(runs), sum(results)
 
 
+_PRUNE_INTERVAL = 24 * 60 * 60  # once a day
+
+
+async def _prune_loop() -> None:
+    """Reclaim processed_runs rows whose events have already aged out.
+
+    Only shard 0 prunes: the table isn't shard-partitioned, so every replica
+    running this would just contend on the same rows for no extra throughput.
+
+    Keeps deleting while a pass fills its batch, so a long-neglected table
+    catches up over successive passes instead of shrinking by one batch a day.
+    """
+    while True:
+        try:
+            if settings.SHARD_INDEX == 0:
+                total = 0
+                while True:
+                    deleted = await prune_processed_runs(
+                        min_age_days=settings.PROCESSED_RUNS_RETENTION_DAYS,
+                        batch_size=settings.PRUNE_BATCH_SIZE,
+                    )
+                    total += deleted
+                    if deleted < settings.PRUNE_BATCH_SIZE:
+                        break
+                    # Yield between batches so polling isn't starved.
+                    await asyncio.sleep(1)
+                if total:
+                    logger.info(
+                        "Pruned %d processed_runs row(s) older than %d days whose "
+                        "events were already gone.",
+                        total,
+                        settings.PROCESSED_RUNS_RETENTION_DAYS,
+                    )
+        except Exception as exc:
+            logger.error("processed_runs prune failed: %s", exc)
+        await asyncio.sleep(_PRUNE_INTERVAL)
+
+
 async def run_worker() -> None:
     await init_pool()
     await ensure_detector_schema()
@@ -539,7 +600,14 @@ async def run_worker() -> None:
             logger.info("OTel export enabled for detector signals/policies.")
     except Exception as exc:
         logger.debug("OTel init skipped: %s", exc)
-    logger.info("Detector worker started. poll_interval=%ss", settings.POLL_INTERVAL)
+    logger.info(
+        "Detector worker started. poll_interval=%ss shard=%d/%d watermark_grace=%ss",
+        settings.POLL_INTERVAL,
+        settings.SHARD_INDEX,
+        settings.SHARD_COUNT,
+        settings.WATERMARK_GRACE_SECS,
+    )
+    prune_task = asyncio.create_task(_prune_loop())
     try:
         while True:
             try:
@@ -552,6 +620,7 @@ async def run_worker() -> None:
     except asyncio.CancelledError:
         logger.info("Detector worker cancelled")
     finally:
+        prune_task.cancel()
         await close_pool()
 
 

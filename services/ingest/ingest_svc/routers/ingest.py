@@ -94,6 +94,16 @@ async def ingest(
     return IngestResponse(accepted=n, batch_id=batch_id)
 
 
+def _header_api_key(request: Request) -> str:
+    """API key from ``Authorization: Bearer <key>``, or the ``X-Dunetrace-API-Key``
+    header. Returns "" when neither is present. Mirrors the OTLP receiver's helper
+    of the same name (ingest_svc/routers/otlp.py)."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    return request.headers.get("X-Dunetrace-API-Key", "").strip()
+
+
 @router.get(
     "/v1/policies",
     summary="Fetch runtime policies for an agent (SDK-facing)",
@@ -102,13 +112,33 @@ async def ingest(
 async def get_policies(
     request: Request,
     agent_id: str = Query(...),
-    api_key: str = Query(...),
+    api_key: str = Query(""),
 ) -> dict:
     """
     Called by the SDK at run start to retrieve active policies.
-    Authenticates via api_key query param — same key used for event ingestion.
+
+    Authenticates via ``Authorization: Bearer <key>`` (preferred) or the
+    ``X-Dunetrace-API-Key`` header. The ``api_key`` query parameter is still
+    accepted so an older SDK build keeps working, but it is **deprecated**:
+    query strings are recorded verbatim in web-server and proxy access logs, so
+    a key sent that way leaks into logs on every request. The header takes
+    precedence when both are present. POST /v1/ingest is unaffected — it has
+    always carried the key in the request body.
     """
-    org_id = await _resolve_org_id(request, api_key)
+    key = _header_api_key(request) or api_key
+    if not key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing API key. Provide it as 'Authorization: Bearer <key>'.",
+        )
+    if not _header_api_key(request) and api_key:
+        logger.warning(
+            "Deprecated: /v1/policies authenticated via api_key query param for "
+            "agent_id=%s. Query strings leak into access logs — send "
+            "'Authorization: Bearer <key>' instead.",
+            agent_id,
+        )
+    org_id = await _resolve_org_id(request, key)
     policies = await fetch_policies(agent_id, org_id)
     return {"policies": policies}
 

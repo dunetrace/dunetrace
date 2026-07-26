@@ -553,7 +553,7 @@ describe("Dunetrace.wrapOpenAI()", () => {
     await dt.shutdown();
   });
 
-  it("skips tracking for streaming calls", async () => {
+  it("tracks streaming calls as the caller consumes the stream", async () => {
     const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
     dt._emit = (e) => events.push(e);
@@ -561,17 +561,30 @@ describe("Dunetrace.wrapOpenAI()", () => {
     const fakeClient = {
       chat: {
         completions: {
-          create: async (_opts: unknown) => ({ stream: true }),
+          create: async (_opts: unknown) => ({
+            async *[Symbol.asyncIterator]() {
+              yield { choices: [{ delta: { content: "hi" } }] };
+              yield { choices: [{ delta: {}, finish_reason: "stop" }] };
+            },
+          }),
         },
       },
     };
     const wrapped = dt.wrapOpenAI(fakeClient);
 
     await dt.run("wrap-agent", {}, async () => {
-      await wrapped.chat.completions.create({ model: "gpt-4o", messages: [], stream: true });
+      const stream = await wrapped.chat.completions.create({
+        model: "gpt-4o", messages: [], stream: true,
+      }) as AsyncIterable<unknown>;
+      for await (const _ of stream) { /* drain */ }
     });
 
-    expect(events.filter(e => e.event_type === "llm.called")).toHaveLength(0);
+    // llm.responded can only be emitted once the stream has been drained — usage
+    // and finish_reason don't exist before then.
+    expect(events.filter(e => e.event_type === "llm.called")).toHaveLength(1);
+    const responded = events.filter(e => e.event_type === "llm.responded");
+    expect(responded).toHaveLength(1);
+    expect(responded[0]?.payload["output"]).toBe("hi");
     await dt.shutdown();
   });
 

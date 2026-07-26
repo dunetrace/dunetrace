@@ -1,4 +1,4 @@
-.PHONY: up down logs build test test-sdk-ts
+.PHONY: up down logs build test test-sdk-ts test-schema-parity
 
 up:
 	docker compose up -d
@@ -42,5 +42,10 @@ test-integrations:
 test-sdk-ts:
 	cd packages/sdk-ts && npm test
 
+# Cross-service: asserts the tables declared by more than one service agree.
+# No PYTHONPATH — it parses the sources rather than importing them.
+test-schema-parity:
+	python -m pytest tests/ -v
+
 test:
-	$(MAKE) test-schemas test-ingest test-detector test-explainer test-alerts test-api test-mcp test-semantic test-integrations test-sdk-ts
+	$(MAKE) test-schemas test-ingest test-detector test-explainer test-alerts test-api test-mcp test-semantic test-integrations test-schema-parity test-sdk-ts

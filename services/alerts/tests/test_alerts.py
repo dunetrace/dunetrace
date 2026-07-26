@@ -595,7 +595,7 @@ class TestWorkerDeliver(unittest.TestCase):
 
 class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
     async def test_poll_once_empty_returns_zeros(self):
-        with patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[])):
+        with patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=[])):
             found, delivered = await worker_module.poll_once()
         self.assertEqual(found, 0)
         self.assertEqual(delivered, 0)
@@ -619,7 +619,7 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
@@ -653,7 +653,7 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
@@ -688,7 +688,7 @@ class TestWorkerPollOnce(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
@@ -771,7 +771,7 @@ class TestWorkerRowToSignalCustomType(unittest.IsolatedAsyncioTestCase):
             }
         ]
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=rows)),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch(
                 "alerts_svc.worker.deliver",
@@ -818,7 +818,7 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
             return {"slack": SendResult(True, "slack", 1, 200)}
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=rows)),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
             patch("alerts_svc.worker.fetch_run_tokens", AsyncMock(return_value=token_map)),
             patch("alerts_svc.worker.deliver", side_effect=fake_deliver),
@@ -919,7 +919,7 @@ class TestDedupWindowHandling(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=[row])),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value=dedup_state)),
             patch("alerts_svc.worker.increment_suppressed_count", AsyncMock()),
@@ -949,7 +949,7 @@ class TestDedupWindowHandling(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=[row])),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value=dedup_state)),
             patch("alerts_svc.worker.increment_suppressed_count", AsyncMock()),
@@ -988,7 +988,7 @@ class TestDedupWindowHandling(unittest.IsolatedAsyncioTestCase):
             delivered_ids.extend(ids)
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=rows)),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=rows)),
             patch("alerts_svc.worker.mark_alerted_batch", side_effect=fake_mark),
             patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
             patch("alerts_svc.worker.fetch_run_tokens", AsyncMock(return_value={})),
@@ -1048,7 +1048,7 @@ class TestSnoozeHandling(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=[row])),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
             patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
             patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value=override)),
@@ -1079,7 +1079,7 @@ class TestSnoozeHandling(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=[row])),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
             patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
             patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value=override)),
@@ -1112,7 +1112,7 @@ class TestSnoozeHandling(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=[row])),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
             patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
             patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value=override)),
@@ -1154,7 +1154,7 @@ class TestDetectorDestinationsRouting(unittest.IsolatedAsyncioTestCase):
 
         row = self._make_row()
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=[row])),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
             patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
             patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value={})),
@@ -1182,7 +1182,7 @@ class TestDetectorDestinationsRouting(unittest.IsolatedAsyncioTestCase):
 
         row = self._make_row(failure_type="RETRY_STORM")
         with (
-            patch("alerts_svc.worker.fetch_unalerted_signals", AsyncMock(return_value=[row])),
+            patch("alerts_svc.worker.claim_unalerted_signals", AsyncMock(return_value=[row])),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
             patch("alerts_svc.worker.fetch_dedup_states", AsyncMock(return_value={})),
             patch("alerts_svc.worker.fetch_agent_overrides", AsyncMock(return_value={})),

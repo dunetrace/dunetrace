@@ -352,7 +352,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
@@ -393,7 +393,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
@@ -418,7 +418,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
@@ -442,7 +442,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
@@ -478,7 +478,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),

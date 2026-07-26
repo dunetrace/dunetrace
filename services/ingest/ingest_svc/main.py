@@ -121,6 +121,13 @@ async def _prune_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting — auth_mode=%s", settings.AUTH_MODE)
+    if settings.is_dev:
+        logger.warning(
+            "AUTH_MODE=%s — AUTHENTICATION IS DISABLED. Anyone who can reach "
+            "this port can write events into any org. Do not expose it beyond "
+            "localhost. Set AUTH_MODE=prod for any shared or public deployment.",
+            settings.AUTH_MODE,
+        )
     await init_pool()
     await ensure_schema()
 

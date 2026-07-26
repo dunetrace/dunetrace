@@ -20,6 +20,18 @@ logger = logging.getLogger("dunetrace.config_loader")
 _SEVERITY_KEY = "severity"
 _MAX_COST_NS_KEY = "max_cost_ns"
 
+# Top-level section that is NOT a per-agent-category: the global custom-detector
+# budget, parsed by load_custom_detector_config() instead.
+_CUSTOM_DETECTORS_KEY = "custom_detectors"
+
+# Keys valid inside any detector section that aren't threshold tunables, so the
+# unknown-key check must not flag them. `alert_policy` and `destinations` are
+# read by alerts_svc (see its config.py), not by this loader — they live in the
+# same file but belong to a different consumer.
+_RESERVED_DETECTOR_KEYS = frozenset(
+    {_SEVERITY_KEY, _MAX_COST_NS_KEY, "alert_policy", "destinations"}
+)
+
 # Maps YAML section key -> detector constructor kwarg names (all uppercase).
 # Only detectors with tunable params need an entry here.
 _PARAM_MAP: dict[str, dict[str, str]] = {
@@ -181,6 +193,7 @@ def load_custom_detector_budget(config_path: str | None = None) -> dict[str, flo
 
 def load_detector_kwargs(
     config_path: str | None = None,
+    known_detectors: set[str] | None = None,
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """
     Parse detectors.yml into a nested dict of detector kwargs keyed by category, then detector name:
@@ -191,6 +204,15 @@ def load_detector_kwargs(
         }
 
     Returns an empty dict if the file is missing — SDK defaults apply.
+
+    `known_detectors` is the set of detector keys the worker will actually run
+    (`_DETECTOR_CLASSES`). Passing it turns a typo'd section name into a startup
+    WARNING instead of a silent no-op: threshold lookup is `category_cfg.get(key,
+    {})`, so a misspelled key just falls back to the hardcoded class defaults and
+    the operator's tuning never applies. Callers that don't have the class list
+    (tests, tooling) can omit it to skip that check; unknown *parameters* inside
+    a recognized section are always reported, since _PARAM_MAP alone is enough
+    to judge those.
     """
     path = config_path or os.environ.get("DETECTOR_CONFIG", "/app/detectors.yml")
 
@@ -216,11 +238,34 @@ def load_detector_kwargs(
     for category, detectors in raw.items():
         if not isinstance(detectors, dict):
             continue
+        if category == _CUSTOM_DETECTORS_KEY:
+            # Global custom-detector budget section, not a per-agent category —
+            # parsed separately by load_custom_detector_config().
+            continue
         result[category] = {}
         for det_key, params in detectors.items():
             if not isinstance(params, dict):
                 continue
+            if known_detectors is not None and det_key not in known_detectors:
+                logger.warning(
+                    "detectors.yml: %s.%s is not a known detector — every key "
+                    "under it is being ignored. Valid detectors: %s",
+                    category,
+                    det_key,
+                    ", ".join(sorted(known_detectors)),
+                )
+                continue
             param_map = _PARAM_MAP.get(det_key, {})
+            unknown_params = set(params) - set(param_map) - _RESERVED_DETECTOR_KEYS
+            if unknown_params:
+                logger.warning(
+                    "detectors.yml: %s.%s has unrecognized key(s) %s — ignored. "
+                    "Tunables for this detector: %s",
+                    category,
+                    det_key,
+                    ", ".join(sorted(unknown_params)),
+                    ", ".join(sorted(param_map)) or "(none)",
+                )
             kwargs = {param_map[k]: v for k, v in params.items() if k in param_map}
 
             if _SEVERITY_KEY in params:

@@ -6,8 +6,8 @@ function-tool call, so registering a single Dunetrace processor instruments the
 whole agent with no changes to the agent definition.
 
 Install:
-    pip install 'dunetrace[openai-agents]'
-    pip install python-dotenv  # optional, only for loading a .env file
+    pip install 'dunetrace[openai-agents]' python-dotenv
+    # python-dotenv is optional — only needed to load the repo-root .env
 
 Run:
     OPENAI_API_KEY=sk-... python examples/openai_agents_agent.py
@@ -25,12 +25,21 @@ from pathlib import Path
 try:
     from dotenv import load_dotenv
 
+    # Reads the repo-root .env — including OPENAI_API_KEY. This example makes
+    # real, billable LLM calls, and will pick up a key from there even if you
+    # don't pass one on the command line.
     load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 except ImportError:
     # python-dotenv is optional; fall back to the ambient environment.
     pass
 
-from agents import Agent, Runner, function_tool
+try:
+    from agents import Agent, Runner, function_tool
+except ImportError as exc:
+    raise SystemExit(
+        f"This example needs the OpenAI Agents SDK — {exc.name} is not installed.\n"
+        "  pip install 'dunetrace[openai-agents]' python-dotenv"
+    ) from None
 
 from dunetrace import Dunetrace
 from dunetrace.integrations.openai_agents import add_dunetrace_processor

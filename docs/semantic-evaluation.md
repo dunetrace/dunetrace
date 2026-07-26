@@ -17,9 +17,10 @@ by construction only starts once it has. See
 [policies.md's "Structural signals only" section](policies.md#structural-signals-only)
 for the full explanation.
 
-If you're looking for the 28 in-path structural detectors instead (Tool
-Loop, Retry Storm, Cost Spike, and the rest — the ones that can and do fire
-policies), see [docs/detectors.md](detectors.md).
+If you're looking for the structural detectors instead (Tool Loop, Retry
+Storm, Cost Spike, and the rest — the ones that can and do fire policies),
+see [docs/detectors.md](detectors.md). There are 29 of them; the 26 that can
+be evaluated in-path are the ones `trigger="signal"` policies can match.
 
 ---
 
@@ -43,6 +44,18 @@ policies), see [docs/detectors.md](detectors.md).
 
 Disabled by default — set `SEMANTIC_WORKER_ENABLED=true` to turn it on; this
 preserves existing OSS behavior for anyone not opting in.
+
+**You also need the `semantic` container running.** It's in both
+`docker-compose.yml` and `docker-compose.ghcr.yml`, but with the flag off it
+logs one line and exits 0 — so it shows as `Exited (0)`, which is expected, not
+a failure. Setting the flag and re-running `docker compose up -d` starts it for
+real.
+
+Per-evaluator model overrides are read from `HALLUCINATION_MODEL`,
+`TASK_COMPLETION_MODEL`, `TASK_UNDERSTANDING_FAILURE_MODEL`,
+`OFF_TOPIC_DRIFT_MODEL`, `USER_FRUSTRATION_MODEL`, `CONFUSION_LOOP_MODEL`, and
+`SYCOPHANCY_SIGNAL_MODEL`. Leave one blank to use the provider default chosen by
+`SEMANTIC_LLM_PROVIDER` (`openai` or `anthropic`).
 
 ---
 
@@ -223,7 +236,7 @@ something no single-run evaluator can see. See
 
 - Not a replacement for structural detection — semantic evaluation
   *augments* it (100% of structurally-flagged runs also get semantic
-  context) and catches a different class of failure, but the 28 structural
+  context) and catches a different class of failure, but the 29 structural
   detectors remain the always-on, zero-cost, zero-LLM first line.
 - Not a runtime guardrail — see the policies cross-link above.
 - Not required — `SEMANTIC_WORKER_ENABLED` defaults to off; everything else

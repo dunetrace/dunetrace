@@ -2,7 +2,7 @@
 OTel span receiver for Dunetrace.
 
 Translates incoming OpenTelemetry spans (gen_ai.* semantic conventions) into
-Dunetrace AgentEvents and runs the full behavioral detector suite on them.
+Dunetrace AgentEvents and runs the full structural detector suite on them.
 Span content (gen_ai.prompt, gen_ai.completion, tool arguments) is carried
 through as-is, same as the native SDK — nothing is hashed or stripped at the
 receiver boundary.
@@ -82,7 +82,7 @@ _FINISH_REASON_KEYS = (
 class DunetraceOTelReceiver:
     """
     OTel SpanExporter that translates ``gen_ai.*`` spans into Dunetrace
-    behavioral events and runs the detector suite on each completed trace.
+    structural events and runs the detector suite on each completed trace.
 
     Add it as a ``SimpleSpanProcessor`` exporter alongside your existing
     OTel pipeline — no changes to agent code required.
@@ -277,7 +277,7 @@ def _llm_output(attrs: dict) -> str:
 
 def _emit_span(run, span) -> None:
     """Emit the Dunetrace call(s) for one span. LLM and tool spans feed the
-    behavioral detectors most heavily; retrieval spans feed the RAG detectors.
+    structural detectors most heavily; retrieval spans feed the RAG detectors.
     Chains, agents, and other lifecycle spans have no distinct Dunetrace event
     and are skipped."""
     attrs = dict(span.attributes or {})

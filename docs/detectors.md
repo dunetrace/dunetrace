@@ -1,6 +1,17 @@
 # Detectors
 
-Dunetrace runs 29 structural detectors against every completed agent run — 19 Tier 1 detectors, prompt injection signal detection, plus the additional detectors below. All thresholds are configurable i.e. no code changes required.
+Dunetrace runs 29 structural detectors against every completed agent run. All of
+them are listed in the table below; the nine newest get a full write-up in
+[Additional detectors](#additional-detectors). All thresholds are configurable
+i.e. no code changes required.
+
+> **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
+> Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **26**
+> detectors the SDK can also run *client-side, in-path*; the three that can't
+> (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`) need raw
+> input or a second run's data. The detector worker runs all 29 regardless — see
+> [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
 zero-LLM, zero-cost, always-on regex/arithmetic checks — the ones that can
@@ -9,11 +20,15 @@ trigger a [policy](policies.md). Dunetrace also has a separate, LLM-based
 post-hoc — see [docs/semantic-evaluation.md](semantic-evaluation.md)) for
 judgment calls no structural check can make:
 
-| Semantic evaluator | What it catches |
-|---|---|
-| `HALLUCINATION` | Agent stated something as fact its own context doesn't support |
-| `TASK_COMPLETION` | Agent didn't actually do what it was asked, despite a plausible-sounding response |
-| `USER_FRUSTRATION` | Cross-turn conversation signals of user frustration (evaluates a whole conversation, not a single run) |
+| Semantic evaluator | Scope | What it catches |
+|---|---|---|
+| `HALLUCINATION` | run | Agent stated something as fact its own context doesn't support |
+| `TASK_COMPLETION` | run | Agent didn't actually do what it was asked, despite a plausible-sounding response |
+| `TASK_UNDERSTANDING_FAILURE` | run | Agent solved the *wrong* problem — a complete answer to a question nobody asked |
+| `OFF_TOPIC_DRIFT` | run | Response started on the user's topic and wandered off it |
+| `USER_FRUSTRATION` | conversation | Cross-turn signals that the user is getting frustrated |
+| `CONFUSION_LOOP` | conversation | User keeps re-asking the same underlying question |
+| `SYCOPHANCY_SIGNAL` | conversation | Agent flip-flopped its position to agree with the user |
 
 Semantic findings never trigger a policy — see
 [policies.md's "Structural signals only"](policies.md#structural-signals-only).
@@ -43,7 +58,7 @@ Semantic findings never trigger a policy — see
 | `RETRY_STORM` | Same tool fails 3+ times in a row without subsequent recovery | HIGH |
 | `EMPTY_LLM_RESPONSE` | Model returned zero-length output with `finish_reason=stop` | HIGH |
 | `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
-| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
+| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns ² | CRITICAL |
 | `PREMATURE_TERMINATION` | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
 | `UNREAD_TOOL_ERROR` | Tool failed, agent's next action doesn't acknowledge it | MEDIUM/HIGH |
 | `TOOL_ARGUMENT_FABRICATION` | Tool call argument references an entity not present anywhere in prior context | HIGH/CRITICAL |
@@ -55,6 +70,30 @@ Semantic findings never trigger a policy — see
 | `DELEGATION_LOOP` | Two or more agents delegate to each other in a cycle that keeps going around instead of converging | HIGH/CRITICAL |
 
 ¹ **Six detectors use per-agent learned baselines.** `STEP_COUNT_INFLATION`, `SLOW_STEP`, `CONTEXT_BLOAT`, `REASONING_STALL`, `COST_SPIKE`, and `SESSION_LATENCY` compute a P75 from the last 50 successfully completed runs (errored runs excluded) for the same `agent_id` + `agent_version` pair. The threshold fires at **2× that baseline** (3× for COST_SPIKE and SESSION_LATENCY). Each detector falls back to its static threshold until at least **20** historical runs exist — below that the P75 estimate is too sensitive to individual outliers to be useful — then switches to the adaptive baseline automatically. Tune the multiplier per agent category with `inflation_factor` in `detectors.yml`.
+
+² **The injection scan is bounded.** `PROMPT_INJECTION_SIGNAL` is the only
+detector that runs **in-path** — the SDK evaluates it inside `dt.run()`, before
+your agent does any work, because the signal has to exist by the time
+`run.started` is emitted. Its cost is therefore your latency, so the scan is
+bounded: inputs up to **32,768** characters are scanned in full, and longer ones
+are scanned as a **16,384**-character head plus a **16,384**-character tail
+(`SCAN_HEAD_CHARS` / `SCAN_TAIL_CHARS` on `PromptInjectionDetector`).
+
+That caps the scan at roughly **10ms** — about 2% of a single 500ms LLM call —
+where an unbounded scan cost ~340ms on a 1 MB input. Most real inputs fall under
+32K characters and are scanned completely, with no gap. Past that, **text between
+the head and tail windows is not scanned**; injections cluster at the edges (a
+prefix override, or a payload appended after legitimate content), so this is
+where the coverage is worth paying for. When an input exceeds the window the
+signal's evidence carries `scan_truncated: true` and `scanned_chars`, so absence
+of a pattern is never mistaken for proof of absence.
+
+Tune the two limits on the class: lower them for latency-critical agents (voice,
+realtime) that take large inputs, raise them if your inputs routinely exceed 32K
+and you want full coverage. Cost is roughly 0.3µs per character scanned. These
+are *not* settable from `detectors.yml` — that file configures the detector
+worker, and this scan runs in the SDK, inside your own process. Treat the signal
+as one input to your defences, not the defence itself.
 
 ---
 
@@ -221,7 +260,7 @@ A content condition fires if **any** occurrence of that field within the run mat
 
 **Evaluation budget**: evaluating one custom detector against one run (all its conditions combined) is capped at 10ms by default (`detectors.yml`'s `custom_detectors.evaluation_budget_ms`) — exceeding it aborts that detector's evaluation for this run (treated as not-fired) and logs a rate-limited warning, rather than stalling the shared detector worker for every other org on that shard.
 
-**What still cannot be detected**: multi-run trends, semantic/fuzzy judgment ("the agent sounds frustrated"), and anything outside the fields/metrics above (e.g. raw system prompt text — the SDK doesn't transmit it, see the root-cause analysis docs). The preview endpoint returns `{"requires_content": true, "reason": "..."}` for these and the config cannot be saved; try rephrasing with a specific value to look for instead.
+**What still cannot be detected**: multi-run trends, semantic/fuzzy judgment ("the agent sounds frustrated"), and anything outside the fields/metrics above. The system prompt is the notable example — the SDK *does* transmit it verbatim in the `run.started` payload, and native root-cause analysis reads it from there, but it isn't one of the four `CONTENT_FIELDS` a custom detector can inspect. The preview endpoint returns `{"requires_content": true, "reason": "..."}` for these and the config cannot be saved; try rephrasing with a specific value to look for instead.
 
 ### Shadow stats
 
@@ -1046,7 +1085,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 18 Tier 1 detectors against the `RunState`
+4. Runs all 29 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`

@@ -89,8 +89,10 @@ _DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
     "delegation_loop": DelegationLoopDetector,
 }
 
-# Load config once at import time
-_CONFIG = load_detector_kwargs()
+# Load config once at import time. Passing the detector key set makes the loader
+# warn about typo'd section names — without it a misspelling silently falls back
+# to class defaults and the operator's tuning never takes effect.
+_CONFIG = load_detector_kwargs(known_detectors=set(_DETECTOR_CLASSES))
 
 
 def _build_plugin_detectors() -> list[BaseDetector]:

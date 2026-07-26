@@ -111,7 +111,10 @@ services:
     build:
       context: .
       dockerfile: services/semantic/Dockerfile
-    restart: unless-stopped
+    # on-failure, not unless-stopped: this worker exits 0 when its
+    # *_WORKER_ENABLED flag is false (the default), and unless-stopped
+    # would restart-loop it forever.
+    restart: on-failure
     volumes:
       - ./docs/config/semantic-sampling.yml:/app/docs/config/semantic-sampling.yml:ro
       - ./docs/config/semantic-evaluators.yml:/app/docs/config/semantic-evaluators.yml:ro
@@ -124,6 +127,11 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       HALLUCINATION_MODEL: ${HALLUCINATION_MODEL:-}
       TASK_COMPLETION_MODEL: ${TASK_COMPLETION_MODEL:-}
+      TASK_UNDERSTANDING_FAILURE_MODEL: ${TASK_UNDERSTANDING_FAILURE_MODEL:-}
+      OFF_TOPIC_DRIFT_MODEL: ${OFF_TOPIC_DRIFT_MODEL:-}
+      USER_FRUSTRATION_MODEL: ${USER_FRUSTRATION_MODEL:-}
+      CONFUSION_LOOP_MODEL: ${CONFUSION_LOOP_MODEL:-}
+      SYCOPHANCY_SIGNAL_MODEL: ${SYCOPHANCY_SIGNAL_MODEL:-}
       # audit Finding 17: this env override was dropping /app/packages/sdk-py, so
       # explainer_svc's `import dunetrace` failed even after the Dockerfile fix.
       PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/semantic
@@ -144,7 +152,10 @@ services:
     build:
       context: .
       dockerfile: services/integrations/Dockerfile
-    restart: unless-stopped
+    # on-failure, not unless-stopped: this worker exits 0 when its
+    # *_WORKER_ENABLED flag is false (the default), and unless-stopped
+    # would restart-loop it forever.
+    restart: on-failure
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       WAKE_INTERVAL: 15
@@ -167,7 +178,10 @@ services:
     build:
       context: .
       dockerfile: services/integrations/Dockerfile
-    restart: unless-stopped
+    # on-failure, not unless-stopped: this worker exits 0 when its
+    # *_WORKER_ENABLED flag is false (the default), and unless-stopped
+    # would restart-loop it forever.
+    restart: on-failure
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       WAKE_INTERVAL: 60

@@ -1,12 +1,13 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { agentVersion } from "./hash.js";
 import { DunetraceRun } from "./run.js";
 import { resultLength as _resultLength, resultText as _resultText } from "./util.js";
 import { HttpBatchEmitter, type BatchEmitter } from "./emitters.js";
+import { runStorage as _runStorage, getCurrentRun } from "./context.js";
+import { registerOwnEndpoint, wrapAnthropicClient, wrapOpenAIClient } from "./auto.js";
 import type { AgentEvent, ClientOptions, EventSink, RunOptions } from "./models.js";
 
-const _runStorage = new AsyncLocalStorage<DunetraceRun>();
+export { getCurrentRun };
 
 export class Dunetrace {
   private _ingestUrl:  string | null;
@@ -22,6 +23,10 @@ export class Dunetrace {
   constructor(opts: ClientOptions = {}) {
     const base      = (opts.endpoint ?? "http://localhost:8001").replace(/\/$/, "");
     this._ingestUrl = base + "/v1/ingest";
+    // Tell HTTP instrumentation to ignore our own traffic. Without this, shipping
+    // a batch would emit a tool.called describing the ship, which buffers another
+    // event, which ships — a feedback loop against our own ingest.
+    registerOwnEndpoint(base);
     this._apiKey    = opts.apiKey ?? "";
     this._emitJson  = opts.emitAsJson ?? false;
     this._bufferSize = opts.bufferSize ?? 10_000;
@@ -201,28 +206,7 @@ export class Dunetrace {
    * const openai = dt.wrapOpenAI(new OpenAI());
    */
   wrapOpenAI<T extends { chat: { completions: { create: (...args: unknown[]) => Promise<unknown> } } }>(client: T): T {
-    const orig = client.chat.completions.create.bind(client.chat.completions);
-    (client.chat.completions as Record<string, unknown>)["create"] = async (...args: unknown[]) => {
-      const opts  = args[0] as Record<string, unknown> | undefined;
-      if (opts?.["stream"]) return orig(...args);  // skip streaming
-      const run   = getCurrentRun();
-      const model = (opts?.["model"] as string | undefined) ?? "unknown";
-      const t0    = Date.now();
-      const resp  = await orig(...args) as Record<string, unknown>;
-      if (run) {
-        const usage  = resp["usage"]   as Record<string, number> | undefined;
-        const choice = (resp["choices"] as Record<string, unknown>[] | undefined)?.[0] ?? {};
-        run.llmCalled(model, usage?.["prompt_tokens"] ?? 0);
-        run.llmResponded({
-          completionTokens: usage?.["completion_tokens"],
-          latencyMs:        Date.now() - t0,
-          finishReason:     (choice["finish_reason"] as string | undefined) ?? "stop",
-          outputText:       ((choice["message"] as Record<string, unknown> | undefined)?.["content"] as string | undefined) ?? "",
-        });
-      }
-      return resp;
-    };
-    return client;
+    return wrapOpenAIClient(client);
   }
 
   /**
@@ -233,27 +217,7 @@ export class Dunetrace {
    * const anthropic = dt.wrapAnthropic(new Anthropic());
    */
   wrapAnthropic<T extends { messages: { create: (...args: unknown[]) => Promise<unknown> } }>(client: T): T {
-    const orig = client.messages.create.bind(client.messages);
-    (client.messages as Record<string, unknown>)["create"] = async (...args: unknown[]) => {
-      const opts  = args[0] as Record<string, unknown> | undefined;
-      if (opts?.["stream"]) return orig(...args);  // skip streaming
-      const run   = getCurrentRun();
-      const model = (opts?.["model"] as string | undefined) ?? "unknown";
-      const t0    = Date.now();
-      const resp  = await orig(...args) as Record<string, unknown>;
-      if (run) {
-        const usage = resp["usage"] as Record<string, number> | undefined;
-        run.llmCalled(model, usage?.["input_tokens"] ?? 0);
-        run.llmResponded({
-          completionTokens: usage?.["output_tokens"],
-          latencyMs:        Date.now() - t0,
-          finishReason:     (resp["stop_reason"] as string | undefined) ?? "stop",
-          outputText:       ((resp["content"] as Record<string, unknown>[] | undefined)?.[0]?.["text"] as string | undefined) ?? "",
-        });
-      }
-      return resp;
-    };
-    return client;
+    return wrapAnthropicClient(client);
   }
 
   // ── Deploy markers ─────────────────────────────────────────────────────────
@@ -331,11 +295,6 @@ export class Dunetrace {
     });
     process.stdout.write(line + "\n");
   }
-}
-
-/** Return the current DunetraceRun from async context, or null. */
-export function getCurrentRun(): DunetraceRun | null {
-  return _runStorage.getStore() ?? null;
 }
 
 function _argsRecord(fn: (...args: unknown[]) => unknown, args: unknown[]): Record<string, unknown> {
