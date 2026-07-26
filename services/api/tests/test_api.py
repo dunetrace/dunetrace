@@ -246,9 +246,75 @@ class TestPagination(unittest.TestCase):
 
 
 class TestConfig(unittest.TestCase):
-    def test_dev_mode_default(self):
-        self.assertEqual(settings.AUTH_MODE, "dev")
-        self.assertTrue(settings.is_dev)
+    def test_auth_mode_defaults_to_prod(self):
+        """Unset AUTH_MODE must mean full auth, not skipped auth.
+
+        Dev mode disables authentication outright, so it has to be an explicit
+        opt-in — a deployment that forgets the variable gets a locked-down API
+        rather than an open one.
+
+        Both sources of AUTH_MODE have to be neutralised to assert the *code*
+        default: the environment variable, and `_load_dotenv()`, which re-reads
+        the repo-root `.env` on every import. That file sets AUTH_MODE=dev for
+        local Docker and doesn't exist in CI — which is exactly why the previous
+        version of this test passed locally and failed on CI.
+        """
+        import builtins
+        import importlib
+        import os
+        from unittest.mock import patch
+
+        import api_svc.config as config_module
+
+        real_open = builtins.open
+
+        def _without_dotenv(path, *args, **kwargs):
+            # _load_dotenv already treats a missing file as "nothing to load",
+            # so this reproduces a CI checkout exactly. Patching the module's
+            # _load_dotenv attribute instead would not work: reload() re-executes
+            # the source, redefining and calling the real one.
+            if str(path).endswith(".env"):
+                raise FileNotFoundError(path)
+            return real_open(path, *args, **kwargs)
+
+        original = os.environ.pop("AUTH_MODE", None)
+        # reload() rebinds config_module.settings to a brand-new object, while
+        # every module that did `from api_svc.config import settings` keeps the
+        # original. Restoring it afterwards keeps those references in sync —
+        # without this, a later test mutating settings.AUTH_MODE would be
+        # changing an object the production code no longer reads.
+        original_settings = config_module.settings
+        try:
+            with patch.object(builtins, "open", _without_dotenv):
+                importlib.reload(config_module)
+                auth_mode = config_module.settings.AUTH_MODE
+                is_dev = config_module.settings.is_dev
+            self.assertEqual(auth_mode, "prod")
+            self.assertFalse(is_dev)
+        finally:
+            if original is not None:
+                os.environ["AUTH_MODE"] = original
+            config_module.settings = original_settings
+
+    def test_dev_mode_is_opt_in(self):
+        import importlib
+        import os
+
+        import api_svc.config as config_module
+
+        original = os.environ.get("AUTH_MODE")
+        original_settings = config_module.settings
+        os.environ["AUTH_MODE"] = "dev"
+        try:
+            importlib.reload(config_module)
+            self.assertTrue(config_module.settings.is_dev)
+        finally:
+            if original is None:
+                os.environ.pop("AUTH_MODE", None)
+            else:
+                os.environ["AUTH_MODE"] = original
+            # Restore the object other modules hold — see the note above.
+            config_module.settings = original_settings
 
     def test_prod_mode_disables_dev(self):
         original = settings.AUTH_MODE
@@ -339,10 +405,42 @@ class TestTrustedAuth(unittest.IsolatedAsyncioTestCase):
 
 class TestDbLayer(unittest.IsolatedAsyncioTestCase):
     async def test_verify_api_key_dev_mode_returns_default_org(self):
-        from api_svc.db.queries import verify_api_key
+        # Force dev mode on the settings object queries.py actually consults,
+        # rather than relying on the ambient default. AUTH_MODE now defaults to
+        # prod, so inheriting it would exercise the key-lookup path instead of
+        # the dev bypass this test is about.
+        # queries.py did `from api_svc.config import settings`, so q.settings is
+        # the exact object verify_api_key consults. Re-importing from the config
+        # module could hand back a different instance and silently no-op.
+        import api_svc.db.queries as q
 
-        result = await verify_api_key("any_key_at_all")
-        self.assertEqual(result, "default")
+        original = q.settings.AUTH_MODE
+        q.settings.AUTH_MODE = "dev"
+        try:
+            result = await q.verify_api_key("any_key_at_all")
+            self.assertEqual(result, "default")
+        finally:
+            q.settings.AUTH_MODE = original
+
+    async def test_verify_api_key_rejects_unknown_key_in_prod(self):
+        """The other half of the fail-closed contract: with auth on and no
+        matching row, an arbitrary key must not resolve to an org.
+
+        `_pool` is pinned to None rather than inherited — other tests in this
+        class install mock pools, and a leftover mock would answer the key
+        lookup and make this pass or fail on test ordering.
+        """
+        import api_svc.db.queries as q
+
+        original_mode = q.settings.AUTH_MODE
+        original_pool = q._pool
+        q.settings.AUTH_MODE = "prod"
+        q._pool = None
+        try:
+            self.assertIsNone(await q.verify_api_key("any_key_at_all"))
+        finally:
+            q.settings.AUTH_MODE = original_mode
+            q._pool = original_pool
 
     async def test_check_db_no_pool_returns_no_pool(self):
         import api_svc.db.queries as q
