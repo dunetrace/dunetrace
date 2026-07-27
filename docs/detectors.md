@@ -138,7 +138,9 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`) by default. The newest few — `SILENT_TRUNCATION`, `MODEL_FALLBACK_DRIFT`, `MEMORY_POISONING`, `DELEGATION_LOOP`, `AGENT_HANDOFF_FAILURE`, and `EXCESSIVE_RETRIEVAL` — ship in shadow mode pending real-traffic validation (they're absent from `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`; add them there to promote). User-defined custom detectors also always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
+All 29 built-in detectors are live (`shadow = false`) — every name in `_DETECTOR_CLASSES` is listed in `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`. A new built-in detector should be added to both, and only added to `LIVE_DETECTORS` once its precision has been checked against real traffic; leaving it out is what keeps it in shadow mode while you evaluate it.
+
+User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
 
 ### Shadow signals in the dashboard
 

@@ -579,8 +579,8 @@ async def _prune_loop() -> None:
                         total,
                         settings.PROCESSED_RUNS_RETENTION_DAYS,
                     )
-        except Exception as exc:
-            logger.error("processed_runs prune failed: %s", exc)
+        except Exception:
+            logger.exception("processed_runs prune failed")
         await asyncio.sleep(_PRUNE_INTERVAL)
 
 
@@ -614,8 +614,14 @@ async def run_worker() -> None:
                 runs, signals = await poll_once()
                 if runs:
                     logger.info("Cycle complete. runs=%d signals=%d", runs, signals)
-            except Exception as exc:
-                logger.error("Poll cycle failed: %s", exc)
+            except Exception:
+                # logger.exception, not logger.error("...: %s", exc): several
+                # exceptions this loop can raise stringify to nothing —
+                # asyncpg's connection errors among them — so "%s" produced a
+                # bare "Poll cycle failed:" with no cause and no traceback. The
+                # only way to attribute those was correlating timestamps against
+                # an outage by hand.
+                logger.exception("Poll cycle failed")
             await asyncio.sleep(settings.POLL_INTERVAL)
     except asyncio.CancelledError:
         logger.info("Detector worker cancelled")

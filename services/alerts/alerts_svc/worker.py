@@ -706,22 +706,22 @@ async def run_worker() -> None:
                 found, delivered = await poll_once()
                 if found:
                     logger.info("Cycle: found=%d delivered=%d", found, delivered)
-            except Exception as exc:
-                logger.error("Poll cycle error: %s", exc)
+            except Exception:
+                logger.exception("Poll cycle error")
 
             try:
                 approvals_delivered = await deliver_pending_approvals()
                 if approvals_delivered:
                     logger.info("Approvals delivered: %d", approvals_delivered)
-            except Exception as exc:
-                logger.error("Approval delivery cycle error: %s", exc)
+            except Exception:
+                logger.exception("Approval delivery cycle error")
 
             try:
                 sent = await send_weekly_digest()
                 if sent:
                     logger.info("Weekly digests sent: %d org(s)", sent)
-            except Exception as exc:
-                logger.error("Digest cycle error: %s", exc)
+            except Exception:
+                logger.exception("Digest cycle error")
 
             await asyncio.sleep(settings.POLL_INTERVAL)
     except asyncio.CancelledError:

@@ -182,8 +182,8 @@ async def run_worker() -> None:
                 count = await poll_once()
                 if count:
                     logger.info("Cycle complete. integrations_polled=%d", count)
-            except Exception as exc:
-                logger.error("Poll cycle failed: %s", exc)
+            except Exception:
+                logger.exception("Poll cycle failed")
             await asyncio.sleep(settings.WAKE_INTERVAL)
     except asyncio.CancelledError:
         logger.info("Integrations worker cancelled")

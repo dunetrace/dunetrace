@@ -529,8 +529,8 @@ async def run_worker() -> None:
                     logger.info(
                         "Cycle complete. runs=%d sampled=%d signals=%d", runs, sampled, signals
                     )
-            except Exception as exc:
-                logger.error("Poll cycle failed: %s", exc)
+            except Exception:
+                logger.exception("Poll cycle failed")
             await asyncio.sleep(settings.POLL_INTERVAL)
     except asyncio.CancelledError:
         logger.info("Semantic worker cancelled")
