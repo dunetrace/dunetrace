@@ -4399,20 +4399,33 @@ async def get_agent_health_score(org_id: str, agent_id: str) -> dict:
                 WHERE org_id = $1 AND agent_id = $2
                   AND processed_at >= NOW() - INTERVAL '30 days'
             ),
+            -- Both numerators are scoped by JOINing runs_30d rather than by
+            -- repeating a detected_at window. The two timestamps are not
+            -- interchangeable: processed_at is refreshed every time a run is
+            -- re-analysed (late events trigger re-detection), while a signal
+            -- keeps its original detected_at. An independent
+            -- `detected_at >= NOW() - 30 days` therefore counted runs in the
+            -- denominator whose signals had aged out of the numerator, driving
+            -- every rate toward zero and every component score toward full
+            -- marks — the agent scoring 25/25 on loop_avoidance while TOOL_LOOP
+            -- was its most common failure.
+            --
+            -- Joining also makes numerator ⊆ denominator structurally, so these
+            -- rates cannot exceed 100% however the timestamps move.
             signal_runs AS (
-                SELECT DISTINCT run_id
-                FROM failure_signals
-                WHERE org_id = $1 AND agent_id = $2
-                  AND shadow = FALSE
-                  AND detected_at >= NOW() - INTERVAL '30 days'
+                SELECT DISTINCT s.run_id
+                FROM failure_signals s
+                JOIN runs_30d r ON r.run_id = s.run_id
+                WHERE s.org_id = $1 AND s.agent_id = $2
+                  AND s.shadow = FALSE
             ),
             loop_runs AS (
-                SELECT DISTINCT run_id
-                FROM failure_signals
-                WHERE org_id = $1 AND agent_id = $2
-                  AND shadow = FALSE
-                  AND detected_at >= NOW() - INTERVAL '30 days'
-                  AND failure_type IN (
+                SELECT DISTINCT s.run_id
+                FROM failure_signals s
+                JOIN runs_30d r ON r.run_id = s.run_id
+                WHERE s.org_id = $1 AND s.agent_id = $2
+                  AND s.shadow = FALSE
+                  AND s.failure_type IN (
                       'TOOL_LOOP','TOOL_THRASHING','TOOL_AVOIDANCE',
                       'STEP_COUNT_INFLATION','LLM_TRUNCATION_LOOP'
                   )

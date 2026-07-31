@@ -850,10 +850,7 @@ async def fetch_duration_baseline(
     return float(row["p75"]) if row["p75"] is not None else None
 
 
-async def prune_processed_runs(
-    min_age_days: int = 120,
-    batch_size: int = 10_000,
-) -> int:
+async def prune_processed_runs(batch_size: int = 10_000) -> int:
     """Delete processed_runs rows whose events are already gone. Returns the count.
 
     `processed_runs` is one row per run, forever — nothing pruned it, while
@@ -869,9 +866,16 @@ async def prune_processed_runs(
     Rather than couple this to ingest_svc's EVENT_RETENTION_DAYS (a value this
     service doesn't own and could disagree with), the NOT EXISTS makes the
     invariant hold by construction whatever retention is actually configured.
-    `min_age_days` only keeps the anti-join cheap by restricting it to rows old
-    enough to plausibly qualify; it is not the safety mechanism, so its default
-    sits comfortably beyond the 90-day event default.
+
+    Candidates are chosen by that same absence-of-events test rather than by a
+    `processed_at` age bound. `processed_at` records when a run was last
+    *analysed*, not when it happened, and it is refreshed every time late events
+    trigger a re-detection — so an age bound over it never expires rows for runs
+    that were re-processed recently but whose events aged out long ago. That left
+    314 permanently unprunable rows here, each rendering as a hollow entry in the
+    run list. Selecting on event absence directly also guarantees every pass makes
+    progress; an age-bounded pass could return a full batch of rows that all still
+    have events and delete nothing.
     """
     if not _pool:
         return 0
@@ -879,11 +883,12 @@ async def prune_processed_runs(
         deleted = await conn.fetchval(
             """
             WITH doomed AS (
-                SELECT run_id
-                FROM processed_runs
-                WHERE processed_at < NOW() - ($1 || ' days')::INTERVAL
-                ORDER BY processed_at
-                LIMIT $2
+                SELECT pr.run_id
+                FROM processed_runs pr
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM events e WHERE e.run_id = pr.run_id
+                )
+                LIMIT $1
             ),
             removed AS (
                 DELETE FROM processed_runs p
@@ -896,7 +901,6 @@ async def prune_processed_runs(
             )
             SELECT count(*) FROM removed
             """,
-            str(min_age_days),
             batch_size,
         )
     return int(deleted or 0)

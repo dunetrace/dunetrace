@@ -80,14 +80,27 @@ class TestPruneProcessedRuns(unittest.IsolatedAsyncioTestCase):
         self.assertIn("NOT EXISTS", conn.sql)
         self.assertIn("FROM events e WHERE e.run_id = p.run_id", conn.sql)
 
-    async def test_age_bound_and_batch_are_parameterized(self):
+    async def test_batch_size_is_parameterized(self):
         conn = _Conn()
         with patch.object(db_module, "_pool", _Pool(conn)):
-            await db_module.prune_processed_runs(min_age_days=45, batch_size=250)
-        self.assertEqual(conn.args, ("45", 250))
-        # Age is an interval built from a bound parameter, never interpolated.
-        self.assertIn("($1 || ' days')::INTERVAL", conn.sql)
-        self.assertIn("LIMIT $2", conn.sql)
+            await db_module.prune_processed_runs(batch_size=250)
+        self.assertEqual(conn.args, (250,))
+        self.assertIn("LIMIT $1", conn.sql)
+
+    async def test_candidates_are_chosen_by_event_absence_not_age(self):
+        """`processed_at` is refreshed whenever late events trigger a
+        re-detection, so an age bound over it never expires rows whose events
+        aged out long ago — they accumulate as permanently hollow run-list
+        entries. Selecting on event absence also guarantees each pass makes
+        progress rather than returning a batch that all still have events."""
+        conn = _Conn()
+        with patch.object(db_module, "_pool", _Pool(conn)):
+            await db_module.prune_processed_runs()
+        self.assertNotIn("processed_at <", conn.sql)
+        self.assertNotIn("days')::INTERVAL", conn.sql)
+        # The candidate CTE itself must filter on absence of events.
+        candidate_cte = conn.sql.split("removed AS")[0]
+        self.assertIn("NOT EXISTS", candidate_cte)
 
     async def test_returns_deleted_count(self):
         conn = _Conn(deleted=37)
@@ -98,14 +111,6 @@ class TestPruneProcessedRuns(unittest.IsolatedAsyncioTestCase):
         conn = _Conn(deleted=None)
         with patch.object(db_module, "_pool", _Pool(conn)):
             self.assertEqual(await db_module.prune_processed_runs(), 0)
-
-    async def test_default_age_exceeds_event_retention_default(self):
-        """The scan bound must sit beyond ingest's 90-day event default, or the
-        anti-join does pointless work on rows that can't qualify yet."""
-        conn = _Conn()
-        with patch.object(db_module, "_pool", _Pool(conn)):
-            await db_module.prune_processed_runs()
-        self.assertGreater(int(conn.args[0]), 90)
 
 
 class TestPruneLoopShardGuard(unittest.IsolatedAsyncioTestCase):
@@ -130,7 +135,6 @@ class TestPruneLoopShardGuard(unittest.IsolatedAsyncioTestCase):
             patch("detector_svc.worker.asyncio.sleep", AsyncMock(side_effect=_sleep)),
         ):
             mock_settings.SHARD_INDEX = shard_index
-            mock_settings.PROCESSED_RUNS_RETENTION_DAYS = 120
             mock_settings.PRUNE_BATCH_SIZE = 100
             with self.assertRaises(asyncio.CancelledError):
                 await worker_module._prune_loop()

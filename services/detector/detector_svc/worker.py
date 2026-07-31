@@ -563,10 +563,7 @@ async def _prune_loop() -> None:
             if settings.SHARD_INDEX == 0:
                 total = 0
                 while True:
-                    deleted = await prune_processed_runs(
-                        min_age_days=settings.PROCESSED_RUNS_RETENTION_DAYS,
-                        batch_size=settings.PRUNE_BATCH_SIZE,
-                    )
+                    deleted = await prune_processed_runs(batch_size=settings.PRUNE_BATCH_SIZE)
                     total += deleted
                     if deleted < settings.PRUNE_BATCH_SIZE:
                         break
@@ -574,10 +571,9 @@ async def _prune_loop() -> None:
                     await asyncio.sleep(1)
                 if total:
                     logger.info(
-                        "Pruned %d processed_runs row(s) older than %d days whose "
-                        "events were already gone.",
+                        "Pruned %d processed_runs row(s) whose events had already "
+                        "aged out of retention.",
                         total,
-                        settings.PROCESSED_RUNS_RETENTION_DAYS,
                     )
         except Exception:
             logger.exception("processed_runs prune failed")

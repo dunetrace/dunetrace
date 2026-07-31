@@ -319,17 +319,47 @@ def search_signals(
     else:
         agents = client.get("/v1/agents", limit=100).get("agents", [])
 
-    params: dict = {"limit": 200, "include_shadow": "false"}
+    params: dict = {"include_shadow": "false"}
     if severity:
         params["severity"] = severity.upper()
     if failure_type:
         params["failure_type"] = failure_type.upper()
 
+    # Page through each agent rather than taking a single fixed slice.
+    #
+    # A flat per-agent cap silently truncated any agent with more signals than
+    # the cap, and the truncated row count was then reported as the match total.
+    # That made the numbers self-contradictory: an unfiltered query truncated one
+    # busy agent to the cap, while each severity-filtered query got its own fresh
+    # cap, so the severity breakdown summed to MORE than the unfiltered "total"
+    # — while both were under the true figure.
+    #
+    # The API has no time-window parameter, so `since_hours` is applied here. It
+    # returns rows detected_at DESC though, so once a page's oldest row predates
+    # the cutoff every later page does too and we can stop — exact counts without
+    # reading an agent's whole history.
+    PAGE = 200
+    MAX_PER_AGENT = 5000  # guard against unbounded paging on a huge agent
+
     all_signals: list = []
+    truncated_agents: list[str] = []
     for a in agents:
         aid = a["agent_id"]
-        sigs = client.get(f"/v1/agents/{aid}/signals", **params).get("signals", [])
-        all_signals.extend(sigs)
+        offset = 0
+        while offset < MAX_PER_AGENT:
+            page = client.get(f"/v1/agents/{aid}/signals", limit=PAGE, offset=offset, **params)
+            sigs = page.get("signals", [])
+            if not sigs:
+                break
+            all_signals.extend(sigs)
+            # Ordered newest-first: nothing older can qualify once we pass it.
+            if cutoff and (sigs[-1].get("detected_at") or 0) < cutoff:
+                break
+            if not (page.get("page") or {}).get("has_more"):
+                break
+            offset += PAGE
+        else:
+            truncated_agents.append(aid)
 
     # Client-side filters — API also filters severity/failure_type but we apply
     # them here too so results are always correct regardless of API version.
@@ -354,7 +384,13 @@ def search_signals(
         qualifier = " / ".join(parts)
         return f"No signals found{(' matching ' + qualifier) if qualifier else ''}."
 
-    lines = [f"Signals ({len(shown)} shown, {len(all_signals)} matched):\n"]
+    header = f"Signals ({len(shown)} shown, {len(all_signals)} matched)"
+    if truncated_agents:
+        header += (
+            f" — count is a LOWER BOUND: hit the {MAX_PER_AGENT}-signal read cap on "
+            f"{', '.join(truncated_agents)}"
+        )
+    lines = [header + ":\n"]
     for s in shown:
         icon = _sev_icon(s["severity"])
         lines.append(
@@ -659,13 +695,24 @@ def get_agent_runs(agent_id: str, limit: int = 20) -> str:
             dur = f"{secs:.1f}s"
         sigs = r.get("signal_count", 0)
         sig_str = f"🔴 {sigs}" if sigs > 0 else "✅  0"
-        lines.append(
-            f"{r['run_id'][:12]:<12} {_ago(r.get('started_at')):<22} "
-            f"{dur:>6} {r.get('step_count', 0):>5}  {sig_str}"
-        )
+        # A run whose events have aged out of retention keeps its processed_runs
+        # row but loses every derived field, because started_at / step_count are
+        # computed from `events`. Rendering that as "— / 0 steps" is
+        # indistinguishable from a real zero-step run, so say what happened.
+        expired = r.get("started_at") is None and not r.get("step_count")
+        started = "events expired" if expired else _ago(r.get("started_at"))
+        steps = "—" if expired else str(r.get("step_count") or 0)
+        lines.append(f"{r['run_id'][:12]:<12} {started:<22} {dur:>6} {steps:>5}  {sig_str}")
 
     page = data.get("page", {})
     lines.append(f"\n{len(runs)} of {page.get('total', len(runs))} runs shown.")
+    expired_count = sum(1 for r in runs if r.get("started_at") is None and not r.get("step_count"))
+    if expired_count:
+        lines.append(
+            f"{expired_count} run(s) show 'events expired': the run was analysed and its "
+            f"signals are retained, but its raw events have aged out of "
+            f"EVENT_RETENTION_DAYS, so duration and step count can no longer be derived."
+        )
     return "\n".join(lines)
 
 

@@ -45,11 +45,11 @@ class Settings:
     # the next poll scans everything after it.
     WATERMARK_GRACE_SECS: float = float(os.getenv("WATERMARK_GRACE_SECS", "3600"))
 
-    # processed_runs retention. Rows are only deleted once the run's events are
-    # gone (see db.py::prune_processed_runs), so this is a scan bound rather than
-    # the safety mechanism — it sits beyond ingest's 90-day EVENT_RETENTION_DAYS
-    # default so the anti-join only considers rows that can plausibly qualify.
-    PROCESSED_RUNS_RETENTION_DAYS: int = int(os.getenv("PROCESSED_RUNS_RETENTION_DAYS", "120"))
+    # processed_runs is pruned by absence of events, not by age — see
+    # db.py::prune_processed_runs. PROCESSED_RUNS_RETENTION_DAYS used to bound
+    # the scan by processed_at, but that column is refreshed on re-analysis, so
+    # the bound never expired rows whose events had aged out. Removed rather
+    # than left as a no-op knob.
     PRUNE_BATCH_SIZE: int = int(os.getenv("PRUNE_BATCH_SIZE", "10000"))
 
 

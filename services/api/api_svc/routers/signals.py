@@ -11,6 +11,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from api_svc.auth import require_org
 from api_svc.config import settings
+from api_svc.failure_types import (
+    invalid_failure_type_detail,
+    is_valid_failure_type,
+)
 from api_svc.db.queries import (
     get_signal_by_id,
     list_signals,
@@ -50,25 +54,8 @@ _CODE_CHANGE_TYPES = frozenset(
 _NO_AUTO_APPLY_TYPES = frozenset({"PROMPT_INJECTION_SIGNAL"})
 
 _VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
-_VALID_FAILURE_TYPES = {
-    "TOOL_LOOP",
-    "TOOL_THRASHING",
-    "TOOL_AVOIDANCE",
-    "RETRY_STORM",
-    "CASCADING_TOOL_FAILURE",
-    "LLM_TRUNCATION_LOOP",
-    "CONTEXT_BLOAT",
-    "EMPTY_LLM_RESPONSE",
-    "GOAL_ABANDONMENT",
-    "REASONING_STALL",
-    "RAG_EMPTY_RETRIEVAL",
-    "SLOW_STEP",
-    "FIRST_STEP_FAILURE",
-    "STEP_COUNT_INFLATION",
-    "PROMPT_INJECTION_SIGNAL",
-    "COST_SPIKE",
-    "SESSION_LATENCY",
-}
+# Validation lives in api_svc.failure_types — a hand-maintained literal here
+# froze at 17 entries and 422'd types that exist in the data. See that module.
 
 
 @router.get(
@@ -94,10 +81,10 @@ async def get_signals(
             status_code=422,
             detail=f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}",
         )
-    if failure_type and failure_type.upper() not in _VALID_FAILURE_TYPES:
+    if failure_type and not is_valid_failure_type(failure_type):
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid failure_type {failure_type!r}. Valid: {sorted(_VALID_FAILURE_TYPES)}",
+            detail=invalid_failure_type_detail(failure_type),
         )
     rows, total = await list_signals(
         org_id, agent_id, offset, limit, severity, failure_type, include_shadow
@@ -148,10 +135,10 @@ async def export_signals_endpoint(
         raise HTTPException(
             422, f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}"
         )
-    if failure_type and failure_type.upper() not in _VALID_FAILURE_TYPES:
+    if failure_type and not is_valid_failure_type(failure_type):
         raise HTTPException(
             422,
-            f"Invalid failure_type {failure_type!r}. Valid: {sorted(_VALID_FAILURE_TYPES)}",
+            invalid_failure_type_detail(failure_type),
         )
 
     from_ts: Optional[float] = None
