@@ -637,7 +637,7 @@ class Dunetrace:
 
             {"trigger": "tool_call_count", "operator": "gt",  "value": 5}
             {"trigger": "cost_usd",        "operator": "gt",  "value": 0.50}
-            {"trigger": "signal",          "operator": "eq",  "value": "TOOL_LOOP"}
+            {"trigger": "signal",          "operator": "contains", "value": "TOOL_LOOP"}
             {"trigger": "finish_reason",   "operator": "eq",  "value": "length"}
 
         action examples::

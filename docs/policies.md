@@ -56,7 +56,7 @@ dt.add_policy(
 # Inject a corrective prompt when a loop is detected mid-run
 dt.add_policy(
     name="loop fix",
-    condition={"trigger": "signal", "operator": "eq", "value": "TOOL_LOOP"},
+    condition={"trigger": "signal", "operator": "contains", "value": "TOOL_LOOP"},
     action={"type": "inject_prompt", "params": {
         "prompt": "Stop repeating tool calls. Summarise what you know and answer directly."
     }},
@@ -97,7 +97,7 @@ Local policies (added via `add_policy`) take priority over remote ones at the sa
 | `error_count` | int | Failed tool calls (`success=False`) |
 | `finish_reason` | str | Latest LLM `finish_reason` (e.g. `"length"`, `"stop"`, `"tool_calls"`) |
 | `llm_latency_ms` | int | Latest LLM call latency in milliseconds |
-| `signal` | str | Detector signal name — runs the full detector suite lazily (e.g. `"TOOL_LOOP"`) |
+| `signal` | list[str] | Failure types detected so far this run — runs the full detector suite lazily. Pair it with `contains` (e.g. `"TOOL_LOOP"`); `eq` compares against the whole list and never matches |
 | `before_tool_call` | str | Name of the tool about to be called — only valid with the `require_approval` action (human-in-the-loop). See [Approvals](approvals.md) |
 | `expression` | — | Sentinel for a **pure-expression** policy: the flat fields are a no-op and a [`match` block](#expression-conditions-argument--metadata-values) carries the whole condition |
 

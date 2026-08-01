@@ -4448,6 +4448,7 @@ tick(); setInterval(tick, 1000);
 // ── Policies ─────────────────────────────────────────────────────────────────
 
 let _policies = [];
+let _policiesLoaded = false;   // false until a fetch has actually succeeded
 let _editingPolicyId = null;
 
 async function apiPost(path, body) {
@@ -4483,8 +4484,9 @@ async function apiDelete(path) {
 async function loadAndRenderPolicies() {
   try {
     _policies = await apiFetch('/v1/policies');
+    _policiesLoaded = true;
   } catch(e) {
-    _policies = [];
+    _policies = [];   // leave _policiesLoaded false so the next visit retries
   }
   renderPolicies();
   const badge = document.getElementById('badge-policies');
@@ -6573,9 +6575,27 @@ function computeIncidents() {
     .sort((a, b) => b.urgency - a.urgency);
 }
 
+// Does policy `p` already watch `failureType` for `agentId`? The API's policy
+// shape has `enabled` (bool) — there is no `status` field — and `agent_id` of
+// '*' means every agent.
+function signalPolicyCovers(p, failureType, agentId) {
+  return p.enabled
+    && p.condition?.trigger === 'signal'
+    && p.condition?.value === failureType
+    && (p.agent_id === agentId || p.agent_id === '*');
+}
+
 function renderIncidents() {
   const el = document.getElementById('incidents-list');
   if (!el) return;
+
+  // Policy state drives the "+ Create policy" / "✓ Policy active" button, but
+  // only the Policies page loads it. Without this, landing straight on
+  // Incidents shows "+ Create policy" for types that already have one — and
+  // clicking it creates a duplicate.
+  if (!_policiesLoaded) {
+    loadAndRenderPolicies().then(() => { if (_policiesLoaded) renderIncidents(); });
+  }
 
   const incidents = computeIncidents();
   const now = Date.now() / 1000;
@@ -6610,11 +6630,10 @@ function renderIncidents() {
       ? '<div class="inc-narrative">' + esc(inc.evSummary) + '. ' + esc(firstSeen) + (inc.cost > 0.005 ? ' ~' + fmtUsd(inc.cost) + ' wasted.' : '') + ' ' + inc.runIds.length + ' run' + (inc.runIds.length !== 1 ? 's' : '') + ' affected.</div>'
       : '<div class="inc-narrative">' + esc(firstSeen) + ' ' + inc.runIds.length + ' run' + (inc.runIds.length !== 1 ? 's' : '') + ' affected.' + (inc.cost > 0.005 ? ' ~' + fmtUsd(inc.cost) + ' wasted.' : '') + '</div>';
 
-    const policyActive = _policies.some(p =>
-      p.status === 'active' && p.condition?.trigger === 'signal' && p.condition?.value === ft);
+    const policyActive = _policies.some(p => signalPolicyCovers(p, ft, inc.agent_id));
     const policyBtn  = policyActive
       ? '<button class="inc-btn inc-btn-primary" onclick="nav(\'policies\',document.querySelector(\'[onclick*=policies]\'))">✓ Policy active</button>'
-      : '<button class="inc-btn" onclick="enablePolicyFromIncident(' + jsVal(ft) + ')">+ Create policy</button>';
+      : '<button class="inc-btn" onclick="enablePolicyFromIncident(' + jsVal(ft) + ',' + jsVal(inc.agent_id) + ')">+ Create policy</button>';
 
     const topRunId = inc.runIds[0] || '';
     const replayBtn  = topRunId ? '<button class="inc-btn" onclick="showDetail(' + jsVal(topRunId) + ',' + jsVal(inc.agent_id) + ')">Replay failing run ↗</button>' : '';
@@ -6652,28 +6671,42 @@ function renderIncidentPanels(incidents) {
   const now  = Date.now() / 1000;
   const cut7 = now - 7 * 86400;
 
-  // PREVENTED THIS WEEK — runs where an active signal policy would have fired
-  let preventedRuns = 0;
-  let preventedType = '';
-  const activePolicies = _policies.filter(p => p.status === 'active' && p.condition?.trigger === 'signal');
-  activePolicies.forEach(p => {
-    const ft   = p.condition.value;
-    const sigs = _allSigs.filter(s => s.failure_type === ft && s.detected_at >= cut7);
-    const runs = new Set(sigs.map(s => s.run_id)).size;
-    if (runs > preventedRuns) { preventedRuns = runs; preventedType = ft; }
+  // COVERED BY POLICY — runs whose failure type an active signal policy watches.
+  // This is coverage, not prevention: every signal here comes from the post-hoc
+  // detector, so the failure already happened and was recorded. Only an in-path
+  // block prevents anything (policy.triggered action_type=stop, approval denied
+  // /timed out) — that's `blocked_run_count` on GET /v1/agents/{id}/token-stats,
+  // which this page doesn't load. Counting detections as "prevented" also read
+  // backwards: the number grew as the agent got worse.
+  const activePolicies = _policies.filter(p => p.enabled && p.condition?.trigger === 'signal');
+  const coveredRuns = new Set();
+  const coveredByType = {};
+  _allSigs.forEach(s => {
+    if (s.detected_at < cut7) return;
+    // Respect agent scoping — a policy on agent A says nothing about agent B.
+    if (!activePolicies.some(p => signalPolicyCovers(p, s.failure_type, s.agent_id))) return;
+    coveredRuns.add(s.run_id);
+    coveredByType[s.failure_type] = (coveredByType[s.failure_type] || 0) + 1;
   });
+  const coveredCount = coveredRuns.size;
+  const topCoveredType = Object.entries(coveredByType).sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+  // A log-action policy records and moves on; say so rather than implying a block.
+  const anyBlocking = activePolicies.some(p => p.action?.type && p.action.type !== 'log');
 
   // NEXT BEST ACTION — top non-resolving incident with no active policy
-  const topNoPolicy = incidents.find(i => i.trend !== 'resolving' && !_policies.some(p =>
-    p.status === 'active' && p.condition?.trigger === 'signal' && p.condition?.value === i.failure_type));
+  const topNoPolicy = incidents.find(i => i.trend !== 'resolving'
+    && !_policies.some(p => signalPolicyCovers(p, i.failure_type, i.agent_id)));
 
-  let preventedPanel = '';
+  let coveredPanel = '';
   if (activePolicies.length > 0) {
-    const label = preventedType ? preventedType.replace(/_/g,' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : '';
-    preventedPanel = '<div class="inc-panel inc-panel-green">'
-      + '<div class="inc-panel-lbl">Prevented this week</div>'
-      + '<div class="inc-panel-val" style="color:var(--green)">' + preventedRuns + ' run' + (preventedRuns !== 1 ? 's' : '') + '</div>'
-      + '<div class="inc-panel-sub">' + esc(label) + ' policy active — auto-triggered ' + activePolicies.length + ' policy rule' + (activePolicies.length !== 1 ? 's' : '') + '</div>'
+    const label = topCoveredType ? topCoveredType.replace(/_/g,' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : '';
+    const sub = activePolicies.length + ' signal polic' + (activePolicies.length !== 1 ? 'ies' : 'y') + ' active'
+      + (label ? ' · mostly ' + esc(label) : '')
+      + (anyBlocking ? '' : ' · log only, nothing blocked');
+    coveredPanel = '<div class="inc-panel inc-panel-green">'
+      + '<div class="inc-panel-lbl">Covered by policy</div>'
+      + '<div class="inc-panel-val" style="color:var(--green)">' + coveredCount + ' run' + (coveredCount !== 1 ? 's' : '') + '</div>'
+      + '<div class="inc-panel-sub">' + sub + '</div>'
       + '</div>';
   }
 
@@ -6684,22 +6717,31 @@ function renderIncidentPanels(incidents) {
       + '<div class="inc-panel-lbl">Next best action</div>'
       + '<div class="inc-panel-val" style="color:var(--amber)">' + esc(ftName) + '</div>'
       + '<div class="inc-panel-sub">' + esc(topNoPolicy.agent_id) + ' · ' + topNoPolicy.thisN + ' signal' + (topNoPolicy.thisN !== 1 ? 's' : '') + ' · no active policy</div>'
-      + '<button class="inc-panel-cta-btn" onclick="enablePolicyFromIncident(' + jsVal(topNoPolicy.failure_type) + ')">+ Create policy</button>'
+      + '<button class="inc-panel-cta-btn" onclick="enablePolicyFromIncident(' + jsVal(topNoPolicy.failure_type) + ',' + jsVal(topNoPolicy.agent_id) + ')">+ Create policy</button>'
       + '</div>';
   }
 
-  const hasContent = preventedPanel || nextPanel;
+  const hasContent = coveredPanel || nextPanel;
   el.style.display = hasContent ? '' : 'none';
-  el.innerHTML = preventedPanel + nextPanel;
+  el.innerHTML = coveredPanel + nextPanel;
 }
 
-async function enablePolicyFromIncident(failureType) {
+// Signal-trigger conditions compare against a *list* of detected failure types,
+// so the operator must be `contains` — `eq` would compare list to string and
+// never fire. The API also rejects a condition with no operator at all (422).
+async function enablePolicyFromIncident(failureType, agentId) {
   try {
-    await apiPost('/v1/policies', { name: failureType + ' auto-fix', condition: { trigger: 'signal', value: failureType }, action: { type: 'log' }, status: 'active' });
+    await apiPost('/v1/policies', {
+      name: failureType + ' watch',
+      agent_id: agentId || '*',
+      condition: { trigger: 'signal', operator: 'contains', value: failureType },
+      action: { type: 'log' },
+      enabled: true,
+    });
     await loadAndRenderPolicies();
     renderIncidents();
   } catch(e) {
-    console.error('Failed to create policy:', e);
+    alert('Failed to create policy: ' + (e.message || e));
   }
 }
 
