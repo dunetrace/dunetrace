@@ -1123,6 +1123,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <span class="gl-item"><span class="gl-dot" style="background:var(--orange-d);border-color:var(--orange)"></span>Tool call (ok)</span>
         <span class="gl-item"><span class="gl-dot" style="background:var(--red-d);border-color:var(--red)"></span>Tool call (loop)</span>
         <span class="gl-item"><span class="gl-dot" style="background:var(--blue);border-color:var(--blue);opacity:.5"></span>Run start / end</span>
+        <span class="gl-item" id="graph-step-count" style="margin-left:auto;color:var(--chalk4)"></span>
       </div>
       <div class="graph-svg-wrap">
         <svg class="run-graph" id="run-graph-svg" width="900" height="320" viewBox="0 0 900 320"></svg>
@@ -2696,6 +2697,10 @@ async function showDetail(runId, agentId) {
   const svg = document.getElementById('run-graph-svg');
   svg.innerHTML = '';
   delete svg.dataset.drawn;
+  const graphWrap = document.querySelector('.graph-svg-wrap');
+  if (graphWrap) graphWrap.scrollLeft = 0;
+  const stepCount = document.getElementById('graph-step-count');
+  if (stepCount) stepCount.textContent = '';
 
   // Show loading state
   document.getElementById('detail-run-id').textContent = 'loading ' + shortId(runId) + '…';
@@ -3228,6 +3233,9 @@ function drawGraph() {
   const events  = svg._events  || [];
   const signals = svg._signals || [];
   if (!events.length) {
+    svg.setAttribute('width', '900');
+    svg.setAttribute('height', '320');
+    svg.setAttribute('viewBox', '0 0 900 320');
     const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     t.setAttribute('x', '450'); t.setAttribute('y', '160');
     t.setAttribute('text-anchor', 'middle');
@@ -3239,7 +3247,6 @@ function drawGraph() {
     return;
   }
 
-  const W = 900, H = 320;
   const ns = 'http://www.w3.org/2000/svg';
 
   function el(tag, attrs, text) {
@@ -3262,9 +3269,50 @@ function drawGraph() {
 
   const R = 22;
   const total = steps.length;
-  const spacing = Math.min(90, Math.max(60, (W - 80) / Math.max(total, 1)));
+
+  // Layout: runs short enough to fit one row keep the original single-line
+  // layout. Longer runs wrap into serpentine rows and the canvas grows
+  // vertically, so every step renders instead of being clipped by the old
+  // fixed 900×320 viewBox.
+  const wrapEl = document.querySelector('.graph-svg-wrap');
+  const W = Math.max(900, Math.min(1600, Math.floor(wrapEl?.clientWidth || 900)));
   const startX = 50;
+  const WRAP_SPACING = 70, ROW_H = 92, ROW_PAD = 50;
+  const perRow = Math.floor((W - startX * 2) / WRAP_SPACING) + 1;   // 12 at 900px wide
+  const SINGLE_ROW_MAX = 14;   // most that fits one row at readable spacing
+  const wrapped = total > SINGLE_ROW_MAX;
+
+  const rows = wrapped ? Math.ceil(total / perRow) : 1;
+  const spacing = wrapped
+    ? WRAP_SPACING
+    : Math.min(90, Math.max(60, (W - 80) / Math.max(total, 1)));
+  const H = wrapped ? ROW_PAD * 2 + (rows - 1) * ROW_H : 320;
+  svg.setAttribute('width', W);
+  svg.setAttribute('height', H);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const midY = H / 2;
+
+  // Serpentine: odd rows run right-to-left so the wrap edge stays short.
+  function nodePos(i) {
+    if (!wrapped) return { x: startX + i * spacing, y: midY };
+    const row = Math.floor(i / perRow);
+    const raw = i % perRow;
+    const col = row % 2 === 0 ? raw : perRow - 1 - raw;
+    return { x: startX + col * spacing, y: ROW_PAD + row * ROW_H };
+  }
+
+  const counter = document.getElementById('graph-step-count');
+  if (counter) counter.textContent = total + ' step' + (total === 1 ? '' : 's');
+
+  const gtext = document.getElementById('detail-graph-text');
+  if (gtext) {
+    gtext.textContent = 'Each node is one step. Edges show causation order — follow the arrows. '
+      + 'Red nodes are looping tool calls where the same args were seen in a previous step.'
+      + (wrapped
+          ? ' This run is too long for one line, so it snakes across rows — left to right, then'
+            + ' right to left on the next row. The number under each node is its step index.'
+          : '');
+  }
 
   // Map step → node position
   const nodes = steps.map((st, i) => {
@@ -3288,10 +3336,12 @@ function drawGraph() {
 
     const sub = isLLM && st.payload?.prompt_tokens ? st.payload.prompt_tokens + ' tokens' : '';
 
-    // Alternate loop nodes up/down
-    const yOff = (isLoop && i % 2 === 0) ? -60 : (isLoop && i % 2 === 1) ? 60 : 0;
+    // Alternate loop nodes up/down (single-row only — rows have no headroom)
+    const yOff = wrapped ? 0
+      : (isLoop && i % 2 === 0) ? -60 : (isLoop && i % 2 === 1) ? 60 : 0;
 
-    return { id: String(st.step), x: startX + i * spacing, y: midY + yOff, type, label, sub, isLoop };
+    const p = nodePos(i);
+    return { id: String(st.step), step: st.step, x: p.x, y: p.y + yOff, type, label, sub, isLoop };
   });
 
   const nodeMap = Object.fromEntries(nodes.map(n => [n.id, n]));
@@ -3313,9 +3363,10 @@ function drawGraph() {
   });
   svg.appendChild(defs);
 
-  // Loop highlight
+  // Loop highlight (single-row only — a box spanning wrapped rows would
+  // enclose unrelated steps; wrapped mode marks loop nodes by halo alone)
   const loopNodes = nodes.filter(n => n.isLoop);
-  if (loopNodes.length) {
+  if (loopNodes.length && !wrapped) {
     const lxs = loopNodes.map(n => n.x);
     const lys = loopNodes.map(n => n.y);
     const lx = Math.min(...lxs) - 36, ly = Math.min(...lys) - 36;
@@ -3342,8 +3393,8 @@ function drawGraph() {
     }));
   }
 
-  // Back-edge for loop nodes back to their first occurrence
-  nodes.filter(n => n.isLoop).forEach(n => {
+  // Back-edge for loop nodes back to their first occurrence (single-row only)
+  if (!wrapped) nodes.filter(n => n.isLoop).forEach(n => {
     const firstLoop = nodes.find(x => x !== n && x.isLoop && x.label === n.label);
     if (firstLoop) {
       const cy = Math.max(n.y, firstLoop.y) + 55;
@@ -3365,9 +3416,26 @@ function drawGraph() {
       fill:c.stroke, 'font-family':"'IBM Plex Mono',monospace", 'font-size':'8', 'font-weight':'600' }, n.label));
     if (n.sub) g.appendChild(el('text', { x:'0', y:'8', 'text-anchor':'middle', 'dominant-baseline':'middle',
       fill:'rgba(200,196,188,0.4)', 'font-family':"'IBM Plex Mono',monospace", 'font-size':'7' }, n.sub));
+    // Step index below the node — the only way to keep your place across rows
+    if (wrapped) g.appendChild(el('text', { x:'0', y:String(R + 12), 'text-anchor':'middle',
+      fill:'rgba(200,196,188,0.35)', 'font-family':"'IBM Plex Mono',monospace", 'font-size':'8' }, n.step));
     svg.appendChild(g);
   });
 }
+
+// Row width comes from the container, so a resize needs a redraw to reflow.
+let _graphResizeT = null;
+window.addEventListener('resize', () => {
+  const svg = document.getElementById('run-graph-svg');
+  if (!svg || !svg.dataset.drawn) return;
+  if (!document.getElementById('dtab-graph')?.classList.contains('active')) return;
+  clearTimeout(_graphResizeT);
+  _graphResizeT = setTimeout(() => {
+    svg.innerHTML = '';
+    delete svg.dataset.drawn;
+    drawGraph();
+  }, 200);
+});
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function detectLoops(events, signals) {
