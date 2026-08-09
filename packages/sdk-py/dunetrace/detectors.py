@@ -202,6 +202,7 @@ class OversizedToolArgumentsDetector(BaseDetector):
                     step_index=tc.step_index,
                     confidence=0.9,
                     evidence={
+                        "step_index": tc.step_index,
                         "tool_name": tc.tool_name,
                         "arg_length": arg_length,
                         "threshold": self.MAX_ARG_LENGTH,

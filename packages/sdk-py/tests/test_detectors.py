@@ -80,6 +80,35 @@ class TestOversizedToolArgumentsDetector(unittest.TestCase):
         state.current_step = 1
         assert self.detector.on_run_completion(state) is None
 
+    def test_boundary_conditions(self):
+        # exactly 10,000 should not trigger
+        state = make_state()
+        state.tool_calls = [make_tool_call("web_search", args="a" * 10_000)]
+        assert self.detector.on_run_completion(state) is None
+        
+        # 10,001 should trigger
+        state.tool_calls = [make_tool_call("web_search", args="a" * 10_001)]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.OVERSIZED_TOOL_ARGUMENTS
+        assert signal.evidence["arg_length"] == 10_001
+
+    def test_identifies_first_oversized_call(self):
+        state = make_state()
+        # step 1 has 10,001 chars, step 2 has 20,000 chars
+        tc1 = make_tool_call("search1", args="a" * 10_001)
+        tc1.step_index = 1
+        tc2 = make_tool_call("search2", args="b" * 20_000)
+        tc2.step_index = 2
+        state.tool_calls = [tc1, tc2]
+        
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.step_index == 1
+        assert signal.evidence["tool_name"] == "search1"
+        assert signal.evidence["arg_length"] == 10_001
+        assert signal.evidence["step_index"] == 1
+
 
 # ── ToolLoopDetector ──────────────────────────────────────────────────────────
 
