@@ -171,6 +171,45 @@ class BaseDetector:
         raise NotImplementedError
 
 
+# ── OVERSIZED_TOOL_ARGUMENTS ──────────────────────────────────────────────────
+
+
+class OversizedToolArgumentsDetector(BaseDetector):
+    """
+    An agent that stuffs a very large payload into a tool call — dumping an entire
+    document or conversation into a single `args` string — is a common cost and
+    latency footgun, and often a sign the agent is using a tool as a scratchpad
+    instead of reasoning.
+
+    Tunable: MAX_ARG_LENGTH (default 10_000) — fire if any tool call's args exceeds
+    this character limit.
+    """
+
+    name = "OVERSIZED_TOOL_ARGUMENTS"
+    SEVERITY = Severity.MEDIUM
+    MAX_ARG_LENGTH = 10_000
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        for tc in state.tool_calls:
+            arg_length = len(tc.args) if tc.args else 0
+            if arg_length > self.MAX_ARG_LENGTH:
+                return FailureSignal(
+                    failure_type=FailureType.OVERSIZED_TOOL_ARGUMENTS,
+                    severity=self.SEVERITY,
+                    run_id=state.run_id,
+                    agent_id=state.agent_id,
+                    agent_version=state.agent_version,
+                    step_index=tc.step_index,
+                    confidence=0.9,
+                    evidence={
+                        "tool_name": tc.tool_name,
+                        "arg_length": arg_length,
+                        "threshold": self.MAX_ARG_LENGTH,
+                    },
+                )
+        return None
+
+
 # ── TOOL_LOOP ─────────────────────────────────────────────────────────────────
 
 
@@ -2954,6 +2993,7 @@ class DelegationLoopDetector(BaseDetector):
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TIER1_DETECTORS: List[BaseDetector] = [
+    OversizedToolArgumentsDetector(),
     ToolLoopDetector(),
     ToolThrashingDetector(),
     ToolAvoidanceDetector(),

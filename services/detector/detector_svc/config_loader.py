@@ -35,6 +35,7 @@ _RESERVED_DETECTOR_KEYS = frozenset(
 # Maps YAML section key -> detector constructor kwarg names (all uppercase).
 # Only detectors with tunable params need an entry here.
 _PARAM_MAP: dict[str, dict[str, str]] = {
+    "oversized_tool_arguments": {"max_arg_length": "MAX_ARG_LENGTH"},
     "tool_loop": {"threshold": "THRESHOLD", "window": "WINDOW"},
     "tool_thrashing": {"window": "WINDOW"},
     "tool_avoidance": {"min_llm_calls": "MIN_LLM_CALLS"},

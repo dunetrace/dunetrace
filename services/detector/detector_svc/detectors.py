@@ -23,6 +23,7 @@ from dunetrace.detectors import (
     CUSTOM_DETECTOR_REGISTRY,
     AgentHandoffFailureDetector,
     BaseDetector,
+    OversizedToolArgumentsDetector,
     CascadingToolFailureDetector,
     ContextBloatDetector,
     CostSpikeDetector,
@@ -58,6 +59,7 @@ logger = logging.getLogger("dunetrace.detector.detectors")
 
 # Maps YAML section key → detector class
 _DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
+    "oversized_tool_arguments": OversizedToolArgumentsDetector,
     "tool_loop": ToolLoopDetector,
     "tool_thrashing": ToolThrashingDetector,
     "tool_avoidance": ToolAvoidanceDetector,
