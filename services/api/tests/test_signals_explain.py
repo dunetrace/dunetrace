@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import HTTPException
+from llm_test_utils import configured_llm, no_llm
 
 from api_svc.routers.signals import (
     OpenPRRequest,
@@ -52,23 +53,25 @@ def _llm_result(root_cause="because X", fix_content="add this", fix_patch="+ add
     return {"root_cause": root_cause, "fix_content": fix_content, "fix_patch": fix_patch}
 
 
-def _settings_mock(*, anthropic_key="key", github_configured=False):
+def _settings_mock(*, github_configured=False):
+    """Only the settings the ROUTER itself reads. Provider credentials no
+    longer live here — the gate is api_svc.llm_provider, so a test that needs
+    an LLM configured stacks configured_llm() alongside this."""
     s = MagicMock()
-    s.ANTHROPIC_API_KEY = anthropic_key
-    s.OPENAI_API_KEY = None
     s.github_configured = github_configured
     return s
 
 
 class TestExplainSignalGating(unittest.IsolatedAsyncioTestCase):
     async def test_no_llm_key_returns_503(self):
-        with patch("api_svc.llm_provider.resolve_provider", return_value=None):
+        with no_llm():
             with self.assertRaises(HTTPException) as ctx:
                 await explain_signal(1, org_id="org-1")
         self.assertEqual(ctx.exception.status_code, 503)
 
     async def test_signal_not_found_returns_404(self):
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=None)),
         ):
@@ -80,6 +83,7 @@ class TestExplainSignalGating(unittest.IsolatedAsyncioTestCase):
         """Root-cause analysis never depends on any external system — only on
         this run's own stored events, which may be sparse or absent."""
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=_signal())),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
@@ -96,6 +100,7 @@ class TestExplainSignalDunetraceNative(unittest.IsolatedAsyncioTestCase):
             failure_type="TOOL_LOOP", evidence={"count": 5, "first_step": 1, "last_step": 5}
         )
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
@@ -117,6 +122,7 @@ class TestExplainSignalDunetraceNative(unittest.IsolatedAsyncioTestCase):
         no external system involved at all."""
         signal = _signal(failure_type="STEP_COUNT_INFLATION", evidence={"current_steps": 12})
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
@@ -132,6 +138,7 @@ class TestExplainSignalCustomerCode(unittest.IsolatedAsyncioTestCase):
         a diff to copy in manually."""
         signal = _signal(failure_type="TOOL_AVOIDANCE")
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
@@ -146,6 +153,7 @@ class TestExplainSignalCustomerCode(unittest.IsolatedAsyncioTestCase):
     async def test_code_change_blocked_when_github_not_configured(self):
         signal = _signal(failure_type="CONTEXT_BLOAT")
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock(github_configured=False)),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
@@ -161,6 +169,7 @@ class TestExplainSignalCustomerCode(unittest.IsolatedAsyncioTestCase):
         only on GitHub being configured."""
         signal = _signal(failure_type="CONTEXT_BLOAT")
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock(github_configured=True)),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
@@ -174,6 +183,7 @@ class TestExplainSignalCustomerCode(unittest.IsolatedAsyncioTestCase):
     async def test_no_auto_apply_always_blocked(self):
         signal = _signal(failure_type="PROMPT_INJECTION_SIGNAL")
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock(github_configured=True)),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value={"events": []})),
@@ -187,6 +197,7 @@ class TestExplainSignalCustomerCode(unittest.IsolatedAsyncioTestCase):
     async def test_source_is_native_when_events_exist(self):
         signal = _signal(failure_type="TOOL_AVOIDANCE")
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch(
@@ -205,6 +216,7 @@ class TestExplainSignalCustomerCode(unittest.IsolatedAsyncioTestCase):
     async def test_source_is_signal_only_when_no_native_events(self):
         signal = _signal(failure_type="TOOL_AVOIDANCE")
         with (
+            configured_llm("anthropic"),
             patch("api_svc.routers.signals.settings", _settings_mock()),
             patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal)),
             patch("api_svc.routers.signals.get_run_detail", AsyncMock(return_value=None)),

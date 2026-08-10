@@ -11,18 +11,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from llm_test_utils import configured_llm, no_llm
 from api_svc.diff_generation import compute_unified_diff, generate_real_file_content
-
-
-def _provider_settings(*, anthropic="", openai="", mistral="", pinned=""):
-    """A settings stand-in for llm_provider, so provider selection in these
-    tests never reads the repo's .env."""
-    s = MagicMock()
-    s.ANTHROPIC_API_KEY = anthropic
-    s.OPENAI_API_KEY = openai
-    s.MISTRAL_API_KEY = mistral
-    s.API_LLM_PROVIDER = pinned
-    return s
 
 
 class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
@@ -31,7 +21,7 @@ class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
         # api_svc.config loads the repo's .env at import, so patching only the
         # local name left provider selection reading a developer's real key —
         # and this test then made a live API call.
-        with patch("api_svc.llm_provider.resolve_provider", return_value=None):
+        with no_llm():
             result = await generate_real_file_content("root cause", "fix it", "a.py", "old content")
         self.assertIsNone(result)
 
@@ -42,7 +32,7 @@ class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
         mock_client.messages.create = AsyncMock(return_value=mock_msg)
 
         with (
-            patch("api_svc.llm_provider.settings", _provider_settings(anthropic="sk-ant-x")),
+            configured_llm("anthropic"),
             patch("anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await generate_real_file_content(
@@ -53,7 +43,7 @@ class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_none_when_llm_call_fails(self):
         with (
-            patch("api_svc.llm_provider.settings", _provider_settings(anthropic="sk-ant-x")),
+            configured_llm("anthropic"),
             patch("anthropic.AsyncAnthropic", side_effect=RuntimeError("API down")),
         ):
             result = await generate_real_file_content("rc", "fix", "a.py", "old")
@@ -103,11 +93,9 @@ class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
         mock_client.messages.create = AsyncMock(return_value=mock_msg)
 
         with (
-            patch("api_svc.diff_generation.settings") as mock_settings,
+            configured_llm("anthropic"),
             patch("anthropic.AsyncAnthropic", return_value=mock_client),
         ):
-            mock_settings.ANTHROPIC_API_KEY = "sk-ant-x"
-            mock_settings.OPENAI_API_KEY = ""
             result = await generate_real_file_content("rc", "fix", "a.py", "def broken(): pass")
 
         self.assertEqual(result, "def fixed():\n    pass")
@@ -115,16 +103,13 @@ class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
     async def test_uses_whichever_provider_is_configured(self):
         """Provider selection now lives in llm_provider; this only needs to
         prove generate_real_file_content consumes whatever text comes back."""
-        with patch(
-            "api_svc.llm_provider.complete",
-            AsyncMock(return_value="def fixed():\n    pass\n"),
-        ):
+        with configured_llm("anthropic", completion="def fixed():\n    pass\n"):
             result = await generate_real_file_content("rc", "fix", "a.py", "def broken(): pass")
 
         self.assertEqual(result, "def fixed():\n    pass")
 
     async def test_returns_none_when_no_provider_configured(self):
-        with patch("api_svc.llm_provider.resolve_provider", return_value=None):
+        with no_llm():
             result = await generate_real_file_content("rc", "fix", "a.py", "def broken(): pass")
         self.assertIsNone(result)
 

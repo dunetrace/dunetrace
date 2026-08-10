@@ -24,6 +24,7 @@ from api_svc.custom_detector_translator import (
     _SYSTEM_PROMPT,
     translate_description,
 )
+from llm_test_utils import configured_llm, no_llm
 
 
 class TestSystemPromptRendering(unittest.TestCase):
@@ -52,13 +53,13 @@ class TestTranslateDescription(unittest.IsolatedAsyncioTestCase):
         test only stayed offline because a patched httpx.AsyncClient happened
         to sit underneath the Anthropic SDK.
         """
-        return patch(
-            "api_svc.llm_provider.complete",
-            AsyncMock(return_value=json.dumps(body)),
-        )
+        # configured_llm patches the GATE as well as the seam. Patching only
+        # `complete` left llm_configured() reading real settings, which passed
+        # on a machine with a .env and failed in CI.
+        return configured_llm(completion=json.dumps(body))
 
     async def test_no_llm_key_raises_value_error(self):
-        with patch("api_svc.llm_provider.resolve_provider", return_value=None):
+        with no_llm():
             with self.assertRaises(ValueError):
                 await translate_description("fires when tool_call_count > 3")
 
