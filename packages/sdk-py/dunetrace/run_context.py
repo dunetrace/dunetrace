@@ -10,6 +10,7 @@ import datetime
 import os
 import time
 import uuid
+import weakref
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from dunetrace.models import (
@@ -109,6 +110,14 @@ class RunContext:
             system_prompt=system_prompt or None,
         )
 
+        # Streamed LLM calls whose response hasn't been reported yet. A stream is
+        # only finished when the caller drains, closes or context-exits it, and a
+        # caller that just breaks out of the loop does none of those — a real
+        # iterator gets no signal from `break`. Without this the event would slip
+        # out at garbage-collection time, i.e. after run.completed. Weak refs so
+        # holding the list never keeps a stream (or its buffers) alive.
+        self._open_streams: list = []
+
         # Policy enforcement state
         self.model_override: str | None = None  # set by switch_model action
         self.prompt_additions: list = []  # appended by inject_prompt action
@@ -127,6 +136,8 @@ class RunContext:
         # Detector result cache — signal-trigger policies reuse this within a step
         # so detectors don't run twice for (llm_called, llm_responded) at the same step.
         self._detector_cache_step: int = -1
+        # Failure types the active signal policies name; None = run everything.
+        self._needed_signal_types: Optional[set] = None
         self._detector_cache_signals: list = []
 
         # Cached per engine generation: whether any active policy uses trigger="signal".
@@ -144,9 +155,39 @@ class RunContext:
         # keeping evaluation itself clock-free / deterministic).
         self._started_monotonic: float = time.monotonic()
 
+    # ── Streamed calls ────────────────────────────────────────────────────────
+
+    def _register_stream(self, stream) -> None:
+        """Called by auto-instrumentation's _StreamProxy on construction."""
+        try:
+            self._open_streams.append(weakref.ref(stream))
+        except TypeError:  # pragma: no cover - not weak-referenceable
+            pass
+
+    def _flush_open_streams(self) -> None:
+        """Report any stream the caller never finished, while the run is still
+        open. Idempotent per stream (the proxy latches its own emit), so a stream
+        that was properly drained costs one dead weakref and nothing else."""
+        pending, self._open_streams = self._open_streams, []
+        for ref in pending:
+            stream = ref()
+            if stream is None:
+                continue
+            try:
+                # error_path: an abandoned stream must not turn a policy stop
+                # into an exception raised from the run's own teardown.
+                stream._emit(error_path=True)
+            except Exception:
+                logger.debug("Dunetrace: failed to finalize open stream", exc_info=True)
+
     # ── LLM hooks ─────────────────────────────────────────────────────────────
 
-    def llm_called(self, model: str, prompt_tokens: int = 0) -> None:
+    def llm_called(
+        self, model: str, prompt_tokens: int = 0, provider: Optional[str] = None
+    ) -> None:
+        # Index of this call within the run, which is exactly the correlation id
+        # the response needs — see LlmCall.call_id.
+        call_id = len(self.state.llm_calls)
         self.state.llm_calls.append(
             LlmCall(
                 model=model,
@@ -155,15 +196,20 @@ class RunContext:
                 latency_ms=None,
                 step_index=self.step,
                 timestamp=time.time(),
+                provider=provider,
+                call_id=call_id,
             )
         )
-        self._emit(
-            EventType.LLM_CALLED,
-            {
-                "model": model,
-                "prompt_tokens": prompt_tokens,
-            },
-        )
+        payload: dict = {
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "call_id": call_id,
+        }
+        # Omitted when unknown rather than sent as null, so the wire format is
+        # byte-identical to before for every manual caller.
+        if provider:
+            payload["provider"] = provider
+        self._emit(EventType.LLM_CALLED, payload)
 
     def llm_responded(
         self,
@@ -175,13 +221,31 @@ class RunContext:
         output_length: int = 0,
         prompt_tokens: int = 0,
         error: Optional[str] = None,
+        call_index: Optional[int] = None,
     ) -> None:
-        # Back-fill the most recent LlmCall with response data.
+        # Back-fill the LlmCall this response belongs to with response data.
         # prompt_tokens is optional — pass it when the count is only known after
         # the call (e.g. taken from the API response), overriding the estimate
         # given to llm_called().
+        #
+        # call_index names that call explicitly. The default (None) keeps the
+        # historical "most recent call" behaviour, which is correct whenever
+        # llm_called and llm_responded are adjacent — every manual caller and
+        # every non-streaming patcher. A *streamed* call breaks that adjacency:
+        # the response isn't known until the caller drains the stream, which may
+        # happen after other LLM calls have started, so _StreamProxy records the
+        # index at construction and passes it here. Without it the stream would
+        # back-fill whichever call happened to be last at drain time, clobbering
+        # that call's tokens, output and cost and leaving its own call unfinished.
+        lc = None
         if self.state.llm_calls:
-            lc = self.state.llm_calls[-1]
+            if call_index is None:
+                lc = self.state.llm_calls[-1]
+            elif 0 <= call_index < len(self.state.llm_calls):
+                lc = self.state.llm_calls[call_index]
+            # An out-of-range index means llm_called never landed (its emit was
+            # swallowed). Skip the back-fill rather than corrupt a different call.
+        if lc is not None:
             lc.finish_reason = finish_reason
             lc.latency_ms = latency_ms
             lc.output_length = output_length
@@ -205,6 +269,11 @@ class RunContext:
         # size-based detectors work either way.
         if not _omit_llm_output_text():
             payload["output"] = output
+        # Echoed so the server-side builders can pair this response with its call
+        # by identity rather than by arrival order. Omitted (not null) when there
+        # is no call to name, keeping the wire format unchanged for that case.
+        if lc is not None and lc.call_id is not None:
+            payload["call_id"] = lc.call_id
         if prompt_tokens:
             payload["prompt_tokens"] = prompt_tokens
         if reasoning_tokens:
@@ -850,18 +919,51 @@ class RunContext:
         # We do this lazily to avoid running detectors when no signal policies exist.
         if self._needs_signal is None or self._needs_signal_generation != engine._generation:
             with engine._lock:
-                self._needs_signal = any(
-                    p.condition.get("trigger") == "signal"
+                signal_policies = [
+                    p
                     for p in engine._policies
-                    if p.enabled and p.agent_id in ("*", self.agent_id)
-                )
+                    if p.enabled
+                    and p.agent_id in ("*", self.agent_id)
+                    and p.condition.get("trigger") == "signal"
+                ]
+                self._needs_signal = bool(signal_policies)
+                # Which failure types those policies actually name. Evaluating
+                # only the detectors that can satisfy an active policy is how
+                # this path sheds cost — the alternative, skipping detectors
+                # that ran slowly, silently disables the guardrail instead.
+                # None means "could not determine statically" (an expression or
+                # match block rather than a plain value), in which case the full
+                # battery runs: over-running is the safe direction here.
+                collected: set = set()
+                resolvable = True
+                for p in signal_policies:
+                    value = p.condition.get("value")
+                    if isinstance(value, str):
+                        collected.add(value)
+                    elif isinstance(value, (list, tuple, set)) and all(
+                        isinstance(v, str) for v in value
+                    ):
+                        collected.update(value)
+                    else:
+                        resolvable = False
+                        break
+                wanted: Optional[set] = collected if resolvable else None
+                self._needed_signal_types = wanted
                 self._needs_signal_generation = engine._generation
         needs_signal = self._needs_signal
         if needs_signal:
             from dunetrace.detectors import run_detectors
 
             if self.step != self._detector_cache_step:
-                self._detector_cache_signals = run_detectors(self.state, context="runtime")
+                from dunetrace.detectors import TIER1_DETECTORS
+
+                wanted = self._needed_signal_types
+                subset = (
+                    [d for d in TIER1_DETECTORS if d.name in wanted] if wanted is not None else None
+                )
+                self._detector_cache_signals = run_detectors(
+                    self.state, detectors=subset, context="policy"
+                )
                 self._detector_cache_step = self.step
             sigs = self._detector_cache_signals
             metrics["signal"] = [s.failure_type.value for s in sigs] if sigs else []

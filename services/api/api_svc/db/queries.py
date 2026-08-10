@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json as _json_mod
 import logging
+import secrets
 import time
 from typing import Any, AsyncGenerator, Optional
 
@@ -479,6 +480,21 @@ END $$;
 # encrypted_credentials column here at all — a genuine simplification, not
 # an oversight.
 _GITHUB_APP_DDL = """
+-- Single-use nonces for the GitHub App install redirect. The callback is
+-- unauthenticated by necessity (GitHub controls that redirect and there is no
+-- Dunetrace key on it), so `state` is the ONLY thing establishing which org is
+-- installing. It previously carried org_id directly, which is a stable,
+-- guessable identifier rather than a nonce — anyone could bind any org to any
+-- installation_id. A row here is minted by the authenticated install-url call
+-- and consumed exactly once by the callback.
+CREATE TABLE IF NOT EXISTS github_install_states (
+    state       TEXT         PRIMARY KEY,
+    org_id      TEXT         NOT NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_github_install_states_created
+    ON github_install_states(created_at);
+
 CREATE TABLE IF NOT EXISTS org_github_integrations (
     id               BIGSERIAL    PRIMARY KEY,
     org_id           TEXT         NOT NULL,
@@ -613,6 +629,15 @@ async def init_pool() -> None:
         # is incompatible with asyncpg's default prepared-statement cache.
         statement_cache_size=0,
     )
+    # Shared schema first: migrations own every definition more than one
+    # service touches, and the DDL below ALTERs tables another service creates.
+    # Booting this service against an empty database used to crash on
+    # `relation "failure_signals" does not exist`.
+    from dunetrace_schemas.migrations import apply_migrations
+
+    async with _pool.acquire() as conn:
+        await apply_migrations(conn)
+
     async with _pool.acquire() as conn:
         await conn.execute(_MIGRATIONS_DDL)
         await conn.execute(_FIXES_DDL)
@@ -718,16 +743,35 @@ async def fetch_otel_receiver_stats(org_id: str, hours: int = 24) -> list[dict]:
 
 async def verify_api_key(key: str) -> Optional[str]:
     """Returns org_id if valid, None otherwise. Dev mode accepts anything."""
+    resolved = await verify_api_key_with_scopes(key)
+    return resolved[0] if resolved else None
+
+
+async def verify_api_key_with_scopes(key: str) -> Optional[tuple]:
+    """(org_id, scopes) if valid, None otherwise.
+
+    Scopes are what stop an agent's own credential from granting the approval
+    it is waiting on — see dunetrace_schemas.scopes.
+    """
+    from dunetrace_schemas.scopes import ADMIN, normalise
+
     if settings.is_dev:
-        return "default"
+        # Dev mode already disables auth entirely; withholding scopes here would
+        # only break the local quickstart without protecting anything.
+        return ("default", (ADMIN,))
     if not _pool:
         return None
+    from dunetrace_schemas.keys import hash_api_key
+
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT org_id FROM api_keys WHERE key = $1 AND active = TRUE",
-            key,
+            # Matched on the hash: the database never holds the secret.
+            "SELECT org_id, scopes FROM api_keys WHERE key_hash = $1 AND active = TRUE",
+            hash_api_key(key),
         )
-    return row["org_id"] if row else None
+    if not row:
+        return None
+    return (row["org_id"], normalise(row["scopes"]))
 
 
 # ── Agents ────────────────────────────────────────────────────────────────────
@@ -914,7 +958,17 @@ async def list_runs(
                     )                                                            AS completed_at,
                     MAX(e.step_index)                                           AS step_count,
                     SUM(
-                        CASE WHEN e.event_type IN ('llm.called', 'llm.responded')
+                        -- llm.called carries a chars//4 ESTIMATE and llm.responded
+                        -- the exact count for the same call, so summing both
+                        -- double-counts. The canonical run builder overrides
+                        -- rather than adds (dunetrace/run_builder.py); this now
+                        -- matches. GREATEST per call_id would be exact, but the
+                        -- estimate is always <= the exact count in practice and
+                        -- this keeps the aggregate a single scan.
+                        CASE WHEN e.event_type = 'llm.responded'
+                                  AND (e.payload->>'prompt_tokens') IS NOT NULL
+                             THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
+                             WHEN e.event_type = 'llm.called'
                              THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
                              ELSE 0 END
                     )                                                            AS prompt_tokens,
@@ -987,13 +1041,20 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         if not pr:
             return None
 
+        # Every fan-out below carries org_id. Authorising on processed_runs and
+        # then fanning out on run_id alone was the leak: run_id is
+        # caller-supplied, so two tenants can hold the same one — and since the
+        # composite (org_id, run_id) key they legitimately BOTH exist, which
+        # makes an unscoped predicate return the other tenant's raw system
+        # prompts, tool arguments and LLM output rather than merely the wrong row.
         events = await conn.fetch(
             """
             SELECT event_type, step_index, timestamp, payload, parent_run_id
-            FROM events WHERE run_id = $1
+            FROM events WHERE run_id = $1 AND org_id = $2
             ORDER BY step_index ASC, timestamp ASC
             """,
             run_id,
+            org_id,
         )
 
         shadow_filter = "" if include_shadow else "AND shadow = FALSE"
@@ -1002,10 +1063,11 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
             SELECT id, failure_type, severity, step_index, confidence,
                    detected_at, evidence, shadow
             FROM failure_signals
-            WHERE run_id = $1 {shadow_filter}
+            WHERE run_id = $1 AND org_id = $2 {shadow_filter}
             ORDER BY shadow ASC, step_index ASC
             """,
             run_id,
+            org_id,
         )
 
         # Phase 3.3 — "part of conversation X" navigation. runs is owned by
@@ -1015,7 +1077,11 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         # NULL for runs that predate this migration or never had a
         # conversation_id at all, same "instrumentation-dependent, may be
         # absent" tolerance as trace_id/system_prompt elsewhere.
-        run_row = await conn.fetchrow("SELECT conversation_id FROM runs WHERE run_id = $1", run_id)
+        run_row = await conn.fetchrow(
+            "SELECT conversation_id FROM runs WHERE run_id = $1 AND org_id = $2",
+            run_id,
+            org_id,
+        )
         conversation_id = run_row["conversation_id"] if run_row else None
 
     started_at = next((e["timestamp"] for e in events if e["event_type"] == "run.started"), None)
@@ -1098,9 +1164,14 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
 
     llm_responded = [e for e in event_list if e["event_type"] == "llm.responded"]
     llm_called = [e for e in event_list if e["event_type"] == "llm.called"]
-    llm_all = llm_called + llm_responded
-    # prompt_tokens: direct SDK writes to llm.called; LangChain writes to llm.responded
-    prompt_tokens = sum(e["payload"].get("prompt_tokens") or 0 for e in llm_all)
+    # prompt_tokens appears on BOTH event types for the same call: llm.called
+    # carries a chars//4 estimate, llm.responded the exact count once the
+    # provider reports it. Summing them double-counted (~67% inflation on a
+    # typical call). Prefer the responded value and fall back to called — the
+    # same override the canonical run builder does.
+    responded_prompt = sum(e["payload"].get("prompt_tokens") or 0 for e in llm_responded)
+    called_prompt = sum(e["payload"].get("prompt_tokens") or 0 for e in llm_called)
+    prompt_tokens = responded_prompt or called_prompt
     completion_tokens = sum(e["payload"].get("completion_tokens") or 0 for e in llm_responded)
     total_tokens = (prompt_tokens + completion_tokens) or None
     model = next(
@@ -3474,6 +3545,49 @@ async def delete_org_alert_integration(org_id: str, provider: str) -> bool:
 # ── GitHub App integration + source mapping (Phase 4.3) ────────────────────────
 
 
+# How long an install nonce stays valid. Long enough for a human to click
+# through GitHub's install screen, short enough that a leaked URL goes stale.
+GITHUB_INSTALL_STATE_TTL_MINUTES = 30
+
+
+async def mint_github_install_state(org_id: str) -> str:
+    """A single-use, unguessable state for the install redirect."""
+    state = secrets.token_urlsafe(32)
+    if not _pool:
+        return state
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO github_install_states (state, org_id) VALUES ($1, $2)",
+            state,
+            org_id,
+        )
+        # Opportunistic cleanup; this table should never grow.
+        await conn.execute(
+            "DELETE FROM github_install_states "
+            "WHERE created_at < NOW() - ($1 || ' minutes')::interval",
+            str(GITHUB_INSTALL_STATE_TTL_MINUTES),
+        )
+    return state
+
+
+async def consume_github_install_state(state: str) -> str | None:
+    """The org that minted this state, or None if it is unknown, expired or
+    already used. Deleting in the same statement is what makes it single-use."""
+    if not _pool or not state:
+        return None
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            DELETE FROM github_install_states
+            WHERE state = $1
+              AND created_at > NOW() - ($2 || ' minutes')::interval
+            RETURNING org_id
+            """,
+            state,
+            str(GITHUB_INSTALL_STATE_TTL_MINUTES),
+        )
+
+
 async def upsert_org_github_installation(org_id: str, installation_id: int) -> None:
     """Called by the install-flow callback once GitHub redirects back with
     a real installation_id. repos/reviewers start empty — a separate config
@@ -5773,7 +5887,7 @@ async def list_api_keys(
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT k.id, k.org_id, k.active,
+            SELECT k.id, k.org_id, k.active, k.key_prefix, k.scopes,
                    k.rate_limit_rpm, k.created_at, o.name AS org_name
             FROM api_keys k
             LEFT JOIN organizations o ON o.id = k.org_id
@@ -5800,12 +5914,15 @@ async def create_api_key(
     org_id: str,
     org_name: Optional[str] = None,
     rate_limit_rpm: int = 600,
+    scopes: Optional[list] = None,
 ) -> dict:
     """Create an org-scoped API key. Not tied to a single agent_id — an org can
     have many agents, discovered dynamically on first ingest."""
-    import secrets as _sec
+    from dunetrace_schemas.keys import generate_api_key, hash_api_key, key_prefix
+    from dunetrace_schemas.scopes import normalise
 
-    key = "dt_" + _sec.token_urlsafe(32)
+    key = generate_api_key()
+    granted = list(normalise(scopes))
     name = org_name or org_id
     if not _pool:
         raise RuntimeError("DB pool not ready")
@@ -5818,13 +5935,16 @@ async def create_api_key(
             )
             row = await conn.fetchrow(
                 """
-                INSERT INTO api_keys (key, org_id, rate_limit_rpm)
-                VALUES ($1, $2, $3)
+                INSERT INTO api_keys
+                    (key, key_hash, key_prefix, org_id, rate_limit_rpm, scopes)
+                VALUES ($1, $1, $2, $3, $4, $5)
                 RETURNING id, created_at
                 """,
-                key,
+                hash_api_key(key),
+                key_prefix(key),
                 org_id,
                 rate_limit_rpm,
+                granted,
             )
     return {
         "id": row["id"],
@@ -5833,6 +5953,7 @@ async def create_api_key(
         "org_id": org_id,
         "org_name": name,
         "rate_limit_rpm": rate_limit_rpm,
+        "scopes": granted,
         "created_at": row["created_at"].isoformat(),
     }
 

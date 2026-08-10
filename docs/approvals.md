@@ -1,5 +1,13 @@
 # Human-in-the-loop approvals
 
+> **The decision endpoint needs a different credential than the agent holds.**
+> `POST /v1/approvals/{id}/decision` requires an API key with the `approve`
+> scope. Keys issued by `POST /v1/keys` are `ingest`-only by default, which is
+> what an SDK/agent needs — so the process being gated cannot grant its own
+> approval. Mint an operator key with `{"scopes": ["approve"]}` for whoever
+> actually decides, or use the Slack path, which verifies Slack's signature
+> rather than a Dunetrace key.
+
 Some tool calls are too consequential to run unattended — wiring money, deleting
 data, sending a customer email. An **approval policy** gates a specific tool: the
 agent blocks on that call until a human approves it (in Slack or the dashboard),

@@ -13,6 +13,10 @@ Supported instrumentation libraries:
 
 Span → event mapping:
   Root span (no parent)     → run.started + run.completed / run.errored
+                              (ONLY when the root is present in this batch —
+                              exporters batch by time, not by trace, so a long
+                              run arrives split across requests and only the
+                              batch carrying the root can open and close it)
   LLM spans                 → llm.called + llm.responded
   Tool spans                → tool.called + tool.responded
   Retrieval / vector spans  → retrieval.called + retrieval.responded
@@ -422,14 +426,26 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
     # Sort chronologically
     spans = sorted(trace["spans"], key=lambda s: int(s.get("startTimeUnixNano") or 0))
 
-    root = next((s for s in spans if _is_root(s)), spans[0] if spans else None)
-    if not root:
-        return events
+    # The ROOT span decides whether this batch closes a run.
+    #
+    # OTel exporters batch by size and time, never by trace — Python's
+    # BatchSpanProcessor defaults to a 5s schedule delay, the Collector's batch
+    # processor to 200ms — and a root span ends AFTER all its children. So any
+    # agent run longer than the batch delay arrives split across several export
+    # requests. Treating each request as a self-contained run (and falling back
+    # to spans[0] when no root was present) synthesised a completed run per
+    # request, so one real trace became several completed runs sharing a run_id.
+    #
+    # A batch with no root carries only the leaf events. The run is opened and
+    # closed by whichever batch actually holds the root, which is the one that
+    # knows when it started and how it ended.
+    root = next((sp for sp in spans if _is_root(sp)), None)
+    has_root = root is not None
 
-    root_ad = _attrs(root.get("attributes", []))
-    started_ts = _ns(root.get("startTimeUnixNano"))
-    ended_ts = _ns(root.get("endTimeUnixNano")) or time.time()
-    errored = root.get("status", {}).get("code") == 2  # STATUS_CODE_ERROR
+    root_ad = _attrs(root.get("attributes", [])) if has_root else {}
+    started_ts = _ns(root.get("startTimeUnixNano")) if has_root else 0.0
+    ended_ts = (_ns(root.get("endTimeUnixNano")) or time.time()) if has_root else 0.0
+    errored = root.get("status", {}).get("code") == 2 if has_root else False
 
     # Infer model from root span if present (some frameworks attach it there)
     root_model = root_ad.get("gen_ai.request.model") or root_ad.get("llm.request.model") or ""
@@ -449,18 +465,19 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
             "trace_id": trace_id,
         }
 
-    events.append(
-        _ev(
-            "run.started",
-            0,
-            started_ts,
-            {
-                "model": root_model,
-                "tools": [],
-                "source": "otlp",
-            },
+    if has_root:
+        events.append(
+            _ev(
+                "run.started",
+                0,
+                started_ts,
+                {
+                    "model": root_model,
+                    "tools": [],
+                    "source": "otlp",
+                },
+            )
         )
-    )
 
     step = 1
     for span in spans:
@@ -602,13 +619,14 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
 
         step += 1
 
-    events.append(
-        _ev(
-            "run.errored" if errored else "run.completed",
-            step,
-            ended_ts,
-            {"exit_reason": "error" if errored else "completed"},
+    if has_root:
+        events.append(
+            _ev(
+                "run.errored" if errored else "run.completed",
+                step,
+                ended_ts,
+                {"exit_reason": "error" if errored else "completed"},
+            )
         )
-    )
 
     return events

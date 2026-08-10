@@ -3195,13 +3195,37 @@ def run_detectors(
     active = detectors if detectors is not None else TIER1_DETECTORS
     signals = []
     for detector in active:
+        # context="policy" deliberately does NOT honour the cost downgrade.
+        # A trigger="signal" policy is a safety control — the product's promise
+        # that a tool loop is stopped before it burns the budget — and a safety
+        # control must not switch itself off because it was slow. Cost is shed
+        # by scope instead: run_context passes only the detectors the active
+        # signal policies actually reference. "runtime" keeps the old
+        # shed-on-cost behaviour for any non-enforcement hot path.
         if context == "runtime":
             tracker = _cost_trackers.get(detector.name)
             if tracker is not None and tracker.downgraded_at is not None:
                 continue
 
         t0 = time.perf_counter_ns()
-        signal = detector.on_run_completion(state)
+        try:
+            signal = detector.on_run_completion(state)
+        except Exception:
+            # One detector must not cost the run its other 28. Failure isolation
+            # was already applied at plugin *construction*
+            # (detector_svc/detectors.py::_build_plugin_detectors), which made
+            # this gap easy to miss: a registered plugin or pack detector that
+            # raises on an unusual RunState — an empty tool_calls list, a None
+            # field it didn't expect — used to abort the whole battery and
+            # record the run as clean. ERROR, not debug: a raising detector is a
+            # bug worth seeing, it just isn't worth losing detection over.
+            logger.error(
+                "Detector %s raised on run %s — skipping it for this run",
+                detector.name,
+                state.run_id,
+                exc_info=True,
+            )
+            continue
         elapsed_ns = time.perf_counter_ns() - t0
         _record_cost_and_maybe_warn(detector, elapsed_ns, state.run_id)
 

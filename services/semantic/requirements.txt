@@ -9,3 +9,8 @@ python-dotenv>=1.2.2,<2.0.0
 PyYAML==6.0.2
 deepeval==4.0.9
 anthropic>=0.40
+# Only imported when SEMANTIC_LLM_PROVIDER=mistral. Pinned to v2+: v2.0 moved
+# every module under mistralai.client, and evaluators/mistral_model.py imports
+# from there. Shipped in the image for the same reason anthropic is, so
+# switching provider is an env change rather than an image rebuild.
+mistralai>=2.0

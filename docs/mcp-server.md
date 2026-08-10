@@ -16,13 +16,26 @@ The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](
 
 All data is sourced from the Customer API over your existing Dunetrace deployment.
 
-**Most tools are read-only, but not all.** Nine tools write through to your
+**The server is read-only by default.** Nine tools write through to your
 deployment: `create_policy`, `toggle_policy`, `delete_policy`,
 `create_custom_detector`, `activate_custom_detector`, `pause_custom_detector`,
 `delete_custom_detector`, `resolve_issue`, and `trigger_explain` (which spends
-an LLM call). They're flagged **✎ writes** in the tool reference below. If you
-want a strictly read-only setup, issue the MCP server an API key scoped to
-reads — the server itself does not gate on tool category.
+an LLM call). They're flagged **✎ writes** in the tool reference below, and they
+are **not registered at all** unless you opt in:
+
+```bash
+DUNETRACE_MCP_READONLY=false   # register the nine write tools
+```
+
+Read-only is the default because an MCP server feeds a model untrusted agent
+output — signal evidence, tool arguments, captured LLM text — which is exactly
+the shape that turns a write tool into a confused deputy. `create_policy` and
+`toggle_policy` affect **live agent runs**: a `stop` policy terminates real runs
+as soon as the SDK next pulls policies.
+
+> Earlier versions of this page advised issuing the MCP server "an API key
+> scoped to reads". No read-scoped key exists in Dunetrace, so that advice
+> mitigated nothing. Withholding the tools is the mechanism that actually works.
 
 ---
 

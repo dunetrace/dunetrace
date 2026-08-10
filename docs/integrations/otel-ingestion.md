@@ -133,3 +133,28 @@ it.
 
 **429.** You are over the per-org span rate. Honor the `Retry-After` header, or
 ask to raise the limit.
+
+---
+
+## How a run's boundaries are decided
+
+A trace becomes a Dunetrace run, and the **root span** is what opens and closes
+it. That matters because OTel exporters batch by size and time, never by trace —
+Python's `BatchSpanProcessor` defaults to a 5s schedule delay, the Collector's
+`batch` processor to 200ms — and a root span ends *after* all of its children.
+Any agent run longer than the batch delay therefore arrives split across several
+export requests.
+
+So: a request that contains the root span emits `run.started` and
+`run.completed`/`run.errored`. A request carrying only child spans emits just
+the LLM/tool/retrieval events. All of them share one `run_id`, derived from the
+trace id, and the run becomes visible to the detector once the batch holding the
+root arrives.
+
+Earlier versions treated every export request as a self-contained run, so one
+real trace became several completed runs sharing a `run_id`.
+
+**Known limitation:** `step_index` is assigned per batch, so a split trace's step
+numbers are not globally ordered. Events order correctly by timestamp; detectors
+that reason about step *adjacency* may be approximate for OTLP-ingested runs
+longer than the exporter's batch delay.

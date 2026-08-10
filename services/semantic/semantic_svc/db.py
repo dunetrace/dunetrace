@@ -247,6 +247,18 @@ CREATE TABLE IF NOT EXISTS org_conversation_evaluation_usage (
 
 
 async def ensure_semantic_schema() -> None:
+    """Bring the SHARED schema up to date first, then this service's own tables.
+
+    Migrations own every definition more than one service touches, so this runs
+    before the local DDL below — booting semantic against an empty database used
+    to crash on a table another service happened to create first.
+    """
+    from dunetrace_schemas.migrations import apply_migrations
+
+    if _pool:
+        async with _pool.acquire() as _c:
+            await apply_migrations(_c)
+
     if not _pool:
         return
     async with _pool.acquire() as conn:

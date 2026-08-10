@@ -1217,14 +1217,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <div><div class="cb-val" id="analytics-cost-saved" style="color:#e67e22">—</div></div>
       <div style="flex:1">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
-          <span class="cb-label" style="margin:0">Est. avoidable cost this week<span class="tip" tabindex="0">i<span class="tip-box">The recoverable slice of this week's failed-run spend: tokens above each agent's healthy baseline (P75 of its clean runs). Not "saved" — these runs already ran; this is what you'd claw back by fixing them.<span class="tip-f">= Σ excess tokens (7d) × rate</span></span></span></span>
-          <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4)">at $</span>
-          <input id="cost-rate-input" type="number" min="0.001" max="1000" step="0.001" value="0.010"
-            style="width:60px;background:var(--s3);border:1px solid var(--wire2);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:2px 5px;border-radius:3px;outline:none"
-            oninput="updateCostSaved()"
-            onfocus="this.style.borderColor='var(--green)'"
-            onblur="this.style.borderColor='var(--wire2)'">
-          <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4)">/1k tokens</span>
+          <span class="cb-label" style="margin:0">Est. avoidable cost this week<span class="tip" tabindex="0">i<span class="tip-box">The recoverable slice of this week's failed-run spend: tokens above each agent's healthy baseline (P75 of its clean runs). Not "saved" — these runs already ran; this is what you'd claw back by fixing them.<span class="tip-f">= Σ excess_cost_usd (7d), priced per model server-side</span></span></span></span>
         </div>
         <div class="cb-sub" id="analytics-cost-sub" style="line-height:1.6">—</div>
       </div>
@@ -1343,56 +1336,16 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <div id="page-config" class="page">
   <div class="sec-head"><span class="sec-title">Detector configuration</span></div>
   <div class="table-card" style="padding:1.5rem">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem">
-      <div>
-        <div class="chart-title mono" style="margin-bottom:1rem">TOOL_LOOP</div>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
-          <span style="font-size:12px;color:var(--chalk3);width:120px">Threshold</span>
-          <input id="cfg-toolloop-thresh" type="range" min="2" max="10" value="3" style="flex:1" oninput="this.nextElementSibling.textContent=this.value;updateConfigPreview()">
-          <span class="mono" style="font-size:12px;color:var(--chalk2);width:20px">3</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
-          <span style="font-size:12px;color:var(--chalk3);width:120px">Window (steps)</span>
-          <input id="cfg-toolloop-window" type="range" min="3" max="15" value="5" style="flex:1" oninput="this.nextElementSibling.textContent=this.value;updateConfigPreview()">
-          <span class="mono" style="font-size:12px;color:var(--chalk2);width:20px">5</span>
-        </div>
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3);line-height:1.9">
+      Detector thresholds are set in <code style="color:var(--chalk2)">detectors.yml</code> and loaded
+      by the detector worker at startup — restart it to apply a change.
+      <div style="color:var(--chalk4);margin-top:.75rem">
+        This page previously showed sliders for 3 of the 29 detectors. They persisted nowhere and the
+        preview beneath them never read their values, so it implied you were tuning detection when you
+        were not. Removed rather than left decorative. Per-agent overrides
+        (<code>confidence_floor</code>, <code>silenced</code>, <code>snoozed_until</code>) exist in
+        <code>agent_detector_overrides</code> but have no API route yet.
       </div>
-      <div>
-        <div class="chart-title mono" style="margin-bottom:1rem">CONTEXT_BLOAT</div>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
-          <span style="font-size:12px;color:var(--chalk3);width:120px">Growth factor</span>
-          <input id="cfg-bloat-factor" type="range" min="1" max="10" value="3" style="flex:1" oninput="this.nextElementSibling.textContent=this.value+'×';updateConfigPreview()">
-          <span class="mono" style="font-size:12px;color:var(--chalk2);width:24px">3×</span>
-        </div>
-      </div>
-      <div>
-        <div class="chart-title mono" style="margin-bottom:1rem">SLOW_STEP</div>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
-          <span style="font-size:12px;color:var(--chalk3);width:120px">Tool latency</span>
-          <input id="cfg-slow-tool" type="range" min="5000" max="60000" value="15000" step="1000" style="flex:1" oninput="this.nextElementSibling.textContent=Math.round(this.value/1000)+'s';updateConfigPreview()">
-          <span class="mono" style="font-size:12px;color:var(--chalk2);width:28px">15s</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:.75rem">
-          <span style="font-size:12px;color:var(--chalk3);width:120px">LLM latency</span>
-          <input id="cfg-slow-llm" type="range" min="10000" max="120000" value="30000" step="1000" style="flex:1" oninput="this.nextElementSibling.textContent=Math.round(this.value/1000)+'s';updateConfigPreview()">
-          <span class="mono" style="font-size:12px;color:var(--chalk2);width:28px">30s</span>
-        </div>
-      </div>
-      <div>
-        <div class="chart-title mono" style="margin-bottom:1rem">ALERT THRESHOLD</div>
-        <div style="display:flex;flex-direction:column;gap:8px">
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev" value="LOW"      onchange="updateConfigPreview()" style="accent-color:var(--orange)"> LOW — all signals</label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev" value="MEDIUM"   onchange="updateConfigPreview()"> MEDIUM</label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk2);cursor:pointer"><input type="radio" name="minsev" value="HIGH"     onchange="updateConfigPreview()" checked style="accent-color:var(--orange)"> HIGH (default)</label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chalk3);cursor:pointer"><input type="radio" name="minsev" value="CRITICAL" onchange="updateConfigPreview()"> CRITICAL only</label>
-        </div>
-      </div>
-    </div>
-
-    <!-- Live preview -->
-    <div id="config-preview-wrap" style="margin-top:1.5rem;padding-top:1.25rem;border-top:1px solid var(--wire)">
-      <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--orange);letter-spacing:3px;text-transform:uppercase;margin-bottom:.75rem">Review</div>
-      <div id="config-preview" style="font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.8;color:var(--chalk4)">loading…</div>
     </div>
   </div>
 
@@ -1714,8 +1667,8 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <table class="run-table">
       <thead><tr>
         <th>Key</th>
-        <th>Agent</th>
-        <th>Company</th>
+        <th>Organization</th>
+        <th>Scopes</th>
         <th>Rate limit</th>
         <th>Created</th>
         <th>Status</th>
@@ -1740,24 +1693,35 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <!-- Create form -->
   <div id="key-form-wrap" style="display:none;background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.5rem;margin-bottom:1.5rem">
     <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--orange);letter-spacing:2px;text-transform:uppercase;margin-bottom:1.25rem">New API key</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem">
-      <div>
-        <div class="cfg-label">Agent ID</div>
-        <input id="kf-agent" type="text" class="cfg-input" placeholder="my-agent" style="width:100%">
-      </div>
-      <div>
-        <div class="cfg-label">Customer ID (slug)</div>
-        <input id="kf-customer" type="text" class="cfg-input" placeholder="acme-corp" style="width:100%">
+    <div style="margin-bottom:1rem">
+      <div class="cfg-label">Organization display name (optional)</div>
+      <input id="kf-org-name" type="text" class="cfg-input" placeholder="Acme Corporation" style="width:100%">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);margin-top:.4rem">
+        Keys are org-scoped. Agents are discovered on first ingest — there is no per-agent key.
       </div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem">
-      <div>
-        <div class="cfg-label">Company display name (optional)</div>
-        <input id="kf-company" type="text" class="cfg-input" placeholder="Acme Corporation" style="width:100%">
+    <div style="margin-bottom:1.5rem">
+      <div class="cfg-label">Scopes</div>
+      <div style="display:flex;flex-wrap:wrap;gap:1rem;margin-top:.5rem">
+        <label style="display:flex;align-items:center;gap:.4rem;font-size:12px;color:var(--chalk2)">
+          <input type="checkbox" id="kf-scope-ingest" checked disabled>
+          <code style="font-size:11px">ingest</code>
+          <span style="color:var(--chalk4);font-size:11px">— submit events, read your own data (always granted)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:.4rem;font-size:12px;color:var(--chalk2)">
+          <input type="checkbox" id="kf-scope-approve">
+          <code style="font-size:11px">approve</code>
+          <span style="color:var(--chalk4);font-size:11px">— decide pending approvals</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:.4rem;font-size:12px;color:var(--chalk2)">
+          <input type="checkbox" id="kf-scope-admin">
+          <code style="font-size:11px">admin</code>
+          <span style="color:var(--chalk4);font-size:11px">— manage keys, policies, integrations</span>
+        </label>
       </div>
-      <div>
-        <div class="cfg-label">Rate limit (requests / minute)</div>
-        <input id="kf-rpm" type="number" class="cfg-input" value="600" min="1" max="100000" style="width:100%">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);margin-top:.6rem">
+        Give an agent <code style="font-size:10px">ingest</code> only. A key that can approve its own
+        requests defeats the point of human-in-the-loop approval.
       </div>
     </div>
     <div style="display:flex;gap:.75rem;align-items:center">
@@ -2258,7 +2222,6 @@ async function loadAll() {
     updateSidebarCounts();
     updateTrendDeltas();
     populateCompareDropdowns();
-    updateConfigPreview();
     updateCostSaved();
     // If token usage page is currently active, refresh token stats automatically
     if (document.getElementById('page-tokens')?.classList.contains('active')) {
@@ -2593,14 +2556,18 @@ function renderAnalytics() {
 // baseline over the last 7d. Sums the backend's excess_tokens so it can't drift from
 // the Token Usage page. Not "saved" — post-hoc detection doesn't prevent spend.
 function updateCostSaved() {
-  const rateInput = document.getElementById('cost-rate-input');
-  const costPer1k = rateInput ? Math.max(0, parseFloat(rateInput.value) || 0) : COST_PER_1M_TK / 1000;
-
-  let excessTokens = 0;
+  // Reads the API's excess_cost_usd, which explainer_svc/cost.py prices PER
+  // MODEL. This used to multiply excess_tokens by a hand-typed flat rate
+  // (COST_PER_1M_TK = $10/1M), which was ~42x high for gpt-4o-mini and ~3x low
+  // for Opus — and disagreed with the Tokens page, which already read the API's
+  // figure for the identical quantity.
+  let excessTokens = 0, dollars = 0;
   Object.values(_tokenStats).forEach(ts => {
-    excessTokens += ts.windows?.['7d']?.excess_tokens || 0;
+    const w = ts.windows?.['7d'];
+    if (!w) return;
+    excessTokens += w.excess_tokens || 0;
+    dollars      += w.excess_cost_usd || 0;
   });
-  const dollars = excessTokens / 1000 * costPer1k;
 
   const savedEl = document.getElementById('analytics-cost-saved');
   const subEl   = document.getElementById('analytics-cost-sub');
@@ -2626,9 +2593,7 @@ function updateCostSaved() {
   savedEl.textContent = dollarStr;
   subEl.innerHTML =
     `<span style="color:var(--chalk2)">${fmtTok(excessTokens)} avoidable</span>` +
-    ` <span style="color:var(--chalk4)">×</span> ` +
-    `<span style="color:var(--chalk2)">$${costPer1k.toFixed(3)}/1k</span>` +
-    ` <span style="color:var(--chalk4)">· spend above healthy baseline</span>`;
+    ` <span style="color:var(--chalk4)">— priced per model from your agents' own usage</span>`;
 }
 
 // ── Heatmap ───────────────────────────────────────────────────────────────────
@@ -2714,12 +2679,15 @@ async function showDetail(runId, agentId) {
   document.getElementById('detail-event-rows').innerHTML   = '<div class="loading">loading…</div>';
 
   try {
-    const [runData, sigsData] = await Promise.all([
-      apiFetch('/v1/runs/' + encodeURIComponent(runId)),
-      apiFetch('/v1/agents/' + encodeURIComponent(agentId) + '/signals?limit=500'),
-    ]);
+    // /v1/runs/{id} already returns this run's own signals. This used to ALSO
+    // fetch the agent's 500 most recent signals and client-filter by run_id —
+    // so on an agent with more than 500 signals an older run's signals fell off
+    // that page and the header rendered "Clean run — no signals fired" for a
+    // run that had actually failed. A false clean verdict is the worst error an
+    // observability tool can make, and the correct data was already in hand.
+    const runData = await apiFetch('/v1/runs/' + encodeURIComponent(runId));
     const events  = runData.events || [];
-    const signals = (sigsData.signals || []).filter(s => s.run_id === runId);
+    const signals = runData.signals || [];
     renderRunDetail(runData, events, signals);
   } catch(e) {
     document.getElementById('detail-run-id').textContent = 'Error loading run: ' + e.message;
@@ -3043,15 +3011,45 @@ async function explainSignal() {
       result.innerHTML = `<span style="color:var(--red)">${esc(data.detail || 'Analysis failed.')}</span>`;
     } else {
       const rootCause  = data.root_cause  || '';
-      const fixContent = data.fix_content || '';
-      const fixPatch   = data.fix_patch   || '';
-      const fixType    = data.fix_type    || 'prompt_addition';
-      const source     = data.source      || 'native';
-
-      const sourceNote = source === 'signal_only'
+      const fixCategory = data.fix_category || 'customer_code';
+      const sourceNote = (data.source || 'native') === 'signal_only'
         ? `<div style="font-size:11px;color:var(--chalk4);margin-top:4px;font-style:italic">No detailed event trace found — analysis based on signal evidence only.</div>`
         : '';
 
+      // dunetrace_native: the fix is a runtime guardrail Dunetrace can enforce
+      // itself, so the API returns a ready-to-POST policy and NO fix_content.
+      // This branch did not exist, so for the four highest-volume detectors
+      // (TOOL_LOOP, RETRY_STORM, CASCADING_TOOL_FAILURE, STEP_COUNT_INFLATION)
+      // the panel rendered a paragraph of prose and nothing actionable.
+      if (fixCategory === 'dunetrace_native' && data.suggested_policy) {
+        _explainSuggestedPolicy = data.suggested_policy;
+        const p = data.suggested_policy;
+        const cond = p.condition || {};
+        const act  = p.action || {};
+        result.innerHTML = esc(rootCause) + `
+          <div style="margin-top:.75rem">
+            <div style="font-size:10px;color:var(--green);letter-spacing:.08em;font-family:'IBM Plex Mono',monospace;margin-bottom:6px">DUNETRACE CAN ENFORCE THIS — NO CODE CHANGE NEEDED</div>
+            <pre style="background:#0a1a0a;border:1px solid rgba(46,184,114,0.25);border-radius:4px;padding:10px 14px;font-size:12px;line-height:1.7;overflow-x:auto;white-space:pre-wrap"><span style="color:#a8f0c0">${esc(p.name || 'suggested policy')}</span>
+<span style="color:var(--chalk3)">when </span><span style="color:#a8f0c0">${esc(cond.trigger || '?')} ${esc(cond.operator || '')} ${esc(String(cond.value ?? ''))}</span>
+<span style="color:var(--chalk3)">then </span><span style="color:#a8f0c0">${esc(act.type || 'log')}</span>
+<span style="color:var(--chalk3)">for  </span><span style="color:#a8f0c0">${esc(p.agent_id || '*')}</span></pre>
+            <div style="display:flex;gap:.6rem;align-items:center;margin-top:.6rem">
+              <button class="btn-primary" style="padding:4px 12px;font-size:11px" onclick="createSuggestedPolicy()">Create this policy</button>
+              <span id="suggested-policy-status" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4)"></span>
+            </div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);margin-top:.5rem">
+              Enforced in-process by the SDK on the next run. A stop policy terminates live runs.
+            </div>
+          </div>` + sourceNote;
+        _explainLastData = { root_cause: rootCause, fix_category: fixCategory };
+        const prBtnN = document.getElementById('open-pr-btn');
+        if (prBtnN) prBtnN.style.display = 'none';
+        return;
+      }
+
+      const fixContent = data.fix_content || '';
+      const fixPatch   = data.fix_patch   || '';
+      const fixType    = data.fix_type    || 'prompt_addition';
       const fixLabel = fixType === 'code_change'    ? 'CODE CHANGE NEEDED'
                      : fixType === 'no_auto_apply'  ? 'SECURITY FIX (review manually)'
                      :                                'SUGGESTED FIX';
@@ -3106,7 +3104,19 @@ async function explainSignal() {
           </div>`;
       }
 
-      result.innerHTML = esc(rootCause) + sourceNote + fixHtml + patchHtml;
+      // Copy-to-clipboard for the customer_code branch. Without it the fixes
+      // table only ever received GitHub-PR rows, so the agent Fixes tab and
+      // every fix-status verdict ("did this fix reduce recurrence?") were
+      // starved of the clipboard path entirely — which is the ONLY path for
+      // prompt_addition fixes, since those have no automated apply mechanism.
+      const copyable = fixPatch || fixContent;
+      const copyHtml = copyable ? `
+        <div style="display:flex;gap:.6rem;align-items:center;margin-top:.6rem">
+          <button class="btn-secondary" style="padding:4px 12px;font-size:11px" onclick="copyFixToClipboard()">Copy fix</button>
+          <span id="copy-fix-status" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4)"></span>
+        </div>` : '';
+
+      result.innerHTML = esc(rootCause) + sourceNote + fixHtml + patchHtml + copyHtml;
 
       // Store for PR creation and show "Open PR" button for code-change types
       _explainLastData = { root_cause: rootCause, fix_content: fixContent, fix_patch: fixPatch, fix_type: fixType };
@@ -3123,6 +3133,61 @@ async function explainSignal() {
     btn.disabled = false;
     status.style.display = 'none';
     result.style.display = '';
+  }
+}
+
+// The suggested_policy from a dunetrace_native explain, held between rendering
+// the preview and the user confirming it.
+let _explainSuggestedPolicy = null;
+
+// CLAUDE.md documents this flow — "the dashboard POSTs it to the existing
+// POST /v1/policies unchanged, after a confirmation dialog" — and it did not
+// exist. The body shape is exactly routers/policies.py's PolicyCreate, which is
+// what build_suggested_policy already returns, so it is posted unchanged.
+async function createSuggestedPolicy() {
+  if (!_explainSuggestedPolicy) return;
+  const statusEl = document.getElementById('suggested-policy-status');
+  const p = _explainSuggestedPolicy;
+  const act = (p.action && p.action.type) || 'log';
+  const confirmMsg = act === 'stop'
+    ? `Create "${p.name}"?\n\nThis is a STOP policy — it will terminate matching runs of ${p.agent_id || '*'} as soon as the SDK next pulls policies.`
+    : `Create "${p.name}" for ${p.agent_id || '*'}?`;
+  if (!window.confirm(confirmMsg)) return;
+  if (statusEl) statusEl.textContent = 'creating…';
+  try {
+    await apiPost('/v1/policies', p);
+    if (statusEl) {
+      statusEl.style.color = 'var(--green)';
+      statusEl.textContent = 'Policy created — active on the next run.';
+    }
+    if (typeof loadPolicies === 'function') loadPolicies();
+  } catch (e) {
+    if (statusEl) {
+      statusEl.style.color = 'var(--red)';
+      statusEl.textContent = e.message || 'Could not create the policy.';
+    }
+  }
+}
+
+// Copies the fix and records that it happened, so the clipboard path shows up
+// in the fixes table alongside GitHub PRs. Recording is best-effort: failing to
+// log the copy must not make the copy itself look like it failed.
+async function copyFixToClipboard() {
+  if (!_explainLastData) return;
+  const statusEl = document.getElementById('copy-fix-status');
+  const text = _explainLastData.fix_patch || _explainLastData.fix_content || '';
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = 'Copied.'; }
+  } catch (e) {
+    if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = 'Could not copy — select the text above instead.'; }
+    return;
+  }
+  try {
+    await apiPost(`/v1/signals/${_explainSignalId}/record-copy`, { fix_content: text });
+  } catch (e) {
+    // Deliberately silent: the user's copy succeeded.
   }
 }
 
@@ -3547,9 +3612,13 @@ const FT_DESCRIPTIONS = {
 };
 
 function ftLabel(ft) {
-  const label = ft.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+  // esc() on the label: `ft` is NOT always one of the 29 built-in enum values.
+  // Custom detectors store their failure_type as free TEXT chosen by whoever
+  // wrote the detector, so this reached innerHTML unescaped — the one systemic
+  // gap in an otherwise disciplined 490-site esc() record.
+  const label = esc(String(ft || '').replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()));
   const desc = FT_DESCRIPTIONS[ft] || '';
-  return desc ? `<span title="${desc.replace(/"/g,'&quot;')}">${label}</span>` : label;
+  return desc ? `<span title="${esc(desc)}">${label}</span>` : label;
 }
 
 function shortId(id) {
@@ -3848,9 +3917,20 @@ function renderAgents() {
     return 0;
   });
   grid.innerHTML = sorted.map(a => {
-    const totalRuns = a.run_count || a._runs?.length || 0;
+    // Numerator and denominator from the SAME sample. This used to divide the
+    // signal-bearing runs of a 200-run page by the agent's ALL-TIME run_count,
+    // which understated fail rate without bound as an agent got busier — a
+    // 20,000-run agent failing 40% of the time rendered 0.4%, wrong precisely
+    // for the agents that matter most. It also disagreed with the "Fail rate"
+    // sort button, which already used this (correct) denominator, so the
+    // visible order contradicted the visible numbers.
+    const ratedRuns = a._runs?.length || 0;
     const failRuns  = a._runs ? a._runs.filter(r => r.has_signals).length : 0;
-    const failRate  = totalRuns ? Math.round(failRuns / totalRuns * 100) : 0;
+    const failRate  = ratedRuns ? Math.round(failRuns / ratedRuns * 100) : 0;
+    const totalRuns = a.run_count || ratedRuns;
+    // Say so when the rate is measured over a sample rather than all history.
+    const rateScope = (a.run_count && a.run_count > ratedRuns)
+      ? `last ${ratedRuns} runs` : 'all runs';
     const dominant  = Object.entries(a.failure_types || {}).sort((x, y) => y[1] - x[1])[0];
     const lastSeen  = a.last_seen ? timeAgo(a.last_seen) : '—';
     const color     = failRate >= 50 ? 'var(--red)' : failRate >= 25 ? 'var(--amber)' : failRate >= 10 ? 'var(--orange)' : 'var(--green)';
@@ -4105,29 +4185,27 @@ function _cmpDiff(runA, sigsA, runB, sigsB) {
 }
 
 // ── Token helpers ─────────────────────────────────────────────────────────────
-const TK_PER_STEP    = 250;    // fallback estimate when no real token data is recorded
-const COST_PER_1M_TK = 10.00;  // $ per 1M tokens (~$0.010/1k, blended mid-tier model)
-function tokEst(stepCount) { return (stepCount || 0) * TK_PER_STEP; }
-// Use real total_tokens from the API when available; fall back to step estimate.
-function realTok(r) { return (r && r.total_tokens) ? r.total_tokens : tokEst(r ? r.step_count : 0); }
+// Real token counts only. This used to fall back to `step_count * 250` for any
+// run with no LLM data, and that fabricated number was then summed into token
+// totals, waste figures and drift baselines on four pages — indistinguishable
+// from measured data once aggregated. A run we have no token data for now
+// contributes 0 rather than a plausible-looking invention.
+function realTok(r) { return (r && r.total_tokens) ? r.total_tokens : 0; }
 function fmtTok(n) {
   if (!n) return '0 tokens';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M tokens';
   if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k tokens';
   return parseFloat(n.toFixed(2)) + ' tokens';
 }
-function fmtCost(tokens) {
-  const dollars = tokens / 1_000_000 * COST_PER_1M_TK;
-  if (dollars >= 1000) return '$' + (dollars / 1000).toFixed(1) + 'k';
-  if (dollars >= 1)    return '$' + dollars.toFixed(2);
-  if (dollars >= 0.01) return '$' + dollars.toFixed(3);
-  return '<$0.01';
-}
 function fmtUsd(usd) {
   if (!usd || usd <= 0) return '—';
-  if (usd < 0.01) return '<$0.01';
   if (usd >= 1000) return '$' + (usd / 1000).toFixed(1) + 'k';
-  return '$' + usd.toFixed(2);
+  if (usd >= 1)    return '$' + usd.toFixed(2);
+  // Sub-dollar amounts keep three decimals rather than collapsing to "<$0.01":
+  // a per-call TTS cost or a single cheap LLM call genuinely lives here, and
+  // rounding it away made a real number look like zero.
+  if (usd >= 0.001) return '$' + usd.toFixed(3);
+  return '<$0.001';
 }
 
 // Returns estimated wasted tokens for a set of run_ids (runs that had signals)
@@ -4235,9 +4313,21 @@ function renderDriftPanel() {
 function renderPostureGauge() {
   const now    = Date.now() / 1000;
   const cut24  = now - 86400;
-  const daily  = _allSigs.filter(s => s.detected_at >= cut24).length;
+  const recent = _allSigs.filter(s => s.detected_at >= cut24);
+  const daily  = recent.length;
   const avgConf = _allSigs.length ? _allSigs.reduce((a, s) => a + s.confidence, 0) / _allSigs.length : 0;
-  const norm   = Math.min(1, Math.max(0, avgConf));
+
+  // The needle used to BE avgConf, so a fleet with one low-confidence signal
+  // and a fleet with two hundred CRITICALs pointed to the same place — volume
+  // and severity never moved it, which is precisely what a "posture" reading
+  // is supposed to convey. It now combines how much is firing in the last 24h
+  // with how bad it is, and confidence stays a separate row beneath.
+  const SEV_WEIGHT = { CRITICAL: 1.0, HIGH: 0.7, MEDIUM: 0.4, LOW: 0.15 };
+  const weighted = recent.reduce((a, s) => a + (SEV_WEIGHT[s.severity] ?? 0.4), 0);
+  // 20 severity-weighted signals in 24h reads as full scale. Saturating rather
+  // than clipping keeps a busy-but-not-critical fleet distinguishable from a
+  // burning one instead of pinning both to solid red.
+  const norm   = Math.min(1, weighted / 20);
 
   const dailyEl = document.getElementById('posture-daily-sigs');
   const confEl  = document.getElementById('posture-avg-conf');
@@ -4250,7 +4340,11 @@ function renderPostureGauge() {
     confEl.textContent = avgConf.toFixed(2);
     confEl.style.color = norm >= 0.75 ? 'var(--red)' : norm >= 0.5 ? 'var(--amber)' : 'var(--chalk2)';
   }
-  if (fpEl) { fpEl.textContent = '0%'; fpEl.style.color = 'var(--green)'; }
+  // Was hardcoded to a green '0%'. A fabricated number sitting beside real ones
+  // poisons trust in the real ones, and signal feedback IS stored server-side
+  // (POST /v1/signals/{id}/feedback) — so this shows "—" until that is wired
+  // rather than inventing a reassuring value.
+  if (fpEl) { fpEl.textContent = '—'; fpEl.style.color = 'var(--chalk4)'; fpEl.title = 'Not yet wired to signal feedback'; }
 
   // SVG gauge — half-circle arc: M 15 70 A 55 55 0 0 1 125 70
   // Arc total length ≈ π × 55 ≈ 172.8
@@ -4325,7 +4419,12 @@ function renderAgentComparison() {
     const runs24  = (a._runs  || []).filter(r => r.started_at >= cut24);
     const runs7d  = (a._runs  || []).filter(r => r.started_at >= cut7d);
     const sigs24  = (a._signals || []).filter(s => s.detected_at >= cut24);
-    const sigs7d  = a._signals || [];
+    // Filtered to the 7-day window, like its denominator. This used to be the
+    // unfiltered 500 most recent ALL-TIME signals while runs7d WAS filtered, so
+    // the baseline was always inflated and drift always pushed negative —
+    // stable agents rendered green "improving" at roughly -70%, and the panel
+    // sorts by this value, so a genuinely regressing agent wasn't surfaced.
+    const sigs7d  = (a._signals || []).filter(s => s.detected_at >= cut7d);
 
     const rate24  = runs24.length > 0 ? sigs24.length / runs24.length : null;
     const rate7d  = runs7d.length  > 0 ? sigs7d.length  / runs7d.length  : null;
@@ -4365,78 +4464,7 @@ function renderAgentComparison() {
 }
 
 // ── Config preview ────────────────────────────────────────────────────────────
-function updateConfigPreview() {
-  const el = document.getElementById('config-preview');
-  if (!el) return;
-
-  const SEV_ORDER = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
-  const SEV_COLOR = { LOW: 'var(--green)', MEDIUM: 'var(--amber)', HIGH: 'var(--red)', CRITICAL: 'var(--purple)' };
-
-  // Read alert threshold
-  const checkedRadio = document.querySelector('input[name="minsev"]:checked');
-  const minSevRaw = checkedRadio?.value || 'HIGH';
-  const ALLOWED_SEVERITIES = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
-  const minSev = ALLOWED_SEVERITIES.has(minSevRaw) ? minSevRaw : 'HIGH';
-  const minOrd  = SEV_ORDER[minSev] ?? 2;
-  const sevColor = SEV_COLOR[minSev] || 'var(--red)';
-
-  // Read slider values
-  const toolLoopThresh  = parseInt(document.getElementById('cfg-toolloop-thresh')?.value  || '3',  10);
-  const toolLoopWindow  = parseInt(document.getElementById('cfg-toolloop-window')?.value  || '5',  10);
-  const bloatFactor     = parseInt(document.getElementById('cfg-bloat-factor')?.value     || '3',  10);
-  const slowToolMs      = parseInt(document.getElementById('cfg-slow-tool')?.value        || '15000', 10);
-  const slowLlmMs       = parseInt(document.getElementById('cfg-slow-llm')?.value         || '30000', 10);
-
-  const totalRuns = _allRuns.length;
-  if (!totalRuns) {
-    el.innerHTML = '<span style="color:var(--chalk4)">No run data yet — load some runs first.</span>';
-    return;
-  }
-
-  // Count runs flagged at minSev or above using existing signals
-  const flaggedRunIds = new Set(
-    _allSigs
-      .filter(s => (SEV_ORDER[s.severity] ?? 0) >= minOrd)
-      .map(s => s.run_id)
-  );
-  const flagged = flaggedRunIds.size;
-  const pct     = Math.round(flagged / totalRuns * 100);
-
-  // Per-severity breakdown above threshold
-  const breakdown = ['CRITICAL','HIGH','MEDIUM','LOW']
-    .filter(s => SEV_ORDER[s] >= minOrd)
-    .map(s => {
-      const n = new Set(_allSigs.filter(x => x.severity === s).map(x => x.run_id)).size;
-      return n > 0 ? `<span style="color:${SEV_COLOR[s]}">${n} ${s}</span>` : null;
-    })
-    .filter(Boolean)
-    .join(' · ');
-
-  // Slider deviation notes
-  const notes = [];
-  if (toolLoopThresh !== 3)
-    notes.push(`TOOL_LOOP threshold ${toolLoopThresh < 3 ? 'lowered to ' + toolLoopThresh + ' (catches loops sooner)' : 'raised to ' + toolLoopThresh + ' (only catches persistent loops)'}`);
-  if (toolLoopWindow !== 5)
-    notes.push(`TOOL_LOOP window ${toolLoopWindow < 5 ? 'tightened to ' + toolLoopWindow + ' steps' : 'widened to ' + toolLoopWindow + ' steps'}`);
-  if (bloatFactor !== 3)
-    notes.push(`CONTEXT_BLOAT growth factor ${bloatFactor < 3 ? 'lowered to ' + bloatFactor + '× (more sensitive)' : 'raised to ' + bloatFactor + '× (less sensitive)'}`);
-  if (slowToolMs !== 15000)
-    notes.push(`SLOW_STEP tool trigger ${Math.round(slowToolMs/1000)}s (was 15s)`);
-  if (slowLlmMs !== 30000)
-    notes.push(`SLOW_STEP LLM trigger ${Math.round(slowLlmMs/1000)}s (was 30s)`);
-
-  const noteHtml = notes.length
-    ? `<div style="margin-top:.5rem;color:var(--amber)">⚠ pending detectors.yml change${notes.length > 1 ? 's' : ''}: ${notes.join(' · ')}</div>`
-    : '';
-
-  el.innerHTML =
-    `With current config, <span style="color:${sevColor};font-weight:600">${flagged} of ${totalRuns} past run${totalRuns !== 1 ? 's' : ''}</span> ` +
-    `would be flagged <span style="color:${sevColor};font-weight:600">${minSev}${minSev !== 'CRITICAL' ? ' or above' : ''}</span> ` +
-    `<span style="color:var(--chalk4)">(${pct}% of runs)</span>` +
-    (breakdown ? `<span style="color:var(--chalk4)"> — ${breakdown}</span>` : '') +
-    `.` +
-    noteHtml;
-}
+// updateConfigPreview() removed with the decorative slider panel it drove.
 
 // ── Clock ─────────────────────────────────────────────────────────────────────
 function tick() {
@@ -4796,12 +4824,11 @@ function setCallStatusFilter(v) { _callStatusFilter = v; loadCalls(); }
 function setCallCostFilter(v)   { _callCostFilter = v; loadCalls(); }
 function setCallRangeFilter(v)  { _callRangeDays = v; loadCalls(); }
 
-function fmtUsdCall(v) {
-  if (!v) return '$0';
-  if (v < 0.01) return '<$0.01';
-  if (v < 1)    return '$' + v.toFixed(3);
-  return '$' + v.toFixed(2);
-}
+// fmtUsdCall was a second money formatter that disagreed with fmtUsd on
+// adjacent screens — $0 vs —, and $0.003 vs <$0.01 for the same value. One
+// formatter now, with the sub-cent precision the voice-call pages need, since
+// per-call TTS costs genuinely live in the third decimal.
+const fmtUsdCall = fmtUsd;
 
 function populateCallsAgentDropdown() {
   const sel = document.getElementById('calls-agent');
@@ -5139,10 +5166,19 @@ function renderKeys() {
     const revokeBtn = k.active
       ? `<button class="act-btn act-danger" style="padding:3px 10px;font-size:10px" onclick="revokeKey(${k.id})">Revoke</button>`
       : '';
+    // Only the prefix is ever stored in the clear — the secret is hashed, so
+    // this is the only thing distinguishing two keys after creation.
+    const prefix = k.key_prefix ? esc(k.key_prefix) + '…' : '—';
+    const org = esc(k.org_name || k.org_id || '—');
+    // A key that can approve or administer is worth seeing at a glance.
+    const scopes = (k.scopes && k.scopes.length ? k.scopes : ['ingest']).map(sc => {
+      const colour = sc === 'admin' ? 'var(--red)' : sc === 'approve' ? 'var(--orange)' : 'var(--chalk3)';
+      return `<code style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:${colour};margin-right:.35rem">${esc(sc)}</code>`;
+    }).join('');
     return `<tr>
-      <td><code style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk2)">${k.key_prefix}</code></td>
-      <td style="font-size:12px">${k.agent_id}</td>
-      <td style="font-size:12px">${k.company_name || k.customer_id}</td>
+      <td><code style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk2)">${prefix}</code></td>
+      <td style="font-size:12px">${org}</td>
+      <td>${scopes}</td>
       <td style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3)">${k.rate_limit_rpm} rpm</td>
       <td style="font-size:11px;color:var(--chalk4)">${ago}</td>
       <td>${statusBadge}</td>
@@ -5154,7 +5190,7 @@ function renderKeys() {
 function openKeyForm() {
   document.getElementById('key-form-wrap').style.display = 'block';
   document.getElementById('kf-error').textContent = '';
-  document.getElementById('kf-agent').focus();
+  document.getElementById('kf-org-name').focus();
 }
 
 function closeKeyForm() {
@@ -5162,15 +5198,20 @@ function closeKeyForm() {
 }
 
 async function submitKeyForm() {
-  const agent_id    = document.getElementById('kf-agent').value.trim();
-  const customer_id = document.getElementById('kf-customer').value.trim();
-  const company_name = document.getElementById('kf-company').value.trim() || null;
-  const rate_limit_rpm = parseInt(document.getElementById('kf-rpm').value) || 600;
+  // Fields match KeyCreateBody exactly. This form used to send agent_id /
+  // customer_id / company_name — concepts the API dropped in the org refactor —
+  // which Pydantic silently discarded, and `company_name` in place of
+  // `org_name` meant creating a key overwrote the org's display name with its
+  // raw id. Rate limit is operator-set now (DEFAULT_KEY_RATE_LIMIT_RPM), not
+  // caller-chosen, so there is no field for it.
+  const org_name = document.getElementById('kf-org-name').value.trim() || null;
+  const scopes = ['ingest'];
+  if (document.getElementById('kf-scope-approve').checked) scopes.push('approve');
+  if (document.getElementById('kf-scope-admin').checked)   scopes.push('admin');
   const errEl = document.getElementById('kf-error');
   errEl.textContent = '';
-  if (!agent_id || !customer_id) { errEl.textContent = 'Agent ID and Customer ID are required'; return; }
   try {
-    const res = await apiPost('/v1/keys', { agent_id, customer_id, company_name, rate_limit_rpm });
+    const res = await apiPost('/v1/keys', { org_name, scopes });
     _newKeyFull = res.key;
     document.getElementById('key-created-value').textContent = res.key;
     document.getElementById('key-created-banner').style.display = 'block';
@@ -5207,7 +5248,10 @@ function copyNewKey() {
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 loadAll().then(handleDeepLink);
-setInterval(loadAll, 15000);
+// Two-requests-per-agent fan-out. Skipped while the tab is hidden — this used
+// to run unconditionally every 15s forever, including in background tabs, and
+// there is no clearInterval anywhere in the file.
+setInterval(() => { if (!document.hidden) loadAll(); }, 15000);
 
 // ── Custom detectors ──────────────────────────────────────────────────────────
 

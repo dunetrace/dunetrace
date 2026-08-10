@@ -12,10 +12,25 @@ dt = Dunetrace(api_key="dt_live_...")
 dt.init(agent_id="my-agent")   # patches every installed supported framework
 ```
 
-Supported frameworks: `openai`, `anthropic`, `httpx`, `requests`, `langchain`
-(covers LangGraph), `crewai`. Pass `frameworks=[...]` to either call to patch
-a subset. Patching is idempotent and permanent for the life of the process —
-calling it twice, or from multiple places, is safe and cheap.
+Supported frameworks: `openai`, `anthropic`, `mistral`, `botocore` (AWS
+Bedrock), `httpx`, `requests`, `langchain` (covers LangGraph), `crewai`. Pass `frameworks=[...]` to either call
+to patch a subset. Patching is idempotent and permanent for the life of the
+process — calling it twice, or from multiple places, is safe and cheap.
+
+`mistral` requires `mistralai>=2.0` (`pip install 'dunetrace[mistral]'`) and
+covers chat, embeddings and FIM, including the Azure- and GCP-hosted clients —
+see [mistral.md](mistral.md) for the full surface and its limits.
+
+`botocore` covers **AWS Bedrock**, and so every model Bedrock hosts rather than
+just one vendor. Bedrock is reached through boto3 rather than any vendor SDK,
+and botocore rides on urllib3 rather than httpx or requests, so it is invisible
+to every other patch here. `Converse` and `ConverseStream` report exact token
+counts, text and stop reason. `InvokeModel` reports token counts from the
+response headers and no output text: its payload is a streaming body in a
+model-specific format, and reading it here would hand your code an empty
+stream. `InvokeModelWithResponseStream` reads the model-agnostic
+`amazon-bedrock-invocationMetrics` object Bedrock appends to the final chunk.
+Non-Bedrock boto3 calls (S3, SQS, …) pass straight through.
 
 ---
 
@@ -25,7 +40,7 @@ This is the page to send a teammate who opens the dashboard, sees a run
 attributed to `unattributed-agent` or a `langchain`/`crewai` default they
 didn't expect, and wants to know what happened.
 
-`openai`, `anthropic`, `httpx`, and `requests` never decide an agent_id
+`openai`, `anthropic`, `mistral`, `httpx`, and `requests` never decide an agent_id
 themselves — they only react to whatever `dt.run()` is already open, and do
 nothing at all outside one. `langchain` and `crewai` are different: LangChain
 can *only* attach to an already-open `dt.run()` (see the next section for
@@ -130,6 +145,55 @@ otherwise be counted twice: once by the LangChain integration, once by the
 `openai` patch underneath it. `auto_instrument()` avoids this with a
 re-entrancy flag (`dunetrace.context._in_framework_call`) that LangChain and
 CrewAI's patches set for the duration of the underlying call — the
-`openai`/`anthropic`/`httpx`/`requests` patches check it and skip their own
-emission (but still make the real call) whenever it's set. You don't need to
+`openai`/`anthropic`/`mistral`/`httpx`/`requests` patches check it and skip their
+own emission (but still make the real call) whenever it's set. You don't need to
 do anything for this — it's automatic whenever you patch both layers together.
+
+There is a second layer of the same problem, and a second flag for it. Every
+vendor LLM SDK here is itself built on `httpx` (or `requests`), so with both the
+provider patch and the HTTP patch on — which is what a bare
+`dt.auto_instrument()` gives you — one LLM call would be recorded twice: once as
+`llm.called`, and once as a `tool.called` named after the provider's hostname.
+That inflates `tool_call_count`, which is both a policy trigger and what
+`TOOL_LOOP` counts. The provider patches set
+`dunetrace.context._http_suppressed` for the duration of the underlying request,
+and the `httpx`/`requests` patches skip their emit while it's set. Suppression is
+scoped to the provider call only, so HTTP your agent makes as a genuine tool is
+still recorded normally.
+
+---
+
+## Streaming
+
+Streamed LLM calls are recorded too, for `openai`, `anthropic` and `mistral`
+alike. `llm.called` is emitted when the call is made; `llm.responded` when the
+stream finishes, carrying the accumulated token counts, output text and latency.
+
+The stream you get back is a transparent proxy: a real iterator and a context
+manager, with everything else falling through to the underlying stream, so
+`next(stream)`, `with`/`async with`, `.close()`, and provider-specific helpers
+(Anthropic's `text_stream`, for instance) all behave as they do un-instrumented.
+
+Because the response isn't known until the stream ends, *when* the event lands
+depends on how you consume it:
+
+| How you consume it | When `llm.responded` lands |
+|---|---|
+| Drain it fully | At the end of the stream |
+| `break` out early | When the run block exits, at the latest — you still get an event for the tokens you read |
+| `with` / `async with` | On context exit |
+| Never touch it again | When the run block exits |
+
+**Token counts on a streamed OpenAI call are estimated, not measured** — unless
+you pass `stream_options={"include_usage": True}`, in which case the exact totals
+are used. Dunetrace deliberately does not inject that option for you: it makes
+the API append a final chunk with an empty `choices` list, which breaks any
+caller doing `chunk.choices[0]`. Without it, completion tokens are estimated from
+the streamed output at roughly 4 characters per token — including streamed
+tool-call arguments, which are billed output but arrive with no text content at
+all. Treat those numbers as approximate when setting a tight `cost_usd` policy
+threshold. Anthropic and Mistral both report real usage on a stream by default,
+so this caveat is OpenAI-only.
+
+A stream that fails partway through is recorded with `finish_reason="error"` and
+the exception text, rather than as a clean `stop`.

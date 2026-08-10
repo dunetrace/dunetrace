@@ -1,6 +1,6 @@
 {
   "name": "dunetrace",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Real-time monitoring for AI agents",
   "author": "Dunetrace <dunetrace@gmail.com>",
   "license": "Apache-2.0",
@@ -83,5 +83,8 @@
     "typescript": "^5.4.0",
     "vitest": "^1.6.0",
     "zod": "^4.4.3"
+  },
+  "overrides": {
+    "postcss": ">=8.5.23"
   }
 }

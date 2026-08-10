@@ -126,7 +126,7 @@ await dt.run("my-agent", {}, async () => {
 
 `autoInstrument()` with no arguments auto-detects via `require`, which only resolves under CommonJS — **pass the imported class if you use ESM or a bundler**. It patches the resource prototype shared by every client, which works under ESM, CommonJS, and bundlers alike. Idempotent, and safe to combine with `dt.wrapOpenAI()`.
 
-It covers three targets — `openai`, `anthropic`, and `http` — narrowable via `targets`.
+It covers four targets — `openai`, `anthropic`, `mistral`, and `http` — narrowable via `targets`.
 
 **Streaming is tracked.** `llm.called` fires at call time; the stream comes back through a pass-through proxy that observes chunks as you pull them and emits `llm.responded` when it ends. Nothing is consumed on your behalf, and `.tee()` / `.controller` still work. Pass `stream_options: { include_usage: true }` for OpenAI or the API never sends token counts.
 

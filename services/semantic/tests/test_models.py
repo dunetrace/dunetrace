@@ -49,10 +49,18 @@ class TestBuildDeepevalModel(unittest.TestCase):
             model = build_deepeval_model("openai", None)
         self.assertEqual(model.get_model_name(), _DEFAULT_MODEL_BY_PROVIDER["openai"])
 
-    def test_unknown_provider_falls_back_to_openai(self):
+    def test_unknown_provider_raises_rather_than_defaulting_to_openai(self):
+        """The provider set is closed. Falling through to OpenAI would mean a
+        typo'd SEMANTIC_LLM_PROVIDER silently ships run text to a US API — the
+        exact outcome the no-cross-provider-fallback rule exists to prevent."""
         with self._fake_keys():
-            model = build_deepeval_model("some-other-provider", "gpt-4o-mini")
-        self.assertIsInstance(model, GPTModel)
+            with self.assertRaises(ValueError) as ctx:
+                build_deepeval_model("some-other-provider", "gpt-4o-mini")
+        self.assertIn("some-other-provider", str(ctx.exception))
+
+    def test_provider_name_is_case_and_whitespace_insensitive(self):
+        with self._fake_keys():
+            self.assertIsInstance(build_deepeval_model("  OpenAI ", "gpt-4o-mini"), GPTModel)
 
 
 if __name__ == "__main__":

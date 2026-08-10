@@ -61,7 +61,7 @@ services:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       POLL_INTERVAL: 5
       STALL_TIMEOUT_SECS: 60
-      PYTHONPATH: /app/packages/sdk-py:/app/services/detector
+      PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/detector
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,7 +86,7 @@ services:
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       POLL_INTERVAL: 10
-      PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/alerts
+      PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/explainer:/app/services/alerts
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-}
       SLACK_MIN_SEVERITY: ${SLACK_MIN_SEVERITY:-LOW}
@@ -125,6 +125,8 @@ services:
       SEMANTIC_LLM_PROVIDER: ${SEMANTIC_LLM_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION: ${SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION:-false}
       HALLUCINATION_MODEL: ${HALLUCINATION_MODEL:-}
       TASK_COMPLETION_MODEL: ${TASK_COMPLETION_MODEL:-}
       TASK_UNDERSTANDING_FAILURE_MODEL: ${TASK_UNDERSTANDING_FAILURE_MODEL:-}
@@ -134,7 +136,7 @@ services:
       SYCOPHANCY_SIGNAL_MODEL: ${SYCOPHANCY_SIGNAL_MODEL:-}
       # audit Finding 17: this env override was dropping /app/packages/sdk-py, so
       # explainer_svc's `import dunetrace` failed even after the Dockerfile fix.
-      PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/semantic
+      PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/explainer:/app/services/semantic
     depends_on:
       postgres:
         condition: service_healthy
@@ -161,7 +163,7 @@ services:
       WAKE_INTERVAL: 15
       INTEGRATIONS_WORKER_ENABLED: ${INTEGRATIONS_WORKER_ENABLED:-false}
       DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
-      PYTHONPATH: /app/services/integrations
+      PYTHONPATH: /app/packages/schemas-py:/app/services/integrations
     depends_on:
       postgres:
         condition: service_healthy
@@ -187,7 +189,7 @@ services:
       WAKE_INTERVAL: 60
       ELEVENLABS_WORKER_ENABLED: ${ELEVENLABS_WORKER_ENABLED:-false}
       DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
-      PYTHONPATH: /app/services/integrations
+      PYTHONPATH: /app/packages/schemas-py:/app/services/integrations
     depends_on:
       postgres:
         condition: service_healthy
@@ -211,7 +213,7 @@ services:
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       AUTH_MODE: dev
-      PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/api
+      PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/explainer:/app/services/api
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}

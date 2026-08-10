@@ -9,6 +9,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -74,6 +75,124 @@ def llm_responded_evt(step: int, prompt_tokens: int = 500) -> dict:
 
 
 # ── RunBuilder tests ───────────────────────────────────────────────────────────
+
+
+class TestRunBuilderLlmCorrelation(unittest.TestCase):
+    """llm.called/llm.responded are paired by call_id, not arrival order. A
+    streamed call's response lands whenever the caller drains the stream, so the
+    two events are no longer guaranteed adjacent."""
+
+    @staticmethod
+    def _called(step, model, call_id, prompt_tokens=100):
+        return evt(
+            "llm.called",
+            step,
+            {"model": model, "prompt_tokens": prompt_tokens, "call_id": call_id},
+        )
+
+    @staticmethod
+    def _responded(step, call_id, completion_tokens, latency_ms, output="x"):
+        return evt(
+            "llm.responded",
+            step,
+            {
+                "call_id": call_id,
+                "completion_tokens": completion_tokens,
+                "latency_ms": latency_ms,
+                "finish_reason": "stop",
+                "output": output,
+                "output_length": len(output),
+            },
+        )
+
+    def test_overlapping_streams_do_not_swap_their_responses(self):
+        """called(A), called(B), responded(A), responded(B) — the non-nested
+        order two concurrent streams produce. A LIFO pop hands B's response to A,
+        swapping model against tokens, latency and cost."""
+        state = build_run_state(
+            [
+                run_started(),
+                self._called(1, "gpt-4o", 0),
+                self._called(2, "gpt-4o-mini", 1),
+                self._responded(3, 0, completion_tokens=500, latency_ms=900, output="A" * 10),
+                self._responded(4, 1, completion_tokens=20, latency_ms=50, output="B"),
+                run_completed(),
+            ]
+        )
+        self.assertEqual(len(state.llm_calls), 2)
+        by_model = {c.model: c for c in state.llm_calls}
+        self.assertEqual(by_model["gpt-4o"].completion_tokens, 500)
+        self.assertEqual(by_model["gpt-4o"].latency_ms, 900)
+        self.assertEqual(by_model["gpt-4o"].output_length, 10)
+        self.assertEqual(by_model["gpt-4o-mini"].completion_tokens, 20)
+        self.assertEqual(by_model["gpt-4o-mini"].latency_ms, 50)
+        self.assertEqual(by_model["gpt-4o-mini"].output_length, 1)
+
+    def test_calls_are_kept_in_call_order(self):
+        state = build_run_state(
+            [
+                run_started(),
+                self._called(1, "gpt-4o", 0),
+                self._called(2, "gpt-4o-mini", 1),
+                self._responded(3, 1, completion_tokens=20, latency_ms=50),
+                self._responded(4, 0, completion_tokens=500, latency_ms=900),
+                run_completed(),
+            ]
+        )
+        self.assertEqual([c.model for c in state.llm_calls], ["gpt-4o", "gpt-4o-mini"])
+
+    def test_undrained_stream_still_produces_a_call(self):
+        """A stream the caller abandoned emits llm.called with no llm.responded.
+        It used to vanish from the run entirely, hiding the prompt tokens it was
+        already billed for."""
+        state = build_run_state(
+            [
+                run_started(),
+                self._called(1, "gpt-4o", 0, prompt_tokens=1000),
+                run_completed(),
+            ]
+        )
+        self.assertEqual(len(state.llm_calls), 1)
+        self.assertEqual(state.llm_calls[0].prompt_tokens, 1000)
+        self.assertIsNone(state.llm_calls[0].completion_tokens)
+        self.assertIsNone(state.llm_calls[0].finish_reason)
+
+    def test_events_without_call_id_still_pair_positionally(self):
+        """Manual run.llm_called() callers and events recorded before call_id
+        existed have adjacent pairs, so the old behaviour is still correct."""
+        state = build_run_state(
+            [run_started(), llm_evt(1), llm_responded_evt(2, prompt_tokens=700), run_completed()]
+        )
+        self.assertEqual(len(state.llm_calls), 1)
+        self.assertEqual(state.llm_calls[0].model, "gpt-4o")
+        self.assertEqual(state.llm_calls[0].prompt_tokens, 700)
+        self.assertEqual(state.llm_calls[0].finish_reason, "stop")
+
+    def test_reasoning_tokens_are_rebuilt(self):
+        """The SDK emits reasoning_tokens and LlmCall carries the field, but the
+        builder never read it back — so COST_SPIKE summed 0 reasoning tokens for
+        every reasoning model, undercounting the models where they dominate."""
+        responded = evt(
+            "llm.responded",
+            2,
+            {
+                "call_id": 0,
+                "completion_tokens": 100,
+                "reasoning_tokens": 4000,
+                "finish_reason": "stop",
+            },
+        )
+        state = build_run_state(
+            [run_started(), self._called(1, "o3", 0), responded, run_completed()]
+        )
+        self.assertEqual(state.llm_calls[0].reasoning_tokens, 4000)
+
+    def test_response_without_any_call_is_still_recorded(self):
+        state = build_run_state(
+            [run_started(), llm_responded_evt(1, prompt_tokens=42), run_completed()]
+        )
+        self.assertEqual(len(state.llm_calls), 1)
+        self.assertEqual(state.llm_calls[0].prompt_tokens, 42)
 
 
 class TestRunBuilder(unittest.TestCase):
@@ -1016,12 +1135,67 @@ class TestShardConfig(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class TestProcessingFailureIsRetried(unittest.IsolatedAsyncioTestCase):
+    """A transient failure must not be recorded as a clean run. process_run's
+    guarded block is mostly DB round-trips, so the common failure is transient —
+    and a completed run never gains events, so a "processed" verdict written on
+    failure could never be revisited."""
+
+    def _patches(self, record_mock, mark_mock, clear_mock):
+        return (
+            patch("detector_svc.worker.fetch_run_events", AsyncMock(return_value=[run_started()])),
+            patch(
+                "detector_svc.worker.build_run_state",
+                MagicMock(side_effect=RuntimeError("pool timeout")),
+            ),
+            patch("detector_svc.worker.record_processing_failure", record_mock),
+            patch("detector_svc.worker.mark_run_processed", mark_mock),
+            patch("detector_svc.worker.clear_processing_failures", clear_mock),
+        )
+
+    async def test_early_failure_leaves_the_run_unprocessed_for_retry(self):
+        record, mark, clear = AsyncMock(return_value=1), AsyncMock(), AsyncMock()
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(record, mark, clear):
+                stack.enter_context(p)
+            from detector_svc.worker import process_run
+
+            count = await process_run("run-1", "agent", "v1", "completed", "org-1")
+
+        self.assertEqual(count, 0)
+        record.assert_awaited_once()
+        # The critical assertion: nothing was written, so the next poll retries.
+        mark.assert_not_awaited()
+
+    async def test_exhausted_budget_records_the_run_as_failed_not_clean(self):
+        record, mark, clear = AsyncMock(return_value=3), AsyncMock(), AsyncMock()
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(record, mark, clear):
+                stack.enter_context(p)
+            from detector_svc.worker import process_run
+
+            await process_run("run-1", "agent", "v1", "completed", "org-1")
+
+        mark.assert_awaited_once()
+        # Distinguishable from a genuinely clean run.
+        self.assertIn("pool timeout", mark.await_args.kwargs["processing_error"])
+        clear.assert_awaited_once()
+
+
 class TestPollWatermark(unittest.IsolatedAsyncioTestCase):
     """The watermark is what bounds the poll scan. Advancing it while work is
     still queued would skip runs permanently, so the drain check is the load-
     bearing part of this feature, not the SQL."""
 
-    async def _poll(self, completed_rows, stalled_rows, batch_size=100, watermark=None):
+    async def _poll(
+        self,
+        completed_rows,
+        stalled_rows,
+        batch_size=100,
+        watermark=None,
+        shard_count=1,
+        shard_index=0,
+    ):
         advance = AsyncMock()
         with (
             patch(
@@ -1040,8 +1214,8 @@ class TestPollWatermark(unittest.IsolatedAsyncioTestCase):
             mock_settings.BATCH_SIZE = batch_size
             mock_settings.STALL_TIMEOUT_SECS = 90
             mock_settings.DETECTOR_CONCURRENCY = 8
-            mock_settings.SHARD_COUNT = 1
-            mock_settings.SHARD_INDEX = 0
+            mock_settings.SHARD_COUNT = shard_count
+            mock_settings.SHARD_INDEX = shard_index
             mock_settings.WATERMARK_GRACE_SECS = 3600
             from detector_svc.worker import poll_once
 
@@ -1062,11 +1236,19 @@ class TestPollWatermark(unittest.IsolatedAsyncioTestCase):
 
     async def test_advances_when_nothing_found(self):
         advance = await self._poll([], [])
-        advance.assert_awaited_once_with(0, 3600)
+        advance.assert_awaited_once_with(0, 3600, 1)
 
     async def test_advances_on_partial_batch(self):
         advance = await self._poll(self._rows(3), [], batch_size=100)
-        advance.assert_awaited_once_with(0, 3600)
+        advance.assert_awaited_once_with(0, 3600, 1)
+
+    async def test_watermark_is_scoped_to_the_shard_topology(self):
+        """Ownership is hashtext(agent_id) %% shard_count, so a watermark keyed
+        by index alone survives a resize while its meaning does not — the shard
+        keeps a bound earned over a different set of agents and silently skips
+        every newly-inherited run behind it."""
+        advance = await self._poll([], [], shard_count=4, shard_index=2)
+        advance.assert_awaited_once_with(2, 3600, 4)
 
     async def test_does_not_advance_when_completed_batch_is_full(self):
         """A full batch means more work is behind it — advancing here would move

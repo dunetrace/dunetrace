@@ -202,6 +202,14 @@ async def mark_alerted_batch(signal_ids: list[int]) -> None:
 
 
 async def ensure_alert_integrations_schema() -> None:
+    """Shared schema first — the DDL here ALTERs failure_signals, which another
+    service creates. See dunetrace_schemas.migrations."""
+    from dunetrace_schemas.migrations import apply_migrations
+
+    if _pool:
+        async with _pool.acquire() as _c:
+            await apply_migrations(_c)
+
     """Defensive copy of api_svc's org_alert_integrations/linear_issue_signals
     DDL (Phase 4.1) — same "whichever service starts first wins" convention
     as ensure_dedup_schema/ensure_digest_schema above. alerts_svc only ever

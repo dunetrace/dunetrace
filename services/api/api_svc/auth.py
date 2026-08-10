@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Header, Request, status
 
 from api_svc.config import settings
-from api_svc.db.queries import verify_api_key
+from api_svc.db.queries import verify_api_key, verify_api_key_with_scopes
 
 
 def is_trusted(request: Request) -> bool:
@@ -68,3 +68,67 @@ async def require_org(
         )
 
     return org_id
+
+
+async def resolve_scopes(
+    request: Request,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+) -> tuple:
+    """(org_id, scopes) for the caller. Same resolution order as require_org."""
+    from dunetrace_schemas.scopes import ADMIN, DEFAULT_SCOPES
+
+    if is_trusted(request):
+        org_id = request.headers.get("x-org-id") or request.headers.get("x-customer-id", "")
+        if not org_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Trusted request missing x-org-id",
+            )
+        # An upstream auth layer has already decided who this is; it carries the
+        # scopes it granted, defaulting to ingest-only rather than to everything.
+        header = request.headers.get("x-scopes", "")
+        scopes = tuple(s.strip() for s in header.split(",") if s.strip()) or DEFAULT_SCOPES
+        return (org_id, scopes)
+
+    if settings.is_dev:
+        return ("default", (ADMIN,))
+
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization header",
+        )
+    parts = authorization.strip().split()
+    api_key = parts[-1] if parts else authorization
+    resolved = await verify_api_key_with_scopes(api_key)
+    if resolved is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or inactive API key",
+        )
+    return resolved
+
+
+def require_scope(scope: str):
+    """Dependency factory: resolve the org and assert the key carries `scope`.
+
+    Returns org_id, so a route can swap `Depends(require_org)` for
+    `Depends(require_scope("approve"))` without changing its signature.
+    """
+
+    async def _dependency(resolved: tuple = Depends(resolve_scopes)) -> str:
+        from dunetrace_schemas.scopes import has_scope
+
+        org_id, scopes = resolved
+        if not has_scope(scopes, scope):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"This API key lacks the {scope!r} scope. Agent keys are "
+                    f"issued with 'ingest' only — a decision must come from a "
+                    f"credential the agent runtime does not hold."
+                ),
+            )
+        return org_id
+
+    return _dependency

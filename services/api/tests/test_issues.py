@@ -21,6 +21,7 @@ from api_svc.routers.issues import (
     resolve_issue,
     search_issues,
 )
+from llm_test_utils import configured_llm
 
 
 def _issue(**overrides):
@@ -136,7 +137,8 @@ class TestGetIssue(unittest.IsolatedAsyncioTestCase):
         with (
             patch("api_svc.routers.issues.get_issue_by_id", AsyncMock(return_value=_issue())),
             patch("api_svc.routers.issues.agent_failure_pattern", AsyncMock(return_value={})),
-            patch("api_svc.routers.issues.settings") as mock_settings,
+            # The gate is llm_provider now, not this router's own settings.
+            configured_llm("anthropic"),
             patch(
                 "api_svc.routers.issues.get_most_recent_signal_id",
                 AsyncMock(return_value=42),
@@ -148,8 +150,6 @@ class TestGetIssue(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         ):
-            mock_settings.ANTHROPIC_API_KEY = "sk-x"
-            mock_settings.OPENAI_API_KEY = ""
             result = await get_issue(7, org_id="org-1")
 
         self.assertEqual(result.root_cause, "Loop detected")

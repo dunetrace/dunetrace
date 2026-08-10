@@ -54,10 +54,14 @@ jobs:
           cache-dependency-path: packages/sdk-py/pyproject.toml
       # dev extra provides mypy + pytest-timeout, so no separate installs needed.
       - run: pip install -e "packages/sdk-py[dev,langchain]"
-      # --timeout kills (and dumps the stack of) any single test that hangs,
-      # so a deadlock fails in seconds with a named culprit instead of blocking
-      # the whole run for hours.
-      - run: python -m pytest packages/sdk-py/tests/ -q --timeout=120
+      # Same Makefile target `make test` uses, so the two cannot disagree about
+      # which tests exist. PYTEST_ADDOPTS' --timeout kills (and dumps the stack
+      # of) any single test that hangs, so a deadlock fails in seconds with a
+      # named culprit instead of blocking the whole run for hours.
+      - name: Run tests
+        env:
+          PYTEST_ADDOPTS: --timeout=120
+        run: make test-sdk-py
       - run: python -m mypy packages/sdk-py/dunetrace/ --ignore-missing-imports --no-error-summary --config-file packages/sdk-py/pyproject.toml
 
   services:
@@ -69,30 +73,23 @@ jobs:
       matrix:
         include:
           - service: ingest
-            pythonpath: packages/sdk-py:packages/schemas-py:services/ingest
             requirements: services/ingest/requirements.txt
             extra: httpx pytest-asyncio
           - service: detector
-            pythonpath: packages/sdk-py:services/detector
             requirements: services/detector/requirements.txt
           - service: explainer
-            pythonpath: packages/sdk-py:services/explainer
             requirements: services/explainer/requirements.txt
           - service: alerts
-            pythonpath: packages/sdk-py:services/explainer:services/alerts
             requirements: services/alerts/requirements.txt
           - service: api
-            pythonpath: packages/sdk-py:services/explainer:services/api
             requirements: services/api/requirements.txt
           # audit Finding 35: semantic + integrations were EXCLUDED from CI, which
           # is why a broken requirements pin (F3) and packaging (F17) shipped
           # undetected. They are now tested like every other service.
           - service: semantic
-            pythonpath: packages/sdk-py:services/explainer:services/semantic
             requirements: services/semantic/requirements.txt
             extra: pytest-asyncio
           - service: integrations
-            pythonpath: packages/sdk-py:services/integrations
             requirements: services/integrations/requirements.txt
             extra: pytest-asyncio
     steps:
@@ -104,11 +101,16 @@ jobs:
           cache-dependency-path: ${{ matrix.requirements }}
       - run: pip install -r ${{ matrix.requirements }} pytest pytest-asyncio pytest-timeout ${{ matrix.extra || '' }}
       - run: pip install -e packages/sdk-py
+      # Calls the Makefile target so PYTHONPATH has exactly ONE source of truth.
+      # Duplicating it here is what let this workflow drift and miss
+      # packages/schemas-py, which broke the moment services began importing
+      # dunetrace_schemas (migrations, key hashing, scopes).
+      # PYTEST_ADDOPTS keeps the timeout that kills and dumps the stack of any
+      # single hung test.
       - name: Run tests
         env:
-          PYTHONPATH: ${{ matrix.pythonpath }}
-        # --timeout kills and dumps the stack of any single hung test.
-        run: python -m pytest services/${{ matrix.service }}/tests/ -v --timeout=120
+          PYTEST_ADDOPTS: --timeout=120
+        run: make test-${{ matrix.service }}
 
   mcp-server:
     name: MCP Server

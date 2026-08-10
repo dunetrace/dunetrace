@@ -47,6 +47,16 @@ _ALLOWLIST = {
     "DUNETRACE_CUSTOM_DETECTORS_PATH",
     "SEMANTIC_LLM_PROVIDER",
     "SEMANTIC_WORKER_ENABLED",
+    "SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION",
+    # Per-provider evaluator credentials, named in docs/semantic-evaluation.md
+    # alongside SEMANTIC_LLM_PROVIDER. Env vars, not detectors.
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "MISTRAL_API_KEY",
+    "API_LLM_PROVIDER",
+    "DUNETRACE_POLICY_SECRET",
+    "POLICY_SIGNING_SECRET",
+    "DUNETRACE_MCP_READONLY",
     "SEMANTIC_QUOTA_EXCEEDED",  # operational signal, not a structural detector
     "SHADOW_BY_DEFAULT",
     "LIVE_DETECTORS",  # the shadow/live gating set in detector_svc, not a detector

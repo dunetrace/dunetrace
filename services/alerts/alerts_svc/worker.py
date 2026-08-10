@@ -277,9 +277,17 @@ async def deliver_pending_approvals() -> int:
             handled += 1
             continue
 
+        # asyncio.to_thread, matching _deliver_one on the signal path below:
+        # send_slack/send_webhook are BLOCKING urllib calls. Awaited inline they
+        # stall the whole event loop, and this is the one delivery path with a
+        # live agent waiting synchronously on the other end — a degraded Slack
+        # endpoint would hold up every other pending approval behind it, turning
+        # one slow destination into a fleet-wide agent stall.
         if slack_available:
             try:
-                send_slack(format_slack_approval(approval), webhook_url=slack_dest)
+                await asyncio.to_thread(
+                    send_slack, format_slack_approval(approval), webhook_url=slack_dest
+                )
             except Exception as exc:
                 logger.error("Approval %s Slack delivery failed: %s", approval["id"], exc)
 
@@ -295,7 +303,7 @@ async def deliver_pending_approvals() -> int:
                 sig = sign_payload(body, settings.WEBHOOK_SECRET)
                 if sig:
                     headers["X-Dunetrace-Signature"] = sig
-                send_webhook(body, headers)
+                await asyncio.to_thread(send_webhook, body, headers)
             except Exception as exc:
                 logger.error("Approval %s webhook delivery failed: %s", approval["id"], exc)
 
