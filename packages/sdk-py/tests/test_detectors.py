@@ -13,6 +13,7 @@ from dunetrace.models import RunState, ToolCall, RetrievalResult, FailureType
 from dunetrace.detectors import (
     AgentHandoffFailureDetector,
     ExcessiveRetrievalDetector,
+    OversizedToolArgumentsDetector,
     ToolLoopDetector,
     ToolThrashingDetector,
     ToolAvoidanceDetector,
@@ -38,16 +39,75 @@ def make_tool_call(
     success=None,
     output_length: int | None = None,
     output: str | None = None,
+    args: str = "aaa",
 ) -> ToolCall:
     return ToolCall(
         tool_name=name,
-        args="aaa",
+        args=args,
         step_index=step,
         timestamp=time.time(),
         success=success,
         output_length=output_length,
         output=output,
     )
+
+
+# ── OversizedToolArgumentsDetector ────────────────────────────────────────────
+
+
+class TestOversizedToolArgumentsDetector(unittest.TestCase):
+    detector = OversizedToolArgumentsDetector()
+
+    def test_no_signal_below_threshold(self):
+        state = make_state()
+        state.tool_calls = [make_tool_call("web_search", args="a" * 100)]
+        state.current_step = 1
+        assert self.detector.on_run_completion(state) is None
+
+    def test_fires_above_threshold(self):
+        state = make_state()
+        state.tool_calls = [make_tool_call("web_search", args="a" * 15_000)]
+        state.current_step = 1
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.OVERSIZED_TOOL_ARGUMENTS
+        assert signal.evidence["tool_name"] == "web_search"
+        assert signal.evidence["arg_length"] == 15_000
+
+    def test_empty_args_ignored(self):
+        state = make_state()
+        state.tool_calls = [make_tool_call("web_search", args="")]
+        state.current_step = 1
+        assert self.detector.on_run_completion(state) is None
+
+    def test_boundary_conditions(self):
+        # exactly 10,000 should not trigger
+        state = make_state()
+        state.tool_calls = [make_tool_call("web_search", args="a" * 10_000)]
+        assert self.detector.on_run_completion(state) is None
+        
+        # 10,001 should trigger
+        state.tool_calls = [make_tool_call("web_search", args="a" * 10_001)]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.OVERSIZED_TOOL_ARGUMENTS
+        assert signal.evidence["arg_length"] == 10_001
+
+    def test_identifies_first_oversized_call(self):
+        state = make_state()
+        # step 1 has 10,001 chars, step 2 has 20,000 chars
+        tc1 = make_tool_call("search1", args="a" * 10_001)
+        tc1.step_index = 1
+        tc2 = make_tool_call("search2", args="b" * 20_000)
+        tc2.step_index = 2
+        state.tool_calls = [tc1, tc2]
+        
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.step_index == 1
+        assert signal.evidence["tool_name"] == "search1"
+        assert signal.evidence["arg_length"] == 10_001
+        assert signal.evidence["step_index"] == 1
 
 
 # ── ToolLoopDetector ──────────────────────────────────────────────────────────

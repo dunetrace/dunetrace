@@ -52,6 +52,13 @@
 
 default:
 
+  oversized_tool_arguments:
+    max_arg_length: 10000
+    alert_policy:
+      mode: consecutive
+      threshold: 2
+      window_runs: 10
+
   tool_loop:
     threshold: 3      # fire if same tool called >= N times in window
     window: 5         # number of recent tool calls to inspect

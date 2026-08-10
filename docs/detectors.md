@@ -1,16 +1,16 @@
 # Detectors
 
-Dunetrace runs 29 structural detectors against every completed agent run. All of
+Dunetrace runs 30 structural detectors against every completed agent run. All of
 them are listed in the table below; the nine newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
 
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
-> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **26**
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **27**
 > detectors the SDK can also run *client-side, in-path*; the three that can't
 > (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`) need raw
-> input or a second run's data. The detector worker runs all 29 regardless — see
+> input or a second run's data. The detector worker runs all 30 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -50,6 +50,7 @@ Semantic findings never trigger a policy — see
 | `REASONING_STALL` | LLM:tool-call ratio exceeds 2× P75 baseline ¹ or static fallback (≥4×) — MEDIUM if run finished, HIGH if it stalled | MEDIUM/HIGH |
 | `COST_SPIKE` | Total token consumption exceeds 3× P75 baseline ¹ or static fallback (>50,000 tokens) | MEDIUM |
 | `SESSION_LATENCY` | Total wall-clock run duration exceeds 3× P75 baseline ¹ or static fallback (>5 min) | MEDIUM |
+| `OVERSIZED_TOOL_ARGUMENTS` | Tool call arguments exceed maximum character limit (default 10,000) | MEDIUM |
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
@@ -138,7 +139,7 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-All 29 built-in detectors are live (`shadow = false`) — every name in `_DETECTOR_CLASSES` is listed in `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`. A new built-in detector should be added to both, and only added to `LIVE_DETECTORS` once its precision has been checked against real traffic; leaving it out is what keeps it in shadow mode while you evaluate it.
+Most built-in detectors are live (`shadow = false`). However, new detectors like `OVERSIZED_TOOL_ARGUMENTS` remain shadowed by default until their precision is checked against real traffic. A new built-in detector should be added to `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in `services/detector/detector_svc/db.py` once validated; leaving it out of `LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
 
 User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
 
