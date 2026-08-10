@@ -130,6 +130,37 @@ class PolicyAction(TypedDict, total=False):
 
 logger = logging.getLogger("dunetrace.policies")
 
+# Actions a REMOTE policy may only take when its signature verified.
+#
+# These are the ones that change what a customer's production agent does rather
+# than what Dunetrace records: halting a live run, blocking a tool call on a
+# human, handing the conversation to a person, rewriting the prompt. The stated
+# threat for policy signing is "a compromised or spoofed server halts a live
+# agent", and with no configured secret there is nothing to verify against — so
+# an unverifiable remote policy is downgraded to log-only rather than obeyed.
+#
+# Deliberately remote-only. A policy the customer registered in their own
+# process via dt.add_policy() is their own code and needs no signature.
+#
+# NOTE ON THE RESIDUAL RISK: signing is a shared HMAC secret, so a server that
+# is itself compromised holds the signing key and can still mint a valid stop
+# policy. Closing that needs asymmetric signing (server signs with a private
+# key, SDK verifies with a public one), which needs a crypto library — and the
+# core SDK is deliberately zero-dependency. What this constant buys is that a
+# party who cannot answer with a *correctly signed* payload — a spoofed
+# endpoint, a hijacked DNS entry, a MITM — cannot stop anyone's agent.
+ENFORCING_ACTIONS = frozenset(
+    {
+        "stop",
+        "require_approval",
+        "escalate_to_human",
+        "stop_current_tts",
+        "switch_model",
+        "inject_prompt",
+        "inject_recovery_prompt",
+    }
+)
+
 # ── Token pricing (USD per token, as of 2025) ─────────────────────────────────
 # Matched by prefix — longest match wins. Falls back to _DEFAULT_PRICE.
 
@@ -141,9 +172,38 @@ _MODEL_PRICES: Dict[str, Dict[str, float]] = {
     "claude-3-5-haiku": {"input": 0.80e-6, "output": 4.00e-6},
     "claude-3-opus": {"input": 15.00e-6, "output": 75.00e-6},
     "gpt-4o-mini": {"input": 0.15e-6, "output": 0.60e-6},
-    "gpt-4o": {"input": 5.00e-6, "output": 15.00e-6},
+    # 2.50/10.00, matching explainer_svc/cost.py. The SDK table carried the
+    # original May-2024 launch price long after it was cut, so a cost_usd
+    # policy threshold evaluated in-process fired at half the real spend
+    # while the server-side rollups for the same run disagreed.
+    "gpt-4o": {"input": 2.50e-6, "output": 10.00e-6},
     "gpt-4-turbo": {"input": 10.00e-6, "output": 30.00e-6},
     "gpt-3.5-turbo": {"input": 0.50e-6, "output": 1.50e-6},
+    # Mistral, verified against https://mistral.ai/pricing/api on 2026-08-08.
+    # Order matters here: _price_for() walks this dict in insertion order and
+    # falls back to a substring test, so "codestral-embed" has to be seen
+    # before "codestral" or the chat rate would win for the embedding model.
+    # Note mistral.ai/pricing (the FAQ page, not /pricing/api) still quotes the
+    # retired $2/$6 Large rate. The per-model cards agree with the numbers here.
+    # Reasoning (magistral) and coding (devstral) families. Verified against
+    # https://mistral.ai/pricing/api on 2026-08-09. No substring collision with
+    # the mistral-* rows: "magistral" does not contain "mistral".
+    "magistral-medium": {"input": 2.00e-6, "output": 5.00e-6},
+    "magistral-small": {"input": 0.50e-6, "output": 1.50e-6},
+    "devstral-medium": {"input": 0.40e-6, "output": 2.00e-6},
+    "devstral-small": {"input": 0.10e-6, "output": 0.30e-6},
+    "mistral-medium": {"input": 1.50e-6, "output": 7.50e-6},
+    "mistral-large": {"input": 0.50e-6, "output": 1.50e-6},
+    "mistral-small": {"input": 0.15e-6, "output": 0.60e-6},
+    "ministral-3b": {"input": 0.10e-6, "output": 0.10e-6},
+    "ministral-8b": {"input": 0.15e-6, "output": 0.15e-6},
+    "ministral-14b": {"input": 0.20e-6, "output": 0.20e-6},
+    "codestral-embed": {"input": 0.15e-6, "output": 0.0},
+    "codestral": {"input": 0.30e-6, "output": 0.90e-6},
+    # Embeddings bill on input only, so output is 0 rather than absent. Leaving
+    # it out would fall through to _DEFAULT_PRICE and charge 12.00e-6 per
+    # output token against a response that has none.
+    "mistral-embed": {"input": 0.10e-6, "output": 0.0},
 }
 _DEFAULT_PRICE: Dict[str, float] = {"input": 3.00e-6, "output": 12.00e-6}
 
@@ -378,10 +438,11 @@ def _policy_canonical(
 def _verify_policy_signature(policy: dict, secret: str) -> bool:
     """Return True if the policy's HMAC-SHA256 signature matches. Always True when secret is empty.
 
-    Policies with an empty signature and a non-empty secret are treated as unsigned
-    (e.g., created before signing was enabled) — they are loaded with a warning rather
-    than silently dropped, to support zero-downtime migration when POLICY_SIGNING_SECRET
-    is first set.
+    An empty signature with a non-empty secret is a FAILURE, not a migration
+    case. Accepting unsigned policies "during migration" meant an attacker who
+    could answer the policy fetch simply omitted the signature field and was
+    obeyed — the verification was optional for exactly the party it was meant
+    to constrain.
 
     The policy's own ``sig_version`` (default 1, for legacy policies with no such
     field) selects the canonical form — so v1-signed policies keep verifying under
@@ -392,15 +453,13 @@ def _verify_policy_signature(policy: dict, secret: str) -> bool:
         return True
     actual_sig = policy.get("signature") or ""
     if not actual_sig:
-        # Unsigned policy — emit a warning but allow through during migration.
-        # Set POLICY_SIGNING_SECRET and re-save all policies to enforce verification.
         logger.warning(
-            "Policy '%s' (id=%s) has no signature — loaded without verification. "
-            "Re-save this policy to sign it.",
+            "Policy '%s' (id=%s) is unsigned but a policy secret is configured — "
+            "rejected. Re-save the policy so the server signs it.",
             policy.get("name"),
             policy.get("id"),
         )
-        return True
+        return False
     try:
         version = int(policy.get("sig_version", 1) or 1)
     except (TypeError, ValueError):
@@ -434,6 +493,14 @@ class PolicyEngine:
         self._policies: List[Policy] = []
         self._lock: threading.Lock = threading.Lock()
         self._fetch_times: Dict[str, float] = {}  # agent_id → last fetch monotonic
+        # Remote policies keyed by the agent_id they were fetched FOR, not by
+        # the agent_id on the policy — a wildcard ("*") policy comes back on
+        # every agent's fetch and so appears under several keys. Keeping them
+        # separate is what stops one agent's fetch from wiping another's: the
+        # fetch is already per-agent (see needs_fetch/mark_fetched), so a load
+        # that replaced every remote policy left each agent in a two-agent
+        # process unguarded for a fetch interval at a time, alternating.
+        self._remote_by_agent: Dict[str, List[Policy]] = {}
         self._generation: int = (
             0  # incremented on every load/add so RunContext can detect staleness
         )
@@ -446,8 +513,15 @@ class PolicyEngine:
             self._policies.sort(key=lambda p: p.priority)
             self._generation += 1
 
-    def load(self, raw: List[dict], secret: str = "") -> None:
-        """Replace remote-sourced policies with a fresh list from the API.
+    def load(self, raw: List[dict], secret: str = "", agent_id: str = "") -> None:
+        """Replace the remote-sourced policies **for one agent** with a fresh
+        list from the API.
+
+        agent_id is the agent the fetch was made for. Policies fetched for other
+        agents are untouched, so a process running several agents keeps every
+        agent's guardrails loaded at once. Omitting it keeps the historical
+        replace-everything behaviour, which is correct for a single-agent
+        process and for callers that hold no per-agent notion.
 
         When ``secret`` is set, each policy's HMAC-SHA256 signature is verified
         before it is loaded. Policies that fail verification are skipped and logged
@@ -463,6 +537,22 @@ class PolicyEngine:
                         p.get("id"),
                     )
                     continue
+            if not secret:
+                action_type = (p.get("action") or {}).get("type", "log")
+                if action_type in ENFORCING_ACTIONS:
+                    # No secret means no way to tell this policy came from the
+                    # real server, and this action would change what the
+                    # customer's agent does. Record it, don't obey it.
+                    logger.warning(
+                        "Remote policy '%s' (id=%s) requests %r but no policy secret is "
+                        "configured, so its origin cannot be verified — downgraded to "
+                        "log-only. Set DUNETRACE_POLICY_SECRET (and POLICY_SIGNING_SECRET "
+                        "on the server) to enable enforcing remote policies.",
+                        p.get("name"),
+                        p.get("id"),
+                        action_type,
+                    )
+                    p = {**p, "action": {"type": "log"}}
             try:
                 verified.append(Policy.from_dict(p))
             except ExpressionError as exc:
@@ -477,9 +567,30 @@ class PolicyEngine:
 
         with self._lock:
             local = [p for p in self._policies if p.id is None]
-            self._policies = sorted(local + verified, key=lambda p: p.priority)
+            if agent_id:
+                self._remote_by_agent[agent_id] = verified
+            else:
+                self._remote_by_agent = {"": verified}
+            # Dedupe by policy id: a wildcard policy is returned by every
+            # agent's fetch, and evaluating it twice would double-count.
+            remote: List[Policy] = []
+            seen_ids = set()
+            for bucket in self._remote_by_agent.values():
+                for policy in bucket:
+                    if policy.id is not None and policy.id in seen_ids:
+                        continue
+                    if policy.id is not None:
+                        seen_ids.add(policy.id)
+                    remote.append(policy)
+            self._policies = sorted(local + remote, key=lambda p: p.priority)
             self._generation += 1
-        logger.debug("Policies loaded: %d total (%d remote)", len(self._policies), len(verified))
+        logger.debug(
+            "Policies loaded for %r: %d total (%d remote across %d agent(s))",
+            agent_id or "*",
+            len(self._policies),
+            len(remote),
+            len(self._remote_by_agent),
+        )
 
     def mark_fetched(self, agent_id: str) -> None:
         self._fetch_times[agent_id] = time.monotonic()

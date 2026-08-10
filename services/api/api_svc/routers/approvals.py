@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api_svc.approvals import DECISION_STATUSES, ApprovalStatus
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.db.queries import (
     create_approval,
     get_approval,
@@ -126,7 +126,13 @@ async def get_one_approval(
 async def post_approval_decision(
     approval_id: int,
     body: ApprovalDecision,
-    org_id: str = Depends(require_org),
+    # 'approve', not the ambient org key. The agent process blocked on this
+    # request holds an ingest-scoped key and sends it on every call, so
+    # require_org here meant the thing being gated could grant its own gate.
+    # A decision must come from a credential the agent runtime does not have:
+    # a dashboard/operator key, or the Slack path, which verifies Slack's own
+    # signature rather than a Dunetrace key at all.
+    org_id: str = Depends(require_scope("approve")),
 ) -> Dict[str, Any]:
     try:
         target = ApprovalStatus(body.decision)

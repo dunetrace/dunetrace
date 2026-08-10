@@ -226,7 +226,10 @@ class Dunetrace:
             else os.environ.get("DUNETRACE_API_URL", "http://localhost:8002")
         ).rstrip("/")
         self._emitter: BatchingEmitter = emitter or HttpBatchingEmitter(_endpoint, self._api_key)
-        self._policy_secret = policy_secret
+        # Env fallback: the secret had no plumbing at all, so the documented
+        # way to turn verification on required editing code. Without it the
+        # default posture for every install was "no verification".
+        self._policy_secret = policy_secret or os.environ.get("DUNETRACE_POLICY_SECRET", "")
         self._buffer = RingBuffer[AgentEvent](maxsize=buffer_size)
         self._stop_evt = Event()
         self._flush_interval = flush_interval_ms / 1000.0
@@ -460,7 +463,14 @@ class Dunetrace:
 
         _token = _current_run.set(ctx)
         try:
-            yield ctx
+            try:
+                yield ctx
+            finally:
+                # Before any run.completed/run.errored is emitted, on every exit
+                # path: a streamed call the caller broke out of without draining
+                # or closing has no other moment to report itself, and an
+                # llm.responded arriving after run.completed would miss the run.
+                ctx._flush_open_streams()
         except PolicyViolation as exc:
             # Guarded: the caller's PolicyViolation must reach them even if
             # recording it fails. Same for the generic path below.
@@ -572,8 +582,8 @@ class Dunetrace:
                            ``docs/integrations/auto-instrumentation.md`` for
                            the full agent_id resolution order.
         :param frameworks: Subset of frameworks to patch. ``None`` patches all
-                           installed ones (openai, anthropic, httpx, requests,
-                           langchain, crewai).
+                           installed ones (openai, anthropic, mistral, httpx,
+                           requests, langchain, crewai).
         """
         self._default_agent_id = agent_id or os.environ.get("DUNETRACE_AGENT_ID", "")
         from dunetrace.auto import auto_instrument as _auto_instrument
@@ -708,7 +718,11 @@ class Dunetrace:
                 import json as _json
 
                 data = _json.loads(resp.read())
-                self._policy_engine.load(data.get("policies", []), secret=self._policy_secret)
+                self._policy_engine.load(
+                    data.get("policies", []),
+                    secret=self._policy_secret,
+                    agent_id=agent_id,
+                )
         except Exception as exc:
             logger.debug("Policy fetch skipped: %s", exc)
 

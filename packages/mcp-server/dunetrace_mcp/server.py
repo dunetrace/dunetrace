@@ -19,6 +19,7 @@ Environment:
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import textwrap
@@ -32,6 +33,35 @@ from . import client
 
 # Docs live at <repo-root>/docs/ — four levels up from this file.
 _DOCS = pathlib.Path(__file__).resolve().parents[3] / "docs"
+
+# ── Write-tool gating ─────────────────────────────────────────────────────────
+#
+# Nine of these tools write, and some of them affect LIVE agent runs — a `stop`
+# policy terminates real runs as soon as the SDK next pulls policies. All 31
+# ride one bearer token, and docs/mcp-server.md advised operators to use a
+# read-scoped key. No such key exists in this system, so that advice mitigated
+# nothing while sounding like it did.
+#
+# This makes the advice true by a different route: the write tools are simply
+# not registered unless the operator opts in. Read-only is the default because
+# an MCP server is driven by a model reading untrusted agent output — signal
+# evidence, tool arguments, LLM text — which is exactly the shape that turns a
+# write tool into a confused-deputy.
+#
+#   DUNETRACE_MCP_READONLY=false   register the write tools
+_MCP_READONLY = os.environ.get("DUNETRACE_MCP_READONLY", "true").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
+
+def writing_tool():
+    """@mcp.tool() for a tool that mutates state, or a no-op when read-only."""
+    if _MCP_READONLY:
+        return lambda fn: fn
+    return mcp.tool()
+
 
 mcp = FastMCP(
     "dunetrace",
@@ -941,7 +971,7 @@ def list_agent_fixes(agent_id: str) -> str:
 # ── explain / root cause tools ────────────────────────────────────────────────
 
 
-@mcp.tool()
+@writing_tool()
 def trigger_explain(signal_id: int, agent_id: str = "") -> str:
     """
     Trigger LLM-powered root cause analysis for a signal and return a fix
@@ -1065,7 +1095,7 @@ def list_policies(agent_id: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@writing_tool()
 def create_policy(name: str, agent_id: str, condition: str, action: str) -> str:
     """
     Create a runtime policy that triggers an action when a metric threshold is
@@ -1122,7 +1152,7 @@ def create_policy(name: str, agent_id: str, condition: str, action: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@writing_tool()
 def toggle_policy(policy_id: str, enabled: bool) -> str:
     """
     Enable or disable a runtime policy.
@@ -1141,7 +1171,7 @@ def toggle_policy(policy_id: str, enabled: bool) -> str:
     return f"Policy '{name}' ({policy_id}) is now {new_state}."
 
 
-@mcp.tool()
+@writing_tool()
 def delete_policy(policy_id: str) -> str:
     """
     Delete a runtime policy.
@@ -1206,7 +1236,7 @@ def list_custom_detectors(agent_id: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@writing_tool()
 def create_custom_detector(description: str, agent_id: str = "*") -> str:
     """
     Create a custom detector from a plain-English description.
@@ -1287,7 +1317,7 @@ def create_custom_detector(description: str, agent_id: str = "*") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@writing_tool()
 def activate_custom_detector(detector_id: str) -> str:
     """
     Activate a custom detector so it fires live alerts.
@@ -1310,7 +1340,7 @@ def activate_custom_detector(detector_id: str) -> str:
     )
 
 
-@mcp.tool()
+@writing_tool()
 def pause_custom_detector(detector_id: str) -> str:
     """
     Pause a custom detector so it stops evaluating entirely.
@@ -1330,7 +1360,7 @@ def pause_custom_detector(detector_id: str) -> str:
     return f"Custom detector '{name}' ({detector_id}) paused.\nIt will not evaluate until resumed."
 
 
-@mcp.tool()
+@writing_tool()
 def delete_custom_detector(detector_id: str) -> str:
     """
     Delete a custom detector permanently.
@@ -1533,7 +1563,7 @@ def search_issues(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@writing_tool()
 def resolve_issue(issue_id: int, resolution_notes: str) -> str:
     """
     Manually mark an issue resolved with notes on what fixed it — for when
@@ -1891,8 +1921,8 @@ _GUIDES: dict[str, str] = {
         ```
 
         ## Option C — auto-instrumentation (simplest for existing code)
-        Patches every installed client: openai, anthropic, langchain, crewai,
-        httpx, requests. No call-site changes.
+        Patches every installed client: openai, anthropic, mistral, langchain,
+        crewai, httpx, requests. No call-site changes.
         ```python
         dt.init(agent_id="my-agent")   # patches clients globally
 
@@ -2556,7 +2586,8 @@ def main() -> None:
     parser.epilog = (
         f"Environment:\n"
         f"  DUNETRACE_API_URL  Customer API base URL  (current: {api_url})\n"
-        f"  DUNETRACE_API_KEY  Bearer token           (current: {'set' if api_key != 'dt_dev_test' else 'dt_dev_test (dev default)'})\n\n"
+        f"  DUNETRACE_API_KEY  Bearer token           (current: {'set' if api_key != 'dt_dev_test' else 'dt_dev_test (dev default)'})\n"
+        f"  DUNETRACE_MCP_READONLY  Withhold the 9 write tools (current: {'true — read-only' if _MCP_READONLY else 'false — WRITE TOOLS ENABLED'})\n\n"
         f"Client config (Claude Code — add to ~/.claude.json):\n"
         f'  {{"mcpServers": {{"dunetrace": {{"command": "dunetrace-mcp", '
         f'"env": {{"DUNETRACE_API_URL": "{api_url}", "DUNETRACE_API_KEY": "..."}}}}}}}}'

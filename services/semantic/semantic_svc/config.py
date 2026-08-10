@@ -39,12 +39,30 @@ class Settings:
         "yes",
     )
 
-    # "openai" | "anthropic" — which DeepEval-native model class evaluators
-    # build by default. Explicit instantiation, not DeepEval's own env/keyfile
-    # provider auto-detection (see evaluators/models.py's docstring for why).
+    # "openai" | "anthropic" | "mistral" — which model class evaluators build by
+    # default. Explicit instantiation, not DeepEval's own env/keyfile provider
+    # auto-detection (see evaluators/models.py's docstring for why). openai and
+    # anthropic map to DeepEval's own classes; mistral maps to
+    # evaluators/mistral_model.py, since DeepEval 4.0.9 ships no Mistral class.
     SEMANTIC_LLM_PROVIDER: str = os.getenv("SEMANTIC_LLM_PROVIDER", "openai")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    # BYOK for the mistral provider, same shape as the two above.
+    MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
+
+    # Second opinions (semantic-evaluators.yml's require_second_opinion) re-run an
+    # evaluator against a *different* model to confirm a HIGH finding. By default
+    # that second model is a different vendor, which is fine for openai/anthropic
+    # but breaks the residency expectation of a mistral deployment: the whole run
+    # text would go to a US API on exactly the findings that matter most. So when
+    # the primary provider is mistral the second opinion stays on Mistral, and a
+    # cross-vendor second_opinion_provider is suppressed with a warning. Set this
+    # to true to allow it — for a deployment that chose Mistral on cost rather
+    # than residency and wants cross-vendor model diversity.
+    # See worker.py::_resolve_second_opinion and docs/integrations/mistral.md.
+    SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION: bool = os.getenv(
+        "SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION", "false"
+    ).lower() in ("1", "true", "yes")
 
     # Per-evaluator model override. Empty string means "use the provider's
     # cost-conscious default" — see evaluators/models.py::_DEFAULT_MODEL_BY_PROVIDER.

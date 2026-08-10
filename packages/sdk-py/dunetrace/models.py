@@ -181,6 +181,21 @@ class LlmCall:
     # server-reconstructed side. Detectors/evaluators that only need the size
     # keep reading output_length; those that need the text read this.
     output_text: Optional[str] = None
+    # Which vendor served the call: "openai", "anthropic", "mistral". Set by the
+    # auto-instrumentation patchers, which know the answer for free. Nullable:
+    # manual run.llm_called() callers and events recorded before this field
+    # existed leave it None, and cost lookup never depends on it (the price
+    # tables key off the model name alone). Declared last so the positional
+    # construction used across the detector tests keeps working.
+    provider: Optional[str] = None
+    # Per-run sequence number correlating this call with its response event.
+    # Ordering alone cannot do it: a streamed call's llm.responded lands whenever
+    # the caller drains the stream, so two overlapping streams emit
+    # called(A), called(B), responded(A), responded(B) — and the server-side
+    # builders' LIFO pop would hand B's response to A. None for manual callers
+    # and for events recorded before this field existed; the builders fall back
+    # to positional pairing then.
+    call_id: Optional[int] = None
 
 
 @dataclass

@@ -279,8 +279,12 @@ class TestLlmSpan:
             {"finish_reason": "stop", "completion_tokens": 1000},
         )
         llm = _named(spans, "chat gpt-4o")
-        # gpt-4o: 1000*5e-6 + 1000*15e-6 = 0.02
-        assert abs(llm.attributes["dunetrace.llm.cost_usd"] - 0.02) < 1e-9
+        # gpt-4o: 1000*2.50e-6 + 1000*10.00e-6 = 0.0125. This asserted 0.02 —
+        # the original May-2024 launch rate, which the SDK's price table still
+        # carried long after the cut while explainer_svc/cost.py had the current
+        # one. test_cost.py::TestPriceTableParityWithSdk now fails the build if
+        # the two ever disagree again.
+        assert abs(llm.attributes["dunetrace.llm.cost_usd"] - 0.0125) < 1e-9
 
     def test_llm_error_sets_error_status(self):
         spans = self._run_with_llm(

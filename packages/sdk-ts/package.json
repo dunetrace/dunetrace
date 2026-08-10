@@ -1,6 +1,6 @@
 {
   "name": "dunetrace",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Real-time monitoring for AI agents",
   "author": "Dunetrace <dunetrace@gmail.com>",
   "license": "Apache-2.0",

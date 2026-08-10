@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from api_svc.auth import require_org
+from api_svc import llm_provider
 from api_svc.config import settings
 from api_svc.failure_types import (
     invalid_failure_type_detail,
@@ -217,12 +218,10 @@ async def explain_signal(
     dt.run()) and always produces a root cause and a fix. No external tracing
     system is consulted at all.
     """
-    if not (settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY):
+    if not llm_provider.llm_configured():
         raise HTTPException(
             status_code=503,
-            detail=(
-                "No LLM API key configured. Add ANTHROPIC_API_KEY or OPENAI_API_KEY to your .env."
-            ),
+            detail=(llm_provider.missing_key_message()),
         )
 
     signal = await get_signal_by_id(org_id, signal_id)
@@ -659,37 +658,7 @@ async def _call_llm(user_prompt: str, failure_type: str = "") -> Dict[str, str]:
         f"{fix_instruction}"
     )
 
-    raw = ""
-    if settings.ANTHROPIC_API_KEY:
-        try:
-            import anthropic
-        except ImportError as exc:
-            raise ImportError("anthropic package required: pip install anthropic") from exc
-
-        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-        msg = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=900,
-            system=system,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        raw = msg.content[0].text
-    else:
-        try:
-            import openai
-        except ImportError as exc:
-            raise ImportError("openai package required: pip install openai") from exc
-
-        client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            max_tokens=900,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        raw = resp.choices[0].message.content
+    raw = await llm_provider.complete(system, user_prompt, max_tokens=900)
 
     # Strip markdown code fences (model sometimes wraps JSON in ```json...```)
     raw_clean = raw.strip()

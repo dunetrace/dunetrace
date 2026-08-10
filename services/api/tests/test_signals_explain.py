@@ -62,7 +62,7 @@ def _settings_mock(*, anthropic_key="key", github_configured=False):
 
 class TestExplainSignalGating(unittest.IsolatedAsyncioTestCase):
     async def test_no_llm_key_returns_503(self):
-        with patch("api_svc.routers.signals.settings", _settings_mock(anthropic_key=None)):
+        with patch("api_svc.llm_provider.resolve_provider", return_value=None):
             with self.assertRaises(HTTPException) as ctx:
                 await explain_signal(1, org_id="org-1")
         self.assertEqual(ctx.exception.status_code, 503)

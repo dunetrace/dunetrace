@@ -2,7 +2,7 @@
 Shared agent_id resolution for framework-level auto-instrumentation
 (LangChain, CrewAI).
 
-The SDK-level patches in ``dunetrace.auto`` (openai, anthropic, httpx,
+The SDK-level patches in ``dunetrace.auto`` (openai, anthropic, mistral, httpx,
 requests) never need this — they only ever attach to an already-active
 ``dt.run()`` and never decide an agent_id themselves. Framework-level
 integrations are different: they can open their *own* run when no ``dt.run()``

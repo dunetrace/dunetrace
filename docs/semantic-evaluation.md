@@ -55,7 +55,13 @@ Per-evaluator model overrides are read from `HALLUCINATION_MODEL`,
 `TASK_COMPLETION_MODEL`, `TASK_UNDERSTANDING_FAILURE_MODEL`,
 `OFF_TOPIC_DRIFT_MODEL`, `USER_FRUSTRATION_MODEL`, `CONFUSION_LOOP_MODEL`, and
 `SYCOPHANCY_SIGNAL_MODEL`. Leave one blank to use the provider default chosen by
-`SEMANTIC_LLM_PROVIDER` (`openai` or `anthropic`).
+`SEMANTIC_LLM_PROVIDER` (`openai`, `anthropic`, or `mistral` — defaults
+`gpt-4o-mini`, `claude-haiku-4-5`, `mistral-small-latest` respectively). Each
+provider reads its own key: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`MISTRAL_API_KEY`. There is no cross-provider fallback — a failure surfaces as a
+failure, and an unrecognised provider name is a startup error. Mistral also
+keeps second opinions in region; see
+[integrations/mistral.md](integrations/mistral.md).
 
 ---
 

@@ -552,3 +552,123 @@ def test_all_malformed_returns_empty_list_not_raise():
     bad_resource = {"resource": "not-a-dict", "scopeSpans": "also-not-a-list"}
     events = otlp_to_events([bad_resource])
     assert events == []
+
+
+# ── Split-batch run boundaries ────────────────────────────────────────────────
+#
+# OTel exporters batch by size and time, never by trace — Python's
+# BatchSpanProcessor defaults to a 5s schedule delay — and a root span ends
+# AFTER its children. So any agent run longer than the batch delay arrives split
+# across export requests. Treating each request as a self-contained run
+# synthesised a completed run per request, so one real trace became several
+# completed runs sharing a run_id.
+
+_SPLIT_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+
+def _leaf(span_id, name, start_ns, end_ns):
+    return _span(span_id, "root0000", name, start_ns, end_ns)
+
+
+def test_batch_without_the_root_span_does_not_open_or_close_a_run():
+    events = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [
+                    _leaf("c1", "chat gpt-4o", 1_000_000_000_000, 2_000_000_000_000),
+                    _leaf("c2", "tool search", 2_000_000_000_000, 3_000_000_000_000),
+                ],
+            )
+        ]
+    )
+    types = [e["event_type"] for e in events]
+
+    assert "run.started" not in types
+    assert "run.completed" not in types
+    assert "run.errored" not in types
+    # The leaf work is still recorded — only the run boundaries are withheld.
+    assert types, "leaf spans should still produce events"
+
+
+def test_batch_with_the_root_span_opens_and_closes_the_run():
+    events = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [
+                    _span("root0000", "", "agent run", 1_000_000_000_000, 9_000_000_000_000),
+                    _leaf("c1", "chat gpt-4o", 1_000_000_000_000, 2_000_000_000_000),
+                ],
+            )
+        ]
+    )
+    types = [e["event_type"] for e in events]
+
+    assert types[0] == "run.started"
+    assert types[-1] == "run.completed"
+
+
+def test_a_split_trace_produces_exactly_one_run_completion():
+    first = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [_leaf("c1", "chat gpt-4o", 1_000_000_000_000, 2_000_000_000_000)],
+            )
+        ]
+    )
+    second = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [
+                    _leaf("c2", "tool search", 2_000_000_000_000, 3_000_000_000_000),
+                    _span("root0000", "", "agent run", 1_000_000_000_000, 9_000_000_000_000),
+                ],
+            )
+        ]
+    )
+    completions = [e for e in first + second if e["event_type"] in ("run.completed", "run.errored")]
+    assert len(completions) == 1
+
+
+def test_all_batches_of_one_trace_share_a_run_id():
+    first = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [_leaf("c1", "chat gpt-4o", 1_000_000_000_000, 2_000_000_000_000)],
+            )
+        ]
+    )
+    second = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [_span("root0000", "", "agent run", 1_000_000_000_000, 9_000_000_000_000)],
+            )
+        ]
+    )
+    assert {e["run_id"] for e in first + second} == {"4bf92f35-77b3-4da6-a3ce-929d0e0e4736"}
+
+
+def test_errored_root_still_produces_run_errored():
+    events = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [
+                    _span(
+                        "root0000",
+                        "",
+                        "agent run",
+                        1_000_000_000_000,
+                        9_000_000_000_000,
+                        status_code=2,
+                    )
+                ],
+            )
+        ]
+    )
+    assert events[-1]["event_type"] == "run.errored"

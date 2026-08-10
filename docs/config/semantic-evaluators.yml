@@ -24,6 +24,14 @@
 # second_opinion_provider/model: if omitted, defaults to whichever provider
 # ISN'T the primary (SEMANTIC_LLM_PROVIDER) — the point is a genuinely
 # different model, not the same one asked twice.
+#
+# DATA RESIDENCY: with SEMANTIC_LLM_PROVIDER=mistral, a second_opinion_provider
+# naming another vendor is IGNORED (with a warning) and replaced by a second
+# Mistral model. Otherwise the confirming call would send the full run text to
+# a US API on exactly the HIGH-confidence findings a European deployment cares
+# most about. Set SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION=true to allow
+# it. The `second_opinion_provider: anthropic` below is therefore only in
+# effect for an openai/anthropic primary. See docs/integrations/mistral.md.
 
 HALLUCINATION:
   alert_confidence_floor: 0.6

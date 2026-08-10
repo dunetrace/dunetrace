@@ -42,24 +42,23 @@ class TestSystemPromptRendering(unittest.TestCase):
 
 
 class TestTranslateDescription(unittest.IsolatedAsyncioTestCase):
-    def _mock_settings(self, anthropic_key="test-key", openai_key=None):
-        s = MagicMock()
-        s.ANTHROPIC_API_KEY = anthropic_key
-        s.OPENAI_API_KEY = openai_key
-        return s
+    @staticmethod
+    def _llm_returning(body: dict):
+        """Patch the one seam every provider now goes through.
 
-    def _mock_anthropic_response(self, body: dict):
-        mock_client = AsyncMock()
-        resp = MagicMock()
-        resp.json.return_value = {"content": [{"text": json.dumps(body)}]}
-        resp.raise_for_status = MagicMock()
-        mock_client.post = AsyncMock(return_value=resp)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        return mock_client
+        Deliberately not a mocked httpx/settings: api_svc.config loads the
+        repo's .env at import, so patching this module's `settings` alone left
+        llm_provider reading a developer's real ANTHROPIC_API_KEY — and the
+        test only stayed offline because a patched httpx.AsyncClient happened
+        to sit underneath the Anthropic SDK.
+        """
+        return patch(
+            "api_svc.llm_provider.complete",
+            AsyncMock(return_value=json.dumps(body)),
+        )
 
     async def test_no_llm_key_raises_value_error(self):
-        with patch("api_svc.custom_detector_translator.settings", self._mock_settings(None, None)):
+        with patch("api_svc.llm_provider.resolve_provider", return_value=None):
             with self.assertRaises(ValueError):
                 await translate_description("fires when tool_call_count > 3")
 
@@ -72,11 +71,7 @@ class TestTranslateDescription(unittest.IsolatedAsyncioTestCase):
             "fix_template": "Add a step limit",
             "requires_content": False,
         }
-        mock_client = self._mock_anthropic_response(body)
-        with (
-            patch("httpx.AsyncClient", return_value=mock_client),
-            patch("api_svc.custom_detector_translator.settings", self._mock_settings()),
-        ):
+        with self._llm_returning(body):
             result = await translate_description("fires when more than 5 tool calls happen")
         self.assertEqual(result["detector_name"], "CUSTOM_TOO_MANY_CALLS")
         self.assertFalse(result["requires_content"])
@@ -97,21 +92,13 @@ class TestTranslateDescription(unittest.IsolatedAsyncioTestCase):
             "fix_template": "Add retry logic",
             "requires_content": False,
         }
-        mock_client = self._mock_anthropic_response(body)
-        with (
-            patch("httpx.AsyncClient", return_value=mock_client),
-            patch("api_svc.custom_detector_translator.settings", self._mock_settings()),
-        ):
+        with self._llm_returning(body):
             result = await translate_description("fires when a tool error mentions a timeout")
         self.assertEqual(result["conditions"][0]["field"], "tool_error")
 
     async def test_declined_response_passed_through_unchanged(self):
         body = {"requires_content": True, "reason": "needs semantic judgment of tone"}
-        mock_client = self._mock_anthropic_response(body)
-        with (
-            patch("httpx.AsyncClient", return_value=mock_client),
-            patch("api_svc.custom_detector_translator.settings", self._mock_settings()),
-        ):
+        with self._llm_returning(body):
             result = await translate_description("fires when the agent sounds frustrated")
         self.assertTrue(result["requires_content"])
         self.assertIn("reason", result)

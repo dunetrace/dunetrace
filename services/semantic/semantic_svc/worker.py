@@ -166,10 +166,25 @@ def _build_conversation_evaluators() -> dict[str, object]:
     }
 
 
+# Second opinion for a mistral-primary deployment. Diversity has to come from
+# the model rather than the vendor, because Mistral is the only European
+# provider we support — see _resolve_second_opinion. The pair is picked so the
+# second opinion is never the same model as the primary default
+# (mistral-small-latest).
+_MISTRAL_SECOND_OPINION_MODEL = "mistral-large-latest"
+_MISTRAL_SECOND_OPINION_ALT = "mistral-medium-latest"
+
+
 def _opposite_provider(provider: str) -> str:
     """The point of a second opinion is a genuinely different model — default
     to whichever provider ISN'T the primary one when semantic-evaluators.yml
-    doesn't specify second_opinion_provider explicitly."""
+    doesn't specify second_opinion_provider explicitly.
+
+    mistral maps to itself: a customer on the European provider does not want
+    the confirming call to leave it, so the second opinion differs by model
+    instead. _resolve_second_opinion picks that model."""
+    if provider == "mistral":
+        return "mistral"
     return "anthropic" if provider == "openai" else "openai"
 
 
@@ -178,7 +193,64 @@ def _provider_has_key(provider: str) -> bool:
         return bool(settings.ANTHROPIC_API_KEY)
     if provider == "openai":
         return bool(settings.OPENAI_API_KEY)
+    if provider == "mistral":
+        return bool(settings.MISTRAL_API_KEY)
     return False
+
+
+def _mistral_second_opinion_model(primary_model: str | None) -> str:
+    """A different Mistral model from the primary one. Asking the identical
+    model twice is not a second opinion."""
+    resolved = (primary_model or "").strip().lower()
+    if resolved.startswith("mistral-large"):
+        return _MISTRAL_SECOND_OPINION_ALT
+    return _MISTRAL_SECOND_OPINION_MODEL
+
+
+def _resolve_second_opinion(name: str, primary_provider: str, cfg: dict) -> tuple[str, str | None]:
+    """(provider, model) for one evaluator's second opinion.
+
+    Enforces the residency boundary: when the primary provider is mistral, a
+    second_opinion_provider naming a different vendor would send the full run
+    text to that vendor on precisely the HIGH-confidence findings a customer
+    cares most about — the opposite of why they selected a European provider.
+    That configuration is suppressed in favour of an in-region Mistral model
+    unless SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION is set.
+
+    Nothing changes for openai/anthropic primaries: they keep crossing to each
+    other, which is the existing behaviour and carries no residency promise.
+    """
+    configured = cfg.get("second_opinion_provider")
+    provider = configured or _opposite_provider(primary_provider)
+    # This evaluator's own primary model override, e.g. HALLUCINATION_MODEL.
+    # Empty means the provider default, which _mistral_second_opinion_model
+    # already treats as "not large".
+    primary_model = getattr(settings, f"{name}_MODEL", "") or None
+
+    if (
+        primary_provider == "mistral"
+        and provider != "mistral"
+        and not settings.SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION
+    ):
+        in_region = _mistral_second_opinion_model(primary_model)
+        logger.warning(
+            "Second-opinion for %s: suppressed cross-provider second_opinion_provider "
+            "%r because SEMANTIC_LLM_PROVIDER=mistral. The run text would have left "
+            "the European provider on every HIGH-confidence finding. Using mistral/%s "
+            "instead. Set SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION=true to allow "
+            "it — see docs/integrations/mistral.md.",
+            name,
+            provider,
+            in_region,
+        )
+        return "mistral", in_region
+
+    if provider == "mistral" and not cfg.get("second_opinion_model"):
+        # In-region by default rather than by override: still needs a model that
+        # differs from the primary one.
+        return provider, _mistral_second_opinion_model(primary_model)
+
+    return provider, cfg.get("second_opinion_model")
 
 
 def _build_second_opinion_evaluators() -> dict[str, object]:
@@ -190,7 +262,7 @@ def _build_second_opinion_evaluators() -> dict[str, object]:
         cls = _EVALUATOR_CLASSES.get(name)
         if cls is None:
             continue
-        provider = cfg.get("second_opinion_provider") or _opposite_provider(primary_provider)
+        provider, second_opinion_model = _resolve_second_opinion(name, primary_provider, cfg)
         # audit Finding 19: a second opinion defaults to the OPPOSITE provider for
         # model diversity. If that provider has no API key configured (the common
         # single-provider deployment — e.g. OpenAI only), DeepEval's model
@@ -206,7 +278,7 @@ def _build_second_opinion_evaluators() -> dict[str, object]:
                 provider,
             )
             continue
-        built[name] = cls(provider, cfg.get("second_opinion_model"))
+        built[name] = cls(provider, second_opinion_model)
     return built
 
 
@@ -244,7 +316,18 @@ async def _run_evaluators(
         # loop; calling it directly inside this async worker loop corrupts the
         # loop (IndexError: pop from an empty deque) and crash-loops the worker.
         # Run it in a thread so DeepEval gets its own loop, isolated from ours.
-        result = await asyncio.to_thread(evaluator.evaluate, run)
+        #
+        # Contained per evaluator: a provider error (rate limit, outage, a
+        # response the schema parser rejects) must cost this one finding, not the
+        # rest of the run's evaluators. Uncontained it propagates through
+        # process_run into poll_once's asyncio.gather and takes the whole batch
+        # down — and every evaluator already run for this run is billable, so the
+        # retry pays for them a second time.
+        try:
+            result = await asyncio.to_thread(evaluator.evaluate, run)
+        except Exception:
+            logger.exception("Evaluator %s failed for run %s — skipping it", name, run_id)
+            continue
         # Logged regardless of whether it fired — see semantic_evaluation_log's
         # schema comment for why failure_signals alone would undercount real
         # spend (it only ever stores fired findings).
@@ -281,7 +364,21 @@ async def _run_evaluators(
             second_evaluator = _second_opinion_evaluators.get(name)
             if second_evaluator is not None:
                 # audit Finding 20: isolate DeepEval's sync loop (see above).
-                second_result = await asyncio.to_thread(second_evaluator.evaluate, run)
+                # A failed second opinion degrades to "no second opinion" — the
+                # primary finding still stands at HIGH. Confirming a finding is
+                # an enhancement; it must not be able to discard the finding it
+                # was meant to confirm.
+                try:
+                    second_result = await asyncio.to_thread(second_evaluator.evaluate, run)
+                except Exception:
+                    logger.exception(
+                        "Second opinion for %s failed on run %s — keeping the "
+                        "primary finding unconfirmed",
+                        name,
+                        run_id,
+                    )
+                    second_result = None
+            if second_evaluator is not None and second_result is not None:
                 await log_semantic_evaluation(
                     org_id,
                     agent_id,
@@ -380,7 +477,16 @@ async def _maybe_run_conversation_evaluator(
     signals_written = 0
     for evaluator in _conversation_evaluators.values():
         # audit Finding 20: isolate DeepEval's sync loop (see _run_evaluators).
-        result = await asyncio.to_thread(evaluator.evaluate, conversation_input)
+        # Contained for the same reason as the run-level loop above.
+        try:
+            result = await asyncio.to_thread(evaluator.evaluate, conversation_input)
+        except Exception:
+            logger.exception(
+                "Conversation evaluator %s failed for conversation %s — skipping it",
+                getattr(evaluator, "name", evaluator),
+                conversation_external_id,
+            )
+            continue
         await log_semantic_evaluation(
             org_id,
             agent_id,

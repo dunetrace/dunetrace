@@ -62,6 +62,36 @@ class FakeAnthropic {
   messages = new FakeMessages();
 }
 
+/**
+ * Mistral's layout differs from the other two in three ways that the spec
+ * machinery had to grow for, all verified against @mistralai/mistralai:
+ *   - the Chat class is NOT exported, so there is no static path to walk;
+ *     `chat` is a lazily-cached getter on Mistral.prototype;
+ *   - the methods are `complete`/`stream`, not a single flagged `create`;
+ *   - responses deserialise to camelCase (promptTokens, finishReason).
+ */
+class FakeMistralChat {
+  async complete(opts: Record<string, unknown>): Promise<unknown> {
+    if (opts["__throw"]) throw new Error("upstream 500");
+    return {
+      choices: [{ message: { content: "bonjour" }, finishReason: "stop" }],
+      usage: { promptTokens: 31, completionTokens: 9 },
+    };
+  }
+  async stream(_opts: Record<string, unknown>): Promise<unknown> {
+    return { __stream: true };
+  }
+}
+
+class FakeMistral {
+  private _chat?: FakeMistralChat;
+  constructor(_opts: unknown) {}
+  get chat(): FakeMistralChat {
+    if (!this._chat) this._chat = new FakeMistralChat();
+    return this._chat;
+  }
+}
+
 // ── Harness ───────────────────────────────────────────────────────────────────
 
 const captured: AgentEvent[] = [];
@@ -707,5 +737,100 @@ describe("instrumentHttp", () => {
     autoInstrument({ targets: ["http"] });
     await dt.run("agent-a", {}, async () => { await fetch("https://api.example.com/x"); });
     expect(eventsOfType("tool.called")).toHaveLength(1);
+  });
+});
+
+// ── Mistral ───────────────────────────────────────────────────────────────────
+
+describe("autoInstrument — mistral", () => {
+  it("resolves the Chat prototype by constructing a throwaway client", () => {
+    // The class is unexported and `chat` is an instance getter, so neither the
+    // static path nor a bare module namespace can reach it.
+    expect(autoInstrument({ mistral: FakeMistral, targets: ["mistral"] })).toEqual(["mistral"]);
+    restore(FakeMistralChat.prototype, "complete", FakeMistralChat.prototype.complete);
+    restore(FakeMistralChat.prototype, "stream", FakeMistralChat.prototype.stream);
+  });
+
+  it("patches every client, including ones built after the call", async () => {
+    const origComplete = FakeMistralChat.prototype.complete;
+    try {
+      const dt = newClient();
+      autoInstrument({ mistral: FakeMistral, targets: ["mistral"] });
+      const client = new FakeMistral({ apiKey: "k" });
+
+      await dt.run("agent", {}, async () => {
+        await client.chat.complete({ model: "mistral-large-latest", messages: [] });
+      });
+
+      const called = eventsOfType("llm.called");
+      const responded = eventsOfType("llm.responded");
+      expect(called).toHaveLength(1);
+      expect(responded).toHaveLength(1);
+      expect(called[0]!.payload["model"]).toBe("mistral-large-latest");
+      // camelCase usage, which the other two SDKs do not use.
+      expect(called[0]!.payload["prompt_tokens"]).toBe(31);
+      expect(responded[0]!.payload["completion_tokens"]).toBe(9);
+      expect(responded[0]!.payload["output"]).toBe("bonjour");
+    } finally {
+      restore(FakeMistralChat.prototype, "complete", origComplete);
+    }
+  });
+
+  it("treats stream() as always streaming, with no stream flag to read", async () => {
+    const origStream = FakeMistralChat.prototype.stream;
+    try {
+      const dt = newClient();
+      autoInstrument({ mistral: FakeMistral, targets: ["mistral"] });
+      const client = new FakeMistral({ apiKey: "k" });
+
+      await dt.run("agent", {}, async () => {
+        await client.chat.stream({ model: "mistral-large-latest", messages: [] });
+      });
+
+      // llm.called fires immediately; llm.responded waits for the caller to
+      // drain, exactly as for the other two SDKs' streaming path.
+      expect(eventsOfType("llm.called")).toHaveLength(1);
+      expect(eventsOfType("llm.responded")).toHaveLength(0);
+    } finally {
+      restore(FakeMistralChat.prototype, "stream", origStream);
+    }
+  });
+
+  it("never breaks the host call when the provider throws", async () => {
+    const origComplete = FakeMistralChat.prototype.complete;
+    try {
+      const dt = newClient();
+      autoInstrument({ mistral: FakeMistral, targets: ["mistral"] });
+      const client = new FakeMistral({ apiKey: "k" });
+
+      await expect(
+        dt.run("agent", {}, async () => {
+          await client.chat.complete({ model: "m", messages: [], __throw: true });
+        }),
+      ).rejects.toThrow("upstream 500");
+    } finally {
+      restore(FakeMistralChat.prototype, "complete", origComplete);
+    }
+  });
+
+  it("is idempotent", () => {
+    const origComplete = FakeMistralChat.prototype.complete;
+    try {
+      autoInstrument({ mistral: FakeMistral, targets: ["mistral"] });
+      const afterFirst = FakeMistralChat.prototype.complete;
+      _resetAutoInstrumentState();
+      autoInstrument({ mistral: FakeMistral, targets: ["mistral"] });
+      expect(FakeMistralChat.prototype.complete).toBe(afterFirst);
+    } finally {
+      restore(FakeMistralChat.prototype, "complete", origComplete);
+    }
+  });
+
+  it("is a known target", () => {
+    const dt = newClient();
+    void dt;
+    expect(autoInstrument({ targets: ["mistral"], mistral: FakeMistral })).toEqual(["mistral"]);
+    restore(FakeMistralChat.prototype, "complete", FakeMistralChat.prototype.complete);
+    restore(FakeMistralChat.prototype, "stream", FakeMistralChat.prototype.stream);
   });
 });

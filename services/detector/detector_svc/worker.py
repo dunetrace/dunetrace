@@ -42,7 +42,10 @@ from detector_svc.db import (
     get_watermark,
     prune_processed_runs,
     init_pool,
+    MAX_PROCESSING_ATTEMPTS,
+    clear_processing_failures,
     mark_run_processed,
+    record_processing_failure,
     record_custom_detector_results,
     write_custom_signal,
     write_signals,
@@ -339,11 +342,39 @@ async def process_run(
         )
         _apply_hard_override(signals, risk)
         _apply_cooccurrence_boost(signals)
-    except Exception:
+    except Exception as exc:
         logger.exception("Run processing failed. run_id=%s", run_id)
+        # Deliberately NOT marked processed on the first failures. This block is
+        # not pure computation — it holds seven baseline queries, a detector
+        # lookup, a parent fetch and a lineage walk, all DB round-trips — so the
+        # common failure here is transient. Marking it processed wrote
+        # signal_count=0, a permanent "clean run" verdict nothing could revisit,
+        # because a completed run never gains events and so never re-enters the
+        # poll. Leaving it unmarked means the next poll retries it.
+        attempts = await record_processing_failure(run_id, repr(exc))
+        if attempts < MAX_PROCESSING_ATTEMPTS:
+            logger.warning(
+                "Run %s will be retried (attempt %d of %d)",
+                run_id,
+                attempts,
+                MAX_PROCESSING_ATTEMPTS,
+            )
+            return 0
+        # Budget spent: a deterministically-undetectable run must not be retried
+        # on every poll forever. Record it as processed WITH the error, so it is
+        # visible as failed rather than indistinguishable from clean.
+        logger.error("Run %s failed detection %d times — recording as failed", run_id, attempts)
         await mark_run_processed(
-            run_id, agent_id, agent_version, trigger, 0, org_id, event_count=len(events)
+            run_id,
+            agent_id,
+            agent_version,
+            trigger,
+            0,
+            org_id,
+            event_count=len(events),
+            processing_error=repr(exc)[:2000],
         )
+        await clear_processing_failures(run_id)
         return 0
 
     count = 0
@@ -491,11 +522,14 @@ async def process_run(
     await mark_run_processed(
         run_id, agent_id, agent_version, trigger, count, org_id, event_count=len(events)
     )
+    # A run that eventually succeeded leaves no failure history behind, so its
+    # next failure (if any) starts with a full retry budget.
+    await clear_processing_failures(run_id)
     return count
 
 
 async def poll_once() -> tuple[int, int]:
-    watermark = await get_watermark(settings.SHARD_INDEX)
+    watermark = await get_watermark(settings.SHARD_INDEX, settings.SHARD_COUNT)
     completed = await fetch_completed_runs(
         limit=settings.BATCH_SIZE,
         shard_count=settings.SHARD_COUNT,
@@ -517,7 +551,9 @@ async def poll_once() -> tuple[int, int]:
     # later costs a few redundant scans; advancing early loses runs.
     drained = len(completed) < settings.BATCH_SIZE and len(stalled) < settings.BATCH_SIZE
     if drained:
-        await advance_watermark(settings.SHARD_INDEX, settings.WATERMARK_GRACE_SECS)
+        await advance_watermark(
+            settings.SHARD_INDEX, settings.WATERMARK_GRACE_SECS, settings.SHARD_COUNT
+        )
     elif watermark is None:
         logger.info(
             "Backlog present (completed=%d stalled=%d, batch=%d) — poll watermark "

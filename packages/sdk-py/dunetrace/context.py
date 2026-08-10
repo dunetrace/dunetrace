@@ -25,6 +25,20 @@ _current_run: ContextVar[Optional["RunContext"]] = ContextVar("dunetrace_current
 # ChatOpenAI doesn't get counted twice.
 _in_framework_call: ContextVar[bool] = ContextVar("dunetrace_in_framework_call", default=False)
 
+# Set to True for the duration of the HTTP request an LLM client patch is
+# already recording. Every vendor SDK here is built on httpx (openai, anthropic,
+# mistralai) or requests, so without this a single LLM call is recorded twice:
+# once as llm.called by the provider patch, and once as tool.called named after
+# the hostname by the httpx/requests patch. That inflates tool_call_count —
+# which is both a policy trigger and what TOOL_LOOP counts — for anyone who
+# calls dt.auto_instrument() with no framework list.
+#
+# Distinct from _in_framework_call, which suppresses the *inner LLM* patch under
+# an outer framework integration. This one suppresses the *inner HTTP* patch
+# under an outer LLM patch; both can be set at once for a LangChain call.
+# Mirrors the TypeScript SDK's httpSuppression (packages/sdk-ts/src/context.ts).
+_http_suppressed: ContextVar[bool] = ContextVar("dunetrace_http_suppressed", default=False)
+
 
 def get_current_run() -> "Optional[RunContext]":
     """

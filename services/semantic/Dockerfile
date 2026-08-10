@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # sdk-py package must be present + on PYTHONPATH — it was missing here, which
 # crash-looped the worker. Matches services/alerts/Dockerfile. (Authorized during
 # audit to enable Phase 3 semantic testing.)
+COPY packages/schemas-py/ packages/schemas-py/
 COPY packages/sdk-py/ packages/sdk-py/
 COPY services/explainer/ services/explainer/
 COPY services/semantic/ services/semantic/

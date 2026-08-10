@@ -48,12 +48,24 @@ class Settings:
     # so self-hosted/dev deployments are unaffected.
     INTERNAL_TOKEN: str = os.getenv("INTERNAL_TOKEN", "")
 
+    # Rate limit stamped on keys created through POST /v1/keys. Operator-set,
+    # not caller-set: key creation is self-service, so letting the request body
+    # choose this made the quota self-granting.
+    DEFAULT_KEY_RATE_LIMIT_RPM: int = int(os.getenv("DEFAULT_KEY_RATE_LIMIT_RPM", "600"))
     PAGE_SIZE_DEFAULT: int = int(os.getenv("PAGE_SIZE_DEFAULT", "50"))
     PAGE_SIZE_MAX: int = int(os.getenv("PAGE_SIZE_MAX", "500"))
 
-    # LLM for explain endpoint (Anthropic preferred; falls back to OpenAI)
+    # LLM for this service's own features: native explain, fix diff generation,
+    # custom-detector translation, issue summarisation. With API_LLM_PROVIDER
+    # unset the first configured key wins in the order below (Anthropic first,
+    # as before). Set it to anthropic|openai|mistral to pin one — a deployment
+    # that must keep this text inside a European provider sets `mistral`.
+    # See api_svc/llm_provider.py; distinct from the semantic worker's
+    # SEMANTIC_LLM_PROVIDER, which selects a different service's evaluators.
+    API_LLM_PROVIDER: str = os.getenv("API_LLM_PROVIDER", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
 
     # GitHub integration — for opening fix PRs from code-change signals.
     # GITHUB_TOKEN/GITHUB_REPO is the original single-tenant PAT-based path

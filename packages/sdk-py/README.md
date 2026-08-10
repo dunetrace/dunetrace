@@ -47,7 +47,7 @@ def my_agent(question: str) -> str:
 **Or with `@dt.agent` + auto-instrumentation:**
 
 ```python
-dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests, langchain, crewai
+dt.init(agent_id="my-agent")   # patches openai, anthropic, mistral, httpx, requests, langchain, crewai
 
 @dt.agent(model="gpt-4o")      # agent_id inherited from init()
 def run_agent(query: str) -> str:

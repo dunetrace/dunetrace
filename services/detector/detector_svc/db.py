@@ -262,12 +262,47 @@ CREATE INDEX IF NOT EXISTS idx_rsm_agent
 # scan, so a fresh install (or one migrating in) picks up all pending history on
 # its first poll and only then starts bounding. One row per shard because shards
 # progress independently.
+#
+# Keyed by (shard_count, shard_index), NOT shard_index alone. Which agents a
+# shard owns is a function of BOTH — `hashtext(agent_id) % shard_count` — so a
+# resize reshuffles ownership. Keyed by index alone, a shard that inherited new
+# agents on a resize kept the watermark it earned under the old topology and
+# skipped every one of their runs older than that bound, permanently and
+# silently. Under the composite key a resize simply presents as "never drained"
+# for the new topology, which reproduces the safe unbounded first scan.
+# Bounded retry for a run whose processing raised.
+#
+# The failure path used to write processed_runs(signal_count=0) — a permanent
+# "clean run" verdict that nothing can revisit, because a completed run never
+# gains events and so never re-enters the poll. process_run's guarded block is
+# not pure computation (seven baseline queries, a detector lookup, a parent
+# fetch, a lineage walk, all against a 5-connection pool), so one Postgres blip
+# silently discarded detection for every run in flight while the dashboard
+# showed them green.
+#
+# Leaving the run unmarked instead means it is retried on the next poll. This
+# table bounds that: a run that fails MAX_PROCESSING_ATTEMPTS times is marked
+# processed with the error recorded, so a deterministically-bad run cannot spin
+# forever and is still visible as failed rather than clean.
+_RUN_FAILURE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_processing_failures (
+    run_id           TEXT        PRIMARY KEY,
+    attempts         INT         NOT NULL DEFAULT 1,
+    last_error       TEXT,
+    last_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE processed_runs ADD COLUMN IF NOT EXISTS processing_error TEXT;
+"""
+
 _WATERMARK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS detector_watermarks (
-    shard_index  INT         PRIMARY KEY,
+    shard_index  INT         NOT NULL,
+    shard_count  INT         NOT NULL DEFAULT 1,
     watermark    TIMESTAMPTZ,
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (shard_count, shard_index)
 );
+ALTER TABLE detector_watermarks ADD COLUMN IF NOT EXISTS shard_count INT NOT NULL DEFAULT 1;
 """
 
 
@@ -393,6 +428,18 @@ LIVE_DETECTORS: set[str] = {
 
 
 async def ensure_detector_schema() -> None:
+    """Bring the SHARED schema up to date first, then this service's own tables.
+
+    Migrations own every definition more than one service touches, so this runs
+    before the local DDL below — booting detector against an empty database used
+    to crash on a table another service happened to create first.
+    """
+    from dunetrace_schemas.migrations import apply_migrations
+
+    if _pool:
+        async with _pool.acquire() as _c:
+            await apply_migrations(_c)
+
     if not _pool:
         return
     async with _pool.acquire() as conn:
@@ -403,6 +450,7 @@ async def ensure_detector_schema() -> None:
         await _seed_packs(conn)
         await conn.execute(_RUN_STATE_METRICS_SCHEMA)
         await conn.execute(_WATERMARK_SCHEMA)
+        await conn.execute(_RUN_FAILURE_SCHEMA)
     logger.info("Detector schema ready")
 
 
@@ -906,7 +954,7 @@ async def prune_processed_runs(batch_size: int = 10_000) -> int:
     return int(deleted or 0)
 
 
-async def get_watermark(shard_index: int) -> Optional[datetime]:
+async def get_watermark(shard_index: int, shard_count: int = 1) -> Optional[datetime]:
     """This shard's poll watermark, or None if it has never fully drained.
 
     None deliberately reproduces the unbounded scan — see _WATERMARK_SCHEMA. It's
@@ -917,12 +965,13 @@ async def get_watermark(shard_index: int) -> Optional[datetime]:
         return None
     async with _pool.acquire() as conn:
         return await conn.fetchval(
-            "SELECT watermark FROM detector_watermarks WHERE shard_index = $1",
+            "SELECT watermark FROM detector_watermarks WHERE shard_index = $1 AND shard_count = $2",
             shard_index,
+            shard_count,
         )
 
 
-async def advance_watermark(shard_index: int, grace_secs: float) -> None:
+async def advance_watermark(shard_index: int, grace_secs: float, shard_count: int = 1) -> None:
     """Move this shard's watermark up to NOW() - grace_secs.
 
     `grace_secs` is the re-scan overlap: events that landed in the last
@@ -943,9 +992,9 @@ async def advance_watermark(shard_index: int, grace_secs: float) -> None:
     async with _pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO detector_watermarks (shard_index, watermark, updated_at)
-            VALUES ($1, NOW() - ($2 || ' seconds')::INTERVAL, NOW())
-            ON CONFLICT (shard_index) DO UPDATE
+            INSERT INTO detector_watermarks (shard_index, shard_count, watermark, updated_at)
+            VALUES ($1, $3, NOW() - ($2 || ' seconds')::INTERVAL, NOW())
+            ON CONFLICT (shard_count, shard_index) DO UPDATE
             SET watermark  = GREATEST(
                     detector_watermarks.watermark,
                     NOW() - ($2 || ' seconds')::INTERVAL
@@ -954,6 +1003,7 @@ async def advance_watermark(shard_index: int, grace_secs: float) -> None:
             """,
             shard_index,
             str(grace_secs),
+            shard_count,
         )
 
 
@@ -1172,6 +1222,41 @@ async def write_signals(signals: list, shadow: bool, org_id: str) -> int:
     return len(rows)
 
 
+# A run gets this many detection attempts before it is written off. Three
+# covers a transient pool timeout or a restart mid-run without letting a
+# genuinely undetectable run be retried on every poll forever.
+MAX_PROCESSING_ATTEMPTS = 3
+
+
+async def record_processing_failure(run_id: str, error: str) -> int:
+    """Count this failed attempt and return the running total."""
+    if not _pool:
+        return MAX_PROCESSING_ATTEMPTS
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO run_processing_failures (run_id, attempts, last_error)
+            VALUES ($1, 1, $2)
+            ON CONFLICT (run_id) DO UPDATE
+                SET attempts        = run_processing_failures.attempts + 1,
+                    last_error      = EXCLUDED.last_error,
+                    last_attempt_at = NOW()
+            RETURNING attempts
+            """,
+            run_id,
+            error[:2000],
+        )
+
+
+async def clear_processing_failures(run_id: str) -> None:
+    """Called after a run finally processes, so a transient blip leaves nothing
+    behind and the next failure starts its budget fresh."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute("DELETE FROM run_processing_failures WHERE run_id = $1", run_id)
+
+
 async def mark_run_processed(
     run_id: str,
     agent_id: str,
@@ -1180,6 +1265,7 @@ async def mark_run_processed(
     signal_count: int,
     org_id: str,
     event_count: int = 0,
+    processing_error: str = "",
 ) -> None:
     """Record that this run has been processed. On a reprocess (audit Finding 15,
     late events grew the count) UPDATE the stored event_count/signal_count so the
@@ -1188,12 +1274,14 @@ async def mark_run_processed(
         await conn.execute(
             """
             INSERT INTO processed_runs
-                (run_id, agent_id, agent_version, trigger, signal_count, org_id, event_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (run_id, agent_id, agent_version, trigger, signal_count, org_id,
+                 event_count, processing_error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''))
             ON CONFLICT (run_id) DO UPDATE
-                SET signal_count = processed_runs.signal_count + EXCLUDED.signal_count,
-                    event_count  = EXCLUDED.event_count,
-                    processed_at = NOW()
+                SET signal_count     = processed_runs.signal_count + EXCLUDED.signal_count,
+                    event_count      = EXCLUDED.event_count,
+                    processing_error = EXCLUDED.processing_error,
+                    processed_at     = NOW()
             """,
             run_id,
             agent_id,
@@ -1202,6 +1290,7 @@ async def mark_run_processed(
             signal_count,
             org_id,
             event_count,
+            processing_error,
         )
 
 

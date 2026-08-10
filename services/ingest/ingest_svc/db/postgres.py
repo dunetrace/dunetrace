@@ -351,6 +351,7 @@ ALTER TABLE policies        ADD COLUMN IF NOT EXISTS org_id TEXT;
 -- HMAC canonical-form version (see api_svc _sign_policy). Added defensively here
 -- too so fetch_policies' SELECT never fails on a missing column regardless of
 -- which service ran its schema first.
+ALTER TABLE policies        ADD COLUMN IF NOT EXISTS signature   TEXT NOT NULL DEFAULT '';
 ALTER TABLE policies        ADD COLUMN IF NOT EXISTS sig_version INT NOT NULL DEFAULT 1;
 
 CREATE INDEX IF NOT EXISTS idx_events_org_agent  ON events(org_id, agent_id, received_at DESC);
@@ -657,7 +658,15 @@ async def prune_old_events(retention_days: int = 90) -> int:
 
 
 async def ensure_schema() -> None:
-    """Idempotent — safe to call on every startup."""
+    """Create this service's base tables, then bring the SHARED schema up to
+    date. Idempotent — safe to call on every startup.
+
+    Migrations run last, after the base DDL, because they reshape tables this
+    block creates. They own every definition more than one service touches (see
+    dunetrace_schemas.migrations); anything above is single-owner.
+    """
+    from dunetrace_schemas.migrations import apply_migrations
+
     if not _pool:
         return
     async with _pool.acquire() as conn:
@@ -665,7 +674,8 @@ async def ensure_schema() -> None:
         await conn.execute(_MULTI_TENANCY_DDL)
         await _backfill_org_id(conn)
         await _ensure_event_partitions(conn)
-    logger.info("Schema ready")
+        version = await apply_migrations(conn)
+    logger.info("Schema ready (shared schema at version %d)", version)
 
 
 # ── Queries ────────────────────────────────────────────────────────────────────
@@ -871,9 +881,9 @@ async def create_api_key(
     Keys are org-scoped, not agent-scoped: this key can submit events for any
     agent_id under org_id, discovered on first ingest.
     """
-    import secrets
+    from dunetrace_schemas.keys import generate_api_key, hash_api_key, key_prefix
 
-    key = "dt_" + secrets.token_urlsafe(32)
+    key = generate_api_key()
     if not _pool:
         raise RuntimeError("DB pool not ready")
     name = org_name or org_id
@@ -885,9 +895,16 @@ async def create_api_key(
                 org_id,
                 name,
             )
+            # Only the hash is persisted. `key` is still written because the
+            # column is NOT NULL from the pre-hash schema, but it holds the
+            # hash too — nothing anywhere reads it as a secret any more, and
+            # the plaintext leaves this function only as the return value,
+            # shown to the caller once.
             await conn.execute(
-                "INSERT INTO api_keys (key, org_id, rate_limit_rpm) VALUES ($1, $2, $3)",
-                key,
+                "INSERT INTO api_keys (key, key_hash, key_prefix, org_id, rate_limit_rpm) "
+                "VALUES ($1, $1, $2, $3, $4)",
+                hash_api_key(key),
+                key_prefix(key),
                 org_id,
                 rate_limit_rpm,
             )
@@ -967,11 +984,14 @@ async def verify_api_key(api_key: str) -> Optional[str]:
     if not _pool:
         return None
 
+    from dunetrace_schemas.keys import hash_api_key
+
     try:
         async with _pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT org_id FROM api_keys WHERE key = $1 AND active = TRUE",
-                api_key,
+                # Matched on the hash: the database never holds the secret.
+                "SELECT org_id FROM api_keys WHERE key_hash = $1 AND active = TRUE",
+                hash_api_key(api_key),
             )
         return row["org_id"] if row else None
     except Exception as exc:

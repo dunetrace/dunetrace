@@ -1,5 +1,21 @@
 # Policies
 
+> **Remote policies that change agent behaviour require a verified signature.**
+> A remote policy asking for `stop`, `require_approval`, `escalate_to_human`,
+> `switch_model`, `inject_prompt`, `inject_recovery_prompt` or
+> `stop_current_tts` is **downgraded to log-only** unless a policy secret is
+> configured — set `DUNETRACE_POLICY_SECRET` in the agent's environment and
+> `POLICY_SIGNING_SECRET` on the server. Without one there is no way to tell the
+> policy came from your server, and these actions change what a production agent
+> does. Policies you register in-process with `dt.add_policy()` are your own
+> code and are never downgraded.
+>
+> Signing is a shared HMAC secret, so a server that is itself compromised holds
+> the signing key. What this protects against is a party who cannot produce a
+> correctly signed payload — a spoofed endpoint, a hijacked DNS record, a MITM.
+> Closing the compromised-server case needs asymmetric signing, which needs a
+> crypto library; the core SDK is deliberately zero-dependency.
+
 Runtime guardrails evaluated mid-run after every `tool_called`, `llm_responded`, and `tool_responded` event. Policies fire at most once per run (except `log` policies, which fire every time).
 
 Policy checks are synchronous and O(1) — running totals for `error_count` and `cost_usd` are maintained incrementally, and signal detector results are cached per step.

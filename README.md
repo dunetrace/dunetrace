@@ -97,7 +97,7 @@ from dunetrace import Dunetrace
 import openai
 
 dt = Dunetrace()
-dt.init(agent_id="support-agent")   # auto-instruments installed clients (OpenAI, Anthropic, LangChain, CrewAI, httpx, requests)
+dt.init(agent_id="support-agent")   # auto-instruments installed clients (OpenAI, Anthropic, Mistral, Bedrock, LangChain, CrewAI, httpx, requests)
 
 @dt.agent("support-agent", model="gpt-4o")
 def my_agent(question: str) -> str:
@@ -114,7 +114,7 @@ import { Dunetrace, autoInstrument } from "dunetrace";
 import OpenAI from "openai";
 
 const dt = new Dunetrace();
-autoInstrument({ openai: OpenAI });   // patches OpenAI + outbound fetch; add `anthropic: Anthropic` if you use it
+autoInstrument({ openai: OpenAI });   // patches OpenAI + outbound fetch; add `anthropic: Anthropic` or `mistral: Mistral` if you use them
 
 const openai = new OpenAI();          // constructed after the patch — still tracked
 
@@ -344,6 +344,10 @@ Agent Code
 ---
 
 ## Integrations
+
+**Model providers** — OpenAI, Anthropic, Mistral and AWS Bedrock, auto-instrumented with no call-site changes.
+- [Auto-instrumentation (what's patched, streaming, agent_id resolution)](docs/integrations/auto-instrumentation.md)
+- [Mistral (hyperscaler-hosted clients, EU-resident evaluation)](docs/integrations/mistral.md)
 
 **Evaluation & tracing**
 - [OpenTelemetry export (Datadog, Grafana, Honeycomb, Signoz, any OTLP backend)](docs/integrations/opentelemetry.md)

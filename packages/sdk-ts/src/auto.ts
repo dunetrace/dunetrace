@@ -59,13 +59,18 @@ export interface AutoInstrumentOptions {
    * Omit to auto-detect.
    */
   anthropic?: unknown;
+  /**
+   * The `@mistralai/mistralai` module, the `Mistral` class, or a client
+   * instance. Omit to auto-detect.
+   */
+  mistral?: unknown;
   /** Restrict to a subset, e.g. `["openai"]`. Defaults to every known target. */
   targets?: string[];
   /** Throw instead of warning when a requested target can't be patched. */
   strict?: boolean;
 }
 
-const KNOWN_TARGETS = ["openai", "anthropic", "http"] as const;
+const KNOWN_TARGETS = ["openai", "anthropic", "mistral", "http"] as const;
 
 function warn(message: string, err?: unknown): void {
   const suffix = err instanceof Error ? `: ${err.message}` : err ? `: ${String(err)}` : "";
@@ -143,6 +148,39 @@ function emitAnthropicResponse(model: string, resp: unknown, startedAt: number):
   });
 }
 
+/**
+ * Mistral's JS SDK deserialises to camelCase (`promptTokens`, `finishReason`),
+ * unlike the snake_case its HTTP API puts on the wire and unlike the Python
+ * SDK — verified against @mistralai/mistralai. Both spellings are read anyway so
+ * a raw-response shape still produces numbers rather than silently zeroing.
+ */
+function emitMistralResponse(model: string, resp: unknown, startedAt: number): void {
+  const run = getCurrentRun();
+  if (!run) return;
+  safeEmit(() => {
+    const body = isRecord(resp) ? resp : {};
+    const usage = isRecord(body["usage"]) ? body["usage"] : {};
+    const choices = Array.isArray(body["choices"]) ? body["choices"] : [];
+    const choice = isRecord(choices[0]) ? choices[0] : {};
+    const message = isRecord(choice["message"]) ? choice["message"] : {};
+
+    run.llmCalled(model, num(usage["promptTokens"]) ?? num(usage["prompt_tokens"]) ?? 0);
+    run.llmResponded({
+      completionTokens: num(usage["completionTokens"]) ?? num(usage["completion_tokens"]),
+      latencyMs: Date.now() - startedAt,
+      finishReason: str(choice["finishReason"]) ?? str(choice["finish_reason"]) ?? "stop",
+      outputText: mistralContentText(message["content"]),
+    });
+  });
+}
+
+/** Mistral content is a string, or a list of chunks for multimodal replies. */
+function mistralContentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((c) => (isRecord(c) ? str(c["text"]) ?? "" : "")).join("");
+}
+
 // ── Streaming ─────────────────────────────────────────────────────────────────
 
 /** Accumulates what a stream reveals only as it is consumed. */
@@ -177,6 +215,38 @@ function openAIStreamCollector(): StreamCollector {
       const delta = isRecord(choice["delta"]) ? choice["delta"] : undefined;
       text += str(delta?.["content"]) ?? "";
       finishReason = str(choice["finish_reason"]) ?? finishReason;
+    },
+    result: () => ({ promptTokens, completionTokens, finishReason, outputText: text }),
+  };
+}
+
+/**
+ * Mistral wraps each streamed chunk in a CompletionEvent, so the payload sits
+ * at `event.data`. Usage arrives on the final chunk by default — no opt-in flag
+ * the way OpenAI needs `stream_options.include_usage`.
+ */
+function mistralStreamCollector(): StreamCollector {
+  let text = "";
+  let promptTokens = 0;
+  let completionTokens: number | undefined;
+  let finishReason: string | undefined;
+
+  return {
+    observe(event) {
+      if (!isRecord(event)) return;
+      const chunk = isRecord(event["data"]) ? event["data"] : event;
+      const usage = isRecord(chunk["usage"]) ? chunk["usage"] : undefined;
+      if (usage) {
+        promptTokens = num(usage["promptTokens"]) ?? num(usage["prompt_tokens"]) ?? promptTokens;
+        completionTokens =
+          num(usage["completionTokens"]) ?? num(usage["completion_tokens"]) ?? completionTokens;
+      }
+      const choices = Array.isArray(chunk["choices"]) ? chunk["choices"] : [];
+      const choice = isRecord(choices[0]) ? choices[0] : undefined;
+      if (!choice) return;
+      const delta = isRecord(choice["delta"]) ? choice["delta"] : undefined;
+      if (delta) text += mistralContentText(delta["content"]);
+      finishReason = str(choice["finishReason"]) ?? str(choice["finish_reason"]) ?? finishReason;
     },
     result: () => ({ promptTokens, completionTokens, finishReason, outputText: text }),
   };
@@ -302,7 +372,12 @@ type CollectorFactory = () => StreamCollector;
  * describe. The failure is already visible to the caller and to whatever
  * error handling the host has.
  */
-function instrumentCreate(orig: AsyncFn, emit: Emitter, collectorFor: CollectorFactory): AsyncFn {
+function instrumentCreate(
+  orig: AsyncFn,
+  emit: Emitter,
+  collectorFor: CollectorFactory,
+  alwaysStream = false,
+): AsyncFn {
   if ((orig as unknown as Record<symbol, unknown>)[INSTRUMENTED]) return orig;
 
   const wrapped = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
@@ -314,7 +389,9 @@ function instrumentCreate(orig: AsyncFn, emit: Emitter, collectorFor: CollectorF
     // the duration so one LLM call doesn't also register as a tool call.
     const resp = await httpSuppression.run(true, () => orig.apply(this, args));
 
-    if (!opts?.["stream"]) {
+    // openai/anthropic express streaming as an option on one method; Mistral
+    // has a separate `stream` method that always streams.
+    if (!alwaysStream && !opts?.["stream"]) {
       emit(model, resp, startedAt);
       return resp;
     }
@@ -402,40 +479,67 @@ export function wrapAnthropicClient<T>(client: T): T {
  */
 function resolvePrototype(
   candidate: unknown,
-  staticPath: readonly string[],
-  instancePath: readonly string[],
+  spec: TargetSpec,
 ): Record<string, unknown> | null {
+  const probe = spec.methods[0].name;
+  const carries = (obj: unknown): boolean =>
+    isRecord(obj) && typeof (obj as Record<string, unknown>)[probe] === "function";
+
   // Unwrap a module namespace to its default/named export.
   let cls = candidate;
   if (isRecord(cls) && typeof cls !== "function") {
-    const named = staticPath[0] === "Chat" ? "OpenAI" : "Anthropic";
-    cls = (cls as Record<string, unknown>)[named] ?? (cls as Record<string, unknown>)["default"] ?? cls;
+    cls =
+      (cls as Record<string, unknown>)[spec.exportName] ??
+      (cls as Record<string, unknown>)["default"] ??
+      cls;
   }
 
   // Path 1 — a class exposing its resource classes as statics.
-  let node: unknown = cls;
-  for (const key of staticPath) {
-    node = isRecord(node) || typeof node === "function"
-      ? (node as Record<string, unknown>)[key]
-      : undefined;
-    if (node === undefined) break;
-  }
-  if (typeof node === "function" && isRecord((node as AnyFn).prototype)) {
-    return (node as unknown as { prototype: Record<string, unknown> }).prototype;
+  if (spec.staticPath.length > 0) {
+    let node: unknown = cls;
+    for (const key of spec.staticPath) {
+      node = isRecord(node) || typeof node === "function"
+        ? (node as Record<string, unknown>)[key]
+        : undefined;
+      if (node === undefined) break;
+    }
+    if (typeof node === "function" && isRecord((node as AnyFn).prototype)) {
+      return (node as unknown as { prototype: Record<string, unknown> }).prototype;
+    }
   }
 
-  // Path 2 — a live instance: walk to the resource object and take its prototype,
-  // which is the same object every other instance shares.
-  let inst: unknown = candidate;
-  for (const key of instancePath) {
-    inst = isRecord(inst) ? inst[key] : undefined;
-    if (inst === undefined) break;
-  }
-  if (isRecord(inst)) {
+  // Path 2 — a live instance: walk to the resource object and take its
+  // prototype, which is the same object every other instance shares.
+  const fromInstance = (root: unknown): Record<string, unknown> | null => {
+    let inst: unknown = root;
+    for (const key of spec.instancePath) {
+      inst = isRecord(inst) ? inst[key] : undefined;
+      if (inst === undefined) break;
+    }
+    if (!isRecord(inst)) return null;
     const proto = Object.getPrototypeOf(inst) as Record<string, unknown> | null;
-    if (proto && typeof proto["create"] === "function") return proto;
-    // Instance owns `create` directly rather than inheriting it.
-    if (typeof inst["create"] === "function") return inst;
+    if (carries(proto)) return proto;
+    // Instance owns the method directly rather than inheriting it.
+    if (carries(inst)) return inst;
+    return null;
+  };
+
+  const direct = fromInstance(candidate);
+  if (direct) return direct;
+
+  // Path 3 — construct one. Needed when the SDK never exports the resource
+  // class and only exposes it as a getter on a client instance, which is how
+  // @mistralai/mistralai is laid out. The throwaway client does no I/O; its
+  // resource object's prototype is shared with every real client.
+  if (spec.instantiate && typeof cls === "function") {
+    try {
+      const probeClient = new (cls as new (opts: unknown) => unknown)({
+        apiKey: "dunetrace-probe",
+      });
+      return fromInstance(probeClient);
+    } catch {
+      return null;
+    }
   }
 
   return null;
@@ -450,31 +554,73 @@ function tryRequire(moduleName: string): unknown {
   }
 }
 
+interface TargetMethod {
+  /** Method on the resolved prototype. */
+  name: string;
+  /** true when the method always returns a stream, rather than taking a flag. */
+  alwaysStream?: boolean;
+}
+
 interface TargetSpec {
   name: string;
   moduleName: string;
+  /** Named export to unwrap when handed a module namespace. */
+  exportName: string;
   staticPath: readonly string[];
   instancePath: readonly string[];
+  /**
+   * Construct the client to reach its resource object when the SDK does not
+   * export the resource class. Mistral needs this: `chat` is a lazily-cached
+   * getter on Mistral.prototype and the Chat class is not exported, so there is
+   * no static path to walk. Constructing does no I/O.
+   */
+  instantiate?: boolean;
+  methods: readonly TargetMethod[];
   emit: Emitter;
   collector: CollectorFactory;
+  /** Named in the "could not patch" message. */
+  fallbackHint: string;
 }
 
 const SPECS: Record<string, TargetSpec> = {
   openai: {
     name: "openai",
     moduleName: "openai",
+    exportName: "OpenAI",
     staticPath: ["Chat", "Completions"],
     instancePath: ["chat", "completions"],
+    methods: [{ name: "create" }],
     emit: emitOpenAIResponse,
     collector: openAIStreamCollector,
+    fallbackHint: "dt.wrapOpenAI(client)",
   },
   anthropic: {
     name: "anthropic",
     moduleName: "@anthropic-ai/sdk",
+    exportName: "Anthropic",
     staticPath: ["Messages"],
     instancePath: ["messages"],
+    methods: [{ name: "create" }],
     emit: emitAnthropicResponse,
     collector: anthropicStreamCollector,
+    fallbackHint: "dt.wrapAnthropic(client)",
+  },
+  mistral: {
+    name: "mistral",
+    moduleName: "@mistralai/mistralai",
+    exportName: "Mistral",
+    // The Chat class is not exported, so there is no static path — resolution
+    // goes through a throwaway instance. Verified against @mistralai/mistralai.
+    staticPath: [],
+    instancePath: ["chat"],
+    instantiate: true,
+    // Two methods rather than one flagged method: `parse`/`parseStream` are
+    // deliberately left alone because they call these internally and would
+    // double-count.
+    methods: [{ name: "complete" }, { name: "stream", alwaysStream: true }],
+    emit: emitMistralResponse,
+    collector: mistralStreamCollector,
+    fallbackHint: "manual run.llmCalled()/run.llmResponded() calls",
   },
 };
 
@@ -521,33 +667,37 @@ export function autoInstrument(options: AutoInstrumentOptions = {}): string[] {
       if (options.strict) {
         throw new Error(
           `autoInstrument: could not load "${spec.moduleName}". Pass it explicitly, ` +
-            `e.g. autoInstrument({ ${name}: ${name === "openai" ? "OpenAI" : "Anthropic"} }).`,
+            `e.g. autoInstrument({ ${name}: ${spec.exportName} }).`,
         );
       }
       continue;
     }
 
-    const proto = resolvePrototype(candidate, spec.staticPath, spec.instancePath);
-    if (!proto || typeof proto["create"] !== "function") {
+    const proto = resolvePrototype(candidate, spec);
+    const missing = spec.methods.filter((m) => !proto || typeof proto[m.name] !== "function");
+    if (!proto || missing.length === spec.methods.length) {
       const message =
         `autoInstrument: found "${spec.moduleName}" but could not locate its ` +
-        `${spec.instancePath.join(".")}.create prototype — the SDK layout may have changed. ` +
-        `Fall back to dt.${name === "openai" ? "wrapOpenAI" : "wrapAnthropic"}(client).`;
+        `${[...spec.instancePath, spec.methods[0].name].join(".")} prototype — ` +
+        `the SDK layout may have changed. Fall back to ${spec.fallbackHint}.`;
       if (options.strict) throw new Error(message);
       warn(message);
       continue;
     }
 
-    const orig = proto["create"] as AsyncFn;
-    if ((orig as unknown as Record<symbol, unknown>)[INSTRUMENTED]) {
-      _patched.add(name);
-      patched.push(name);
-      continue;
+    for (const method of spec.methods) {
+      const orig = proto[method.name];
+      if (typeof orig !== "function") continue;
+      if ((orig as unknown as Record<symbol, unknown>)[INSTRUMENTED]) continue;
+      // No .bind() here: the method must keep receiving the calling instance as
+      // `this`, since one prototype serves every client.
+      proto[method.name] = instrumentCreate(
+        orig as AsyncFn,
+        spec.emit,
+        spec.collector,
+        method.alwaysStream ?? false,
+      );
     }
-
-    // No .bind() here: the method must keep receiving the calling instance as
-    // `this`, since one prototype serves every client.
-    proto["create"] = instrumentCreate(orig, spec.emit, spec.collector);
     _patched.add(name);
     patched.push(name);
   }

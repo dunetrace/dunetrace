@@ -18,7 +18,9 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import semantic_svc.worker  # must be imported before patch() can resolve "semantic_svc.worker.*"
 from semantic_svc.worker import (
     _build_second_opinion_evaluators,
+    _mistral_second_opinion_model,
     _opposite_provider,
+    _provider_has_key,
     _run_evaluators,
     _severity_for_confidence,
     poll_once,
@@ -569,6 +571,80 @@ class TestMaybeRunConversationEvaluator(unittest.IsolatedAsyncioTestCase):
         write_mock.assert_not_called()
 
 
+class TestEvaluatorFailureContainment(unittest.IsolatedAsyncioTestCase):
+    """One evaluator raising must cost that finding only. Uncontained it
+    propagates through process_run into poll_once's asyncio.gather and takes the
+    whole batch down — and every evaluator already run for the run is billable,
+    so the retry pays for them a second time."""
+
+    async def test_one_failing_evaluator_does_not_stop_the_others(self):
+        fake_run = MagicMock()
+        fired_result = MagicMock(
+            evaluator="TASK_COMPLETION",
+            fired=True,
+            confidence=0.9,
+            reasoning="incomplete",
+            prompt_tokens=10,
+            completion_tokens=5,
+            cost_usd=0.01,
+        )
+        exploding = MagicMock(evaluate=MagicMock(side_effect=RuntimeError("429 rate limited")))
+        healthy = MagicMock(evaluate=MagicMock(return_value=fired_result))
+
+        with (
+            patch("semantic_svc.worker.fetch_run_events", AsyncMock(return_value=[{"x": 1}])),
+            patch("semantic_svc.worker.build_evaluation_input", return_value=fake_run),
+            patch(
+                "semantic_svc.worker._evaluators",
+                {"HALLUCINATION": exploding, "TASK_COMPLETION": healthy},
+            ),
+            patch(
+                "semantic_svc.worker.write_semantic_signal", AsyncMock(return_value=101)
+            ) as write_mock,
+            patch("semantic_svc.worker.record_signal_group_membership", AsyncMock()),
+            patch("semantic_svc.worker.fetch_signal_group_fp_count", AsyncMock(return_value=0)),
+            patch("semantic_svc.worker.log_semantic_evaluation", AsyncMock()),
+        ):
+            count = await _run_evaluators("run-1", "agent-1", "v1", "org-1", None)
+
+        self.assertEqual(count, 1)
+        write_mock.assert_called_once()
+        self.assertEqual(write_mock.call_args.kwargs["evaluator"], "TASK_COMPLETION")
+
+    async def test_failed_second_opinion_keeps_the_primary_finding(self):
+        """Confirming a HIGH finding is an enhancement — it must not be able to
+        discard the finding it was meant to confirm."""
+        fake_run = MagicMock()
+        high_result = MagicMock(
+            evaluator="HALLUCINATION",
+            fired=True,
+            confidence=0.75,  # HIGH band, so a second opinion is requested
+            reasoning="maybe",
+            prompt_tokens=10,
+            completion_tokens=5,
+            cost_usd=0.01,
+        )
+        primary = MagicMock(evaluate=MagicMock(return_value=high_result))
+        second = MagicMock(evaluate=MagicMock(side_effect=RuntimeError("provider down")))
+
+        with (
+            patch("semantic_svc.worker.fetch_run_events", AsyncMock(return_value=[{"x": 1}])),
+            patch("semantic_svc.worker.build_evaluation_input", return_value=fake_run),
+            patch("semantic_svc.worker._evaluators", {"HALLUCINATION": primary}),
+            patch("semantic_svc.worker._second_opinion_evaluators", {"HALLUCINATION": second}),
+            patch(
+                "semantic_svc.worker.write_semantic_signal", AsyncMock(return_value=101)
+            ) as write_mock,
+            patch("semantic_svc.worker.record_signal_group_membership", AsyncMock()),
+            patch("semantic_svc.worker.fetch_signal_group_fp_count", AsyncMock(return_value=0)),
+            patch("semantic_svc.worker.log_semantic_evaluation", AsyncMock()),
+        ):
+            count = await _run_evaluators("run-1", "agent-1", "v1", "org-1", None)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(write_mock.call_args.kwargs["severity"], "HIGH")
+
+
 class TestRunEvaluators(unittest.IsolatedAsyncioTestCase):
     async def test_returns_zero_when_no_evaluation_input(self):
         with (
@@ -878,6 +954,88 @@ class TestBuildSecondOpinionEvaluators(unittest.TestCase):
             mock_settings.SEMANTIC_LLM_PROVIDER = "openai"
             built = _build_second_opinion_evaluators()
         self.assertEqual(built, {})
+
+
+class TestSecondOpinionResidency(unittest.TestCase):
+    """A mistral primary is a residency choice. The confirming call must not be
+    the thing that ships the run text to a US vendor."""
+
+    # The shipped docs/config/semantic-evaluators.yml block, verbatim.
+    SHIPPED_HALLUCINATION_CONFIG = {
+        "HALLUCINATION": {
+            "require_second_opinion": True,
+            "second_opinion_provider": "anthropic",
+            "second_opinion_model": "claude-sonnet-4-6",
+        }
+    }
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _worker(config, *, allow_cross_provider=False):
+        mock_cls = MagicMock()
+        with (
+            patch("semantic_svc.worker._EVALUATOR_CONFIG", config),
+            patch("semantic_svc.worker.settings") as mock_settings,
+            patch.dict("semantic_svc.worker._EVALUATOR_CLASSES", {"HALLUCINATION": mock_cls}),
+        ):
+            mock_settings.SEMANTIC_LLM_PROVIDER = "mistral"
+            mock_settings.MISTRAL_API_KEY = "mistral-fake"
+            mock_settings.HALLUCINATION_MODEL = ""
+            mock_settings.SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION = allow_cross_provider
+            yield mock_cls
+
+    def test_provider_has_key_tracks_mistral_key(self):
+        """Without this branch the only in-region configuration an operator can
+        write is skipped with a warning telling them to set a key they already
+        set."""
+        with patch("semantic_svc.worker.settings") as s:
+            s.MISTRAL_API_KEY = "mistral-fake"
+            self.assertTrue(_provider_has_key("mistral"))
+            s.MISTRAL_API_KEY = ""
+            self.assertFalse(_provider_has_key("mistral"))
+
+    def test_opposite_provider_keeps_mistral_in_region(self):
+        self.assertEqual(_opposite_provider("mistral"), "mistral")
+
+    def test_second_opinion_model_differs_from_a_large_primary(self):
+        # Asking the identical model twice is not a second opinion.
+        self.assertEqual(_mistral_second_opinion_model(None), "mistral-large-latest")
+        self.assertEqual(
+            _mistral_second_opinion_model("mistral-large-latest"), "mistral-medium-latest"
+        )
+
+    def test_shipped_anthropic_config_is_suppressed_for_a_mistral_primary(self):
+        with self._worker(self.SHIPPED_HALLUCINATION_CONFIG) as mock_cls:
+            _build_second_opinion_evaluators()
+        mock_cls.assert_called_once_with("mistral", "mistral-large-latest")
+
+    def test_opt_in_flag_restores_the_cross_provider_second_opinion(self):
+        with self._worker(self.SHIPPED_HALLUCINATION_CONFIG, allow_cross_provider=True) as mock_cls:
+            _build_second_opinion_evaluators()
+        mock_cls.assert_called_once_with("anthropic", "claude-sonnet-4-6")
+
+    def test_unconfigured_mistral_primary_gets_an_in_region_second_opinion(self):
+        config = {"HALLUCINATION": {"require_second_opinion": True}}
+        with self._worker(config) as mock_cls:
+            _build_second_opinion_evaluators()
+        mock_cls.assert_called_once_with("mistral", "mistral-large-latest")
+
+    def test_openai_primary_still_crosses_to_anthropic(self):
+        """The residency rule is scoped to mistral — it must not change the
+        existing single-vendor deployments."""
+        config = {"HALLUCINATION": {"require_second_opinion": True}}
+        mock_cls = MagicMock()
+        with (
+            patch("semantic_svc.worker._EVALUATOR_CONFIG", config),
+            patch("semantic_svc.worker.settings") as mock_settings,
+            patch.dict("semantic_svc.worker._EVALUATOR_CLASSES", {"HALLUCINATION": mock_cls}),
+        ):
+            mock_settings.SEMANTIC_LLM_PROVIDER = "openai"
+            mock_settings.ANTHROPIC_API_KEY = "sk-ant-fake"
+            mock_settings.HALLUCINATION_MODEL = ""
+            mock_settings.SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION = False
+            _build_second_opinion_evaluators()
+        mock_cls.assert_called_once_with("anthropic", None)
 
 
 class TestPollOnce(unittest.IsolatedAsyncioTestCase):

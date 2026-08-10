@@ -77,7 +77,7 @@ interpreter shutdown (seconds, default `2`), or to `0` to disable it entirely.
 
 ## Auto instrumentation
 
-`dt.auto_instrument()` patches `openai`, `anthropic`, `httpx`, and `requests` so every LLM/HTTP call inside a run is tracked with no manual event calls:
+`dt.auto_instrument()` patches `openai`, `anthropic`, `mistral`, `httpx`, and `requests` so every LLM/HTTP call inside a run is tracked with no manual event calls:
 
 ```python
 dt.init(agent_id="my-production-agent")

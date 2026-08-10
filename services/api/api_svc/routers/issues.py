@@ -34,6 +34,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 
 from api_svc.auth import require_org
+from api_svc import llm_provider
 from api_svc.config import settings
 from api_svc.db.queries import (
     agent_failure_pattern,
@@ -122,7 +123,7 @@ async def get_issue(issue_id: int, org_id: str = Depends(require_org)) -> IssueD
 
     root_cause = None
     suggested_fix = None
-    if settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY:
+    if llm_provider.llm_configured():
         signal_id = await get_most_recent_signal_id(
             org_id, issue["agent_id"], issue["failure_type"]
         )
