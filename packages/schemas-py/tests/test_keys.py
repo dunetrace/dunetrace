@@ -29,6 +29,28 @@ class TestKeyGeneration(unittest.TestCase):
         self.assertGreaterEqual(len(generate_api_key()), 40)
 
 
+class TestKeysAreHighEntropyNotPasswords(unittest.TestCase):
+    """The SHA-256 choice is justified ONLY because the input is a 256-bit
+    random token. If key generation ever becomes user-chosen or lower-entropy,
+    this test fails and the hashing decision has to be revisited (argon2id)."""
+
+    def test_generated_key_carries_at_least_256_bits(self):
+        # token_urlsafe(32) -> 32 random bytes, base64url encoded (~43 chars).
+        body = generate_api_key()[len("dt_") :]
+        self.assertGreaterEqual(len(body), 43)
+
+    def test_keys_are_not_derived_from_any_caller_input(self):
+        import inspect
+
+        from dunetrace_schemas import keys as keys_mod
+
+        # No parameters: nothing a user picks can influence the secret.
+        self.assertEqual(list(inspect.signature(keys_mod.generate_api_key).parameters), [])
+
+    def test_two_keys_never_collide(self):
+        self.assertEqual(len({generate_api_key() for _ in range(500)}), 500)
+
+
 class TestHashing(unittest.TestCase):
     def test_hash_is_stable(self):
         key = generate_api_key()

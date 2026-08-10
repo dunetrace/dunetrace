@@ -42,6 +42,9 @@ import { getCurrentRun, httpInstrumentationSuppressed, httpSuppression } from ".
 /** Marks a function as already instrumented, so re-patching is a no-op. */
 const INSTRUMENTED = Symbol.for("dunetrace.instrumented");
 
+/** Property names that must never be written dynamically onto a prototype. */
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 /** Targets patched in this process, so repeat calls stay idempotent. */
 const _patched = new Set<string>();
 
@@ -686,6 +689,15 @@ export function autoInstrument(options: AutoInstrumentOptions = {}): string[] {
     }
 
     for (const method of spec.methods) {
+      // `method.name` comes from the SPECS constant above, never from library
+      // input — but this is a dynamic property write on a prototype, so a
+      // future spec sourced from anywhere else would be a prototype-pollution
+      // sink. Reject the three keys that could reach Object.prototype rather
+      // than relying on the provenance staying true.
+      if (UNSAFE_KEYS.has(method.name)) {
+        warn(`autoInstrument: refusing to patch unsafe property "${method.name}"`);
+        continue;
+      }
       const orig = proto[method.name];
       if (typeof orig !== "function") continue;
       if ((orig as unknown as Record<symbol, unknown>)[INSTRUMENTED]) continue;

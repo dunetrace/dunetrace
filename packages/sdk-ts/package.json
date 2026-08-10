@@ -83,5 +83,8 @@
     "typescript": "^5.4.0",
     "vitest": "^1.6.0",
     "zod": "^4.4.3"
+  },
+  "overrides": {
+    "postcss": ">=8.5.23"
   }
 }
