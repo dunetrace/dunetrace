@@ -315,6 +315,31 @@ def _llm_output_text(ad: dict[str, Any]) -> str:
     return ""
 
 
+_TOOL_ARG_KEYS = (
+    "gen_ai.tool.call.arguments",
+    "tool.arguments",
+    "tool.parameters",
+    "traceloop.entity.input",
+    "input.value",
+)
+
+
+def _tool_args_raw_length(ad: dict[str, Any]) -> int:
+    """Length of the tool arguments BEFORE truncation.
+
+    `_truncate` caps stored args at OTLP_MAX_ATTR_CHARS (8192 by default), which
+    is below OVERSIZED_TOOL_ARGUMENTS' threshold — so a detector measuring
+    `len(args)` could never fire on an OTel-ingested run, and would understate
+    the payload even if it did. Recording the real length keeps length-based
+    detection honest without storing the whole payload.
+    """
+    for key in _TOOL_ARG_KEYS:
+        text = _as_text(ad.get(key))
+        if text:
+            return len(text)
+    return 0
+
+
 def _tool_args(ad: dict[str, Any]) -> str:
     return _first_present(
         ad,
@@ -570,6 +595,9 @@ def _events_for_trace(trace_id: str, trace: dict) -> list[dict]:
                 # args string across repeated calls can false-fire the loop
                 # detector. Populating it keeps that detection honest.
                 called["args"] = tool_args
+                # The stored string is capped at OTLP_MAX_ATTR_CHARS; this is how
+                # long it actually was. OVERSIZED_TOOL_ARGUMENTS reads it.
+                called["args_length"] = _tool_args_raw_length(ad)
             events.append(_ev("tool.called", step, start_ts, called))
 
             responded = {

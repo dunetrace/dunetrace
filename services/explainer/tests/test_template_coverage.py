@@ -54,6 +54,12 @@ NO_TEMPLATE_EXPECTED = {
 
 # Evidence as emitted by each detector.
 REAL_EVIDENCE = {
+    FailureType.OVERSIZED_TOOL_ARGUMENTS: {
+        "step_index": 4,
+        "tool_name": "summarise_document",
+        "arg_length": 42_318,
+        "threshold": 10_000,
+    },
     FailureType.EXCESSIVE_RETRIEVAL: {
         "retrieval_count": 9,
         "threshold": 5,
@@ -218,6 +224,7 @@ class TestTemplatesRunOnRealEvidence(unittest.TestCase):
             FailureType.AGENT_HANDOFF_FAILURE: "delegate_to_researcher",
             FailureType.EXCESSIVE_RETRIEVAL: "kb-main",
             FailureType.SILENT_TRUNCATION: "gpt-4o-mini",
+            FailureType.OVERSIZED_TOOL_ARGUMENTS: "summarise_document",
         }
         for ft, needle in expectations.items():
             with self.subTest(ft=ft.name):

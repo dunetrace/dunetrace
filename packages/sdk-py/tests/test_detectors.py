@@ -85,7 +85,7 @@ class TestOversizedToolArgumentsDetector(unittest.TestCase):
         state = make_state()
         state.tool_calls = [make_tool_call("web_search", args="a" * 10_000)]
         assert self.detector.on_run_completion(state) is None
-        
+
         # 10,001 should trigger
         state.tool_calls = [make_tool_call("web_search", args="a" * 10_001)]
         signal = self.detector.on_run_completion(state)
@@ -101,7 +101,7 @@ class TestOversizedToolArgumentsDetector(unittest.TestCase):
         tc2 = make_tool_call("search2", args="b" * 20_000)
         tc2.step_index = 2
         state.tool_calls = [tc1, tc2]
-        
+
         signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.step_index == 1
@@ -817,3 +817,39 @@ class TestReasoningSpinDetector(unittest.TestCase):
         state = _make_spin_state(llm_count=4, tool_count=0)  # ratio=4.0, now above MIN
         signal = detector.on_run_completion(state)
         assert signal is not None
+
+
+class TestOversizedToolArgumentsAcrossTransports(unittest.TestCase):
+    """The threshold (10,000) is above the OTLP ingest truncation cap (8192), so
+    a detector measuring len(args) is unreachable for every OTel-ingested run.
+    `args_length` carries the pre-truncation size so length-based detection
+    works on both transports."""
+
+    detector = OversizedToolArgumentsDetector()
+
+    def test_fires_on_truncated_args_when_true_length_is_known(self):
+        state = make_state()
+        tc = make_tool_call("summarise", args="a" * 8192)  # capped by the transport
+        tc.args_length = 42_318  # what the agent actually sent
+        state.tool_calls = [tc]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["arg_length"] == 42_318
+
+    def test_does_not_fire_when_true_length_is_under_threshold(self):
+        state = make_state()
+        tc = make_tool_call("summarise", args="a" * 8192)
+        tc.args_length = 9_000
+        state.tool_calls = [tc]
+        assert self.detector.on_run_completion(state) is None
+
+    def test_falls_back_to_len_args_when_not_supplied(self):
+        """The SDK path never truncates, so args_length is None there and
+        len(args) is already the true length."""
+        state = make_state()
+        tc = make_tool_call("summarise", args="a" * 15_000)
+        assert tc.args_length is None
+        state.tool_calls = [tc]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["arg_length"] == 15_000

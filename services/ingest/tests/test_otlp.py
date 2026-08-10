@@ -672,3 +672,29 @@ def test_errored_root_still_produces_run_errored():
         ]
     )
     assert events[-1]["event_type"] == "run.errored"
+
+
+def test_tool_args_carry_their_pre_truncation_length():
+    """Stored args are capped at OTLP_MAX_ATTR_CHARS (8192), which is BELOW
+    OVERSIZED_TOOL_ARGUMENTS' 10,000 threshold — so without args_length that
+    detector could never fire on an OTel-ingested run."""
+    from ingest_svc.otel import otlp_to_events
+
+    huge = "x" * 40_000
+    span = _span(
+        "t1",
+        "root0000",
+        "tool web_search",
+        1_000_000_000_000,
+        2_000_000_000_000,
+        attrs=[_attr("gen_ai.tool.call.arguments", "stringValue", huge)],
+    )
+    events = otlp_to_events([_make_resource_span("4bf92f3577b34da6a3ce929d0e0e4736", [span])])
+    called = [e for e in events if e["event_type"] == "tool.called"]
+    assert called, "expected a tool.called event"
+
+    payload = called[0]["payload"]
+    # The stored string IS truncated — that part is deliberate.
+    assert len(payload["args"]) < len(huge)
+    # ...but the true length survives, so length-based detection stays honest.
+    assert payload["args_length"] == 40_000

@@ -162,6 +162,12 @@ class ToolCall:
     output: Optional[str] = (
         None  # raw tool response body, when the caller passes output= to tool_responded()
     )
+    # True length of `args` before any transport-side truncation. The OTLP
+    # ingest path caps stored args at OTLP_MAX_ATTR_CHARS (8192), which is below
+    # OVERSIZED_TOOL_ARGUMENTS' threshold — so `len(args)` alone could never fire
+    # that detector on an OTel-ingested run. None on the SDK path, where args are
+    # never truncated and `len(args)` is already the true length.
+    args_length: Optional[int] = None
 
 
 @dataclass

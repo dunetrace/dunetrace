@@ -191,7 +191,12 @@ class OversizedToolArgumentsDetector(BaseDetector):
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         for tc in state.tool_calls:
-            arg_length = len(tc.args) if tc.args else 0
+            # args_length is the pre-truncation length, set by transports that
+            # cap the stored string. The OTLP path truncates at 8192 chars —
+            # below this detector's default threshold — so measuring len(args)
+            # alone would make this detector unreachable for OTel-ingested runs
+            # and would understate the payload wherever it did fire.
+            arg_length = tc.args_length if tc.args_length is not None else len(tc.args or "")
             if arg_length > self.MAX_ARG_LENGTH:
                 return FailureSignal(
                     failure_type=FailureType.OVERSIZED_TOOL_ARGUMENTS,

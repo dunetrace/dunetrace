@@ -164,6 +164,8 @@ def build_run_state(events: list[dict]) -> RunState:
                     args=payload.get("args", ""),
                     step_index=step_index,
                     timestamp=raw.get("timestamp", 0.0),
+                    # Set only by the OTLP path, which truncates `args`.
+                    args_length=payload.get("args_length"),
                 )
             )
 

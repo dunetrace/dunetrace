@@ -1352,6 +1352,90 @@ def explain_reasoning_stall(signal: FailureSignal) -> Explanation:
 # COST_SPIKE
 
 
+def explain_oversized_tool_arguments(signal: FailureSignal) -> Explanation:
+    ev = signal.evidence
+    # `or` not a dict default: a key present with an explicit None still has to
+    # end up an int, since every use below is a `:,` format that would raise on
+    # NoneType (test_none_valued_evidence_does_not_raise covers exactly this).
+    tool = ev.get("tool_name") or "a tool"
+    arg_length = ev.get("arg_length") or 0
+    threshold = ev.get("threshold") or 0
+    step = ev.get("step_index") if ev.get("step_index") is not None else signal.step_index
+
+    over = f"{arg_length / threshold:.1f}x" if threshold else "over"
+
+    return Explanation(
+        **_base(signal),
+        title=f"Oversized tool arguments: {arg_length:,} characters passed to {tool}",
+        what=(
+            f"At step {step} the agent called `{tool}` with {arg_length:,} characters of "
+            f"arguments — {over} the {threshold:,}-character ceiling. An argument payload "
+            f"this size usually means whole documents, full conversation history, or an "
+            f"un-summarised tool result was pasted straight into the call, rather than the "
+            f"agent extracting the part the tool actually needs."
+        ),
+        why_it_matters=(
+            f"The payload was generated token-by-token by the preceding LLM call and is "
+            f"then replayed into the context of every subsequent one, so it is paid for "
+            f"at least twice — roughly {arg_length // 4:,} tokens each time. It also "
+            f"crowds out the context window (expect CONTEXT_BLOAT or LLM_TRUNCATION_LOOP "
+            f"alongside it), and many tool APIs reject or silently truncate oversized "
+            f"inputs, so the tool may not even have received what the agent sent."
+        ),
+        evidence_summary=(
+            f"{tool} received {arg_length:,} chars at step {step}. "
+            f"Threshold: {threshold:,}. "
+            f"Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description="Pass a reference instead of the payload — let the tool fetch it",
+                language="python",
+                code=(
+                    "# Instead of inlining the document into the call:\n"
+                    "#   summarise(text=entire_document)\n"
+                    "# store it once and pass the handle:\n"
+                    "doc_id = store.put(entire_document)\n"
+                    "summarise(doc_id=doc_id)   # tool reads it server-side"
+                ),
+            ),
+            CodeFix(
+                description="Cap argument size at the call site so the agent cannot exceed it",
+                language="python",
+                code=(
+                    "MAX_ARG_CHARS = 10_000\n\n"
+                    "def call_tool(name: str, **kwargs):\n"
+                    "    for key, value in kwargs.items():\n"
+                    "        if isinstance(value, str) and len(value) > MAX_ARG_CHARS:\n"
+                    "            raise ValueError(\n"
+                    "                f'{name}.{key} is {len(value)} chars (max {MAX_ARG_CHARS}). '\n"
+                    "                'Pass a reference or summarise first.'\n"
+                    "            )\n"
+                    "    return tools[name](**kwargs)"
+                ),
+            ),
+            CodeFix(
+                description="Tell the model the limit in the tool schema — most will respect it",
+                language="python",
+                code=(
+                    "{\n"
+                    '  "name": "summarise",\n'
+                    '  "description": "Summarise a document. Pass doc_id, NOT the text.",\n'
+                    '  "parameters": {\n'
+                    '    "type": "object",\n'
+                    '    "properties": {\n'
+                    '      "doc_id": {"type": "string", "description": "Identifier from store.put()"},\n'
+                    '      "focus":  {"type": "string", "maxLength": 500}\n'
+                    "    },\n"
+                    '    "required": ["doc_id"]\n'
+                    "  }\n"
+                    "}"
+                ),
+            ),
+        ],
+    )
+
+
 def explain_cost_spike(signal: FailureSignal) -> Explanation:
     ev = signal.evidence
     total = ev.get("total_tokens", 0)
@@ -2577,6 +2661,7 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.FIRST_STEP_FAILURE: explain_first_step_failure,
     FailureType.SLOW_STEP: explain_slow_step,
     FailureType.REASONING_STALL: explain_reasoning_stall,
+    FailureType.OVERSIZED_TOOL_ARGUMENTS: explain_oversized_tool_arguments,
     FailureType.COST_SPIKE: explain_cost_spike,
     FailureType.SESSION_LATENCY: explain_session_latency,
     FailureType.EXCESSIVE_RETRIEVAL: explain_excessive_retrieval,
