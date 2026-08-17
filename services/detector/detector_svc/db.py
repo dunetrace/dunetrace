@@ -332,9 +332,10 @@ async def fetch_per_tool_latency_baselines(
                 ORDER BY pr.processed_at DESC
                 LIMIT $4
             ),
-            event_gaps AS (
+            event_sequence AS (
                 SELECT
                     e.run_id,
+                    e.event_type,
                     e.payload->>'tool_name' as tool_name,
                     (LEAD(e.timestamp) OVER (
                         PARTITION BY e.run_id
@@ -342,7 +343,11 @@ async def fetch_per_tool_latency_baselines(
                     ) - e.timestamp) * 1000.0 AS gap_ms
                 FROM events e
                 WHERE e.run_id IN (SELECT run_id FROM recent)
-                  AND e.event_type = 'tool.called'
+            ),
+            event_gaps AS (
+                SELECT run_id, tool_name, gap_ms
+                FROM event_sequence
+                WHERE event_type = 'tool.called'
             ),
             stats AS (
                 SELECT

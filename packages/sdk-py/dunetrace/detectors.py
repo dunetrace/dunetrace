@@ -559,7 +559,7 @@ class SlowStepDetector(BaseDetector):
                         # Check for per-tool baseline first
                         if tool_name and state.baseline_p75_latency_by_tool and tool_name in state.baseline_p75_latency_by_tool:
                             return (
-                                int(state.baseline_p75_latency_by_tool[tool_name] * self.INFLATION_FACTOR),
+                                max(1, int(state.baseline_p75_latency_by_tool[tool_name] * self.INFLATION_FACTOR)),
                                 label,
                             )
                         # Fallback to global tool baseline
