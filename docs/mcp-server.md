@@ -14,7 +14,28 @@ The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](
 - *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
 - *"Walk me through run `019e2314-6b7` step by step."*
 
-All data is read-only. Only hashed metadata is exposed — no raw prompts, tool arguments, or model outputs ever leave your process.
+All data is sourced from the Customer API over your existing Dunetrace deployment.
+
+**The server is read-only by default.** Nine tools write through to your
+deployment: `create_policy`, `toggle_policy`, `delete_policy`,
+`create_custom_detector`, `activate_custom_detector`, `pause_custom_detector`,
+`delete_custom_detector`, `resolve_issue`, and `trigger_explain` (which spends
+an LLM call). They're flagged **✎ writes** in the tool reference below, and they
+are **not registered at all** unless you opt in:
+
+```bash
+DUNETRACE_MCP_READONLY=false   # register the nine write tools
+```
+
+Read-only is the default because an MCP server feeds a model untrusted agent
+output — signal evidence, tool arguments, captured LLM text — which is exactly
+the shape that turns a write tool into a confused deputy. `create_policy` and
+`toggle_policy` affect **live agent runs**: a `stop` policy terminates real runs
+as soon as the SDK next pulls policies.
+
+> Earlier versions of this page advised issuing the MCP server "an API key
+> scoped to reads". No read-scoped key exists in Dunetrace, so that advice
+> mitigated nothing. Withholding the tools is the mechanism that actually works.
 
 ---
 
@@ -115,6 +136,22 @@ For production, set `DUNETRACE_API_KEY` to your real API key.
 
 ## Tools
 
+31 tools. **✎** marks a tool that writes to your deployment.
+
+| Area | Tools |
+|---|---|
+| Agents | `list_agents`, `summarize_agent`, `get_agent_health`, `get_agent_patterns`, `get_agent_token_stats` |
+| Runs | `get_agent_runs`, `get_run_detail`, `compare_runs` |
+| Signals | `get_agent_signals`, `get_signal_detail`, `search_signals`, `get_failure_pattern_detail` |
+| Root cause & fixes | `trigger_explain` ✎, `get_fix_status`, `list_agent_fixes` |
+| Issues | `list_agent_issues`, `get_issue`, `search_issues`, `resolve_issue` ✎ |
+| Policies | `list_policies`, `create_policy` ✎, `toggle_policy` ✎, `delete_policy` ✎ |
+| Custom detectors | `list_custom_detectors`, `create_custom_detector` ✎, `activate_custom_detector` ✎, `pause_custom_detector` ✎, `delete_custom_detector` ✎ |
+| Voice | `list_voice_calls`, `get_call_detail` |
+| Onboarding | `get_instrumentation_guide` |
+
+`search_signals` is also registered under the alias `list_all_signals`.
+
 ### `list_agents`
 
 List all monitored agents with their run counts, signal counts, and failure type breakdown.
@@ -125,9 +162,9 @@ List all monitored agents with their run counts, signal counts, and failure type
 ```
 AGENT                                RUNS  SIGS CRIT HIGH  LAST SEEN
 ───────────────────────────────────────────────────────────────────────────
-langfuse-example-agent                 52    48    0   47  12h ago
+python-example-agent                   52    48    0   47  12h ago
                                       FIRST_STEP_FAILURE×1, TOOL_LOOP×47
-langfuse-ts-example-agent               4     3    0    3  21h ago
+ts-example-agent                        4     3    0    3  21h ago
                                       TOOL_LOOP×3
 langchain-example-agent               134    57    0   48  5d ago
                                       FIRST_STEP_FAILURE×1, TOOL_LOOP×48, STEP_COUNT_INFLATION×8
@@ -164,12 +201,12 @@ Failure breakdown:
 Most recent signals:
   🟠 TOOL_LOOP  conf=90%  5d ago  run=019e2314…
      The agent called `web_search` 6 times in steps 2–7 with identical
-     arguments every time (same args_hash across all calls). It is not
-     tracking which queries it has already tried.
+     arguments every time. It is not tracking which queries it has
+     already tried.
      Impact: Looping agents burn tokens and cost money without producing
      value. A 5-step loop at typical gpt-4o pricing costs roughly
      $0.15–$0.30 — with nothing to show for it.
-     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
+     Fix: Deduplicate `web_search` calls — identical arguments seen 6×
 
   🟠 TOOL_LOOP  conf=90%  5d ago  run=019e230c…
      [same pattern — web_search called 6× with identical args]
@@ -279,6 +316,43 @@ The alternating 🔴 / ✅ pattern here is a tell: runs with 8 steps consistentl
 
 ---
 
+### `list_voice_calls`
+
+List recent voice calls with call-level metrics: duration, how the call ended, silence percentage, voice signal count, and cost. A "call" is a voice agent's conversation (the runs that share one conversation id).
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | "" | Filter to one voice agent (optional) |
+| `completion_status` | string | "" | `natural`, `dropped`, or `escalated` (optional) |
+| `cost_bucket` | string | "" | `low` (<$0.10), `medium` ($0.10–$1), or `high` (>$1) (optional) |
+| `limit` | int | 20 | Max calls to return (max 100) |
+
+**Example output:**
+```
+Voice calls
+
+ CALL  AGENT              WHEN          DUR SILENCE  SIGS      COST  STATUS
+────────────────────────────────────────────────────────────────────────────────────
+  101  voice-support      5m ago        92s     12%     0 $  0.0423  ✅ natural
+  102  voice-support      15m ago       45s     55%  🔴 2 $  0.5000  🔴 dropped
+```
+
+---
+
+### `get_call_detail`
+
+One voice call's full picture: call-level metrics, per-stage cost breakdown (STT / LLM / TTS / telephony), the voice failure signals detected, and links to the call audio when recorded.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `conversation_id` | int | required | Call id (from `list_voice_calls`) |
+
+---
+
 ### `get_agent_signals`
 
 Recent failure signals for a specific agent, with titles, explanations, and fix suggestions.
@@ -316,8 +390,8 @@ Detected:  5d ago
 
 What happened:
   The agent called `web_search` 6 times in steps 2–7 with identical
-  arguments every time (same args_hash across all calls). It is not
-  tracking which queries it has already tried.
+  arguments every time. It is not tracking which queries it has
+  already tried.
 
 Why it matters:
   Looping agents burn tokens and cost money without producing value.
@@ -332,10 +406,10 @@ Evidence:
   args_identical: True
   first_step: 2
   last_step: 7
-  args_hashes: ['ffa8f58f', 'ffa8f58f', 'ffa8f58f', 'ffa8f58f', ...]
+  args: ['{"query": "LLM agent failure modes"}', '{"query": "LLM agent failure modes"}', ...]
 
 Suggested fixes:
-  1. Deduplicate `web_search` calls — identical args hash seen 6×
+  1. Deduplicate `web_search` calls — identical arguments seen 6×
      ```python
      seen_queries = set()
      def web_search(query):
@@ -349,8 +423,6 @@ Suggested fixes:
       If a search returned no useful results, reformulate
       the query before trying again."
 ```
-
-> **Privacy note:** `args_hashes` contains SHA-256 hashes of the original tool arguments — raw arguments never leave your agent process.
 
 ---
 
@@ -412,7 +484,7 @@ Exit:     run.completed
 Signals (1):
   🟠 TOOL_LOOP  [HIGH]  conf=90%  step=7
      Tool loop detected: `web_search` called 6× in steps 2–7
-     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
+     Fix: Deduplicate `web_search` calls — identical arguments seen 6×
 
 Event timeline:
   [  0]  +0.0s  run.started
@@ -427,6 +499,96 @@ Event timeline:
 ```
 
 The prompt token growth across LLM calls (512 → 612 → 710 → 805) is a secondary signal: context is inflating with each redundant search result even though the queries are identical.
+
+Note: `get_run_detail` is the tool for "give me the full trace of this run" — there is no separate `get_run` tool. If you're looking for one by that name, this is it.
+
+---
+
+### `get_issue`
+
+Full context for a single issue — metadata, affected runs, root cause, and a suggested fix. The deep-dive tool for triaging one specific issue found via `search_issues` or `list_agent_issues`.
+
+May trigger an LLM call to generate the root cause/fix (the same native root-cause analysis `trigger_explain` uses) and can take 5–15 seconds. If no LLM key is configured on the backend, `root_cause`/`suggested_fix` are omitted but the rest of the report still returns.
+
+`code_references` (the source file/line an issue maps to) is always empty for now — Dunetrace has no source-mapping capability yet.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `issue_id` | int | The integer issue ID (from `search_issues` or `list_agent_issues`) |
+
+**Example — issue `#7` (`TOOL_LOOP` on `support-bot`):**
+```
+Issue #7: TOOL_LOOP on support-bot
+Status: open  (opened 5d ago, last seen 1h ago)
+Affected runs: 12 total
+
+AFFECTED RUNS (most recent):
+  RUN ID           WHEN          STEP  CONF
+  run-abc123       1h ago           5   90%
+  run-def456       6h ago           3   85%
+
+ROOT CAUSE:
+  The agent loops on web_search without tracking prior queries.
+
+SUGGESTED FIX:
+  Deduplicate web_search calls by argument.
+
+CODE REFERENCES:
+  Not available yet — source mapping hasn't been configured for this agent.
+
+To resolve: resolve_issue(issue_id=7, resolution_notes="...")
+```
+
+---
+
+### `search_issues`
+
+Search issues across ALL agents in your org — for triage across an entire fleet rather than one agent at a time (`list_agent_issues` is scoped to a single agent).
+
+`query` is a plain substring match against `agent_id`/`failure_type`/`resolution_notes` — not full-text search or relevance ranking (issues have no free-text title/description field beyond `resolution_notes`, which is only populated once an issue has been manually resolved via `resolve_issue`).
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `query` | string | Substring to match. Empty matches everything. |
+| `status` | string | `open` \| `resolved` \| `reopened`. Empty = all. |
+| `agent_id` | string | Restrict to one agent. Empty = all agents. |
+| `failure_type` | string | Restrict to one failure type, e.g. `TOOL_LOOP`. Empty = all. |
+| `limit` | int | Max results (default 20). |
+
+**Example:**
+```
+Issues matching filters (2 total, showing 2):
+
+   ID  AGENT                 FAILURE TYPE                    LAST SEEN     RUNS  STATUS
+───────────────────────────────────────────────────────────────────────────────────────
+    7  support-bot           TOOL_LOOP                       1h ago          12  open
+    8  billing-bot           COST_SPIKE                       2h ago           3  reopened
+```
+
+---
+
+### `resolve_issue` ✎
+
+Manually mark an issue resolved with notes on what fixed it — for when you've made a code/prompt change and want to close the loop, distinct from Dunetrace's automatic resolve-after-5-clean-runs detection.
+
+If the failure recurs later, the issue reopens automatically regardless of whether it was auto- or manually-resolved — `resolution_notes` is kept as a historical record either way.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `issue_id` | int | The integer issue ID to resolve |
+| `resolution_notes` | string | What fixed it, e.g. "Added a per-tool call limit of 3." |
+
+**Example:**
+```
+Issue #7 marked resolved.
+Notes: Added a per-tool call limit of 3 in the agent's retry loop.
+```
 
 ---
 
@@ -469,9 +631,236 @@ Quick-start code snippet for instrumenting an agent with Dunetrace.
 
 | Argument | Type | Description |
 |---|---|---|
-| `framework` | string | `langchain`, `python`, `typescript`, `tools`, or `otel` |
+| `framework` | string | `langchain`, `python`, `typescript`, `haystack`, `tools`, `voice`, or `otel` |
 
-Aliases: `langgraph`, `lc`, `ts`, `js`, `node`, `otlp`, `opentelemetry`, `langdock`, `dify`, `tool-calls`, `tracking`.
+Aliases: `langgraph`, `lc`, `ts`, `js`, `node`, `haystack-ai`, `voice-agent`, `stt`, `tts`, `speech`, `otlp`, `opentelemetry`, `langdock`, `dify`, `tool-calls`, `tracking`.
+
+---
+
+### `compare_runs`
+
+Compare two runs side by side — duration, step count, token usage, signals, and exit reason. Useful for spotting a regression between a known-good run and a bad one, or for comparing runs either side of a deploy.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `run_id_1` | string | First run UUID |
+| `run_id_2` | string | Second run UUID |
+| `agent_id` | string | Agent ID (optional; informational only) |
+
+---
+
+### `get_failure_pattern_detail`
+
+Deep dive into one failure type for one agent: evidence aggregates, a 14-day trend with an ASCII bar chart, signals that co-occur with this failure, and the top example runs. Use it after `get_agent_patterns` tells you *which* failure dominates and you want to know *why*.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID (from `list_agents`) |
+| `failure_type` | string | Detector type, e.g. `TOOL_LOOP`, `COST_SPIKE`, `CONTEXT_BLOAT` |
+
+---
+
+### `trigger_explain` ✎
+
+Run root-cause analysis on a signal and return a fix suggestion. Calls `POST /v1/signals/{id}/explain`, which **spends an LLM call** on your configured provider — this is the one read-shaped tool that costs money.
+
+Returns either a suggested Dunetrace policy (for `dunetrace_native` fixes) or a diff (for `customer_code` fixes). See [Root cause and fix classification](detectors.md) for what determines which.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `signal_id` | int | The integer signal ID to analyze |
+| `agent_id` | string | Agent ID (optional; not required for lookup) |
+
+---
+
+### `get_fix_status`
+
+Check whether a fix applied for a signal actually reduced recurrence.
+
+| Verdict | Meaning |
+|---|---|
+| `verified` | Signal has not recurred since the fix was applied |
+| `likely_fixed` | Recurrence dropped significantly but not to zero |
+| `still_occurring` | Signal is still firing at a similar rate |
+| `insufficient_data` | Not enough post-fix runs to make a determination |
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `signal_id` | int | The integer signal ID to check |
+| `agent_id` | string | Agent ID (optional; not required for lookup) |
+
+---
+
+### `list_agent_fixes`
+
+List every fix applied for an agent's signals — which signal, the fix type, how it was applied (clipboard copy or GitHub PR), and whether it was verified effective.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID (from `list_agents`) |
+
+**Example output:**
+```
+Fixes for: langchain-example-agent  (2 total)
+
+ SIGNAL  TYPE                VIA         VERDICT               WHEN
+───────────────────────────────────────────────────────────────────────────
+    518  prompt_addition     clipboard   verified              3d ago
+    502  code_change         github_pr   still_occurring       9d ago
+```
+
+---
+
+### `list_policies`
+
+List runtime policies configured for your agents. Policies act *during* a live run — they stop it, switch the model, inject a corrective prompt, or log — when a condition is met. See [policies.md](policies.md).
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Filter to one agent. Empty = all agents. |
+
+**Example output:**
+```
+Policies (2):
+
+NAME                       AGENT            TRIGGER       OP    VALUE       ACTION              STATUS
+────────────────────────────────────────────────────────────────────────────────────────────────────
+cap-tool-calls             support-bot      tool_call_c   gt    5           stop                enabled
+downgrade-on-cost          *                cost_usd      gt    0.5         switch_model        enabled
+```
+
+---
+
+### `create_policy` ✎
+
+Create a runtime policy. **This takes effect on live agent runs** as soon as the SDK next pulls policies at run start — a `stop` action will terminate real runs.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `name` | string | Human-readable policy name |
+| `agent_id` | string | Agent to apply to (`*` for all agents) |
+| `condition` | string | JSON: `{"metric": ..., "operator": ..., "threshold": ...}` |
+| `action` | string | JSON: `{"type": "stop"}`, `{"type": "switch_model", "model": ...}`, `{"type": "inject_prompt", "text": ...}`, or `{"type": "log"}` |
+
+Operators: `gt`, `gte`, `lt`, `lte`, `eq`. For the full condition and action reference — including the `match` block for gating on tool-argument values — see [policies.md](policies.md#condition-reference).
+
+---
+
+### `toggle_policy` ✎
+
+Enable or disable an existing policy without deleting it.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `policy_id` | string | The policy ID to toggle |
+| `enabled` | bool | `true` to enable, `false` to disable |
+
+---
+
+### `delete_policy` ✎
+
+Delete a runtime policy permanently. Prefer `toggle_policy` if you may want it back.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `policy_id` | string | The policy ID to delete |
+
+---
+
+### `list_custom_detectors`
+
+List custom detectors with status, fire rate, and run counts.
+
+| Status | Meaning |
+|---|---|
+| `shadow` | Evaluating silently — results stored, no alerts fire |
+| `active` | Firing live alerts when triggered |
+| `paused` | Evaluation suspended |
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Filter to one agent. Empty = all. |
+
+**Example output:**
+```
+Custom detectors (2):
+
+NAME                            STATUS     AGENT            FIRE RATE  TOTAL RUNS
+────────────────────────────────────────────────────────────────────────────────
+excessive-tool-calls            [shadow]   support-bot      3/120 (2%)  120
+refund-over-10k                 [active]   billing-bot      1/40 (2%)   40
+```
+
+---
+
+### `create_custom_detector` ✎
+
+Create a custom detector from a plain-English description. The tool translates the description to a structured config via LLM (**spends an LLM call**), then creates the detector **in shadow mode** — it evaluates on every matching run but fires no alerts until you call `activate_custom_detector`.
+
+If the description can't be expressed with the supported metrics and content fields, the tool returns the translator's reason instead of creating anything. See [detectors.md](detectors.md#custom-detectors) for what's expressible.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `description` | string | Plain English, e.g. "Alert when total tool calls exceed 20 in a single run" |
+| `agent_id` | string | Agent to apply to (`*` for all agents, the default) |
+
+---
+
+### `activate_custom_detector` ✎
+
+Promote a shadow or paused detector to `active` so it fires live alerts. Check its shadow fire rate with `list_custom_detectors` first — that's what shadow mode is for.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `detector_id` | string | The custom detector ID to activate |
+
+---
+
+### `pause_custom_detector` ✎
+
+Pause a custom detector so it stops evaluating entirely, without deleting it or losing its history.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `detector_id` | string | The custom detector ID to pause |
+
+---
+
+### `delete_custom_detector` ✎
+
+Delete a custom detector permanently, **including all its historical evaluation results** (`custom_detector_results` cascades). Use `pause_custom_detector` if you only want to stop evaluation.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `detector_id` | string | The custom detector ID to delete |
 
 ---
 
@@ -545,7 +934,7 @@ Claude: [calls get_signal_detail(518, "langchain-example-agent")]
             If a search returned no useful results, reformulate
             the query before trying again."
 
-        Option 2 can be applied via Langfuse in one click from the dashboard.
+        Option 2 is a diff you copy into your system prompt manually.
 ```
 
 ---
@@ -571,8 +960,8 @@ Claude: [calls get_run_detail("019e2314-6b7")]
 You:   Which agents had issues in the last 24 hours?
 
 Claude: [calls list_agents]
-        langfuse-example-agent — 47 HIGH signals (TOOL_LOOP), last seen 12h ago.
-        langfuse-ts-example-agent — 3 HIGH signals (TOOL_LOOP), last seen 21h ago.
+        python-example-agent — 47 HIGH signals (TOOL_LOOP), last seen 12h ago.
+        ts-example-agent — 3 HIGH signals (TOOL_LOOP), last seen 21h ago.
         Both are looping on web_search. Likely the same root cause — want me
         to compare?
 ```
@@ -608,16 +997,23 @@ Claude: [calls get_instrumentation_guide("langchain")]
 
 ---
 
-## Privacy
+## Data Handling
 
-All data served by the MCP tools comes from the Dunetrace Customer API, which stores only hashed or structural metadata:
+All data served by the MCP tools comes from the Dunetrace Customer API:
 
-- Tool arguments → SHA-256 hash (shown as `args_hashes`)
-- LLM prompts and outputs → SHA-256 hash (never stored)
+- Tool arguments, LLM prompts and outputs → stored and returned as-is (shown as `args`, `output`, etc. in evidence)
 - Token counts, latency, step counts → stored as plain numbers
 - Run and signal metadata → stored as plain text
 
-The `evidence` dict in signal responses contains the hashed fingerprints the detector used — not the original content.
+The `evidence` dict in signal responses contains the actual content the detector used, not a hash of it.
+
+**Writes.** Nine tools mutate your deployment rather than just reading it — see
+the ✎ markers in the tool index above. Two of them have effects outside
+Dunetrace itself: `create_policy` and `toggle_policy` change how **live agent
+runs** behave (a `stop` policy terminates real runs from the moment the SDK
+next pulls policies), and `trigger_explain` / `create_custom_detector` each
+spend an LLM call against your configured provider. Everything else is scoped
+to Dunetrace's own records.
 
 ---
 
@@ -657,7 +1053,7 @@ python -m pytest tests/ -v
 dunetrace_mcp/
   __init__.py
   client.py      # thin httpx wrapper around the Customer API
-  server.py      # FastMCP server with 10 tools + 7 doc resources
+  server.py      # FastMCP server with 31 tools + 8 doc resources
 tests/
   test_tools.py  # 105 unit tests (all offline)
 pyproject.toml

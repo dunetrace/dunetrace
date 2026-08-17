@@ -162,7 +162,9 @@ def run_basic_agent() -> None:
                 ) as run:
                     run.llm_called(model, prompt_tokens=150)
                     run.llm_responded(finish_reason="tool_calls")
-                    run.retrieval_called("product-docs", query_hash=f"hash{i}")
+                    run.retrieval_called(
+                        "product-docs", query=f"How do I configure feature X? run={i}"
+                    )
                     run.retrieval_responded("product-docs", result_count=0, latency_ms=45)
                     run.llm_called(model, prompt_tokens=300)
                     run.llm_responded(finish_reason="stop")

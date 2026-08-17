@@ -1,349 +1,156 @@
-# Integrating a Custom Python Agent with Dunetrace
+# Integrating a Python Agent with Dunetrace
 
-This guide covers how to instrument a Python agent already running in production so Dunetrace can monitor it for structural failures in real-time.
+> **Using TypeScript/Node.js?** See [integrate-typescript-agent.md](./integrate-typescript-agent.md).
+> **Using LangChain, CrewAI, or AutoGen?** Those have dedicated guides with zero manual instrumentation — see [integrate-langchain-agent.md](./integrate-langchain-agent.md), [integrate-crewai-agent.md](./integrate-crewai-agent.md), [integrate-autogen-agent.md](./integrate-autogen-agent.md).
 
-> **Using TypeScript or Node.js?** See [integrate-typescript-agent.md](./integrate-typescript-agent.md) for the Node.js SDK guide.
-> **Using LangChain or LangGraph?** See [integrate-langchain-agent.md](./integrate-langchain-agent.md). **Using CrewAI?** See [integrate-crewai-agent.md](./integrate-crewai-agent.md). **Using AutoGen?** See [integrate-autogen-agent.md](./integrate-autogen-agent.md). Those frameworks have dedicated integrations that require no manual event calls.
-
----
-
-## What Dunetrace Captures
-
-Dunetrace detects behavioral failures in AI agents — tool loops, cost spikes, session latency, context bloat, and 13 more patterns — within ~15 seconds of a run completing. It never transmits raw prompts or outputs: all user content, tool arguments, and completions are SHA-256 hashed in-process before any data leaves your agent.
-
-What does transmit: model names, token counts, latencies, tool names, finish reasons, and step counts.
-
----
-
-## Prerequisites
-
-- Dunetrace backend running (`docker compose up -d`)
-- Python 3.11+
-
-> **Local dev — no API key needed.** The backend runs in dev mode by default (`ENV=dev`) and accepts requests without any API key. Skip Step 1 entirely when testing on localhost. API keys are only required for production deployments.
-
----
-
-## Step 1: Generate an API Key (production only)
-
-Skip this step if you are testing locally — the backend accepts unauthenticated requests in dev mode.
-
-API keys are stored in the `api_keys` table in Postgres. There is no UI for this yet — insert a row directly.
-
-Connect to your Dunetrace Postgres instance and run:
-
-```sql
-INSERT INTO api_keys (key, agent_id, customer_id)
-VALUES ('dt_live_<your-random-string>', 'my-production-agent', 'my-company');
-```
-
-**Field notes:**
-
-| Field | Description |
-|---|---|
-| `key` | The key string your agent sends on every request. Use the `dt_live_` prefix by convention. Generate the random suffix with the command below. |
-| `agent_id` | Identifies which agent this key belongs to. Must match the `agent_id` you pass to `dt.init()`. |
-| `customer_id` | Your organization identifier. Used for grouping in the dashboard. |
-| `active` | Defaults to `TRUE`. Set to `FALSE` to revoke a key without deleting it. |
-
-Generate a secure random suffix:
-
-```bash
-python3 -c "import secrets; print('dt_live_' + secrets.token_hex(16))"
-# Example output: dt_live_3a9f2c1d8e4b7a6f0c5d2e1b9f8a3c7d
-```
-
-To revoke a key:
-
-```sql
-UPDATE api_keys SET active = FALSE WHERE key = 'dt_live_...';
-```
-
----
-
-## Step 2: Install the SDK
+## Quick Start
 
 ```bash
 pip install dunetrace
 ```
 
-If you want OpenTelemetry export to Tempo or Datadog:
+```python
+from dunetrace import Dunetrace
+
+dt = Dunetrace()  # local dev, no API key needed
+
+@dt.tool
+def web_search(query: str) -> list:
+    return search_api(query)
+
+@dt.trace
+def my_agent(question: str) -> str:
+    return web_search(question)[0]
+
+my_agent("What is the capital of France?")
+dt.shutdown()
+```
+
+Start the backend once, locally, before running this: `docker compose up -d`.
+
+## What this does
+
+Wrap your agent's entry point with `@dt.trace` and your tool functions with `@dt.tool`. Dunetrace then auto-traces every tool and LLM call made inside that function, ships the trace to the backend, and detects structural failures (tool loops, retry storms, cost spikes, and 26 more) within ~15 seconds — no other code changes.
+
+## Recommended usage pattern
+
+`@dt.trace` + `@dt.tool` decorators, as shown above. No SDK calls needed inside your function bodies. Works on sync and async functions identically, and is a no-op outside a Dunetrace run (your code still runs normally).
+
+For a single-function agent that calls OpenAI/Anthropic directly, `@dt.agent()` plus auto-instrumentation is equally simple — see [Auto instrumentation](#auto-instrumentation) below.
+
+## Initialization (optional)
+
+```python
+dt = Dunetrace(endpoint="http://localhost:8001")   # default — local dev, no key needed
+dt.init(agent_id="my-production-agent")             # optional: fixed default agent ID
+```
+
+**Production** needs an API key:
+
+```python
+dt = Dunetrace(endpoint="https://your-ingest", api_key="dt_live_...")
+```
+
+Generate the first key directly in Postgres (there's no UI for this yet):
+
+```sql
+INSERT INTO organizations (id, name) VALUES ('my-company', 'My Company') ON CONFLICT (id) DO NOTHING;
+INSERT INTO api_keys (key, org_id) VALUES ('dt_live_<random-string>', 'my-company');
+```
 
 ```bash
-pip install 'dunetrace[otel]'
+python3 -c "import secrets; print('dt_live_' + secrets.token_hex(16))"
 ```
 
----
+Events are shipped from a background thread, so anything still buffered when the
+process exits needs flushing. The SDK registers an `atexit` hook that does this
+for you, which is what makes short-lived scripts, CLIs and one-shot jobs work
+without ceremony.
 
-## Step 3: Choose an Integration Path
+Still call `dt.shutdown()` explicitly where you can — it flushes at a point you
+control, with a full timeout rather than the shorter at-exit one, and surfaces
+delivery problems while your process is still alive to log them. Calling it
+cancels the at-exit hook, so events are never sent twice.
 
-Pick the path that fits your agent's architecture:
+Set `DUNETRACE_ATEXIT_TIMEOUT` to change how long the at-exit flush may block
+interpreter shutdown (seconds, default `2`), or to `0` to disable it entirely.
 
-| Path | Best for | Code change |
-|---|---|---|
-| `@dt.trace` + `@dt.tool` | Multi-function agents, no SDK in body | Decorators only |
-| `@dt.agent()` decorator | Single-function agents | Minimal |
-| ASGI/WSGI middleware | FastAPI / Flask / Django | One line |
-| `dt.run()` context manager | Full manual control | Moderate |
-| OTel receiver | Already instrumented with OpenLLMetry | Zero to agent |
+## Auto instrumentation
 
----
-
-## Path A: Zero-instrumentation decorators (`@dt.trace` / `@dt.tool`)
-
-Decorate your tool functions with `@dt.tool` and your agent entry point with `@dt.trace`. No SDK calls are needed inside any function body — everything is tracked automatically.
+`dt.auto_instrument()` patches `openai`, `anthropic`, `mistral`, `httpx`, and `requests` so every LLM/HTTP call inside a run is tracked with no manual event calls:
 
 ```python
-from dunetrace import Dunetrace
-
-dt = Dunetrace(endpoint="http://localhost:8001")
-
-@dt.tool                                      # auto-emits tool.called / tool.responded
-def web_search(query: str) -> list:
-    return search_api(query)                  # tool args are SHA-256 hashed, never transmitted raw
-
-@dt.tool("calculator")                        # explicit tool name
-def calc(expr: str) -> float:
-    return eval(expr)                         # noqa: S307
-
-@dt.trace                                     # agent_id defaults to function name "my_agent"
-def my_agent(question: str) -> str:
-    results = web_search(question)
-    return str(calc(results[0]))              # tool calls are auto-tracked inside
-
-# Or with an explicit agent ID and model:
-@dt.trace("research-agent", model="gpt-4o")
-async def async_agent(question: str) -> str:
-    results = await async_search(question)
-    return results[0]
-```
-
-`@dt.tool` is a no-op when called outside a `dt.run()` / `@dt.trace` context — the function still runs normally with no overhead. Both decorators work on sync and async functions identically.
-
----
-
-## Path B: Decorator (Recommended for most agents)
-
-Wrap your agent's entry point with `@dt.agent()`. Calls to OpenAI and Anthropic are captured automatically via `auto_instrument()`.
-
-```python
-from dunetrace import Dunetrace
-
-dt = Dunetrace(endpoint="http://localhost:8001")
 dt.init(agent_id="my-production-agent")
-dt.auto_instrument()  # patches openai, anthropic, httpx, requests
+dt.auto_instrument()
 
-@dt.agent(model="gpt-4o", tools=["web_search", "calculator"])
+@dt.agent(model="gpt-4o", tools=["web_search"])
 def run_agent(query: str) -> str:
-    # OpenAI/Anthropic calls here are auto-tracked
     response = openai_client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": query}],
     )
     return response.choices[0].message.content
-
-# Call normally — Dunetrace wraps it transparently
-result = run_agent("What is the capital of France?")
-
-# On process exit
-dt.shutdown()
 ```
 
-For async agents:
+Uninstalled frameworks are silently skipped. Restrict to specific clients with `dt.auto_instrument(["openai", "anthropic"])`.
 
-```python
-@dt.agent(model="gpt-4o", tools=["web_search"])
-async def run_agent_async(query: str) -> str:
-    response = await async_openai_client.chat.completions.create(...)
-    return response.choices[0].message.content
+## Verification
+
+Run your agent once, then check:
+
+1. **Dashboard** — `http://localhost:3000` — the run appears within ~15 seconds
+2. **Runs API** — `GET http://localhost:8002/v1/runs?agent_id=<your-agent-id>`
+
+To confirm detectors and alerts fire end-to-end:
+
+```bash
+SCENARIO=failures python examples/decorator_agent.py
 ```
+
+This runs three agents that intentionally trigger `TOOL_LOOP`, `RETRY_STORM`, and `RAG_EMPTY_RETRIEVAL` — each should appear in the dashboard within ~15 seconds.
 
 ---
 
-## Path C: FastAPI / ASGI Middleware
+## Advanced (optional)
 
-Add one middleware line. Each HTTP request becomes one agent run.
+### FastAPI / ASGI middleware
+
+One line — each HTTP request becomes one agent run.
 
 ```python
 from dunetrace import Dunetrace, DunetraceASGIMiddleware
-from dunetrace.context import get_current_run
 from fastapi import FastAPI
 
-dt = Dunetrace(endpoint="http://localhost:8001")
+dt = Dunetrace()
 dt.auto_instrument()
-
 app = FastAPI()
-app.add_middleware(
-    DunetraceASGIMiddleware,
-    dt=dt,
-    agent_id="my-api-agent",
-    model="gpt-4o",
-)
-
-@app.post("/chat")
-async def chat(query: str):
-    run = get_current_run()  # opened automatically by middleware
-
-    # Instrument non-LLM steps manually
-    run.tool_called("db_lookup", {"query": query})
-    result = await db.get(query)
-    run.tool_responded("db_lookup", success=True, output_length=len(str(result)))
-
-    return result
+app.add_middleware(DunetraceASGIMiddleware, dt=dt, agent_id="my-api-agent", model="gpt-4o")
 ```
 
-For Flask / Django, use `DunetraceWSGIMiddleware` instead.
+Flask / Django: use `DunetraceWSGIMiddleware` the same way.
 
----
+### Manual `dt.run()` context manager
 
-## Path D: Manual `dt.run()` Context Manager
-
-Use this when you need full control over every event.
+Use this for full control over every event — useful when decorators/middleware don't fit your architecture:
 
 ```python
-from dunetrace import Dunetrace
-
-dt = Dunetrace(endpoint="http://localhost:8001")
-dt.init(agent_id="my-production-agent")
-
-TOOLS = ["web_search", "calculator", "code_runner"]
-
-with dt.run("my-production-agent", user_input=query, model="gpt-4o", tools=TOOLS) as run:
-
-    # Before each LLM call
+with dt.run("my-agent", user_input=query, model="gpt-4o", tools=["web_search"]) as run:
     run.llm_called("gpt-4o", prompt_tokens=150)
-
     response = call_llm(query)
+    run.llm_responded(completion_tokens=30, latency_ms=820, finish_reason="stop")
 
-    # After LLM responds
-    run.llm_responded(
-        completion_tokens=30,
-        latency_ms=820,
-        finish_reason="tool_calls",
-        output_length=len(response),
-    )
-
-    # Before each tool call
     run.tool_called("web_search", {"query": query})
     result = web_search(query)
+    run.tool_responded("web_search", success=True, output_length=len(result))
 
-    # After tool responds
-    run.tool_responded("web_search", success=True, output_length=len(result), latency_ms=300)
-
-    # RAG/retrieval (if applicable)
-    run.retrieval_called(index_name="product-docs", query_hash="abc123")
-    docs = retrieve(query)
-    run.retrieval_responded(index_name="product-docs", result_count=len(docs), top_score=0.91, latency_ms=45)
-
-    # Mark run complete
     run.final_answer()
-
-dt.shutdown()
 ```
 
-### Full RunContext API reference
+Full `RunContext` API: `llm_called` / `llm_responded`, `tool_called` / `tool_responded`, `retrieval_called` / `retrieval_responded`, `external_signal`, `final_answer`.
 
-```python
-# LLM events
-run.llm_called(model, prompt_tokens)
-run.llm_responded(completion_tokens, latency_ms, finish_reason, output_length)
+### `get_current_run()`
 
-# Tool events
-run.tool_called(tool_name, args)           # args dict gets hashed in-process
-run.tool_responded(tool_name, success, output_length, latency_ms, error)
-
-# Retrieval/RAG events
-run.retrieval_called(index_name, query_hash)
-run.retrieval_responded(index_name, result_count, top_score, latency_ms)
-
-# Infrastructure signals (no step counter increment)
-run.external_signal("rate_limit", source="openai")
-run.external_signal("cache_miss", source="redis", key_prefix="emb:")
-
-# Terminal marker — always call this when agent produces final output
-run.final_answer()
-```
-
----
-
-## Path E: OpenTelemetry (Already instrumented with OpenLLMetry)
-
-If your agent already emits `gen_ai.*` OTel spans via OpenLLMetry, attach the receiver to your existing TracerProvider:
-
-```python
-from dunetrace import Dunetrace
-from dunetrace.integrations.otel_receiver import DunetraceOTelReceiver
-
-dt = Dunetrace(endpoint="http://localhost:8001")
-DunetraceOTelReceiver.attach(tracer_provider, dt, agent_id="my-agent")
-```
-
-No changes to agent code required.
-
----
-
-## Path F: Flask / WSGI
-
-`DunetraceWSGIMiddleware` wraps any WSGI app. One run per request, cleaned up after the response.
-
-```python
-from flask import Flask, request as flask_request
-from dunetrace import Dunetrace, DunetraceWSGIMiddleware, get_current_run
-
-dt = Dunetrace(endpoint="http://localhost:8001")
-dt.auto_instrument()
-
-app = Flask(__name__)
-app.wsgi_app = DunetraceWSGIMiddleware(app.wsgi_app, dt=dt, agent_id="my-api")
-
-@app.post("/chat")
-def chat():
-    run = get_current_run()
-    query = flask_request.json["query"]
-    resp = openai_client.chat.completions.create(
-        model="gpt-4o", messages=[{"role": "user", "content": query}]
-    )
-    return resp.choices[0].message.content
-```
-
-**Django:**
-
-```python
-# wsgi.py
-from dunetrace import Dunetrace, DunetraceWSGIMiddleware
-
-dt = Dunetrace(endpoint="http://localhost:8001")
-dt.auto_instrument()
-
-from django.core.wsgi import get_wsgi_application
-application = DunetraceWSGIMiddleware(get_wsgi_application(), dt=dt, agent_id="django-api")
-```
-
-The run is also available in `environ["dunetrace.run"]` for direct WSGI environ access.
-
----
-
-## Auto-instrumentation
-
-`dt.auto_instrument()` patches supported AI clients so every LLM call inside a run is tracked without manual `run.llm_called()` / `run.llm_responded()` calls.
-
-**Supported:** `openai`, `anthropic`, `httpx`, `requests`. Uninstalled frameworks are silently skipped.
-
-```python
-dt.auto_instrument()                          # patch all installed frameworks
-dt.auto_instrument(["openai", "anthropic"])   # LLM clients only
-dt.auto_instrument(["httpx", "requests"])     # HTTP clients only
-```
-
-**LLM calls** (`openai`, `anthropic`): model name, prompt + completion tokens, latency, finish reason, output length.
-
-**HTTP calls** (`httpx`, `requests`): hostname used as tool name (e.g. `serpapi.com`), success/failure based on HTTP status, response length, latency.
-
----
-
-## `get_current_run()`
-
-Returns the active `RunContext` for the current async task or thread, or `None` if no run is active. Use inside helpers to access the run without threading it through your call stack.
+Access the active run from any helper without threading it through your call stack:
 
 ```python
 from dunetrace import get_current_run
@@ -352,207 +159,45 @@ def some_helper():
     run = get_current_run()
     if run:
         run.tool_called("cache_lookup")
-        result = cache.get(key)
-        run.tool_responded("cache_lookup", success=result is not None)
-        return result
 ```
 
-Works with `@dt.agent()`, ASGI middleware, WSGI middleware, and `dt.run()` directly.
+### Already instrumented with OpenTelemetry / OpenLLMetry
 
----
+```python
+from dunetrace.integrations.otel_receiver import DunetraceOTelReceiver
+DunetraceOTelReceiver.attach(tracer_provider, dt, agent_id="my-agent")
+```
 
-## Grafana / Loki
+No agent code changes required.
+
+### Grafana / Loki (no HTTP ingest)
 
 ```python
 dt = Dunetrace(emit_as_json=True)
 ```
 
-Writes every event to stdout as a Loki-compatible NDJSON line. Each line includes `ts`, `level`, `logger`, `event_type`, `agent_id`, `run_id`, `step_index`, and `payload`. Works alongside HTTP ingest — both can be active simultaneously.
+Writes each event as an NDJSON line to stdout instead of (or alongside) HTTP ingest.
 
-Minimal Promtail pipeline stage:
+### Tuning detectors
+
+Edit `detectors.yml` on the server, then `docker compose restart detector` — no code changes:
 
 ```yaml
-pipeline_stages:
-  - json:
-      expressions: {ts: ts, event_type: event_type, agent_id: agent_id}
-  - timestamp:
-      source: ts
-      format: RFC3339Nano
-  - labels:
-      agent_id:
-      event_type:
+default:
+  tool_loop:
+    threshold: 3
+my-production-agent:       # per-agent-id override
+  tool_loop:
+    threshold: 6
 ```
 
----
-
-## Step 4: Shutdown Gracefully
-
-Always call `dt.shutdown()` before your process exits. This drains the background flush thread and ensures all pending events are sent.
-
-```python
-import atexit
-
-dt = Dunetrace(...)
-atexit.register(dt.shutdown)
-```
-
-Or with a timeout:
-
-```python
-dt.shutdown(timeout=5)  # waits up to 5 seconds
-```
-
----
-
-## Step 5: Configure Alerts
-
-Set these environment variables on your Dunetrace server before restarting:
+### Configuring alerts
 
 ```env
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
-SLACK_CHANNEL=#agent-alerts
-SLACK_MIN_SEVERITY=HIGH        # HIGH | MEDIUM | CRITICAL
-DASHBOARD_URL=https://your-dashboard-url
+SLACK_MIN_SEVERITY=HIGH
 ```
 
-Alerts fire within ~15 seconds of a run completing.
+### Data handling
 
----
-
-## Step 6: Tune Detectors (Optional)
-
-Dunetrace ships 17 built-in detectors with defaults that work for most agents. If your agent legitimately calls the same tool many times (e.g., a search agent), loosen the thresholds in `detectors.yml` on the server:
-
-```yaml
-# detectors.yml
-default:
-  tool_loop:
-    threshold: 3        # flag if same tool called ≥3x in 5-call window
-
-my-production-agent:    # per-agent-id overrides
-  tool_loop:
-    threshold: 6        # search agents call tools more
-  context_bloat:
-    growth_factor: 4.0  # allow more token growth
-  reasoning_stall:
-    ratio_threshold: 6  # higher tolerance for LLM-heavy agents
-```
-
-After editing, restart the detector service:
-
-```bash
-docker compose restart detector
-```
-
----
-
-## Step 7: Verify the Integration
-
-Run your agent once, then check:
-
-1. **Dashboard** (`http://your-dashboard:3000`) — the run should appear within 15 seconds
-2. **Runs API** — `GET http://your-ingest:8002/v1/runs?agent_id=my-production-agent`
-3. **Alerts** — trigger the built-in failure scenarios to confirm signals fire and Slack alerts:
-
-```bash
-SCENARIO=failures python examples/decorator_agent.py
-```
-
-This runs three agents that intentionally trigger `TOOL_LOOP`, `RETRY_STORM`, and `RAG_EMPTY_RETRIEVAL`. Each signal should appear in the dashboard within ~15 seconds and fire a Slack alert if configured.
-
-For local testing before pointing at production, omit the `api_key` parameter entirely — the backend accepts unauthenticated requests in dev mode:
-
-```python
-dt = Dunetrace(endpoint="http://localhost:8001")  # dev mode, no key needed
-```
-
----
-
-## Detector Reference
-
-These run automatically on every completed run. No configuration needed to enable them.
-
-| Detector | Trigger | Severity |
-|---|---|---|
-| `TOOL_LOOP` | Same tool called ≥3x in a 5-call window | HIGH |
-| `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
-| `RETRY_STORM` | Same tool fails 3+ consecutive times | HIGH |
-| `LLM_TRUNCATION_LOOP` | `finish_reason=length` ≥2 times | HIGH |
-| `EMPTY_LLM_RESPONSE` | Zero-length output with `finish_reason=stop` | HIGH |
-| `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ tools | HIGH |
-| `TOOL_AVOIDANCE` | Final answer without using available tools | MEDIUM |
-| `GOAL_ABANDONMENT` | Tool use stops, then 4+ LLM-only calls | MEDIUM |
-| `RAG_EMPTY_RETRIEVAL` | 0 retrieval results but agent answered | MEDIUM |
-| `CONTEXT_BLOAT` | Prompt tokens grow 3× from first to last call | MEDIUM |
-| `STEP_COUNT_INFLATION` | Run takes >2× baseline steps for this agent | MEDIUM |
-| `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
-| `REASONING_STALL` | LLM-to-tool-call ratio ≥4× | MEDIUM |
-| `SLOW_STEP` | Tool >15s or LLM >30s | MEDIUM/HIGH |
-| `PROMPT_INJECTION_SIGNAL` | Input matches injection/jailbreak patterns | CRITICAL |
-
----
-
-## Privacy Summary
-
-| Data | Transmitted? |
-|---|---|
-| User input text | No — SHA-256 hash only |
-| LLM prompts and completions | No — SHA-256 hash only |
-| Tool arguments | No — SHA-256 hash only |
-| Tool outputs | No — SHA-256 hash only |
-| Model names (`gpt-4o`, `claude-3-5-sonnet`) | Yes |
-| Tool names (`web_search`, `calculator`) | Yes |
-| Token counts | Yes |
-| Latencies | Yes |
-| Finish reasons | Yes |
-| HTTP status codes | Yes |
-
-Hashing happens in-process. Raw content never leaves your agent.
-
----
-
-## Quick-Start Checklist
-
-**Local dev**
-- [ ] `docker compose up -d`
-- [ ] `pip install dunetrace`
-- [ ] `Dunetrace(endpoint="http://localhost:8001")` — no api_key needed
-- [ ] Call `dt.init(agent_id="...")` and `dt.auto_instrument()`
-- [ ] Wrap agent entry point (decorator, middleware, or `dt.run()`)
-- [ ] Add manual `run.tool_called()` / `run.tool_responded()` for non-LLM steps
-- [ ] Call `dt.shutdown()` on process exit (or register with `atexit`)
-- [ ] Run `SCENARIO=failures python examples/decorator_agent.py` to verify signals fire
-
-**Production**
-- [ ] Generate an API key via `INSERT INTO api_keys ...` in Postgres
-- [ ] `Dunetrace(endpoint="https://your-ingest", api_key="dt_live_...")`
-- [ ] Set `SLACK_WEBHOOK_URL` on the server
-- [ ] Tune `detectors.yml` thresholds if needed
-
-**Langfuse deep analysis (optional)**
-- [ ] Add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `ANTHROPIC_API_KEY` to `.env`
-- [ ] Restart the API container: `docker compose up -d api`
-- [ ] Pass `LangfuseCallbackHandler()` alongside `DunetraceCallbackHandler` in `config={"callbacks": [...]}`
-- [ ] Click "Explain with Langfuse" on any signal in the dashboard (button only appears when `LANGFUSE_PUBLIC_KEY` is configured)
-- [ ] See [docs/integrate-langfuse.md](integrate-langfuse.md) for the full setup guide
-
----
-
-## What happens after a run completes
-
-Within ~15 seconds of each run, Dunetrace:
-
-1. **Detects** — 17 structural detectors run against the reconstructed run state (16 Tier 1 + prompt injection signal detection)
-2. **Explains** — each signal produces a plain-English title, cause, and fix using deterministic templates (no LLM); if Langfuse is connected, clicking "Explain with Langfuse ↗" in the dashboard fetches the full trace and returns an LLM-generated root-cause specific to that run
-3. **Trends** — the dashboard Health Record panel shows failure rate per failure type over 30 days, a 7-day systemic pattern flag (≥10% of runs affected), and a sparkline showing rate over time
-4. **Alerts** — Slack messages include a one-line rate context: "First occurrence", "5/20 runs affected (25%)", or "Systemic pattern — 8/12 runs affected (67%)"
-
-**Cross-run pattern analysis** — the dashboard "Why is this happening?" panel (click any failure type in the sidebar) shows a deep-dive for that failure type across all runs:
-
-```
-GET /v1/agents/{agent_id}/failure-patterns/{failure_type}
-```
-
-Returns: affected/total runs + rate, avg confidence, severity breakdown, step distribution (P25/P50/P75 where the failure fires), aggregated evidence (which tool loops, token growth rate, avg duration, etc.), co-occurring failure types, 14-day daily trend, and five highest-confidence example runs.
-
-The Health Record is available at `GET /v1/agents/{id}/insights` — it returns `failure_rates` (daily affected/total per failure type) and `systemic_patterns` (7-day rate + `is_systemic` flag).
+User input, tool arguments, and completions are sent to the backend over TLS as-is — content-aware detectors need to see what the agent actually said and did. Self-host for an air-gapped deployment. Full detector list: [docs/detectors.md](detectors.md).

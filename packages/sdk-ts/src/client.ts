@@ -1,10 +1,13 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-import { hashContent, agentVersion } from "./hash.js";
+import { randomUUID } from "node:crypto";
+import { agentVersion } from "./hash.js";
 import { DunetraceRun } from "./run.js";
-import { resultLength as _resultLength } from "./util.js";
-import type { AgentEvent, ClientOptions, RunOptions } from "./models.js";
+import { resultLength as _resultLength, resultText as _resultText } from "./util.js";
+import { HttpBatchEmitter, type BatchEmitter } from "./emitters.js";
+import { runStorage as _runStorage, getCurrentRun } from "./context.js";
+import { registerOwnEndpoint, wrapAnthropicClient, wrapOpenAIClient } from "./auto.js";
+import type { AgentEvent, ClientOptions, EventSink, RunOptions } from "./models.js";
 
-const _runStorage = new AsyncLocalStorage<DunetraceRun>();
+export { getCurrentRun };
 
 export class Dunetrace {
   private _ingestUrl:  string | null;
@@ -14,14 +17,22 @@ export class Dunetrace {
   private _timeoutMs:  number;
   private _drainTimer: ReturnType<typeof setInterval> | null = null;
   private _emitJson:   boolean;
+  private _emitter:    BatchEmitter;
+  private _exporter:   EventSink | null;
 
   constructor(opts: ClientOptions = {}) {
     const base      = (opts.endpoint ?? "http://localhost:8001").replace(/\/$/, "");
     this._ingestUrl = base + "/v1/ingest";
+    // Tell HTTP instrumentation to ignore our own traffic. Without this, shipping
+    // a batch would emit a tool.called describing the ship, which buffers another
+    // event, which ships — a feedback loop against our own ingest.
+    registerOwnEndpoint(base);
     this._apiKey    = opts.apiKey ?? "";
     this._emitJson  = opts.emitAsJson ?? false;
     this._bufferSize = opts.bufferSize ?? 10_000;
     this._timeoutMs  = opts.timeoutMs  ?? 5_000;
+    this._emitter    = opts.emitter ?? new HttpBatchEmitter(base, this._apiKey, this._timeoutMs);
+    this._exporter   = opts.exporter ?? null;
 
     const interval = opts.flushIntervalMs ?? 200;
     this._drainTimer = setInterval(() => { this._drain(); }, interval);
@@ -43,6 +54,16 @@ export class Dunetrace {
     const version = agentVersion(opts.systemPrompt ?? "", model, tools);
     const run     = new DunetraceRun(agentId, version, this, opts.runId);
 
+    // Auto-thread parent_run_id: if this run opens while another run is already
+    // active (this call is nested inside an enclosing run's fn, so
+    // _runStorage.getStore() returns that parent) and the caller didn't pass
+    // parentRunId, inherit the active run's id. This links nested multi-agent
+    // runs into a parent/child graph with no manual id threading — the substrate
+    // the server-side DELEGATION_LOOP and HANDOFF_CONTEXT_LOSS detectors consume.
+    // An explicit parentRunId always wins. Propagation follows AsyncLocalStorage,
+    // so it survives awaits within the same async context.
+    const parentRunId = opts.parentRunId ?? _runStorage.getStore()?.runId ?? null;
+
     this._emit({
       event_type:    "run.started",
       run_id:        run.runId,
@@ -51,11 +72,14 @@ export class Dunetrace {
       step_index:    0,
       timestamp:     Date.now() / 1000,
       payload: {
-        input_hash:   opts.userInput ? hashContent(opts.userInput) : "",
+        input_text:    opts.userInput ?? "",
+        system_prompt: opts.systemPrompt ?? "",
         model,
         tools,
       },
-      parent_run_id: opts.parentRunId ?? null,
+      parent_run_id: parentRunId,
+      trace_id:      opts.traceId ?? null,
+      conversation_id: opts.conversationId ?? null,
     });
 
     let result: T;
@@ -71,7 +95,7 @@ export class Dunetrace {
         timestamp:     Date.now() / 1000,
         payload: {
           error_type: (err instanceof Error) ? err.name : "Error",
-          error_hash: hashContent(String(err)),
+          error:      String(err),
           step_index: run.currentStep(),
         },
       });
@@ -117,7 +141,7 @@ export class Dunetrace {
         const t0 = Date.now();
         try {
           const result = await (fn as (...a: unknown[]) => Promise<unknown>)(...args);
-          if (run) run.toolResponded(toolName, true, _resultLength(result), Date.now() - t0);
+          if (run) run.toolResponded(toolName, true, _resultLength(result), Date.now() - t0, undefined, _resultText(result));
           return result;
         } catch (err) {
           if (run) run.toolResponded(toolName, false, 0, Date.now() - t0, String(err));
@@ -132,7 +156,7 @@ export class Dunetrace {
         const t0 = Date.now();
         try {
           const result = (fn as (...a: unknown[]) => unknown)(...args);
-          if (run) run.toolResponded(toolName, true, _resultLength(result), Date.now() - t0);
+          if (run) run.toolResponded(toolName, true, _resultLength(result), Date.now() - t0, undefined, _resultText(result));
           return result;
         } catch (err) {
           if (run) run.toolResponded(toolName, false, 0, Date.now() - t0, String(err));
@@ -182,28 +206,7 @@ export class Dunetrace {
    * const openai = dt.wrapOpenAI(new OpenAI());
    */
   wrapOpenAI<T extends { chat: { completions: { create: (...args: unknown[]) => Promise<unknown> } } }>(client: T): T {
-    const orig = client.chat.completions.create.bind(client.chat.completions);
-    (client.chat.completions as Record<string, unknown>)["create"] = async (...args: unknown[]) => {
-      const opts  = args[0] as Record<string, unknown> | undefined;
-      if (opts?.["stream"]) return orig(...args);  // skip streaming
-      const run   = getCurrentRun();
-      const model = (opts?.["model"] as string | undefined) ?? "unknown";
-      const t0    = Date.now();
-      const resp  = await orig(...args) as Record<string, unknown>;
-      if (run) {
-        const usage  = resp["usage"]   as Record<string, number> | undefined;
-        const choice = (resp["choices"] as Record<string, unknown>[] | undefined)?.[0] ?? {};
-        run.llmCalled(model, usage?.["prompt_tokens"] ?? 0);
-        run.llmResponded({
-          completionTokens: usage?.["completion_tokens"],
-          latencyMs:        Date.now() - t0,
-          finishReason:     (choice["finish_reason"] as string | undefined) ?? "stop",
-          outputText:       ((choice["message"] as Record<string, unknown> | undefined)?.["content"] as string | undefined) ?? "",
-        });
-      }
-      return resp;
-    };
-    return client;
+    return wrapOpenAIClient(client);
   }
 
   /**
@@ -214,27 +217,7 @@ export class Dunetrace {
    * const anthropic = dt.wrapAnthropic(new Anthropic());
    */
   wrapAnthropic<T extends { messages: { create: (...args: unknown[]) => Promise<unknown> } }>(client: T): T {
-    const orig = client.messages.create.bind(client.messages);
-    (client.messages as Record<string, unknown>)["create"] = async (...args: unknown[]) => {
-      const opts  = args[0] as Record<string, unknown> | undefined;
-      if (opts?.["stream"]) return orig(...args);  // skip streaming
-      const run   = getCurrentRun();
-      const model = (opts?.["model"] as string | undefined) ?? "unknown";
-      const t0    = Date.now();
-      const resp  = await orig(...args) as Record<string, unknown>;
-      if (run) {
-        const usage = resp["usage"] as Record<string, number> | undefined;
-        run.llmCalled(model, usage?.["input_tokens"] ?? 0);
-        run.llmResponded({
-          completionTokens: usage?.["output_tokens"],
-          latencyMs:        Date.now() - t0,
-          finishReason:     (resp["stop_reason"] as string | undefined) ?? "stop",
-          outputText:       ((resp["content"] as Record<string, unknown>[] | undefined)?.[0]?.["text"] as string | undefined) ?? "",
-        });
-      }
-      return resp;
-    };
-    return client;
+    return wrapAnthropicClient(client);
   }
 
   // ── Deploy markers ─────────────────────────────────────────────────────────
@@ -257,7 +240,7 @@ export class Dunetrace {
 
   async flush(): Promise<void> {
     const batch = this._buffer.splice(0);
-    if (batch.length > 0) await this._ship(batch);
+    if (batch.length > 0) await this._emitter.ship(batch);
   }
 
   async shutdown(timeoutMs = 5000): Promise<void> {
@@ -274,7 +257,19 @@ export class Dunetrace {
   // ── Internal ───────────────────────────────────────────────────────────────
 
   _emit(event: AgentEvent): void {
+    // audit Finding 14: stamp a stable id once, at buffer entry, so a retry of
+    // the same buffered event ships the same id and the ingest side dedups it.
+    if (!event.event_id) event.event_id = randomUUID();
     if (this._emitJson) this._writeJsonLine(event);
+    // Fan out to the optional OTel exporter. It never throws (see handle()), but
+    // guard anyway so a sink defect can't break the agent's own event path.
+    if (this._exporter) {
+      try {
+        this._exporter.handle(event);
+      } catch (err) {
+        process.stderr.write(`[dunetrace] exporter failed: ${err}\n`);
+      }
+    }
     if (this._buffer.length >= this._bufferSize) return;
     this._buffer.push(event);
   }
@@ -282,39 +277,7 @@ export class Dunetrace {
   private _drain(): void {
     const batch = this._buffer.splice(0, 100);
     if (batch.length === 0 || !this._ingestUrl) return;
-    this._ship(batch).catch(() => {});
-  }
-
-  private async _ship(batch: AgentEvent[]): Promise<void> {
-    if (!this._ingestUrl) return;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this._timeoutMs);
-    try {
-      await fetch(this._ingestUrl, {
-        method:  "POST",
-        headers: {
-          "Content-Type":      "application/json",
-          "X-Dunetrace-Agent": batch[0]?.agent_id ?? "",
-        },
-        body: JSON.stringify({
-          api_key:  this._apiKey,
-          agent_id: batch[0]?.agent_id ?? "",
-          events:   batch,
-        }),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      const isConnRefused = String(err).includes("ECONNREFUSED") || String(err).includes("fetch failed");
-      if (isConnRefused) {
-        process.stderr.write(
-          `[dunetrace] Backend unreachable at ${this._ingestUrl} — is it running? (docker compose up -d)\n`
-        );
-      } else {
-        process.stderr.write(`[dunetrace] Failed to ship ${batch.length} events: ${err}\n`);
-      }
-    } finally {
-      clearTimeout(timer);
-    }
+    this._emitter.ship(batch).catch(() => {});
   }
 
   private _writeJsonLine(event: AgentEvent): void {
@@ -332,11 +295,6 @@ export class Dunetrace {
     });
     process.stdout.write(line + "\n");
   }
-}
-
-/** Return the current DunetraceRun from async context, or null. */
-export function getCurrentRun(): DunetraceRun | null {
-  return _runStorage.getStore() ?? null;
 }
 
 function _argsRecord(fn: (...args: unknown[]) => unknown, args: unknown[]): Record<string, unknown> {

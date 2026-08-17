@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace"
-version = "0.3.21"
+version = "0.5.4"
 description = "Real-time monitoring for AI agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -27,17 +27,31 @@ dependencies = []
 
 [project.optional-dependencies]
 langchain = ["langchain>=1.0", "langgraph>=0.2"]
-langfuse = ["langfuse>=2.0"]
 haystack = ["haystack-ai>=2.0"]
+openai-agents = ["openai-agents>=0.1,<1.0"]
+# v2 only. v2.0 moved every module under mistralai.client and dropped the
+# top-level __init__.py, so the v1 import paths the patcher targets don't exist.
+mistral = ["mistralai>=2.0"]
 otel = [
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
+    "opentelemetry-api>=1.28.0",
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
 ]
 dev = [
     "pytest>=7",
     "pytest-cov",
+    # Kills (and dumps the stack of) any single hung test so a deadlock can't
+    # wedge a local `pre-commit run` — the same protection CI uses.
+    "pytest-timeout",
     "mypy",
     "ruff",
+    # Test-only (not a runtime dependency — the core SDK stays stdlib-only). The
+    # policy evaluator's ReDoS timeout uses `regex` when present and degrades to
+    # stdlib `re` (no timeout) otherwise; the test env installs it so the
+    # timeout-protected path is actually exercised instead of hanging on the
+    # catastrophic-backtracking test pattern.
+    "regex",
 ]
 
 [project.urls]

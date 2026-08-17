@@ -27,6 +27,14 @@ jobs:
             dockerfile: services/alerts/Dockerfile
           - service: api
             dockerfile: services/api/Dockerfile
+          # Optional workers — off by default at runtime, but published so the
+          # prebuilt-image stack (docker-compose.ghcr.yml) can run them without
+          # building from source. `elevenlabs` is not a separate image: it runs
+          # the integrations image with a different command.
+          - service: semantic
+            dockerfile: services/semantic/Dockerfile
+          - service: integrations
+            dockerfile: services/integrations/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

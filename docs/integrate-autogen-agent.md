@@ -1,74 +1,29 @@
 # Integrating an AutoGen Agent with Dunetrace
 
-`DunetraceAutoGenObserver` wraps a multi-agent AutoGen conversation with a single Dunetrace run. Wrap the model client with `observer.wrap_client()` to instrument every LLM call, then use `observer.run()` as a context manager around the team execution.
-
----
-
-## Prerequisites
-
-- Dunetrace backend running (`docker compose up -d`)
-- Python 3.11+
-- autogen-agentchat >= 0.4 (tested with 0.7.x)
-
-> **Local dev — no API key needed.** The backend accepts requests without any API key when running locally.
-
----
-
-## Install
+## Quick Start
 
 ```bash
-pip install dunetrace autogen-agentchat autogen-ext python-dotenv
+pip install dunetrace autogen-agentchat autogen-ext
 ```
-
----
-
-## How it works
-
-| What you call | What Dunetrace captures |
-|---|---|
-| `observer.wrap_client(base_client)` | Wraps every `model_client.create()` call — emits `llm.called` / `llm.responded` with model, token counts, and latency |
-| `async with observer.run(user_input=...)` | Emits `run.started` / `run.completed` |
-| Tool functions registered in `FunctionTool` | Emits `tool.called` / `tool.responded` automatically |
-
----
-
-## Integration
 
 ```python
 import asyncio
 from autogen_agentchat.agents import AssistantAgent
-from autogen_agentchat.teams import RoundRobinGroupChat
-from autogen_agentchat.conditions import MaxMessageTermination
-from autogen_core.tools import FunctionTool
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 from dunetrace import Dunetrace
 from dunetrace.integrations.autogen import DunetraceAutoGenObserver
 
-dt       = Dunetrace(endpoint="http://localhost:8001")
-observer = DunetraceAutoGenObserver(dt, agent_id="my-autogen", model="gpt-4o-mini")
-
-def web_search(query: str) -> str:
-    """Search the web."""
-    return f"Results for {query}"
+dt       = Dunetrace()   # local dev, no API key needed
+observer = DunetraceAutoGenObserver(dt, agent_id="my-agent", model="gpt-4o-mini")
 
 async def main():
     base_client = OpenAIChatCompletionClient(model="gpt-4o-mini")
     dt_client   = observer.wrap_client(base_client)   # instruments every LLM call
 
-    assistant = AssistantAgent(
-        "assistant",
-        model_client=dt_client,
-        tools=[FunctionTool(web_search, description="Search the web.")],
-        system_message="You are helpful. Say TERMINATE when done.",
-    )
-    team = RoundRobinGroupChat(
-        [assistant],
-        termination_condition=MaxMessageTermination(5),
-    )
+    assistant = AssistantAgent("assistant", model_client=dt_client)
 
-    query = "What is the capital of France?"
-    async with observer.run(user_input=query):
-        result = await team.run(task=query)
+    async with observer.run(user_input="What is the capital of France?"):
+        result = await assistant.run(task="What is the capital of France?")
 
     await base_client.close()
     dt.shutdown()
@@ -76,47 +31,32 @@ async def main():
 asyncio.run(main())
 ```
 
-The run appears in the dashboard under `my-autogen`. Every `model_client.create()` call is tracked — `llm.called` / `llm.responded` events capture model name, prompt + completion token counts, and latency.
+Start the backend once, locally, before running this: `docker compose up -d`.
 
----
+## What this does
 
-## Multi-agent setup
+`observer.wrap_client()` instruments a model client so every `create()` call — model name, token counts, latency — is captured automatically. `observer.run()` opens a Dunetrace run around the whole conversation, so a multi-agent team's calls all land under one run.
 
-When your team has multiple agents, wrap each agent's model client separately. Each wrapped client reports into the same Dunetrace run:
+For a team with multiple agents, wrap each agent's model client separately — each still reports into the same run:
 
 ```python
-base_a = OpenAIChatCompletionClient(model="gpt-4o-mini")
-base_b = OpenAIChatCompletionClient(model="gpt-4o")
-
-agent_a = AssistantAgent("researcher", model_client=observer.wrap_client(base_a), ...)
-agent_b = AssistantAgent("writer",     model_client=observer.wrap_client(base_b), ...)
+agent_a = AssistantAgent("researcher", model_client=observer.wrap_client(base_a))
+agent_b = AssistantAgent("writer",     model_client=observer.wrap_client(base_b))
 ```
+
+## Verification
+
+```bash
+OPENAI_API_KEY=sk-... SCENARIO=tool_loop python packages/sdk-py/examples/autogen_agent.py
+```
+
+Check the dashboard at `http://localhost:3000` — the run (and, for the tool-loop scenario, a `TOOL_LOOP` signal) should appear within ~15 seconds.
 
 ---
 
-## Verify
+## Advanced (optional)
 
-```bash
-docker compose up -d
-OPENAI_API_KEY=sk-… python packages/sdk-py/examples/autogen_agent.py
-```
+### Troubleshooting
 
-Open the dashboard at `http://localhost:3000`. The run should appear within 15 seconds.
-
-**Trigger a tool-loop scenario:**
-
-```bash
-SCENARIO=tool_loop OPENAI_API_KEY=sk-… python packages/sdk-py/examples/autogen_agent.py
-```
-
----
-
-## Troubleshooting
-
-**No runs appear in the dashboard**
-- Confirm `observer.run()` context manager wraps the team execution
-- Confirm `dt.shutdown()` is called after the run
-- Try `debug=True` in `Dunetrace(debug=True)` for verbose logging
-
-**Token counts missing**
-- Token counts are extracted from the AutoGen model client response metadata. If the provider omits usage, token fields are absent — detectors still run on step counts and tool patterns.
+- **No runs appear** — confirm the team execution runs inside `observer.run()`, and `dt.shutdown()` was called; try `Dunetrace(debug=True)` for verbose logs
+- **Token counts missing** — extracted from the model client's response metadata; if the provider omits usage, detectors still run on step counts and tool patterns

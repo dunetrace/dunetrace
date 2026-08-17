@@ -1,0 +1,52 @@
+# Self-contained OTel backend harness for verifying Dunetrace span export.
+# Runs independently of the main Dunetrace stack. The SDK exports to the
+# collector on localhost:4317 (gRPC) / :4318 (HTTP); the collector fans out to
+# Jaeger and Tempo and also logs every span.
+#
+#   docker compose -f otel/docker-compose.yml up -d
+#   python otel/exercise_agent.py       # push spans through the SDK
+#   python otel/verify.py               # assert the trace landed with the right shape
+#   docker compose -f otel/docker-compose.yml logs collector   # see raw spans
+#
+# UIs: Jaeger http://localhost:16686 · Grafana http://localhost:3000 (Tempo)
+
+services:
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    depends_on:
+      - jaeger
+      - tempo
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI + query API
+
+  tempo:
+    image: grafana/tempo:2.6.0
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "3200:3200"    # Tempo query API
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/tempo.yaml:ro
+    ports:
+      - "3001:3000"   # 3001 on host to avoid clashing with other local services
+    depends_on:
+      - tempo

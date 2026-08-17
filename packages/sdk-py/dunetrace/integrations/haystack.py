@@ -19,9 +19,8 @@ Register once before running any pipeline::
 Works with sync Pipeline, AsyncPipeline, and the high-level Agent component.
 Compatible with haystack-ai >= 2.0.
 
-Content tracing is enabled (so Haystack passes component I/O to us), but all text
-is SHA-256 hashed before any network transmission — raw content never leaves the
-process.
+Content tracing is enabled so Haystack passes component I/O to us; that content
+is transmitted as-is.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ try:
 except ImportError:
     _HAYSTACK_AVAILABLE = False
 
-from dunetrace.models import hash_content, agent_version as calc_version
+from dunetrace.models import agent_version as calc_version
 
 if TYPE_CHECKING:
     from dunetrace.client import Dunetrace
@@ -114,7 +113,7 @@ def _model_hint_from_type(comp_type: str) -> str:
 
 
 def _extract_tool_calls(inp: Any, output: Any, exc_type: Any) -> List[tuple]:
-    """Return list of (tool_name, args_hash, success) from ToolInvoker input/output.
+    """Return list of (tool_name, args, success) from ToolInvoker input/output.
 
     Prefers output tool_messages (has per-tool error info). Falls back to input
     messages tool_calls when output is absent (e.g. ToolInvoker raised an exception).
@@ -133,7 +132,7 @@ def _extract_tool_calls(inp: Any, output: Any, exc_type: Any) -> List[tuple]:
                 name = getattr(origin, "tool_name", "unknown")
                 args = getattr(origin, "arguments", {})
                 ok = not getattr(tcr, "error", True)
-                results.append((name, hash_content(str(args)), ok))
+                results.append((name, str(args), ok))
 
     if results:
         return results
@@ -146,7 +145,7 @@ def _extract_tool_calls(inp: Any, output: Any, exc_type: Any) -> List[tuple]:
         for tc in getattr(msg, "tool_calls", None) or []:
             name = getattr(tc, "tool_name", "unknown")
             args = getattr(tc, "arguments", {})
-            results.append((name, hash_content(str(args)), exc_type is None))
+            results.append((name, str(args), exc_type is None))
 
     return results
 
@@ -250,7 +249,7 @@ class _DunetraceSpan:
         self._tracer = tracer
         self._operation = operation_name
         self._tags: Dict[str, Any] = dict(tags)
-        self._ctags: Dict[str, Any] = {}  # content tags (locally only, never transmitted)
+        self._ctags: Dict[str, Any] = {}  # component I/O scratch, used locally to derive metrics
         self._parent = parent_span
         self._start = time.time()
         # Set by root pipeline spans:
@@ -373,7 +372,7 @@ class _DunetraceSpan:
                     agent_version=t._version,
                     step_index=state.step,
                     payload={
-                        "input_hash": hash_content(user_input),
+                        "input_text": user_input,
                         "tools": t._tools,
                         "model": t._model,
                     },
@@ -421,7 +420,7 @@ class _DunetraceSpan:
                         step_index=self._comp_step,
                         payload={
                             "index_name": comp_name,
-                            "query_hash": hash_content(query),
+                            "query": query,
                         },
                     )
                 )
@@ -450,7 +449,7 @@ class _DunetraceSpan:
                         step_index=state.step,
                         payload={
                             "error_type": exc_type.__name__ if exc_type else "unknown",
-                            "error_hash": hash_content(str(exc_val)),
+                            "error": str(exc_val),
                         },
                     )
                 )
@@ -501,7 +500,7 @@ class _DunetraceSpan:
 
                 payload: Dict[str, Any] = {
                     "finish_reason": "error" if exc_type else (finish or "stop"),
-                    "output_hash": hash_content(reply_text),
+                    "output": reply_text,
                     "output_length": len(reply_text),
                     "latency_ms": latency_ms,
                 }
@@ -512,7 +511,7 @@ class _DunetraceSpan:
                 if ct is not None:
                     payload["completion_tokens"] = ct
                 if exc_type is not None:
-                    payload["error_hash"] = hash_content(str(exc_val))
+                    payload["error"] = str(exc_val)
 
                 t._client._emit(
                     AgentEvent(
@@ -550,7 +549,7 @@ class _DunetraceSpan:
                         payload={
                             "result_count": 0 if exc_type else result_count,
                             "top_score": None if exc_type else top_score,
-                            **({"error_hash": hash_content(str(exc_val))} if exc_type else {}),
+                            **({"error": str(exc_val)} if exc_type else {}),
                         },
                     )
                 )
@@ -564,7 +563,7 @@ class _DunetraceSpan:
                     # Fallback when ToolInvoker has no messages (direct tool component)
                     calls = [(comp_name, "", exc_type is None)]
 
-                for tool_name, args_hash, success in calls:
+                for tool_name, args, success in calls:
                     t._client._emit(
                         AgentEvent(
                             event_type=EventType.TOOL_CALLED,
@@ -572,7 +571,7 @@ class _DunetraceSpan:
                             agent_id=t._agent_id,
                             agent_version=t._version,
                             step_index=step,
-                            payload={"tool_name": tool_name, "args_hash": args_hash},
+                            payload={"tool_name": tool_name, "args": args},
                         )
                     )
                     t._client._emit(
@@ -586,7 +585,7 @@ class _DunetraceSpan:
                                 "tool_name": tool_name,
                                 "success": success,
                                 "latency_ms": latency_ms,
-                                **({"error_hash": hash_content(str(exc_val))} if exc_type else {}),
+                                **({"error": str(exc_val)} if exc_type else {}),
                             },
                         )
                     )
@@ -614,7 +613,6 @@ class DunetraceHaystackTracer:
     """
 
     # Tell Haystack to call set_content_tag so we can see component outputs.
-    # All text is hashed before any network transmission.
     is_content_tracing_enabled: bool = True
 
     def __init__(

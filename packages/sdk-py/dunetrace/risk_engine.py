@@ -65,7 +65,7 @@ class RiskEngine:
 
     # ── Hard rule constants ─────────────────────────────────────────────────────
     HARD_LOOP_CALLS = 8  # same-tool call count across full run
-    HARD_SIMILARITY_THRESH = 0.9  # fraction with identical args_hash
+    HARD_SIMILARITY_THRESH = 0.9  # fraction with identical args
     HARD_FAILURE_STREAK = 5  # consecutive tool failures
 
     # ── Scoring constants ───────────────────────────────────────────────────────
@@ -256,7 +256,7 @@ class RiskEngine:
         """
         (max_call_count_for_any_tool, arg_similarity) across ALL tool calls.
         arg_similarity = fraction of the dominant tool's calls sharing the most
-        common args_hash (1.0 = all identical, 0.0 = all different).
+        common args value (1.0 = all identical, 0.0 = all different).
         """
         if not state.tool_calls:
             return 0, 0.0
@@ -270,8 +270,8 @@ class RiskEngine:
         for calls in by_tool.values():
             if len(calls) > max_calls:
                 max_calls = len(calls)
-                hashes = Counter(tc.args_hash for tc in calls)
-                most_common = hashes.most_common(1)[0][1]
+                counts = Counter(tc.args for tc in calls)
+                most_common = counts.most_common(1)[0][1]
                 similarity = most_common / len(calls)
 
         return max_calls, similarity

@@ -38,16 +38,16 @@ def _tool(
     step: int,
     *,
     success: bool | None = True,
-    args_hash: str = "abc",
-    error_hash: str | None = None,
+    args: str = "abc",
+    error: str | None = None,
 ) -> ToolCall:
     return ToolCall(
         tool_name=name,
-        args_hash=args_hash,
+        args=args,
         step_index=step,
         timestamp=time.time(),
         success=success,
-        error_hash=error_hash,
+        error=error,
     )
 
 
@@ -377,8 +377,8 @@ class TestTimeEscalation(unittest.TestCase):
 
 class TestHardRules(unittest.TestCase):
     def test_extreme_loop_returns_critical(self):
-        # 8 calls to "search", all with same args_hash
-        calls = [_tool("search", i, args_hash="same") for i in range(8)]
+        # 8 calls to "search", all with same args
+        calls = [_tool("search", i, args="same") for i in range(8)]
         state = _state(tool_calls=calls)
         score = RiskEngine().evaluate([], state)
         self.assertEqual(score.severity, "CRITICAL")
@@ -386,14 +386,14 @@ class TestHardRules(unittest.TestCase):
 
     def test_extreme_loop_below_threshold_no_override(self):
         # 7 calls (< 8) — hard rule should NOT fire
-        calls = [_tool("search", i, args_hash="same") for i in range(7)]
+        calls = [_tool("search", i, args="same") for i in range(7)]
         state = _state(tool_calls=calls)
         score = RiskEngine().evaluate([], state)
         self.assertIsNone(score.severity)
 
     def test_extreme_loop_low_similarity_no_override(self):
-        # 8 calls but all different args_hash (similarity ≈ 0.125)
-        calls = [_tool("search", i, args_hash=f"hash_{i}") for i in range(8)]
+        # 8 calls but all different args (similarity ≈ 0.125)
+        calls = [_tool("search", i, args=f"arg_{i}") for i in range(8)]
         state = _state(tool_calls=calls)
         score = RiskEngine().evaluate([], state)
         self.assertIsNone(score.severity)
@@ -413,14 +413,14 @@ class TestHardRules(unittest.TestCase):
 
     def test_critical_overrides_high(self):
         # Both hard rules trigger — CRITICAL fires first, returned immediately
-        calls = [_tool("search", i, args_hash="same", success=False) for i in range(8)]
+        calls = [_tool("search", i, args="same", success=False) for i in range(8)]
         state = _state(tool_calls=calls)
         score = RiskEngine().evaluate([], state)
         self.assertEqual(score.severity, "CRITICAL")
 
     def test_hard_rule_skips_scoring(self):
         # Hard rule result should not have normal 5-key scores dict
-        calls = [_tool("search", i, args_hash="same") for i in range(8)]
+        calls = [_tool("search", i, args="same") for i in range(8)]
         state = _state(tool_calls=calls)
         score = RiskEngine().evaluate([], state)
         self.assertEqual(score.scores, {"loop": 1.0})
@@ -432,7 +432,7 @@ class TestHardRules(unittest.TestCase):
 class TestCustomThresholds(unittest.TestCase):
     def test_lower_hard_loop_threshold(self):
         engine = RiskEngine(HARD_LOOP_CALLS=4)
-        calls = [_tool("search", i, args_hash="same") for i in range(4)]
+        calls = [_tool("search", i, args="same") for i in range(4)]
         state = _state(tool_calls=calls)
         score = engine.evaluate([], state)
         self.assertEqual(score.severity, "CRITICAL")
@@ -466,7 +466,7 @@ class TestIntegration(unittest.TestCase):
 
     def test_sick_run_high_confidence(self):
         # Looping tool + all failures + token bloat
-        calls = [_tool("search", i, args_hash="same", success=False) for i in range(4)]
+        calls = [_tool("search", i, args="same", success=False) for i in range(4)]
         llm_calls = [_llm(1, prompt_tokens=500), _llm(2, prompt_tokens=2000)]
         events = [_event(EventType.LLM_CALLED, i) for i in range(4)]
         state = _state(tool_calls=calls, llm_calls=llm_calls, events=events)

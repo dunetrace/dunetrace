@@ -130,7 +130,6 @@ class DunetraceCrewCallback:
 
     def _after_llm(self, ctx: "LLMCallHookContext") -> None:
         from dunetrace.context import _current_run
-        from dunetrace.models import hash_content
 
         run = _current_run.get(None)
         if run is None:
@@ -141,7 +140,7 @@ class DunetraceCrewCallback:
         output_text = ctx.response or ""
         run.llm_responded(
             latency_ms=latency,
-            output_hash=hash_content(output_text),
+            output=output_text,
             output_length=len(output_text),
             finish_reason="stop",
         )
@@ -172,11 +171,13 @@ class DunetraceCrewCallback:
         tool_result = ctx.tool_result
         # success: None result or explicit error attribute means the tool failed.
         success = tool_result is not None and not getattr(ctx, "error", None)
+        result_text = str(tool_result) if tool_result is not None else ""
         run.tool_responded(
             ctx.tool_name,
             success=success,
-            output_length=len(str(tool_result)) if tool_result is not None else 0,
+            output_length=len(result_text),
             latency_ms=latency,
+            output=result_text,
         )
 
 

@@ -1,0 +1,8 @@
+{
+  "recall": 1.0,
+  "fp_rate": 0.0,
+  "precision": 1.0,
+  "positives": 12,
+  "negatives": 11,
+  "live_ready": true
+}

@@ -5,10 +5,16 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
-from api_svc.custom_detector_translator import translate_description, SUPPORTED_METRICS
+from api_svc.auth import require_org
+from api_svc.custom_detector_translator import (
+    translate_description,
+    SUPPORTED_METRICS,
+    CONTENT_FIELDS,
+    CONTENT_OPERATORS,
+)
 from api_svc.db.queries import (
     create_custom_detector,
     delete_custom_detector,
@@ -57,38 +63,82 @@ class StatusUpdate(BaseModel):
         return v
 
 
+def _validate_metric_condition(cond: dict, i: int) -> None:
+    for field in ("metric", "operator", "threshold"):
+        if field not in cond:
+            raise HTTPException(422, f"conditions[{i}] is missing required field '{field}'")
+    if cond["metric"] not in SUPPORTED_METRICS:
+        raise HTTPException(
+            422,
+            f"conditions[{i}].metric '{cond['metric']}' is not a supported metric. "
+            f"Valid values: {sorted(SUPPORTED_METRICS)}",
+        )
+    if cond["operator"] not in _VALID_OPERATORS:
+        raise HTTPException(
+            422,
+            f"conditions[{i}].operator '{cond['operator']}' is invalid. "
+            f"Valid operators: {sorted(_VALID_OPERATORS)}",
+        )
+    try:
+        float(cond["threshold"])
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"conditions[{i}].threshold must be a number")
+
+
+def _validate_content_condition(cond: dict, i: int) -> None:
+    for field in ("field", "operator", "value"):
+        if field not in cond:
+            raise HTTPException(422, f"conditions[{i}] is missing required field '{field}'")
+    if cond["field"] not in CONTENT_FIELDS:
+        raise HTTPException(
+            422,
+            f"conditions[{i}].field '{cond['field']}' is not a supported content field. "
+            f"Valid values: {sorted(CONTENT_FIELDS)}",
+        )
+    if cond["operator"] not in CONTENT_OPERATORS:
+        raise HTTPException(
+            422,
+            f"conditions[{i}].operator '{cond['operator']}' is not a supported content operator. "
+            f"Valid values: {sorted(CONTENT_OPERATORS)}",
+        )
+    if cond["operator"] in ("length_gt", "length_lt"):
+        try:
+            float(cond["value"])
+        except (TypeError, ValueError):
+            raise HTTPException(
+                422, f"conditions[{i}].value must be a number for operator '{cond['operator']}'"
+            )
+    if "case_sensitive" in cond and not isinstance(cond["case_sensitive"], bool):
+        raise HTTPException(422, f"conditions[{i}].case_sensitive must be a boolean")
+
+
 def _validate_config(config: dict) -> None:
     """Raise HTTPException(422) if the detector config is structurally invalid."""
     name = config.get("detector_name")
     if not name or not name.startswith("CUSTOM_"):
         raise HTTPException(422, "config.detector_name must start with CUSTOM_")
     if config.get("requires_content"):
-        raise HTTPException(422, "Cannot save a detector that requires content access")
+        raise HTTPException(
+            422,
+            "This description needs something outside the supported metrics/content "
+            "fields — see the 'reason' from /preview.",
+        )
 
     conditions = config.get("conditions")
     if not isinstance(conditions, list) or len(conditions) == 0:
         raise HTTPException(422, "config.conditions must be a non-empty list")
 
     for i, cond in enumerate(conditions):
-        for field in ("metric", "operator", "threshold"):
-            if field not in cond:
-                raise HTTPException(422, f"conditions[{i}] is missing required field '{field}'")
-        if cond["metric"] not in SUPPORTED_METRICS:
+        if not isinstance(cond, dict):
+            raise HTTPException(422, f"conditions[{i}] must be an object")
+        if "field" in cond:
+            _validate_content_condition(cond, i)
+        elif "metric" in cond:
+            _validate_metric_condition(cond, i)
+        else:
             raise HTTPException(
-                422,
-                f"conditions[{i}].metric '{cond['metric']}' is not a supported metric. "
-                f"Valid values: {sorted(SUPPORTED_METRICS)}",
+                422, f"conditions[{i}] must have either 'metric' (numeric) or 'field' (content)"
             )
-        if cond["operator"] not in _VALID_OPERATORS:
-            raise HTTPException(
-                422,
-                f"conditions[{i}].operator '{cond['operator']}' is invalid. "
-                f"Valid operators: {sorted(_VALID_OPERATORS)}",
-            )
-        try:
-            float(cond["threshold"])
-        except (TypeError, ValueError):
-            raise HTTPException(422, f"conditions[{i}].threshold must be a number")
 
 
 @router.post("/preview")
@@ -110,16 +160,17 @@ async def preview_detector(body: PreviewRequest):
 
 
 @router.get("")
-async def list_detectors(agent_id: Optional[str] = None):
+async def list_detectors(agent_id: Optional[str] = None, org_id: str = Depends(require_org)):
     """List all custom detectors, optionally filtered by agent_id."""
-    return await list_custom_detectors(agent_id)
+    return await list_custom_detectors(org_id, agent_id)
 
 
 @router.post("", status_code=201)
-async def create_detector(body: CreateRequest):
+async def create_detector(body: CreateRequest, org_id: str = Depends(require_org)):
     """Save a new custom detector (always starts in shadow mode)."""
     _validate_config(body.config)
     detector = await create_custom_detector(
+        org_id=org_id,
         agent_id=body.agent_id,
         name=body.config["detector_name"],
         description=body.description,
@@ -129,27 +180,27 @@ async def create_detector(body: CreateRequest):
 
 
 @router.get("/{detector_id}")
-async def get_detector(detector_id: int):
-    det = await get_custom_detector(detector_id)
+async def get_detector(detector_id: int, org_id: str = Depends(require_org)):
+    det = await get_custom_detector(org_id, detector_id)
     if not det:
         raise HTTPException(404, "Custom detector not found")
     return det
 
 
 @router.get("/{detector_id}/shadow-stats")
-async def shadow_stats(detector_id: int):
+async def shadow_stats(detector_id: int, org_id: str = Depends(require_org)):
     """Return shadow evaluation results — how often the detector would have fired."""
-    det = await get_custom_detector(detector_id)
+    det = await get_custom_detector(org_id, detector_id)
     if not det:
         raise HTTPException(404, "Custom detector not found")
-    return await get_custom_detector_shadow_stats(detector_id)
+    return await get_custom_detector_shadow_stats(org_id, detector_id)
 
 
 @router.patch("/{detector_id}")
-async def update_detector(detector_id: int, body: StatusUpdate):
+async def update_detector(detector_id: int, body: StatusUpdate, org_id: str = Depends(require_org)):
     """Activate, pause, or return a detector to shadow mode."""
     try:
-        updated = await update_custom_detector_status(detector_id, body.status)
+        updated = await update_custom_detector_status(org_id, detector_id, body.status)
     except RuntimeError:
         raise HTTPException(503, "Database unavailable")
     if not updated:
@@ -158,9 +209,9 @@ async def update_detector(detector_id: int, body: StatusUpdate):
 
 
 @router.delete("/{detector_id}", status_code=204)
-async def remove_detector(detector_id: int):
+async def remove_detector(detector_id: int, org_id: str = Depends(require_org)):
     try:
-        deleted = await delete_custom_detector(detector_id)
+        deleted = await delete_custom_detector(org_id, detector_id)
     except RuntimeError:
         raise HTTPException(503, "Database unavailable")
     if not deleted:

@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-End-to-end test for the autofix feature (explain + copy + apply-fix).
+End-to-end test for the autofix feature (explain + copy + fix-status + open-pr).
 
-Uses signal 348 (TOOL_LOOP, langfuse-example-agent) which is already in
-the running DB. Exercises each new endpoint in sequence:
+Root-cause analysis is fully native — no external tracing system involved.
+Exercises each endpoint in sequence against a real signal from the running DB:
 
-  1. POST /v1/signals/{id}/explain  — root_cause + fix_content + prompt detection
+  1. POST /v1/signals/{id}/explain     — root_cause + fix_content/fix_patch
   2. POST /v1/signals/{id}/record-copy — clipboard-path tracking
   3. GET  /v1/signals/{id}/fix-status  — recurrence verdict
-  4. (apply-fix skipped unless --apply flag passed, as it writes to Langfuse)
+  4. (open-pr skipped unless --open-pr flag passed, as it writes to GitHub)
 
 Usage:
-    python scripts/test_autofix.py
-    python scripts/test_autofix.py --apply   # also tests apply-fix (writes to Langfuse)
+    python scripts/test_autofix.py --agent-id my-agent --signal-id 42
+    python scripts/test_autofix.py --agent-id my-agent --signal-id 42 --open-pr
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import urllib.request
@@ -36,8 +37,12 @@ AUTH_HEADER = {
     "Authorization": "Bearer dt_dev_test",
     "Content-Type": "application/json",
 }
-SIGNAL_ID = 348  # TOOL_LOOP on langfuse-example-agent, steps 2-7
-APPLY = "--apply" in sys.argv
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--agent-id", default="", help="Agent ID to pick a recent signal from")
+parser.add_argument("--signal-id", type=int, default=0, help="Exact signal ID to test")
+parser.add_argument("--open-pr", action="store_true", help="Also test the open-pr endpoint")
+args = parser.parse_args()
 
 _pass = 0
 _fail = 0
@@ -81,22 +86,34 @@ def post(path, body=None):
         return {"detail": detail, "_status": e.code}, e.code
 
 
-# ── Step 0: Verify signal exists ───────────────────────────────────────────────
+# ── Step 0: Find a signal to test ──────────────────────────────────────────────
 
 print(f"\n{'=' * 60}")
-print(f"Autofix end-to-end test  (signal_id={SIGNAL_ID})")
+print("Autofix end-to-end test")
 print(f"{'=' * 60}\n")
 
-print("[0] Verify signal exists")
-data, status = get(f"/v1/agents/langfuse-example-agent/signals?limit=500")
-sig = next((s for s in data.get("signals", []) if s["id"] == SIGNAL_ID), None)
-if sig:
-    ok(f"Signal {SIGNAL_ID} found: {sig['failure_type']} ({sig['severity']})")
-    print(f"      run_id = {sig['run_id']}")
-    print(f"      evidence_summary = {sig['evidence_summary']}")
+print("[0] Find a signal to test")
+if args.signal_id and args.agent_id:
+    data, status = get(f"/v1/agents/{args.agent_id}/signals?limit=500")
+    sig = next((s for s in data.get("signals", []) if s["id"] == args.signal_id), None)
+    if not sig:
+        fail(f"Signal {args.signal_id} not found for agent {args.agent_id!r}")
+        sys.exit(1)
+elif args.agent_id:
+    data, status = get(f"/v1/agents/{args.agent_id}/signals?limit=1")
+    sigs = data.get("signals", [])
+    if not sigs:
+        fail(f"No signals found for agent {args.agent_id!r} — run any instrumented agent first")
+        sys.exit(1)
+    sig = sigs[0]
 else:
-    fail(f"Signal {SIGNAL_ID} not found — run the langfuse_agent.py example first")
+    fail("Pass --agent-id (and optionally --signal-id) — see --help")
     sys.exit(1)
+
+SIGNAL_ID = sig["id"]
+ok(f"Signal {SIGNAL_ID} found: {sig['failure_type']} ({sig['severity']})")
+print(f"      run_id = {sig['run_id']}")
+print(f"      evidence_summary = {sig['evidence_summary']}")
 
 
 # ── Step 1: Explain ────────────────────────────────────────────────────────────
@@ -104,8 +121,10 @@ else:
 print("\n[1] POST /v1/signals/{id}/explain")
 explain_data, explain_status = post(f"/v1/signals/{SIGNAL_ID}/explain")
 
+fix_content = ""
+
 if explain_status == 200:
-    ok(f"explain returned 200")
+    ok("explain returned 200")
 
     if "root_cause" in explain_data and explain_data["root_cause"]:
         ok(f"root_cause present ({len(explain_data['root_cause'])} chars)")
@@ -113,40 +132,31 @@ if explain_status == 200:
     else:
         fail("root_cause missing or empty", str(explain_data))
 
-    if "fix_content" in explain_data:
-        fc = explain_data["fix_content"]
+    if explain_data.get("fix_category") == "dunetrace_native":
+        ok(
+            f"fix_category = dunetrace_native — suggested_policy: {explain_data.get('suggested_policy')}"
+        )
+        fix_content = explain_data.get("root_cause", "")
+    else:
+        fc = explain_data.get("fix_content")
         if fc:
             ok(f"fix_content present: {fc!r}")
+            fix_content = fc
         else:
             fail("fix_content is empty — LLM did not return structured JSON")
-    else:
-        fail("fix_content key missing from response")
-
-    pname = explain_data.get("langfuse_prompt_name")
-    pver = explain_data.get("langfuse_prompt_version")
-    if pname:
-        ok(f"langfuse_prompt_name = {pname!r}  version = {pver}")
-    else:
-        print(f"  NOTE  langfuse_prompt_name = null — trace didn't use a managed prompt")
-        print(f"        'Apply via Langfuse' button will NOT be shown (correct behaviour)")
-
-    fix_content = explain_data.get("fix_content", "")
-    prompt_name = explain_data.get("langfuse_prompt_name")
+        print(
+            f"      fix_type = {explain_data.get('fix_type')}  apply_blocked = {explain_data.get('apply_blocked')}"
+        )
 
 elif explain_status == 503:
     detail = explain_data.get("detail", "")
-    if "Langfuse" in detail:
-        print(f"  SKIP  Langfuse not configured ({detail})")
-    elif "LLM" in detail or "API key" in detail:
+    if "LLM" in detail or "API key" in detail:
         print(f"  SKIP  LLM not configured ({detail})")
     else:
-        fail(f"explain 503", detail)
+        fail("explain 503", detail)
     fix_content = sig["suggested_fixes"][0]["code"] if sig.get("suggested_fixes") else ""
-    prompt_name = None
 else:
     fail(f"explain returned {explain_status}", explain_data.get("detail", ""))
-    fix_content = ""
-    prompt_name = None
 
 
 # ── Step 2: record-copy ────────────────────────────────────────────────────────
@@ -159,11 +169,7 @@ if not fix_content:
 
 copy_data, copy_status = post(
     f"/v1/signals/{SIGNAL_ID}/record-copy",
-    {
-        "fix_content": fix_content,
-        "langfuse_prompt_name": prompt_name or "",
-        "applied_via": "clipboard",
-    },
+    {"fix_content": fix_content},
 )
 if copy_status == 200:
     ok(f"record-copy returned 200  (fix_id={copy_data.get('fix_id')})")
@@ -176,7 +182,7 @@ else:
 print("\n[3] GET /v1/signals/{id}/fix-status")
 status_data, status_code = get(f"/v1/signals/{SIGNAL_ID}/fix-status")
 if status_code == 200:
-    ok(f"fix-status returned 200")
+    ok("fix-status returned 200")
     fix_applied = status_data.get("fix_applied")
     if fix_applied:
         ok(f"fix_applied = True  →  verdict = {status_data.get('verdict')!r}")
@@ -188,32 +194,26 @@ else:
     fail(f"fix-status returned {status_code}", status_data.get("detail", ""))
 
 
-# ── Step 4: apply-fix (optional) ──────────────────────────────────────────────
+# ── Step 4: open-pr (optional) ─────────────────────────────────────────────────
 
-if APPLY:
-    print("\n[4] POST /v1/signals/{id}/apply-fix  (--apply flag set)")
-    if not prompt_name:
-        print("  SKIP  No langfuse_prompt_name — cannot apply without a managed prompt")
-    elif not fix_content:
-        print("  SKIP  No fix_content from explain step")
+if args.open_pr:
+    print("\n[4] POST /v1/signals/{id}/open-pr  (--open-pr flag set)")
+    pr_data, pr_status = post(
+        f"/v1/signals/{SIGNAL_ID}/open-pr",
+        {
+            "root_cause": explain_data.get("root_cause", ""),
+            "fix_content": fix_content,
+            "fix_patch": explain_data.get("fix_patch", ""),
+        },
+    )
+    if pr_status == 200:
+        ok(f"open-pr returned 200 — {pr_data.get('pr_url')}")
+    elif pr_status == 503:
+        print(f"  SKIP  GitHub not configured ({pr_data.get('detail', '')})")
     else:
-        apply_data, apply_status = post(
-            f"/v1/signals/{SIGNAL_ID}/apply-fix",
-            {
-                "fix_content": fix_content,
-                "langfuse_prompt_name": prompt_name,
-                "applied_via": "langfuse",
-            },
-        )
-        if apply_status == 200:
-            ok(f"apply-fix returned 200")
-            ok(
-                f"new_version = {apply_data.get('new_version')}  url = {apply_data.get('prompt_url')}"
-            )
-        else:
-            fail(f"apply-fix returned {apply_status}", apply_data.get("detail", ""))
+        fail(f"open-pr returned {pr_status}", pr_data.get("detail", ""))
 else:
-    print("\n[4] apply-fix  (skipped — pass --apply to write to Langfuse)")
+    print("\n[4] open-pr  (skipped — pass --open-pr to write to GitHub)")
 
 
 # ── Summary ────────────────────────────────────────────────────────────────────

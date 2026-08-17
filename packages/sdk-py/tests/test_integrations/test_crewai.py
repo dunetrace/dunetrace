@@ -262,6 +262,15 @@ class TestCrewCallbackToolHooks(unittest.TestCase):
         responded = [e for e in self.emitted if e.event_type == EventType.TOOL_RESPONDED][0]
         self.assertEqual(responded.payload.get("output_length"), 11)
 
+    def test_raw_output_transmitted_from_result(self):
+        ctx = ToolCallHookContext(tool_name="t", tool_result="hello world")
+        with self.dt.run("test-crew", user_input="q"):
+            self.cb._before_tool(ctx)
+            self.cb._after_tool(ctx)
+
+        responded = [e for e in self.emitted if e.event_type == EventType.TOOL_RESPONDED][0]
+        self.assertEqual(responded.payload.get("output"), "hello world")
+
     def test_no_run_context_no_emit(self):
         ctx = ToolCallHookContext(tool_name="t", tool_result="x")
         self.cb._before_tool(ctx)

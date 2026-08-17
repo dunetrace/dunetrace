@@ -1,24 +1,32 @@
 /**
  * TypeScript agent example: Dunetrace + Vercel AI SDK integration.
  *
- * Mirrors langfuse_agent.ts, but drives the Vercel AI SDK (`generateText`)
- * against a local Ollama instead of raw OpenAI — no API key required, since
- * Ollama exposes an OpenAI-compatible endpoint. The Dunetrace run is opened
- * via the `traceGenerateText` wrapper, which instruments the SDK call and
- * emits the same llm.* / tool.* events the manual loop produces.
+ * Drives the Vercel AI SDK (`generateText`) against a local Ollama instead
+ * of raw OpenAI — no API key required, since Ollama exposes an
+ * OpenAI-compatible endpoint. The Dunetrace run is opened via the
+ * `traceGenerateText` wrapper, which instruments the SDK call and emits the
+ * same llm.* / tool.* events a manual instrumentation loop would produce.
  *
  * Install deps:
  *   cd packages/sdk-ts && npm install
  *
  * Run (happy path):
  *   ollama pull llama3.2
- *   npx tsx examples/vercel_ai_agent.ts
+ *   npm run example:vercel-ai
  *
  * Run (tool loop — triggers TOOL_LOOP signal + explain):
- *   SCENARIO=tool_loop npx tsx examples/vercel_ai_agent.ts
+ *   npm run example:vercel-ai:loop
  *
- * Override the endpoint/model with OLLAMA_BASE_URL / OLLAMA_MODEL.
- * OLLAMA_BASE_URL defaults to http://localhost:11434/v1.
+ * Cost: the agent's own LLM calls go to a local Ollama and are free. The
+ * tool_loop scenario additionally calls POST /v1/signals/{id}/explain, which
+ * spends one LLM call on whatever provider the *stack* is configured with.
+ *
+ * Environment:
+ *   OLLAMA_BASE_URL     Ollama endpoint      (default http://localhost:11434/v1)
+ *   OLLAMA_MODEL        Model to pull/run    (default llama3.2)
+ *   DUNETRACE_ENDPOINT  Ingest API           (default http://localhost:8001)
+ *   DUNETRACE_API       Customer API         (default http://localhost:8002)
+ *   DUNETRACE_KEY       Customer API bearer  (default dt_dev_test)
  */
 
 import * as path from "node:path";

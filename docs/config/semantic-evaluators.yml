@@ -1,0 +1,50 @@
+# DuneTrace — Semantic Evaluator Config
+#
+# Read independently by two services, different keys each:
+#   - alerts_svc:   alert_confidence_floor (Phase 1.4.1). Below-floor semantic
+#                   signals are still written and stored (visible in the
+#                   dashboard) but never alerted.
+#   - semantic_svc: require_second_opinion / second_opinion_provider /
+#                   second_opinion_model (Phase 1.4.4).
+#
+# Restart both workers after any change:
+#
+#   docker compose restart semantic alerts
+#
+# Any evaluator not listed here uses the defaults: confidence floor 0.6,
+# require_second_opinion false. Per-agent sampling/evaluator selection lives
+# in the agent_semantic_config table, not here — see
+# docs/semantic-evaluation.md (Phase 5).
+#
+# require_second_opinion: for HIGH-severity findings (confidence 0.70-0.84),
+# re-run the same evaluator with a different model before trusting the
+# HIGH severity. Both must agree the run has a problem for it to stay HIGH;
+# disagreement downgrades to MEDIUM. Roughly doubles cost for the runs it
+# applies to — only worth enabling where a false HIGH is expensive to act on.
+# second_opinion_provider/model: if omitted, defaults to whichever provider
+# ISN'T the primary (SEMANTIC_LLM_PROVIDER) — the point is a genuinely
+# different model, not the same one asked twice.
+#
+# DATA RESIDENCY: with SEMANTIC_LLM_PROVIDER=mistral, a second_opinion_provider
+# naming another vendor is IGNORED (with a warning) and replaced by a second
+# Mistral model. Otherwise the confirming call would send the full run text to
+# a US API on exactly the HIGH-confidence findings a European deployment cares
+# most about. Set SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION=true to allow
+# it. The `second_opinion_provider: anthropic` below is therefore only in
+# effect for an openai/anthropic primary. See docs/integrations/mistral.md.
+
+HALLUCINATION:
+  alert_confidence_floor: 0.6
+  # Hallucinations are the highest-consequence semantic failure mode (a
+  # customer-facing wrong answer stated confidently) — worth the 2x cost to
+  # avoid a false HIGH triggering unnecessary escalation.
+  require_second_opinion: true
+  second_opinion_provider: anthropic
+  second_opinion_model: claude-sonnet-4-6
+
+TASK_COMPLETION:
+  alert_confidence_floor: 0.6
+  # Task completion misses are usually caught downstream by the user
+  # noticing the task didn't happen — lower consequence for a false HIGH
+  # than a hallucination, not worth doubling cost for in v1.
+  require_second_opinion: false

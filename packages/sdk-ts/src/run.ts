@@ -1,9 +1,28 @@
 import { randomUUID } from "node:crypto";
-import { hashContent } from "./hash.js";
-import type { AgentEvent, EventType, LlmRespondedOptions } from "./models.js";
+import type {
+  AgentEvent,
+  EventType,
+  LlmRespondedOptions,
+  MemorySource,
+  RecordingOptions,
+  TranscriptionOptions,
+  TtsOptions,
+  TurnTakingAction,
+  VadType,
+} from "./models.js";
+import { MEMORY_SOURCES, TURN_TAKING_ACTIONS, VAD_TYPES } from "./models.js";
 
 export interface EventEmitter {
   _emit(event: AgentEvent): void;
+}
+
+/** True when DUNETRACE_OMIT_LLM_OUTPUT_TEXT opts out of transmitting raw LLM
+ *  output text (bandwidth-sensitive deployments). Read per-call so it can be
+ *  toggled at runtime / in tests. `output_length` is always sent, so size-based
+ *  detectors work either way. Mirrors the Python SDK. */
+function omitLlmOutputText(): boolean {
+  const v = (process.env.DUNETRACE_OMIT_LLM_OUTPUT_TEXT ?? "").toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
 }
 
 export class DunetraceRun {
@@ -35,19 +54,23 @@ export class DunetraceRun {
       latency_ms:        opts.latencyMs        ?? 0,
       finish_reason:     opts.finishReason      ?? "stop",
       output_length:     opts.outputLength      ?? (opts.outputText?.length ?? 0),
-      output_hash:       hashContent(opts.outputText ?? ""),
     };
-    if (opts.promptTokens) payload["prompt_tokens"] = opts.promptTokens;
+    // Transmit the output text by default; omit it (bandwidth) when
+    // DUNETRACE_OMIT_LLM_OUTPUT_TEXT is set. output_length is always sent.
+    if (!omitLlmOutputText()) {
+      payload["output"] = opts.outputText ?? "";
+    }
+    if (opts.promptTokens)    payload["prompt_tokens"]    = opts.promptTokens;
+    if (opts.reasoningTokens) payload["reasoning_tokens"] = opts.reasoningTokens;
     this._emit("llm.responded", payload, false);
   }
 
   // ── Tool hooks ─────────────────────────────────────────────────────────────
 
-  /** args are SHA-256 hashed before transmission — raw values never leave the process. */
   toolCalled(toolName: string, args: Record<string, unknown> = {}): void {
     this._emit("tool.called", {
       tool_name: toolName,
-      args_hash: hashContent(JSON.stringify(args)),
+      args: JSON.stringify(args),
     });
   }
 
@@ -57,24 +80,25 @@ export class DunetraceRun {
     outputLength = 0,
     latencyMs    = 0,
     error?:      string,
+    output       = "",
   ): void {
     const payload: Record<string, unknown> = {
       tool_name:     toolName,
       success,
       output_length: outputLength,
       latency_ms:    latencyMs,
+      output,
     };
-    if (error) payload["error_hash"] = hashContent(error);
+    if (error) payload["error"] = error;
     this._emit("tool.responded", payload, false);
   }
 
   // ── Retrieval hooks ────────────────────────────────────────────────────────
 
-  /** query is SHA-256 hashed before transmission. */
   retrievalCalled(indexName: string, query = ""): void {
     this._emit("retrieval.called", {
       index_name: indexName,
-      query_hash: query ? hashContent(query) : "",
+      query,
     });
   }
 
@@ -83,13 +107,95 @@ export class DunetraceRun {
     resultCount: number,
     topScore?:   number,
     latencyMs    = 0,
+    content      = "",
   ): void {
     this._emit("retrieval.responded", {
       index_name:   indexName,
       result_count: resultCount,
       top_score:    topScore ?? null,
       latency_ms:   latencyMs,
+      content,
     }, false);
+  }
+
+  // ── Voice hooks (detector pack "voice") ────────────────────────────────────
+  //
+  // advance semantics mirror the non-voice hooks: a turn-initiating event
+  // advances the step counter (like llmCalled / toolCalled), while completion
+  // and high-frequency annotation events do not (like llmResponded). This keeps
+  // a normal voice turn at ~one step, so the always-on built-in step detectors
+  // don't false-fire on a real voice call.
+
+  /**
+   * Speech-to-text produced a transcript for one user turn. Turn-initiating —
+   * advances the step counter.
+   */
+  transcriptionReceived(text: string, opts: TranscriptionOptions = {}): void {
+    const payload: Record<string, unknown> = {
+      text,
+      confidence: opts.confidence ?? 1.0,
+      latency_ms: opts.latencyMs ?? 0,
+    };
+    if (opts.audioSeconds) payload["audio_seconds"] = opts.audioSeconds;
+    this._emit("transcription.received", payload);
+  }
+
+  /**
+   * Text-to-speech rendered an agent response. Completes the turn — does not
+   * advance the step counter (like llmResponded).
+   */
+  ttsGenerated(text: string, opts: TtsOptions = {}): void {
+    const payload: Record<string, unknown> = {
+      text,
+      latency_ms: opts.latencyMs ?? 0,
+      truncated:  opts.truncated ?? false,
+    };
+    if (opts.audioSeconds)          payload["audio_seconds"]          = opts.audioSeconds;
+    if (opts.voiceId)               payload["voice_id"]               = opts.voiceId;
+    if (opts.model)                 payload["model"]                  = opts.model;
+    if (opts.provider)              payload["provider"]               = opts.provider;
+    if (opts.providerGenerationId)  payload["provider_generation_id"] = opts.providerGenerationId;
+    this._emit("tts.generated", payload, false);
+  }
+
+  /**
+   * A VAD transition (speech_start / speech_end / silence / barge_in).
+   * High-frequency annotation — does not advance the step counter.
+   */
+  voiceActivityDetected(type: VadType, durationMs = 0): void {
+    if (!VAD_TYPES.includes(type)) {
+      throw new Error(
+        `voiceActivityDetected: type must be one of ${VAD_TYPES.join(", ")}, got ${String(type)}`,
+      );
+    }
+    this._emit("voice_activity.detected", { type, duration_ms: durationMs }, false);
+  }
+
+  /**
+   * A conversational-floor transition (agent_speaking / user_speaking /
+   * both_speaking / neither). State annotation — does not advance the step counter.
+   */
+  turnTaking(action: TurnTakingAction, fromAgent = false, toUser = false): void {
+    if (!TURN_TAKING_ACTIONS.includes(action)) {
+      throw new Error(
+        `turnTaking: action must be one of ${TURN_TAKING_ACTIONS.join(", ")}, got ${String(action)}`,
+      );
+    }
+    this._emit("turn_taking.changed", { action, from_agent: fromAgent, to_user: toUser }, false);
+  }
+
+  /**
+   * Record where the call audio lives. Storage-agnostic: Dunetrace stores and
+   * links the URL but never fetches the audio, so a presigned or private URL is
+   * fine (mind its expiry). Annotation event — does not advance the step counter.
+   */
+  recordingMetadata(url: string, opts: RecordingOptions = {}): void {
+    const payload: Record<string, unknown> = { url };
+    if (opts.durationSeconds)    payload["duration_seconds"]     = opts.durationSeconds;
+    if (opts.format)             payload["format"]               = opts.format;
+    if (opts.storageProvider)    payload["storage_provider"]     = opts.storageProvider;
+    if (opts.startOffsetSeconds) payload["start_offset_seconds"] = opts.startOffsetSeconds;
+    this._emit("recording.available", payload, false);
   }
 
   // ── Infrastructure signals ─────────────────────────────────────────────────
@@ -160,6 +266,45 @@ export class DunetraceRun {
     this.llmCalled(model, promptTokens);
     this.llmResponded({ completionTokens, latencyMs, finishReason, outputText });
     return response;
+  }
+
+  // ── Agent memory channel ───────────────────────────────────────────────────
+  //
+  // Instrumentation for what an agent persists to and reads from its own memory
+  // (conversation buffers, scratchpads, long-term stores). None of these advance
+  // the step counter — they annotate the run, like externalSignal. The
+  // server-side MEMORY_POISONING detector reads these events.
+
+  /**
+   * Record that `value` was written to agent memory under `key`.
+   *
+   * `source` is optional but strongly encouraged — it names where the content
+   * originated so downstream detection can weigh injection risk: one of
+   * "user_input", "retrieval", "tool_output", "llm_output", "agent_reasoning",
+   * "external". Does not advance the step counter.
+   */
+  memoryWritten(key: string, value: string, source?: MemorySource): void {
+    if (source !== undefined && !MEMORY_SOURCES.includes(source)) {
+      throw new Error(
+        `memoryWritten: source must be one of ${MEMORY_SOURCES.join(", ")} or undefined, got ${String(source)}`,
+      );
+    }
+    const payload: Record<string, unknown> = { key, value };
+    if (source !== undefined) payload["source"] = source;
+    this._emit("memory.written", payload, false);
+  }
+
+  /** Record that agent memory was read at `key`. Does not advance the step counter. */
+  memoryRead(key: string): void {
+    this._emit("memory.read", { key }, false);
+  }
+
+  /**
+   * Record that agent memory was cleared — a specific `key`, or all memory when
+   * `key` is omitted. Does not advance the step counter.
+   */
+  memoryCleared(key?: string): void {
+    this._emit("memory.cleared", { key: key ?? null }, false);
   }
 
   finalAnswer(): void {

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace-mcp"
-version = "0.2.0"
+version = "0.4.5"
 description = "Dunetrace MCP server - expose agent signals to Claude Code, Cursor, and Codex"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -12,7 +12,15 @@ requires-python = ">=3.11"
 authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]
 keywords = ["ai", "agents", "mcp", "observability", "llm", "monitoring"]
 dependencies = [
-    "mcp>=1.0",
+    # server.py imports `mcp.server.fastmcp`, which bounds this at BOTH ends:
+    #   < 1.2  — the module does not exist yet (1.0.0 ships no fastmcp at all,
+    #            so the previous `>=1.0` floor was never actually satisfiable)
+    #   >= 2.0 — the module was renamed to `mcp.server.mcpserver`
+    # An unbounded `>=1.0` meant CI silently installed 2.0.0 on release day and
+    # every test collection died on ModuleNotFoundError, while local checkouts
+    # pinned at 1.23.x kept passing. Moving to 2.x is an API migration, not a
+    # version bump — do it deliberately, then raise this ceiling.
+    "mcp>=1.2,<2",
     "httpx>=0.24",
 ]
 
@@ -22,6 +30,13 @@ dunetrace-mcp = "dunetrace_mcp.server:main"
 [tool.setuptools.packages.find]
 where   = ["."]
 include = ["dunetrace_mcp*"]
+
+# The dunetrace://docs/* resources serve Markdown from <repo-root>/docs/, which is
+# outside this package. setup.py's build hook copies it into dunetrace_mcp/_docs/
+# at build time; this is what puts it in the wheel. Without it the resources
+# resolve into site-packages and return "(doc not found)" on a real install.
+[tool.setuptools.package-data]
+dunetrace_mcp = ["_docs/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

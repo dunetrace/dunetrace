@@ -19,10 +19,12 @@ Environment:
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import textwrap
 from datetime import datetime, timezone
+from importlib import resources
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -31,6 +33,35 @@ from . import client
 
 # Docs live at <repo-root>/docs/ — four levels up from this file.
 _DOCS = pathlib.Path(__file__).resolve().parents[3] / "docs"
+
+# ── Write-tool gating ─────────────────────────────────────────────────────────
+#
+# Nine of these tools write, and some of them affect LIVE agent runs — a `stop`
+# policy terminates real runs as soon as the SDK next pulls policies. All 31
+# ride one bearer token, and docs/mcp-server.md advised operators to use a
+# read-scoped key. No such key exists in this system, so that advice mitigated
+# nothing while sounding like it did.
+#
+# This makes the advice true by a different route: the write tools are simply
+# not registered unless the operator opts in. Read-only is the default because
+# an MCP server is driven by a model reading untrusted agent output — signal
+# evidence, tool arguments, LLM text — which is exactly the shape that turns a
+# write tool into a confused-deputy.
+#
+#   DUNETRACE_MCP_READONLY=false   register the write tools
+_MCP_READONLY = os.environ.get("DUNETRACE_MCP_READONLY", "true").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
+
+def writing_tool():
+    """@mcp.tool() for a tool that mutates state, or a no-op when read-only."""
+    if _MCP_READONLY:
+        return lambda fn: fn
+    return mcp.tool()
+
 
 mcp = FastMCP(
     "dunetrace",
@@ -44,6 +75,7 @@ mcp = FastMCP(
         - "Show me the details of run <id>"
         - "Which failure type is most common across all agents?"
         - "Did a recent deploy cause a spike in errors?"
+        - "How are my voice agents doing? Show me dropped calls."
 
         All timestamps returned are UTC ISO-8601.
         Confidence values are 0–1 (higher = more certain the failure occurred).
@@ -317,17 +349,47 @@ def search_signals(
     else:
         agents = client.get("/v1/agents", limit=100).get("agents", [])
 
-    params: dict = {"limit": 200, "include_shadow": "false"}
+    params: dict = {"include_shadow": "false"}
     if severity:
         params["severity"] = severity.upper()
     if failure_type:
         params["failure_type"] = failure_type.upper()
 
+    # Page through each agent rather than taking a single fixed slice.
+    #
+    # A flat per-agent cap silently truncated any agent with more signals than
+    # the cap, and the truncated row count was then reported as the match total.
+    # That made the numbers self-contradictory: an unfiltered query truncated one
+    # busy agent to the cap, while each severity-filtered query got its own fresh
+    # cap, so the severity breakdown summed to MORE than the unfiltered "total"
+    # — while both were under the true figure.
+    #
+    # The API has no time-window parameter, so `since_hours` is applied here. It
+    # returns rows detected_at DESC though, so once a page's oldest row predates
+    # the cutoff every later page does too and we can stop — exact counts without
+    # reading an agent's whole history.
+    PAGE = 200
+    MAX_PER_AGENT = 5000  # guard against unbounded paging on a huge agent
+
     all_signals: list = []
+    truncated_agents: list[str] = []
     for a in agents:
         aid = a["agent_id"]
-        sigs = client.get(f"/v1/agents/{aid}/signals", **params).get("signals", [])
-        all_signals.extend(sigs)
+        offset = 0
+        while offset < MAX_PER_AGENT:
+            page = client.get(f"/v1/agents/{aid}/signals", limit=PAGE, offset=offset, **params)
+            sigs = page.get("signals", [])
+            if not sigs:
+                break
+            all_signals.extend(sigs)
+            # Ordered newest-first: nothing older can qualify once we pass it.
+            if cutoff and (sigs[-1].get("detected_at") or 0) < cutoff:
+                break
+            if not (page.get("page") or {}).get("has_more"):
+                break
+            offset += PAGE
+        else:
+            truncated_agents.append(aid)
 
     # Client-side filters — API also filters severity/failure_type but we apply
     # them here too so results are always correct regardless of API version.
@@ -352,7 +414,13 @@ def search_signals(
         qualifier = " / ".join(parts)
         return f"No signals found{(' matching ' + qualifier) if qualifier else ''}."
 
-    lines = [f"Signals ({len(shown)} shown, {len(all_signals)} matched):\n"]
+    header = f"Signals ({len(shown)} shown, {len(all_signals)} matched)"
+    if truncated_agents:
+        header += (
+            f" — count is a LOWER BOUND: hit the {MAX_PER_AGENT}-signal read cap on "
+            f"{', '.join(truncated_agents)}"
+        )
+    lines = [header + ":\n"]
     for s in shown:
         icon = _sev_icon(s["severity"])
         lines.append(
@@ -424,10 +492,10 @@ def get_signal_detail(signal_id: int, agent_id: str = "") -> str:
         "",
     ]
 
-    # Evidence dict (structured data, hashed values only — no raw content)
+    # Evidence dict — includes raw content fields (args, output, errors) where the detector used them
     ev = signal.get("evidence") or {}
     if ev:
-        lines.append("Evidence (hashed/structural data):")
+        lines.append("Evidence:")
         for k, v in ev.items():
             if isinstance(v, list) and len(v) > 6:
                 v = v[:6] + [f"…+{len(v) - 6} more"]
@@ -657,13 +725,145 @@ def get_agent_runs(agent_id: str, limit: int = 20) -> str:
             dur = f"{secs:.1f}s"
         sigs = r.get("signal_count", 0)
         sig_str = f"🔴 {sigs}" if sigs > 0 else "✅  0"
-        lines.append(
-            f"{r['run_id'][:12]:<12} {_ago(r.get('started_at')):<22} "
-            f"{dur:>6} {r.get('step_count', 0):>5}  {sig_str}"
-        )
+        # A run whose events have aged out of retention keeps its processed_runs
+        # row but loses every derived field, because started_at / step_count are
+        # computed from `events`. Rendering that as "— / 0 steps" is
+        # indistinguishable from a real zero-step run, so say what happened.
+        expired = r.get("started_at") is None and not r.get("step_count")
+        started = "events expired" if expired else _ago(r.get("started_at"))
+        steps = "—" if expired else str(r.get("step_count") or 0)
+        lines.append(f"{r['run_id'][:12]:<12} {started:<22} {dur:>6} {steps:>5}  {sig_str}")
 
     page = data.get("page", {})
     lines.append(f"\n{len(runs)} of {page.get('total', len(runs))} runs shown.")
+    expired_count = sum(1 for r in runs if r.get("started_at") is None and not r.get("step_count"))
+    if expired_count:
+        lines.append(
+            f"{expired_count} run(s) show 'events expired': the run was analysed and its "
+            f"signals are retained, but its raw events have aged out of "
+            f"EVENT_RETENTION_DAYS, so duration and step count can no longer be derived."
+        )
+    return "\n".join(lines)
+
+
+# ── voice / call tools ───────────────────────────────────────────────────────
+#
+# A "call" is a conversation for a voice agent, read through a voice lens:
+# duration, how the call ended, silence percentage, agent-vs-caller talk ratio,
+# and per-stage cost (STT / LLM / TTS / telephony). These wrap the /v1/calls
+# endpoints so an operator can ask "how are my voice agents doing" without
+# leaving the client. Voice failure signals are reported through the normal
+# signal tools too; these add the voice-specific call metrics on top.
+
+
+_COMPLETION_ICONS = {"natural": "✅", "dropped": "🔴", "escalated": "🟠"}
+
+
+@mcp.tool()
+def list_voice_calls(
+    agent_id: str = "",
+    completion_status: str = "",
+    cost_bucket: str = "",
+    limit: int = 20,
+) -> str:
+    """
+    List recent voice calls with call-level metrics: duration, how the call
+    ended, silence percentage, voice signal count, and cost. A "call" is a voice
+    agent's conversation (the runs that share one conversation id).
+
+    Use this for questions like "how are my voice agents doing", "show me dropped
+    calls", or "which calls escalated to a human".
+
+    Args:
+        agent_id:          Filter to one voice agent (optional).
+        completion_status: Filter by how the call ended:
+                           natural | dropped | escalated (optional).
+        cost_bucket:       Filter by cost: low (<$0.10) | medium ($0.10-$1) |
+                           high (>$1) (optional).
+        limit:             Max calls to return (default 20, max 100).
+    """
+    data = client.get(
+        "/v1/calls",
+        agent_id=agent_id or None,
+        completion_status=completion_status or None,
+        cost_bucket=cost_bucket or None,
+        limit=min(limit, 100),
+    )
+    calls = data.get("calls", [])
+    if not calls:
+        return "No voice calls found for the given filters."
+
+    lines = [
+        "Voice calls\n",
+        f"{'CALL':>5}  {'AGENT':<18} {'WHEN':<10} {'DUR':>6} {'SILENCE':>7} "
+        f"{'SIGS':>5} {'COST':>9}  STATUS",
+        "─" * 84,
+    ]
+    for c in calls:
+        icon = _COMPLETION_ICONS.get(c.get("completion_status", ""), "⚪")
+        dur = f"{c.get('duration_seconds', 0):.0f}s"
+        silence = f"{c.get('silence_pct', 0):.0f}%"
+        sigs = c.get("voice_signal_count", 0)
+        sig_str = f"🔴 {sigs}" if sigs else "0"
+        lines.append(
+            f"{c.get('id', '?'):>5}  {str(c.get('agent_id', ''))[:18]:<18} "
+            f"{_ago(c.get('last_run_at')):<10} {dur:>6} {silence:>7} "
+            f"{sig_str:>5} ${c.get('cost_usd', 0):>8.4f}  {icon} {c.get('completion_status', '?')}"
+        )
+
+    page = data.get("page", {})
+    lines.append(f"\n{len(calls)} of {page.get('total', len(calls))} calls shown.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_call_detail(conversation_id: int) -> str:
+    """
+    One voice call's full picture: call-level metrics, per-stage cost breakdown,
+    the voice failure signals detected, and (when recorded) links to the call
+    audio.
+
+    Args:
+        conversation_id: The integer call id (from list_voice_calls).
+    """
+    try:
+        c = client.get(f"/v1/calls/{conversation_id}")
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    icon = _COMPLETION_ICONS.get(c.get("completion_status", ""), "⚪")
+    lines = [
+        f"Call #{c.get('id')}  ({c.get('agent_id', '')})",
+        f"  Ended:      {icon} {c.get('completion_status', '?')}",
+        f"  Duration:   {c.get('duration_seconds', 0):.0f}s over {c.get('run_count', 0)} run(s)",
+        f"  Silence:    {c.get('silence_pct', 0):.0f}%",
+    ]
+    ratio = c.get("agent_talk_ratio")
+    if ratio is not None:
+        lines.append(f"  Talk ratio: agent {ratio * 100:.0f}% / caller {(1 - ratio) * 100:.0f}%")
+    lines.append(f"  Cost:       ${c.get('cost_usd', 0):.4f}")
+    breakdown = c.get("cost_breakdown") or {}
+    parts = "  ".join(f"{k}=${v:.4f}" for k, v in breakdown.items() if v)
+    if parts:
+        lines.append(f"              {parts}")
+
+    signals = c.get("voice_signals") or []
+    lines.append("")
+    if signals:
+        lines.append(f"Voice signals ({len(signals)}):")
+        lines.extend(f"  🔴 {s}" for s in signals)
+    else:
+        lines.append("Voice signals: ✅ none")
+
+    recordings = c.get("recordings") or []
+    if recordings:
+        lines.append("")
+        lines.append(f"Recordings ({len(recordings)}):")
+        for rec in recordings:
+            dur = rec.get("duration_seconds")
+            suffix = f"  ({dur:.0f}s)" if isinstance(dur, (int, float)) else ""
+            lines.append(f"  🎧 {rec.get('url', '')}{suffix}")
+
     return "\n".join(lines)
 
 
@@ -688,7 +888,7 @@ def get_fix_status(signal_id: int, agent_id: str = "") -> str:
     try:
         data = client.get(f"/v1/signals/{signal_id}/fix-status")
     except Exception as exc:
-        return f"Error: \1"
+        return f"Error: {exc}"
 
     verdict = data.get("verdict", "unknown")
     verdict_icons = {
@@ -737,7 +937,7 @@ def list_agent_fixes(agent_id: str) -> str:
     List all fixes that have been applied for an agent's signals.
 
     Shows which signals were fixed, how they were applied (clipboard copy or
-    Langfuse apply), the fix type, and whether the fix was verified effective.
+    GitHub PR), the fix type, and whether the fix was verified effective.
 
     Args:
         agent_id: The agent ID to query.
@@ -771,15 +971,16 @@ def list_agent_fixes(agent_id: str) -> str:
 # ── explain / root cause tools ────────────────────────────────────────────────
 
 
-@mcp.tool()
+@writing_tool()
 def trigger_explain(signal_id: int, agent_id: str = "") -> str:
     """
     Trigger LLM-powered root cause analysis for a signal and return a fix
     suggestion.
 
-    Fetches the Langfuse trace for the signal's run, runs the analysis, and
-    returns a structured explanation with a fix (either a prompt addition or a
-    code/infra change description).
+    Runs natively against Dunetrace's own stored events for the signal's run
+    — no external tracing system involved — and returns a structured
+    explanation with either a suggested runtime policy (for failure types
+    Dunetrace can guard against directly) or a prompt/code diff.
 
     Note: this makes an LLM call and may take 5–15 seconds.
 
@@ -792,10 +993,23 @@ def trigger_explain(signal_id: int, agent_id: str = "") -> str:
     except Exception as exc:
         return f"Error: {exc}"
 
+    lines = [
+        f"Root cause analysis for signal #{signal_id}",
+        "",
+        "Root cause:",
+        f"  {result.get('root_cause', '—')}",
+        "",
+    ]
+
+    if result.get("fix_category") == "dunetrace_native":
+        policy = result.get("suggested_policy", {})
+        lines.append("Suggested fix: a Dunetrace runtime policy (applies directly, no code change)")
+        lines.append(f"  {policy}")
+        lines.append("  Apply via POST /v1/policies.")
+        return "\n".join(lines)
+
     fix_type = result.get("fix_type", "unknown")
     apply_blocked = result.get("apply_blocked", True)
-    prompt_name = result.get("langfuse_prompt_name")
-    prompt_ver = result.get("langfuse_prompt_version")
 
     fix_type_labels = {
         "prompt_addition": "Prompt addition (add a sentence to your system prompt)",
@@ -803,30 +1017,18 @@ def trigger_explain(signal_id: int, agent_id: str = "") -> str:
         "no_auto_apply": "No auto-apply available for this failure type",
     }
 
-    lines = [
-        f"Root cause analysis for signal #{signal_id}",
-        "",
-        "Root cause:",
-        f"  {result.get('root_cause', '—')}",
-        "",
-        f"Fix ({fix_type_labels.get(fix_type, fix_type)}):",
-        f"  {result.get('fix_content', '—')}",
-        "",
-    ]
+    lines.append(f"Fix ({fix_type_labels.get(fix_type, fix_type)}):")
+    lines.append(f"  {result.get('fix_content', '—')}")
+    lines.append("")
 
-    if not apply_blocked and prompt_name:
-        lines.append("Apply instructions:")
-        lines.append(f"  Prompt name:    {prompt_name}")
-        if prompt_ver is not None:
-            lines.append(f"  Current version: {prompt_ver}")
+    if fix_type == "code_change" and not apply_blocked:
         lines.append(
-            "  Use the 'Apply Fix' button in the dashboard, or call the apply-fix API endpoint."
+            "Can be applied automatically: POST /v1/signals/{id}/open-pr opens a draft GitHub PR."
         )
-    elif apply_blocked:
-        lines.append(
-            "Apply blocked: this failure type requires a code or infra change — "
-            "no Langfuse prompt to patch."
-        )
+    elif fix_type == "no_auto_apply":
+        lines.append("Never auto-applied — this is a security signal. Review manually.")
+    else:
+        lines.append("Apply blocked: copy this fix into your system prompt or code manually.")
 
     return "\n".join(lines)
 
@@ -893,7 +1095,7 @@ def list_policies(agent_id: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@writing_tool()
 def create_policy(name: str, agent_id: str, condition: str, action: str) -> str:
     """
     Create a runtime policy that triggers an action when a metric threshold is
@@ -950,7 +1152,7 @@ def create_policy(name: str, agent_id: str, condition: str, action: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@writing_tool()
 def toggle_policy(policy_id: str, enabled: bool) -> str:
     """
     Enable or disable a runtime policy.
@@ -969,7 +1171,7 @@ def toggle_policy(policy_id: str, enabled: bool) -> str:
     return f"Policy '{name}' ({policy_id}) is now {new_state}."
 
 
-@mcp.tool()
+@writing_tool()
 def delete_policy(policy_id: str) -> str:
     """
     Delete a runtime policy.
@@ -1034,7 +1236,7 @@ def list_custom_detectors(agent_id: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@writing_tool()
 def create_custom_detector(description: str, agent_id: str = "*") -> str:
     """
     Create a custom detector from a plain-English description.
@@ -1058,10 +1260,11 @@ def create_custom_detector(description: str, agent_id: str = "*") -> str:
 
     if preview.get("requires_content"):
         return (
-            "This description requires access to raw prompt/response content, "
-            "which is unavailable (everything is hashed at the SDK). "
-            "Rephrase to use structural metrics: tool call counts, latency, "
-            "token usage, step count, retry count, etc."
+            f"Could not translate this description: {preview.get('reason', 'unsupported')}. "
+            "Rephrase using either a structural metric (tool call counts, latency, "
+            "token usage, step count, retry count, etc.) or a content condition with "
+            "a specific value to look for (e.g. \"when a tool error mentions 'timeout'\"). "
+            "See docs/detectors.md for the supported metrics and content fields."
         )
 
     # Derive a name from the description
@@ -1114,7 +1317,7 @@ def create_custom_detector(description: str, agent_id: str = "*") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@writing_tool()
 def activate_custom_detector(detector_id: str) -> str:
     """
     Activate a custom detector so it fires live alerts.
@@ -1137,7 +1340,7 @@ def activate_custom_detector(detector_id: str) -> str:
     )
 
 
-@mcp.tool()
+@writing_tool()
 def pause_custom_detector(detector_id: str) -> str:
     """
     Pause a custom detector so it stops evaluating entirely.
@@ -1157,7 +1360,7 @@ def pause_custom_detector(detector_id: str) -> str:
     return f"Custom detector '{name}' ({detector_id}) paused.\nIt will not evaluate until resumed."
 
 
-@mcp.tool()
+@writing_tool()
 def delete_custom_detector(detector_id: str) -> str:
     """
     Delete a custom detector permanently.
@@ -1216,6 +1419,172 @@ def list_agent_issues(agent_id: str, status: str = "open") -> str:
         lines.append(f"{ft:<35}  {opened:<12}  {last_seen:<12}  {count:>5}  {iss_status}")
 
     return "\n".join(lines)
+
+
+# ── coding-agent issue tools (Phase 4.2) ───────────────────────────────────────
+
+
+@mcp.tool()
+def get_issue(issue_id: int) -> str:
+    """
+    Full context for a single issue — metadata, affected runs, root cause,
+    and a suggested fix. This is the deep-dive tool for triaging one
+    specific issue found via search_issues or list_agent_issues.
+
+    Note: this may trigger an LLM call to generate the root cause/fix
+    (same native root-cause analysis trigger_explain uses) and can take
+    5-15 seconds. If no LLM key is configured on the backend, root_cause/
+    suggested_fix are omitted but the rest of the report still returns.
+
+    code_references (source file/line the issue maps to) is always empty
+    for now — Dunetrace has no source-mapping capability yet (planned,
+    not yet built).
+
+    Args:
+        issue_id: The integer issue ID (from search_issues or list_agent_issues).
+    """
+    try:
+        data = client.get(f"/v1/issues/{issue_id}")
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    lines = [
+        f"Issue #{data['id']}: {data['failure_type']} on {data['agent_id']}",
+        f"Status: {data['status']}  (opened {_ago(data.get('first_seen'))}, "
+        f"last seen {_ago(data.get('last_seen'))})",
+        f"Affected runs: {data.get('affected_runs_count', 0)} total",
+    ]
+    if data.get("manually_resolved") and data.get("resolution_notes"):
+        lines.append(f"Resolution notes: {data['resolution_notes']}")
+    lines.append("")
+
+    affected_runs = data.get("affected_runs") or []
+    if affected_runs:
+        lines.append("AFFECTED RUNS (most recent):")
+        lines.append(f"  {'RUN ID':<15}  {'WHEN':<12}  {'STEP':>4}  CONF")
+        for r in affected_runs[:10]:
+            run_id = str(r.get("run_id") or "—")[:15]
+            when = _ago(r.get("detected_at"))
+            step = r.get("step_index", "—")
+            conf = r.get("confidence")
+            conf_str = f"{conf:.0%}" if conf is not None else "—"
+            lines.append(f"  {run_id:<15}  {when:<12}  {str(step):>4}  {conf_str}")
+        lines.append("")
+
+    if data.get("root_cause"):
+        lines.append("ROOT CAUSE:")
+        lines.append(f"  {data['root_cause']}")
+        lines.append("")
+
+    if data.get("suggested_fix"):
+        lines.append("SUGGESTED FIX:")
+        lines.append(f"  {data['suggested_fix']}")
+        lines.append("")
+
+    if not data.get("root_cause") and not data.get("suggested_fix"):
+        lines.append(
+            "No root cause/fix available — configure ANTHROPIC_API_KEY or OPENAI_API_KEY "
+            "on the backend, or call trigger_explain on one of the affected runs' signals."
+        )
+        lines.append("")
+
+    code_refs = data.get("code_references") or []
+    lines.append("CODE REFERENCES:")
+    if code_refs:
+        for ref in code_refs:
+            lines.append(f"  {ref}")
+    else:
+        lines.append("  Not available yet — source mapping hasn't been configured for this agent.")
+    lines.append("")
+
+    lines.append(f'To resolve: resolve_issue(issue_id={data["id"]}, resolution_notes="...")')
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def search_issues(
+    query: str = "",
+    status: str = "",
+    agent_id: str = "",
+    failure_type: str = "",
+    limit: int = 20,
+) -> str:
+    """
+    Search issues across ALL agents in your org — for triage across an
+    entire fleet rather than one agent at a time (list_agent_issues is
+    scoped to a single agent).
+
+    `query` is a plain substring match against agent_id/failure_type/
+    resolution_notes — not full-text search or relevance ranking (issues
+    have no free-text title/description field beyond resolution_notes,
+    which is only populated once an issue has been manually resolved).
+
+    Args:
+        query:        Substring to match. Empty matches everything.
+        status:       Filter: 'open', 'resolved', or 'reopened'. Empty = all.
+        agent_id:     Restrict to one agent. Empty = all agents.
+        failure_type: Restrict to one failure type, e.g. TOOL_LOOP. Empty = all.
+        limit:        Max results (default 20).
+    """
+    try:
+        data = client.get(
+            "/v1/issues/search",
+            q=query or None,
+            status=status or None,
+            agent_id=agent_id or None,
+            failure_type=failure_type or None,
+            limit=limit,
+        )
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    issues = data.get("issues", [])
+    total = data.get("page", {}).get("total", len(issues))
+
+    if not issues:
+        return "No issues match these filters."
+
+    lines = [
+        f"Issues matching filters ({total} total, showing {len(issues)}):\n",
+        f"{'ID':>5}  {'AGENT':<20}  {'FAILURE TYPE':<30}  {'LAST SEEN':<12}  {'RUNS':>5}  STATUS",
+        "─" * 95,
+    ]
+    for issue in issues:
+        agent = (issue.get("agent_id") or "—")[:20]
+        ft = (issue.get("failure_type") or "—")[:30]
+        last_seen = _ago(issue.get("last_seen"))
+        count = issue.get("affected_runs", 0)
+        iss_status = issue.get("status", "open")
+        lines.append(
+            f"{issue.get('id'):>5}  {agent:<20}  {ft:<30}  {last_seen:<12}  {count:>5}  {iss_status}"
+        )
+
+    return "\n".join(lines)
+
+
+@writing_tool()
+def resolve_issue(issue_id: int, resolution_notes: str) -> str:
+    """
+    Manually mark an issue resolved with notes on what fixed it — for when
+    you've made a code/prompt change and want to close the loop, distinct
+    from Dunetrace's automatic resolve-after-5-clean-runs detection.
+
+    If the failure recurs later, the issue reopens automatically regardless
+    of whether it was auto- or manually-resolved — resolution_notes is kept
+    as a historical record either way.
+
+    Args:
+        issue_id:         The integer issue ID to resolve.
+        resolution_notes: What fixed it, e.g. "Added a per-tool call limit
+                           of 3 in the agent's retry loop."
+    """
+    try:
+        client.post(f"/v1/issues/{issue_id}/resolve", {"resolution_notes": resolution_notes})
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    return f"Issue #{issue_id} marked resolved.\nNotes: {resolution_notes}"
 
 
 # ── failure pattern detail tool ───────────────────────────────────────────────
@@ -1380,8 +1749,30 @@ def compare_runs(run_id_1: str, run_id_2: str, agent_id: str = "") -> str:
 
 
 def _read_doc(name: str) -> str:
+    """Return a bundled doc, preferring the copy shipped inside the package.
+
+    Two lookups, in this order, because the two install modes put the docs in
+    different places:
+
+    1. ``dunetrace_mcp/_docs/`` — written into the wheel at build time (see
+       setup.py). This is the only copy a `pip install dunetrace-mcp` has;
+       resolving relative to ``__file__`` lands in site-packages, where there is
+       no repo and every doc resource returned "(doc not found)".
+    2. ``<repo-root>/docs/`` — an editable install or a source checkout, where
+       the package dir has no ``_docs`` and the real docs sit four levels up.
+       Reading them live means local edits show up without a rebuild.
+    """
+    try:
+        packaged = resources.files("dunetrace_mcp").joinpath("_docs", name)
+        if packaged.is_file():
+            return packaged.read_text(encoding="utf-8")
+    except (ModuleNotFoundError, FileNotFoundError, OSError):
+        pass  # fall through to the source checkout
+
     p = _DOCS / name
-    return p.read_text(encoding="utf-8") if p.exists() else f"(doc not found: {p})"
+    if p.exists():
+        return p.read_text(encoding="utf-8")
+    return f"(doc not found: {name} — not packaged in this build and no repo checkout at {_DOCS})"
 
 
 @mcp.resource("dunetrace://docs/integrate-python")
@@ -1506,7 +1897,7 @@ _GUIDES: dict[str, str] = {
 
         @dt.tool
         def web_search(query: str) -> list:
-            ...  # your tool implementation — args are hashed, never sent raw
+            ...  # your tool implementation — args are sent as-is
 
         @dt.trace("my-agent")
         def run_agent(question: str) -> str:
@@ -1529,7 +1920,9 @@ _GUIDES: dict[str, str] = {
                 run.llm_responded(completion_tokens=80, latency_ms=900)
         ```
 
-        ## Option C — auto-instrumentation (patches openai / anthropic / httpx)
+        ## Option C — auto-instrumentation (simplest for existing code)
+        Patches every installed client: openai, anthropic, mistral, langchain,
+        crewai, httpx, requests. No call-site changes.
         ```python
         dt.init(agent_id="my-agent")   # patches clients globally
 
@@ -1542,7 +1935,7 @@ _GUIDES: dict[str, str] = {
         ```python
         run.tool_called("my_tool", {"arg": value})   # before calling
         result = my_tool(value)
-        run.tool_responded("my_tool", success=True, result=result, latency_ms=50)
+        run.tool_responded("my_tool", success=True, output=str(result), latency_ms=50)
         ```
 
         Full guide: docs/integrate-custom-python-agent.md
@@ -1550,21 +1943,60 @@ _GUIDES: dict[str, str] = {
     "typescript": textwrap.dedent("""
         # Instrument a TypeScript / Node.js agent with Dunetrace
 
-        No SDK required — post events directly to the ingest HTTP endpoint.
+        ```bash
+        npm install dunetrace
+        ```
 
-        ## Minimal client
+        ## Option A — auto-instrumentation (simplest)
+        Patches the OpenAI and Anthropic SDKs plus outbound `fetch`, so every
+        client is tracked — including ones constructed inside a library you
+        don't control. Streaming calls are tracked too.
+        ```typescript
+        import { Dunetrace, autoInstrument } from "dunetrace";
+        import OpenAI from "openai";
+
+        const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+        autoInstrument({ openai: OpenAI });   // add `anthropic: Anthropic` if used
+
+        const openai = new OpenAI();          // built after the patch — still tracked
+
+        await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
+          await openai.chat.completions.create({ model: "gpt-4o", messages });
+          run.finalAnswer();
+        });
+        await dt.shutdown();
+        ```
+        Pass the imported class as shown. The zero-argument `autoInstrument()`
+        auto-detects via `require`, which only resolves under CommonJS.
+
+        ## Option B — wrap one client
+        ```typescript
+        const openai = dt.wrapOpenAI(new OpenAI());
+        const claude = dt.wrapAnthropic(new Anthropic());
+        const search = dt.tool(webSearch);     // emits tool.called + tool.responded
+        ```
+
+        ## Option C — wrap a whole agent function
+        ```typescript
+        const agent = dt.trace(myAgent, "my-agent", { model: "gpt-4o" });
+        await agent(question);                 // opens and closes its own run
+        ```
+
+        ## Vercel AI SDK
+        ```typescript
+        import { generateText } from "ai";
+        import { traceGenerateText } from "dunetrace";
+
+        await traceGenerateText(dt, "my-agent", {}, generateText, { model, prompt });
+        ```
+
+        ## Option D — no SDK, raw HTTP
+        Only if you can't add the dependency. Post events to the ingest endpoint
+        yourself:
         ```typescript
         import { randomUUID } from "crypto";
-        import * as crypto from "crypto";
 
         const ENDPOINT = process.env.DUNETRACE_ENDPOINT ?? "http://localhost:8001";
-
-        function sha256(value: unknown): string {
-          return crypto.createHash("sha256")
-            .update(JSON.stringify(value))
-            .digest("hex")
-            .slice(0, 16);
-        }
 
         async function sendEvent(event: object) {
           await fetch(`${ENDPOINT}/v1/ingest`, {
@@ -1587,7 +2019,7 @@ _GUIDES: dict[str, str] = {
           event_type: "run.started",
           run_id: runId, agent_id: agentId, agent_version: "1.0.0",
           step_index: step++, timestamp: t0,
-          payload: { input_hash: sha256(userQuery), available_tools: ["web_search"] },
+          payload: { input_text: userQuery, available_tools: ["web_search"] },
         });
 
         // 2. LLM call
@@ -1611,7 +2043,7 @@ _GUIDES: dict[str, str] = {
           event_type: "tool.called",
           run_id: runId, agent_id: agentId, agent_version: "1.0.0",
           step_index: step, timestamp: Date.now() / 1000,
-          payload: { tool_name: "web_search", args_hash: sha256(args) },
+          payload: { tool_name: "web_search", args: JSON.stringify(args) },
         });
         const toolResult = await webSearch(args);
         await sendEvent({
@@ -1650,7 +2082,7 @@ _GUIDES: dict[str, str] = {
             results = web_search(question)   # automatically tracked inside a run
             return results[0]
         ```
-        Args are SHA-256 hashed before transmission — raw arguments never leave your process.
+        Args are sent to the backend as-is.
 
         ## Python — context manager (explicit)
         ```python
@@ -1660,7 +2092,7 @@ _GUIDES: dict[str, str] = {
             run.tool_responded(
                 "web_search",
                 success=True,
-                result=result,      # hashed before sending
+                output_length=len(str(result)),
                 latency_ms=120,
             )
         ```
@@ -1674,19 +2106,27 @@ _GUIDES: dict[str, str] = {
         # on_tool_start / on_tool_end are captured automatically
         ```
 
-        ## TypeScript — manual events
+        ## TypeScript — wrap the function (automatic)
         ```typescript
-        // Before calling
-        await sendEvent({ event_type: "tool.called", payload: {
-          tool_name: "web_search", args_hash: sha256(args)
-        }, ... });
+        import { Dunetrace } from "dunetrace";
 
-        const result = await webSearch(args);
+        const dt = new Dunetrace();
+        const search = dt.tool(webSearch);          // emits tool.called + tool.responded
 
-        // After calling
-        await sendEvent({ event_type: "tool.responded", payload: {
-          tool_name: "web_search", success: true, latency_ms: 150
-        }, ... });
+        await dt.run("my-agent", {}, async () => {
+          const results = await search(query);      // tracked automatically
+        });
+        ```
+        Outbound HTTP is tracked too once `autoInstrument()` has run — each
+        request emits tool.called / tool.responded named by hostname.
+
+        ## TypeScript — explicit events
+        ```typescript
+        await dt.run("my-agent", {}, async (run) => {
+          run.toolCalled("web_search", { query });
+          const result = await webSearch(query);
+          run.toolResponded("web_search", true, String(result).length, 150);
+        });
         ```
 
         ## What the detectors watch for
@@ -1769,6 +2209,61 @@ _GUIDES: dict[str, str] = {
 
         Full guide: docs/integrate-haystack-agent.md
     """).strip(),
+    "voice": textwrap.dedent("""
+        # Instrument a voice agent with Dunetrace
+
+        Voice hooks live on the run object — no extra install, `pip install dunetrace`.
+        They sit alongside the LLM / tool / retrieval hooks so a voice turn is
+        captured end to end: speech-to-text in, LLM and tool work, text-to-speech
+        out, plus the VAD and turn-taking signals a voice loop runs on.
+
+        ## Instrument a turn
+        ```python
+        from dunetrace import Dunetrace
+
+        dt = Dunetrace(endpoint="http://localhost:8001")
+
+        # conversation_id (the call id) rolls every turn up into one call
+        with dt.run("voice-support", conversation_id=call_id) as run:
+            # 1. Speech-to-text for the caller's turn (advances the step)
+            run.transcription_received(
+                transcript, confidence=0.92, latency_ms=140, audio_seconds=3.1
+            )
+
+            # 2. Your normal LLM / tool work, tracked as usual
+            run.llm_called("gpt-4o", prompt_tokens=800)
+            reply = generate_reply(transcript)
+            run.llm_responded(completion_tokens=120, latency_ms=900)
+
+            # 3. Text-to-speech for the agent's reply (does NOT advance the step)
+            run.tts_generated(
+                reply, latency_ms=210, audio_seconds=4.4,
+                provider="elevenlabs", voice_id="rachel", model="eleven_turbo_v2",
+            )
+        ```
+
+        ## Real-time signals (annotate the turn, never advance the step)
+        ```python
+        # speech_start | speech_end | silence | barge_in
+        run.voice_activity_detected("barge_in", duration_ms=200)
+        # agent_speaking | user_speaking | both_speaking | neither
+        run.turn_taking("agent_speaking", from_agent=True)
+        run.recording_metadata(
+            "https://audio.example/call.wav", duration_seconds=61, format="wav",
+        )
+        ```
+
+        ## Notes
+        - Only `transcription_received` advances the step counter, so a full voice
+          turn stays ~one step and the always-on step detectors don't false-fire.
+        - `audio_seconds` is optional but enables per-minute STT cost attribution.
+        - `provider` / `voice_id` / `model` on `tts_generated` let Dunetrace pull
+          provider-side generation history (ElevenLabs) back to the exact turn.
+        - Query the resulting calls from an MCP client with `list_voice_calls`
+          and `get_call_detail`.
+
+        Full guide: docs/integrations/voice-frameworks.md
+    """).strip(),
     "otel": textwrap.dedent("""
         # Zero-code monitoring via OpenTelemetry (OTLP receiver)
 
@@ -1835,6 +2330,40 @@ _GUIDES: dict[str, str] = {
         - `service.name` resource attribute → agent_id
         - `service.version` resource attribute → agent_version
         - Override per-request with `X-Dunetrace-Agent-Id` header
+
+        ## Also from the Python SDK (`pip install 'dunetrace[otel]'`)
+
+        If you already run the Dunetrace Python SDK, it bridges OpenTelemetry in
+        both directions in-process — no OTLP endpoint or network hop needed.
+
+        ### Export Dunetrace's own events to your OTel backend
+        Ship every run / LLM / tool / retrieval / voice event to Datadog, Grafana
+        Tempo, Honeycomb, Signoz, etc. as OTel spans (GenAI semantic conventions),
+        alongside Dunetrace's normal ingest. Env-driven, zero code change:
+        ```bash
+        export DUNETRACE_OTEL_ENABLED=1
+        export DUNETRACE_OTEL_ENDPOINT=https://otlp.example:4317
+        export DUNETRACE_OTEL_HEADERS="DD-API-KEY=xxxxx"   # provider auth
+        export DUNETRACE_OTEL_PROTOCOL=grpc                # or http/protobuf
+        ```
+        Export runs on a bounded background pipeline with a circuit breaker, so a
+        slow or dead collector never blocks or breaks the agent.
+
+        ### Feed an existing OTel pipeline into Dunetrace's detectors
+        Already instrumented with OpenLLMetry / Traceloop / OpenLIT? Attach the
+        receiver as a second span processor — no dt.run() calls required:
+        ```python
+        from opentelemetry.sdk.trace import TracerProvider
+        from dunetrace import Dunetrace
+        from dunetrace.integrations.otel_receiver import DunetraceOTelReceiver
+
+        dt = Dunetrace(api_key="dt_live_...")
+        provider = TracerProvider()          # your existing pipeline, unchanged
+        DunetraceOTelReceiver.attach(provider, dt, agent_id="my-agent")
+        ```
+        gen_ai.* spans are translated to Dunetrace events and run through the full
+        detector suite — same result as the HTTP endpoint above, without leaving
+        the process.
     """).strip(),
 }
 
@@ -1864,6 +2393,13 @@ _ALIASES: dict[str, str] = {
     "haystack-ai": "haystack",
     "haystack2": "haystack",
     "hs": "haystack",
+    "voice": "voice",
+    "voice-agent": "voice",
+    "voice_agent": "voice",
+    "voice-agents": "voice",
+    "stt": "voice",
+    "tts": "voice",
+    "speech": "voice",
     "otel": "otel",
     "otlp": "otel",
     "opentelemetry": "otel",
@@ -1885,18 +2421,20 @@ def get_instrumentation_guide(framework: str) -> str:
             - "langchain"   — LangChain / LangGraph agents
             - "python"      — Custom Python agents (decorator, context manager,
                               auto-instrumentation, FastAPI, Flask)
-            - "typescript"  — TypeScript / Node.js agents (raw HTTP ingest)
+            - "typescript"  — TypeScript / Node.js agents (npm SDK, auto-instrumentation)
             - "tools"       — How to track tool calls specifically (all languages)
             - "haystack"    — Haystack 2.x pipelines (simple, RAG, Agent component)
-            - "otel"        — Zero-code OTel/OTLP receiver (Langdock, Dify, OpenLLMetry,
-                              any platform that emits OTLP traces)
+            - "voice"       — Voice agents (STT / TTS / VAD / turn-taking hooks)
+            - "otel"        — OpenTelemetry: zero-code OTLP receiver plus the SDK's
+                              in-process export and receiver bridge (dunetrace[otel])
 
     Aliases accepted: langgraph, lc, custom-python, ts, javascript, js, node,
-    tool-calls, tracking, haystack-ai, hs, otlp, opentelemetry, langdock, dify, no-code.
+    tool-calls, tracking, haystack-ai, hs, voice-agent, stt, tts, speech,
+    otlp, opentelemetry, langdock, dify, no-code.
     """
     key = _ALIASES.get(framework.lower().strip())
     if key is None:
-        supported = "langchain, python, typescript, tools, haystack"
+        supported = "langchain, python, typescript, tools, haystack, voice, otel"
         return (
             f"Unknown framework '{framework}'. Supported values: {supported}.\n\n"
             "Use list_agents to check what agents are already instrumented."
@@ -1911,6 +2449,7 @@ def get_instrumentation_guide(framework: str) -> str:
         "typescript": "integrate-typescript-agent.md",
         "tools": "integrate-custom-python-agent.md",
         "haystack": "integrate-haystack-agent.md",
+        "voice": "integrations/voice-frameworks.md",
         "otel": "integrate-langdock.md",
     }
     doc_path = _DOCS / doc_map[key]
@@ -1924,15 +2463,19 @@ def get_instrumentation_guide(framework: str) -> str:
 @mcp.tool()
 def get_agent_token_stats(agent_id: str) -> str:
     """
-    Per-window token usage and waste breakdown for an agent (1d / 7d / 30d).
+    Per-window token usage breakdown for an agent (1d / 7d / 30d).
 
-    Shows how many tokens were spent, how many were wasted (on runs with detected
-    failures), and the estimated API cost for each time window.  The 30-day view
-    also breaks waste down by failure type so you can prioritise which failures
-    to fix first.
+    Reports three distinct spend metrics per window:
+      • Failed-run tokens — all spend on runs that had a failure (attribution).
+      • Excess (avoidable) — the portion above a healthy baseline; the realistic
+        "waste" figure and the one worth acting on.
+      • Prevented (saved) — spend actually stopped by an in-path policy/approval
+        block. Post-hoc detectors prevent nothing and never count here.
+    Plus a 30-day projection of avoidable waste, and (30d) a by-failure-type
+    breakdown so you can prioritise which failures to fix first.
 
-    Use this when you want to understand the financial impact of agent failures or
-    answer questions like "how much money is my agent wasting?".
+    Use this to understand the financial impact of agent failures or answer
+    "how much money is my agent wasting, and how much could I actually save?".
 
     Args:
         agent_id: The agent ID to query.
@@ -1968,21 +2511,32 @@ def get_agent_token_stats(agent_id: str) -> str:
         if not w:
             continue
         label = {"1d": "Last 24 h", "7d": "Last 7 days", "30d": "Last 30 days"}[win]
-        cost_wst_pct = int(round((w.get("wasted_pct") or 0) * 100))
         total_tok = w.get("total_tokens") or 0
-        tok_wst_pct = int(round(w.get("wasted_tokens", 0) / total_tok * 100)) if total_tok else 0
+        failed_tok = w.get("failed_run_tokens", w.get("wasted_tokens", 0))
+        failed_cost = w.get("failed_run_cost_usd", w.get("wasted_cost_usd", 0))
+        failed_run_ct = w.get("failed_run_count", w.get("wasted_run_count", 0))
+        excess_tok = w.get("excess_tokens", 0)
+        excess_pct = int(round(excess_tok / total_tok * 100)) if total_tok else 0
+        fail_pct = int(round(failed_tok / total_tok * 100)) if total_tok else 0
+        prevented_tok = w.get("prevented_tokens", 0)
+        blocked_ct = w.get("blocked_run_count", 0)
+        proj_cost = w.get("projected_monthly_excess_cost_usd", 0)
         lines += [
             f"── {label} ──",
-            f"  Runs:            {w.get('run_count', 0):>6}  ({w.get('wasted_run_count', 0)} with failures)",
-            f"  Total tokens:    {_fmt_tok(w.get('total_tokens', 0)):>8}",
-            f"  Wasted tokens:   {_fmt_tok(w.get('wasted_tokens', 0)):>8}  ({tok_wst_pct}% of total)",
-            f"  Total cost:      {_fmt_cost(w.get('total_cost_usd', 0)):>10}",
-            f"  Wasted cost:     {_fmt_cost(w.get('wasted_cost_usd', 0)):>10}  ({cost_wst_pct}% of total)",
-            "",
+            f"  Runs:              {w.get('run_count', 0):>6}  ({failed_run_ct} with failures)",
+            f"  Total tokens:      {_fmt_tok(total_tok):>8}   {_fmt_cost(w.get('total_cost_usd', 0))}",
+            f"  Failed-run tokens: {_fmt_tok(failed_tok):>8}  ({fail_pct}% of total, {_fmt_cost(failed_cost)}) — attribution",
+            f"  Excess (avoidable):{_fmt_tok(excess_tok):>8}  ({excess_pct}% of total, {_fmt_cost(w.get('excess_cost_usd', 0))}) — the realistic waste",
+            f"  Prevented (saved): {_fmt_tok(prevented_tok):>8}  ({blocked_ct} run{'s' if blocked_ct != 1 else ''} stopped in-path, {_fmt_cost(w.get('prevented_cost_usd', 0))})",
         ]
+        if win != "1d":
+            lines.append(
+                f"  Projected/mo:      {_fmt_cost(proj_cost):>10}  avoidable waste if left unfixed"
+            )
+        lines.append("")
 
     if waste_by_ft:
-        lines.append("Waste by failure type (30 days):")
+        lines.append("Failed-run spend by failure type (30 days):")
         for ft in waste_by_ft:
             lines.append(
                 f"  {ft['failure_type']:<35}  "
@@ -2032,7 +2586,8 @@ def main() -> None:
     parser.epilog = (
         f"Environment:\n"
         f"  DUNETRACE_API_URL  Customer API base URL  (current: {api_url})\n"
-        f"  DUNETRACE_API_KEY  Bearer token           (current: {'set' if api_key != 'dt_dev_test' else 'dt_dev_test (dev default)'})\n\n"
+        f"  DUNETRACE_API_KEY  Bearer token           (current: {'set' if api_key != 'dt_dev_test' else 'dt_dev_test (dev default)'})\n"
+        f"  DUNETRACE_MCP_READONLY  Withhold the 9 write tools (current: {'true — read-only' if _MCP_READONLY else 'false — WRITE TOOLS ENABLED'})\n\n"
         f"Client config (Claude Code — add to ~/.claude.json):\n"
         f'  {{"mcpServers": {{"dunetrace": {{"command": "dunetrace-mcp", '
         f'"env": {{"DUNETRACE_API_URL": "{api_url}", "DUNETRACE_API_KEY": "..."}}}}}}}}'

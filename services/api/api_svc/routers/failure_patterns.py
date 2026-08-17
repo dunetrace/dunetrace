@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from api_svc.auth import require_customer
+from api_svc.auth import require_org
 from api_svc.db.queries import agent_failure_pattern
 from api_svc.schemas import (
     FailurePatternAnalysis,
@@ -23,27 +23,15 @@ from api_svc.schemas import (
 
 router = APIRouter(tags=["Insights"])
 
-_VALID_FAILURE_TYPES = {
-    "TOOL_LOOP",
-    "TOOL_THRASHING",
-    "TOOL_AVOIDANCE",
-    "GOAL_ABANDONMENT",
-    "PROMPT_INJECTION_SIGNAL",
-    "RAG_EMPTY_RETRIEVAL",
-    "LLM_TRUNCATION_LOOP",
-    "CONTEXT_BLOAT",
-    "SLOW_STEP",
-    "RETRY_STORM",
-    "EMPTY_LLM_RESPONSE",
-    "STEP_COUNT_INFLATION",
-    "CASCADING_TOOL_FAILURE",
-    "FIRST_STEP_FAILURE",
-    "REASONING_STALL",
-    "CONFIDENT_HALLUCINATION_PROXY",
-    "POLICY_VIOLATION",
-    "USER_DISSATISFACTION",
-    "INTENT_MISALIGNMENT",
-}
+# Derived from the FailureType enum so it can't go stale as detectors are added.
+# A hardcoded list here silently 422'd real, live failure types (e.g.
+# TOOL_ARGUMENT_FABRICATION, the top pattern on the overview) when they were
+# added to the enum but not to this set. Semantic/custom-detector types
+# (TASK_COMPLETION, CUSTOM_*) are additionally allowed so any pattern the
+# dashboard links to opens rather than erroring.
+from dunetrace.models import FailureType  # noqa: E402
+
+_VALID_FAILURE_TYPES = {t.value for t in FailureType} | {"TASK_COMPLETION"}
 
 
 @router.get(
@@ -60,15 +48,17 @@ _VALID_FAILURE_TYPES = {
 async def get_failure_pattern(
     agent_id: str,
     failure_type: str,
-    _customer: str = Depends(require_customer),
+    org_id: str = Depends(require_org),
 ) -> FailurePatternAnalysis:
-    if failure_type not in _VALID_FAILURE_TYPES:
+    # Custom-detector signals are stored under their own CUSTOM_* name; allow them
+    # through so a custom pattern the dashboard links to opens too.
+    if failure_type not in _VALID_FAILURE_TYPES and not failure_type.startswith("CUSTOM_"):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Unknown failure_type '{failure_type}'. Valid: {sorted(_VALID_FAILURE_TYPES)}",
         )
 
-    data = await agent_failure_pattern(agent_id, failure_type)
+    data = await agent_failure_pattern(org_id, agent_id, failure_type)
     if not data:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DB unavailable"

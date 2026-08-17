@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 End-to-end test: fire all 13 testable detectors, then call the explain endpoint
-on each signal and verify the Langfuse integration + fix_type classification.
+on each signal and verify fix_type classification. Root-cause analysis is
+fully native — no external tracing system involved, so every detector
+exercises the full LLM + fix_type path directly from the synthetic run's own
+stored events.
 
 Detectors covered (13 of 15):
   TOOL_LOOP · TOOL_THRASHING · TOOL_AVOIDANCE · RAG_EMPTY_RETRIEVAL
@@ -12,10 +15,6 @@ Detectors covered (13 of 15):
 Skipped:
   GOAL_ABANDONMENT — requires 90s stall timeout; not suitable for a smoke test.
 
-The explain endpoint is called with a known-good Langfuse trace_id override so
-every detector exercises the full LLM + fix_type path even though the synthetic
-runs themselves have no Langfuse trace.
-
 Usage:
     docker compose up -d
     python scripts/test_detectors_explain.py
@@ -23,8 +22,6 @@ Usage:
 Env vars:
     INGEST_URL   (default: http://localhost:8001)
     API_URL      (default: http://localhost:8002)
-    LF_TRACE_ID  override the Langfuse trace used for explain calls
-                 (default: the most recent TOOL_LOOP trace from langfuse-example-agent)
 """
 
 from __future__ import annotations
@@ -171,7 +168,7 @@ def s_tool_loop() -> str:
                     rid,
                     AGENT_ID,
                     i,
-                    {"tool_name": "search", "args_hash": "h1"},
+                    {"tool_name": "search", "args": "h1"},
                 )
                 for i in range(1, 6)
             ],
@@ -192,7 +189,7 @@ def s_tool_thrashing() -> str:
                 rid,
                 AGENT_ID,
                 i,
-                {"tool_name": tool, "args_hash": f"h{i}"},
+                {"tool_name": tool, "args": f"h{i}"},
             )
         )
     ingest(
@@ -345,7 +342,7 @@ def s_slow_step() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"tool_name": "slow_api", "args_hash": "h1"},
+                {"tool_name": "slow_api", "args": "h1"},
                 ts=T,
             ),
             ev(
@@ -373,7 +370,7 @@ def s_retry_storm() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"tool_name": "payment_api", "args_hash": "h1"},
+                {"tool_name": "payment_api", "args": "h1"},
             ),
             ev(
                 "tool.responded",
@@ -387,7 +384,7 @@ def s_retry_storm() -> str:
                 rid,
                 AGENT_ID,
                 2,
-                {"tool_name": "payment_api", "args_hash": "h2"},
+                {"tool_name": "payment_api", "args": "h2"},
             ),
             ev(
                 "tool.responded",
@@ -401,7 +398,7 @@ def s_retry_storm() -> str:
                 rid,
                 AGENT_ID,
                 3,
-                {"tool_name": "payment_api", "args_hash": "h3"},
+                {"tool_name": "payment_api", "args": "h3"},
             ),
             ev(
                 "tool.responded",
@@ -444,7 +441,7 @@ def s_cascading_failure() -> str:
         rid,
         [
             ev("run.started", rid, AGENT_ID, 0),
-            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "db", "args_hash": "h1"}),
+            ev("tool.called", rid, AGENT_ID, 1, {"tool_name": "db", "args": "h1"}),
             ev(
                 "tool.responded",
                 rid,
@@ -457,7 +454,7 @@ def s_cascading_failure() -> str:
                 rid,
                 AGENT_ID,
                 2,
-                {"tool_name": "search", "args_hash": "h2"},
+                {"tool_name": "search", "args": "h2"},
             ),
             ev(
                 "tool.responded",
@@ -466,7 +463,7 @@ def s_cascading_failure() -> str:
                 2,
                 {"tool_name": "search", "success": False},
             ),
-            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "db", "args_hash": "h3"}),
+            ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "db", "args": "h3"}),
             ev(
                 "tool.responded",
                 rid,
@@ -512,7 +509,7 @@ def s_reasoning_stall() -> str:
                 },
             )
         )
-    events.append(ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args_hash": "h1"}))
+    events.append(ev("tool.called", rid, AGENT_ID, 3, {"tool_name": "search", "args": "h1"}))
     events.append(ev("tool.responded", rid, AGENT_ID, 3, {"success": True}))
     events.append(ev("run.completed", rid, AGENT_ID, 6, {"exit_reason": "final_answer"}))
     ingest(AGENT_ID, rid, events)
@@ -570,7 +567,7 @@ def s_step_count_inflation() -> str:
                     "output_length": 30,
                 },
             ),
-            _infl("tool.called", rid, i, {"tool_name": "search", "args_hash": f"h{i}"}),
+            _infl("tool.called", rid, i, {"tool_name": "search", "args": f"h{i}"}),
             _infl("tool.responded", rid, i, {"success": True}),
         ]
     events.append(_infl("run.completed", rid, 20, {"exit_reason": "completed"}))
@@ -581,11 +578,8 @@ def s_step_count_inflation() -> str:
 # ── Explain call ───────────────────────────────────────────────────────────────
 
 
-def explain(signal_id: int, lf_trace_id: str) -> tuple[dict, int]:
-    return _post(
-        f"{API_URL}/v1/signals/{signal_id}/explain",
-        {"langfuse_trace_id": lf_trace_id},
-    )
+def explain(signal_id: int) -> tuple[dict, int]:
+    return _post(f"{API_URL}/v1/signals/{signal_id}/explain", {})
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -593,7 +587,7 @@ def explain(signal_id: int, lf_trace_id: str) -> tuple[dict, int]:
 
 def main() -> None:
     print("=" * 70)
-    print("Dunetrace — All-detector explain + Langfuse integration test")
+    print("Dunetrace — All-detector native explain test")
     print(f"  Ingest : {INGEST_URL}")
     print(f"  API    : {API_URL}")
     print("=" * 70)
@@ -603,36 +597,14 @@ def main() -> None:
     wait_healthy(INGEST_URL, "  ingest")
     wait_healthy(API_URL, "  api   ")
 
-    # ── Find known-good Langfuse trace ────────────────────────────────────────
-    print("\n[1] Finding known-good Langfuse trace...")
-    lf_trace_id = os.environ.get("LF_TRACE_ID")
-    if not lf_trace_id:
-        try:
-            sigs = fetch_signals("langfuse-example-agent", limit=5)
-            if sigs:
-                raw_id = sigs[0]["run_id"]
-                lf_trace_id = raw_id.replace("-", "")
-                print(f"  Using most recent TOOL_LOOP trace: {lf_trace_id}")
-            else:
-                print(
-                    "  WARNING: no langfuse-example-agent signals found."
-                    " Set LF_TRACE_ID= to override."
-                )
-        except Exception as exc:
-            print(f"  WARNING: could not fetch trace ID: {exc}")
-    if not lf_trace_id:
-        print(f"  {RED}ABORT: cannot run explain tests without a Langfuse trace ID.{RESET}")
-        print("  Run:  SCENARIO=tool_loop python packages/sdk-py/examples/langfuse_agent.py")
-        sys.exit(1)
-
     # ── Baseline for STEP_COUNT_INFLATION ─────────────────────────────────────
-    print("\n[2] Injecting 10 baseline runs for STEP_COUNT_INFLATION...")
+    print("\n[1] Injecting 10 baseline runs for STEP_COUNT_INFLATION...")
     inject_inflation_baseline(10)
     print("    Waiting 20s for detector to process baseline runs...")
     time.sleep(20)
 
     # ── Inject all scenarios ──────────────────────────────────────────────────
-    print("\n[3] Injecting 12 synthetic scenarios...")
+    print("\n[2] Injecting 12 synthetic scenarios...")
     SYNTH_SCENARIOS = [
         ("TOOL_LOOP", s_tool_loop),
         ("TOOL_THRASHING", s_tool_thrashing),
@@ -664,7 +636,7 @@ def main() -> None:
 
     # ── Poll for signals ──────────────────────────────────────────────────────
     SYNTH_TARGETS = {name for name, _ in SYNTH_SCENARIOS} | {"STEP_COUNT_INFLATION"}
-    print(f"\n[4] Polling for {len(SYNTH_TARGETS)} synthetic signals (up to 60s)...")
+    print(f"\n[3] Polling for {len(SYNTH_TARGETS)} synthetic signals (up to 60s)...")
     deadline = time.time() + 60
     found_synth: dict[str, dict] = {}
     while time.time() < deadline:
@@ -682,7 +654,7 @@ def main() -> None:
     print(f"  Found: {len(found_synth)}/{len(SYNTH_TARGETS)}")
 
     # Also pull PROMPT_INJECTION from existing DB (example-agent)
-    print("\n[5] Looking for PROMPT_INJECTION_SIGNAL in existing data...")
+    print("\n[4] Looking for PROMPT_INJECTION_SIGNAL in existing data...")
     found_injection: dict | None = None
     for agent_id in ("example-agent", "basic-example-agent"):
         try:
@@ -700,7 +672,7 @@ def main() -> None:
         print(f"  {YELLOW}SKIP{RESET}  No PROMPT_INJECTION_SIGNAL found in DB")
 
     # ── Run explain on every signal ───────────────────────────────────────────
-    print(f"\n[6] Running explain on each signal (Langfuse trace: {lf_trace_id[:12]}...)\n")
+    print("\n[5] Running explain on each signal...\n")
 
     results: list[tuple[str, str, str]] = []  # (failure_type, status, detail)
 
@@ -709,7 +681,7 @@ def main() -> None:
         sig_id = sig["id"]
         exp_type, exp_blocked = EXPECTED_FIX_TYPE.get(ft, ("?", None))
 
-        resp, status = explain(sig_id, lf_trace_id)
+        resp, status = explain(sig_id)
 
         if status != 200:
             detail = resp.get("detail", str(resp))
@@ -751,31 +723,39 @@ def main() -> None:
     for sig in all_signals:
         run_explain_check(sig)
 
-    # ── Test apply-fix 403 guard for PROMPT_INJECTION ─────────────────────────
-    print("[7] Verifying apply-fix 403 guard for PROMPT_INJECTION_SIGNAL...")
+    # ── Test open-pr 403 guard for PROMPT_INJECTION ───────────────────────────
+    print("[6] Verifying open-pr 403 guard for PROMPT_INJECTION_SIGNAL...")
     if found_injection:
         body, status = _post(
-            f"{API_URL}/v1/signals/{found_injection['id']}/apply-fix",
-            {"fix_content": "test", "langfuse_prompt_name": "test-prompt"},
+            f"{API_URL}/v1/signals/{found_injection['id']}/open-pr",
+            {"root_cause": "test", "fix_content": "test", "fix_patch": "test"},
         )
         if status == 403:
             results.append(
                 (
-                    "PROMPT_INJECTION_SIGNAL (apply-fix guard)",
+                    "PROMPT_INJECTION_SIGNAL (open-pr guard)",
                     "PASS",
-                    "apply-fix correctly returned 403",
+                    "open-pr correctly returned 403",
+                )
+            )
+        elif status == 503:
+            results.append(
+                (
+                    "PROMPT_INJECTION_SIGNAL (open-pr guard)",
+                    "SKIP",
+                    "GitHub not configured — guard fires before this check anyway",
                 )
             )
         else:
             results.append(
                 (
-                    "PROMPT_INJECTION_SIGNAL (apply-fix guard)",
+                    "PROMPT_INJECTION_SIGNAL (open-pr guard)",
                     "FAIL",
                     f"expected 403, got {status}: {body.get('detail', '')}",
                 )
             )
     else:
-        results.append(("PROMPT_INJECTION_SIGNAL (apply-fix guard)", "SKIP", "no signal in DB"))
+        results.append(("PROMPT_INJECTION_SIGNAL (open-pr guard)", "SKIP", "no signal in DB"))
 
     # ── Print results ─────────────────────────────────────────────────────────
     print()

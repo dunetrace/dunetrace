@@ -93,16 +93,14 @@ describe("Dunetrace.run() — lifecycle events", () => {
     await dt.shutdown();
   });
 
-  it("run.started hashes userInput — never stores raw", async () => {
+  it("run.started transmits raw userInput", async () => {
     const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
     dt._emit = (e) => events.push(e);
 
     await dt.run("my-agent", { userInput: "secret user query" }, async () => {});
     const started = events.find(e => e.event_type === "run.started")!;
-    expect(started.payload).not.toHaveProperty("input");
-    expect(typeof started.payload["input_hash"]).toBe("string");
-    expect((started.payload["input_hash"] as string)).toHaveLength(16);
+    expect(started.payload["input_text"]).toBe("secret user query");
     await dt.shutdown();
   });
 
@@ -115,6 +113,28 @@ describe("Dunetrace.run() — lifecycle events", () => {
     const started = events.find(e => e.event_type === "run.started")!;
     expect(started.payload["model"]).toBe("gpt-4o");
     expect(started.payload["tools"]).toEqual(["search"]);
+    await dt.shutdown();
+  });
+
+  it("run.started transmits raw systemPrompt", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("my-agent", { systemPrompt: "You are a helpful assistant." }, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.payload["system_prompt"]).toBe("You are a helpful assistant.");
+    await dt.shutdown();
+  });
+
+  it("run.started defaults system_prompt to empty string when omitted", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("my-agent", {}, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.payload["system_prompt"]).toBe("");
     await dt.shutdown();
   });
 
@@ -162,7 +182,7 @@ describe("Dunetrace.run() — lifecycle events", () => {
     await dt.shutdown();
   });
 
-  it("preset runId is used on all events (Langfuse correlation)", async () => {
+  it("preset runId is used on all events (external trace correlation)", async () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
     dt._emit = (e) => events.push(e);
@@ -184,6 +204,76 @@ describe("Dunetrace.run() — lifecycle events", () => {
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       );
     });
+    await dt.shutdown();
+  });
+
+  it("run.started carries traceId as a top-level field (external evaluation correlation)", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", { traceId: "langfuse-trace-abc123" }, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.trace_id).toBe("langfuse-trace-abc123");
+    await dt.shutdown();
+  });
+
+  it("trace_id defaults to null when traceId omitted", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", {}, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.trace_id).toBeNull();
+    await dt.shutdown();
+  });
+
+  it("traceId does not affect agent_version (unlike systemPrompt)", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", { model: "gpt-4o", traceId: "trace-1" }, async () => {});
+    await dt.run("agent", { model: "gpt-4o", traceId: "trace-2" }, async () => {});
+
+    const started = events.filter(e => e.event_type === "run.started");
+    expect(started[0].agent_version).toBe(started[1].agent_version);
+    await dt.shutdown();
+  });
+
+  it("run.started carries conversationId as a top-level field (conversation modeling)", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", { conversationId: "conv_123" }, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.conversation_id).toBe("conv_123");
+    await dt.shutdown();
+  });
+
+  it("conversation_id defaults to null when conversationId omitted", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", {}, async () => {});
+    const started = events.find(e => e.event_type === "run.started")!;
+    expect(started.conversation_id).toBeNull();
+    await dt.shutdown();
+  });
+
+  it("conversationId does not affect agent_version (unlike systemPrompt)", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent", { model: "gpt-4o", conversationId: "conv-1" }, async () => {});
+    await dt.run("agent", { model: "gpt-4o", conversationId: "conv-2" }, async () => {});
+
+    const started = events.filter(e => e.event_type === "run.started");
+    expect(started[0].agent_version).toBe(started[1].agent_version);
     await dt.shutdown();
   });
 });
@@ -226,6 +316,21 @@ describe("Dunetrace.tool()", () => {
     await dt.shutdown();
   });
 
+  it("transmits the raw result as tool.responded output", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    const search = dt.tool(async (_q: unknown) => ["result1", "result2"], "search");
+
+    await dt.run("agent", {}, async () => {
+      await search("query");
+    });
+
+    const resp = events.find(e => e.event_type === "tool.responded")!;
+    expect(resp.payload["output"]).toBe(JSON.stringify(["result1", "result2"]));
+  });
+
   it("emits success=false on error and re-throws", async () => {
     const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
@@ -239,7 +344,7 @@ describe("Dunetrace.tool()", () => {
 
     const resp = events.find(e => e.event_type === "tool.responded")!;
     expect(resp.payload["success"]).toBe(false);
-    expect(resp.payload).toHaveProperty("error_hash");
+    expect(resp.payload["error"]).toBe("Error: fail");
     await dt.shutdown();
   });
 
@@ -316,7 +421,7 @@ describe("Dunetrace.trace()", () => {
     await dt.shutdown();
   });
 
-  it("hashes first arg as userInput", async () => {
+  it("transmits raw first arg as userInput", async () => {
     const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
     dt._emit = (e) => events.push(e);
@@ -326,8 +431,7 @@ describe("Dunetrace.trace()", () => {
     await wrapped("sensitive input");
 
     const started = events.find(e => e.event_type === "run.started")!;
-    expect(started.payload).not.toHaveProperty("input");
-    expect(typeof started.payload["input_hash"]).toBe("string");
+    expect(started.payload["input_text"]).toBe("sensitive input");
     await dt.shutdown();
   });
 });
@@ -449,7 +553,7 @@ describe("Dunetrace.wrapOpenAI()", () => {
     await dt.shutdown();
   });
 
-  it("skips tracking for streaming calls", async () => {
+  it("tracks streaming calls as the caller consumes the stream", async () => {
     const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events: AgentEvent[] = [];
     dt._emit = (e) => events.push(e);
@@ -457,17 +561,30 @@ describe("Dunetrace.wrapOpenAI()", () => {
     const fakeClient = {
       chat: {
         completions: {
-          create: async (_opts: unknown) => ({ stream: true }),
+          create: async (_opts: unknown) => ({
+            async *[Symbol.asyncIterator]() {
+              yield { choices: [{ delta: { content: "hi" } }] };
+              yield { choices: [{ delta: {}, finish_reason: "stop" }] };
+            },
+          }),
         },
       },
     };
     const wrapped = dt.wrapOpenAI(fakeClient);
 
     await dt.run("wrap-agent", {}, async () => {
-      await wrapped.chat.completions.create({ model: "gpt-4o", messages: [], stream: true });
+      const stream = await wrapped.chat.completions.create({
+        model: "gpt-4o", messages: [], stream: true,
+      }) as AsyncIterable<unknown>;
+      for await (const _ of stream) { /* drain */ }
     });
 
-    expect(events.filter(e => e.event_type === "llm.called")).toHaveLength(0);
+    // llm.responded can only be emitted once the stream has been drained — usage
+    // and finish_reason don't exist before then.
+    expect(events.filter(e => e.event_type === "llm.called")).toHaveLength(1);
+    const responded = events.filter(e => e.event_type === "llm.responded");
+    expect(responded).toHaveLength(1);
+    expect(responded[0]?.payload["output"]).toBe("hi");
     await dt.shutdown();
   });
 
@@ -525,5 +642,80 @@ describe("Dunetrace.wrapAnthropic()", () => {
     expect(llmResponded!.payload["finish_reason"]).toBe("end_turn");
 
     await dt.shutdown();
+  });
+});
+
+// ── parent_run_id auto-threading ────────────────────────────────────────────────
+
+describe("Dunetrace.run() — parent_run_id auto-threading", () => {
+  function started(events: AgentEvent[], agentId: string): AgentEvent {
+    const e = events.find((ev) => ev.event_type === "run.started" && ev.agent_id === agentId);
+    if (!e) throw new Error(`no run.started for ${agentId}`);
+    return e;
+  }
+
+  it("a nested run inherits the active run's id as parent_run_id", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    let parentId = "";
+    await dt.run("orchestrator", {}, async (parent) => {
+      parentId = parent.runId;
+      await dt.run("researcher", {}, async () => {});
+    });
+
+    expect(started(events, "orchestrator").parent_run_id).toBeNull();
+    expect(started(events, "researcher").parent_run_id).toBe(parentId);
+  });
+
+  it("an explicit parentRunId always wins", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("orchestrator", {}, async () => {
+      await dt.run("researcher", { parentRunId: "explicit-parent" }, async () => {});
+    });
+
+    expect(started(events, "researcher").parent_run_id).toBe("explicit-parent");
+  });
+
+  it("a top-level run has no parent", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("solo", {}, async () => {});
+    expect(started(events, "solo").parent_run_id).toBeNull();
+  });
+
+  it("sequential (non-nested) runs do not link", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    await dt.run("agent-a", {}, async () => {});
+    await dt.run("agent-b", {}, async () => {});
+    expect(started(events, "agent-b").parent_run_id).toBeNull();
+  });
+
+  it("three-level nesting links each run to its immediate parent", async () => {
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+    const events: AgentEvent[] = [];
+    dt._emit = (e) => events.push(e);
+
+    let aId = "", bId = "";
+    await dt.run("a", {}, async (a) => {
+      aId = a.runId;
+      await dt.run("b", {}, async (b) => {
+        bId = b.runId;
+        await dt.run("c", {}, async () => {});
+      });
+    });
+
+    expect(started(events, "a").parent_run_id).toBeNull();
+    expect(started(events, "b").parent_run_id).toBe(aId);
+    expect(started(events, "c").parent_run_id).toBe(bId);
   });
 });

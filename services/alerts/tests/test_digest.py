@@ -155,12 +155,12 @@ class TestShouldSendDigest(unittest.TestCase):
 
 
 class TestFormatDigestSlack(unittest.TestCase):
-    def _blocks(self, data=None):
-        payload = format_digest_slack(data or _sample_data())
+    def _blocks(self, data=None, org_id="org-1"):
+        payload = format_digest_slack(data or _sample_data(), org_id)
         return payload["attachments"][0]["blocks"]
 
     def test_returns_valid_slack_payload(self):
-        payload = format_digest_slack(_sample_data())
+        payload = format_digest_slack(_sample_data(), "org-1")
         self.assertIn("attachments", payload)
         self.assertIsInstance(json.dumps(payload), str)
 
@@ -169,6 +169,11 @@ class TestFormatDigestSlack(unittest.TestCase):
         header = blocks[0]
         self.assertEqual(header["type"], "header")
         self.assertIn("Digest", header["text"]["text"])
+
+    def test_header_block_contains_org_id(self):
+        blocks = self._blocks(org_id="org-acme")
+        header = blocks[0]
+        self.assertIn("org-acme", header["text"]["text"])
 
     def test_context_block_shows_totals(self):
         blocks = self._blocks(_sample_data(total_runs=50, total_agents=2, total_signals=10))
@@ -234,46 +239,133 @@ class TestFormatDigestSlack(unittest.TestCase):
         self.assertIn("33%", all_text)
 
     def test_color_is_blue(self):
-        payload = format_digest_slack(_sample_data())
+        payload = format_digest_slack(_sample_data(), "org-1")
         self.assertEqual(payload["attachments"][0]["color"], "#4a9ede")
 
 
-# ── send_weekly_digest ─────────────────────────────────────────────────────────
+# ── send_weekly_digest (fan-out over active orgs) ─────────────────────────────
 
 
 class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
     async def test_skips_when_digest_not_enabled(self):
-        with patch("alerts_svc.digest.settings") as mock_settings:
+        with (
+            patch("alerts_svc.digest.settings") as mock_settings,
+            patch("alerts_svc.digest.fetch_active_org_ids", AsyncMock()) as mock_active,
+        ):
             mock_settings.digest_enabled = False
             result = await send_weekly_digest()
-        self.assertFalse(result)
+        self.assertEqual(result, 0)
+        mock_active.assert_not_called()
 
     async def test_skips_when_not_correct_time(self):
         with (
             patch("alerts_svc.digest.settings") as mock_settings,
             patch("alerts_svc.digest.should_send_digest", return_value=False),
+            patch("alerts_svc.digest.fetch_active_org_ids", AsyncMock()) as mock_active,
         ):
             mock_settings.digest_enabled = True
             result = await send_weekly_digest()
-        self.assertFalse(result)
+        self.assertEqual(result, 0)
+        mock_active.assert_not_called()
 
-    async def test_skips_when_already_sent_recently(self):
+    async def test_no_active_orgs_sends_nothing(self):
         with (
             patch("alerts_svc.digest.settings") as mock_settings,
             patch("alerts_svc.digest.should_send_digest", return_value=True),
+            patch("alerts_svc.digest.fetch_active_org_ids", AsyncMock(return_value=[])),
+        ):
+            mock_settings.digest_enabled = True
+            result = await send_weekly_digest()
+        self.assertEqual(result, 0)
+
+    async def test_sends_one_digest_per_active_org(self):
+        """Two active orgs → two independent sends, each scoped to its own org_id."""
+        fetched_for = []
+
+        async def fake_fetch_data(org_id):
+            fetched_for.append(org_id)
+            return _sample_data()
+
+        with (
+            patch("alerts_svc.digest.settings") as mock_settings,
+            patch("alerts_svc.digest.should_send_digest", return_value=True),
+            patch(
+                "alerts_svc.digest.fetch_active_org_ids",
+                AsyncMock(return_value=["org-a", "org-b"]),
+            ),
+            patch(
+                "alerts_svc.digest.was_digest_sent_recently",
+                AsyncMock(return_value=False),
+            ),
+            patch("alerts_svc.digest.fetch_weekly_digest_data", side_effect=fake_fetch_data),
+            patch(
+                "alerts_svc.digest.send_slack",
+                return_value=SendResult(True, "slack", 1, 200),
+            ),
+            patch("alerts_svc.digest.log_digest_sent", AsyncMock()) as mock_log,
+        ):
+            mock_settings.digest_enabled = True
+            mock_settings.DASHBOARD_URL = "https://app.dunetrace.io"
+            result = await send_weekly_digest()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(set(fetched_for), {"org-a", "org-b"})
+        self.assertEqual(mock_log.call_count, 2)
+
+    async def test_one_org_failing_does_not_block_the_other(self):
+        """If one org's digest fails, the other org still gets sent."""
+
+        async def fake_fetch_data(org_id):
+            if org_id == "org-bad":
+                raise Exception("DB down")
+            return _sample_data()
+
+        with (
+            patch("alerts_svc.digest.settings") as mock_settings,
+            patch("alerts_svc.digest.should_send_digest", return_value=True),
+            patch(
+                "alerts_svc.digest.fetch_active_org_ids",
+                AsyncMock(return_value=["org-bad", "org-good"]),
+            ),
+            patch(
+                "alerts_svc.digest.was_digest_sent_recently",
+                AsyncMock(return_value=False),
+            ),
+            patch("alerts_svc.digest.fetch_weekly_digest_data", side_effect=fake_fetch_data),
+            patch(
+                "alerts_svc.digest.send_slack",
+                return_value=SendResult(True, "slack", 1, 200),
+            ),
+            patch("alerts_svc.digest.log_digest_sent", AsyncMock()) as mock_log,
+        ):
+            mock_settings.digest_enabled = True
+            mock_settings.DASHBOARD_URL = "https://app.dunetrace.io"
+            result = await send_weekly_digest()
+
+        self.assertEqual(result, 1)
+        mock_log.assert_called_once_with("org-good")
+
+
+# ── _send_org_digest (single-org behavior) ────────────────────────────────────
+
+
+class TestSendOrgDigest(unittest.IsolatedAsyncioTestCase):
+    async def test_skips_when_already_sent_recently(self):
+        from alerts_svc.digest import _send_org_digest
+
+        with (
             patch(
                 "alerts_svc.digest.was_digest_sent_recently",
                 AsyncMock(return_value=True),
             ),
         ):
-            mock_settings.digest_enabled = True
-            result = await send_weekly_digest()
+            result = await _send_org_digest("org-1")
         self.assertFalse(result)
 
     async def test_skips_and_logs_when_no_runs(self):
+        from alerts_svc.digest import _send_org_digest
+
         with (
-            patch("alerts_svc.digest.settings") as mock_settings,
-            patch("alerts_svc.digest.should_send_digest", return_value=True),
             patch(
                 "alerts_svc.digest.was_digest_sent_recently",
                 AsyncMock(return_value=False),
@@ -284,15 +376,14 @@ class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
             ),
             patch("alerts_svc.digest.log_digest_sent", AsyncMock()) as mock_log,
         ):
-            mock_settings.digest_enabled = True
-            result = await send_weekly_digest()
+            result = await _send_org_digest("org-1")
         self.assertFalse(result)
-        mock_log.assert_called_once()  # still log so we don't retry until next week
+        mock_log.assert_called_once_with("org-1")  # still log so we don't retry until next week
 
     async def test_sends_and_logs_on_success(self):
+        from alerts_svc.digest import _send_org_digest
+
         with (
-            patch("alerts_svc.digest.settings") as mock_settings,
-            patch("alerts_svc.digest.should_send_digest", return_value=True),
             patch(
                 "alerts_svc.digest.was_digest_sent_recently",
                 AsyncMock(return_value=False),
@@ -307,16 +398,14 @@ class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
             ),
             patch("alerts_svc.digest.log_digest_sent", AsyncMock()) as mock_log,
         ):
-            mock_settings.digest_enabled = True
-            mock_settings.DASHBOARD_URL = "https://app.dunetrace.io"
-            result = await send_weekly_digest()
+            result = await _send_org_digest("org-1")
         self.assertTrue(result)
-        mock_log.assert_called_once()
+        mock_log.assert_called_once_with("org-1")
 
     async def test_returns_false_on_slack_failure(self):
+        from alerts_svc.digest import _send_org_digest
+
         with (
-            patch("alerts_svc.digest.settings") as mock_settings,
-            patch("alerts_svc.digest.should_send_digest", return_value=True),
             patch(
                 "alerts_svc.digest.was_digest_sent_recently",
                 AsyncMock(return_value=False),
@@ -331,16 +420,14 @@ class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
             ),
             patch("alerts_svc.digest.log_digest_sent", AsyncMock()) as mock_log,
         ):
-            mock_settings.digest_enabled = True
-            mock_settings.DASHBOARD_URL = "https://app.dunetrace.io"
-            result = await send_weekly_digest()
+            result = await _send_org_digest("org-1")
         self.assertFalse(result)
         mock_log.assert_not_called()  # don't log — allow retry next cycle
 
     async def test_returns_false_on_data_fetch_error(self):
+        from alerts_svc.digest import _send_org_digest
+
         with (
-            patch("alerts_svc.digest.settings") as mock_settings,
-            patch("alerts_svc.digest.should_send_digest", return_value=True),
             patch(
                 "alerts_svc.digest.was_digest_sent_recently",
                 AsyncMock(return_value=False),
@@ -350,8 +437,7 @@ class TestSendWeeklyDigest(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(side_effect=Exception("DB down")),
             ),
         ):
-            mock_settings.digest_enabled = True
-            result = await send_weekly_digest()
+            result = await _send_org_digest("org-1")
         self.assertFalse(result)
 
 

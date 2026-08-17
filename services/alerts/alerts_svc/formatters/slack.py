@@ -70,6 +70,7 @@ def format_slack(
     suppressed_count: int = 0,
     dedup_window: int = 3600,
     signal_id: int | None = None,
+    org_id: str | None = None,
 ) -> dict:
     """Block Kit payload for Slack Incoming Webhook."""
     severity = explanation.severity
@@ -180,6 +181,7 @@ def format_slack(
             "signal_id": signal_id,
             "agent_id": explanation.agent_id,
             "failure_type": explanation.failure_type,
+            "org_id": org_id,
         }
     )
 
@@ -214,6 +216,16 @@ def format_slack(
                     "action_id": "false_positive",
                     "value": _btn_val,
                     "style": "danger",
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Snooze 24h",
+                        "emoji": True,
+                    },
+                    "action_id": "snooze",
+                    "value": _btn_val,
                 },
             ],
         }

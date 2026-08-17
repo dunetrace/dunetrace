@@ -9,52 +9,89 @@ jobs:
   lint:
     name: Lint (Python)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      # Pin ruff to the pre-commit-config version so CI matches local linting.
+      # An unpinned `pip install ruff` pulls the latest release, whose newly
+      # stabilized rules fail CI on untouched code even when nothing changed.
+      - run: pip install ruff==0.15.11
       - run: ruff check .
       - run: ruff format --check .
+
+  docs-consistency:
+    name: Docs consistency (detectors)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The check imports dunetrace (detectors + packs) to read real names.
+      - run: pip install -e packages/sdk-py
+      # Fails if docs claim a detector/evaluator that doesn't exist in code.
+      - run: python scripts/validate_detector_docs.py
+      - run: python -m unittest scripts.test_validate_detector_docs
 
   sdk-py:
     name: SDK (Python)
     runs-on: ubuntu-latest
+    # Backstop against a hung test: the job can't burn the full 6h runner cap.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e "packages/sdk-py[dev]"
-      - run: python -m pytest packages/sdk-py/tests/ -v
-      - run: pip install mypy
+          # Key the pip cache on this job's actual dependency source so the
+          # heavy langchain/langgraph install is reused across runs instead of
+          # re-resolved every time (the other jobs already set this).
+          cache-dependency-path: packages/sdk-py/pyproject.toml
+      # dev extra provides mypy + pytest-timeout, so no separate installs needed.
+      - run: pip install -e "packages/sdk-py[dev,langchain]"
+      # Same Makefile target `make test` uses, so the two cannot disagree about
+      # which tests exist. PYTEST_ADDOPTS' --timeout kills (and dumps the stack
+      # of) any single test that hangs, so a deadlock fails in seconds with a
+      # named culprit instead of blocking the whole run for hours.
+      - name: Run tests
+        env:
+          PYTEST_ADDOPTS: --timeout=120
+        run: make test-sdk-py
       - run: python -m mypy packages/sdk-py/dunetrace/ --ignore-missing-imports --no-error-summary --config-file packages/sdk-py/pyproject.toml
 
   services:
     name: ${{ matrix.service }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         include:
           - service: ingest
-            pythonpath: packages/sdk-py:services/ingest
             requirements: services/ingest/requirements.txt
             extra: httpx pytest-asyncio
           - service: detector
-            pythonpath: packages/sdk-py:services/detector
             requirements: services/detector/requirements.txt
           - service: explainer
-            pythonpath: packages/sdk-py:services/explainer
             requirements: services/explainer/requirements.txt
           - service: alerts
-            pythonpath: packages/sdk-py:services/explainer:services/alerts
             requirements: services/alerts/requirements.txt
           - service: api
-            pythonpath: packages/sdk-py:services/explainer:services/api
             requirements: services/api/requirements.txt
+          # audit Finding 35: semantic + integrations were EXCLUDED from CI, which
+          # is why a broken requirements pin (F3) and packaging (F17) shipped
+          # undetected. They are now tested like every other service.
+          - service: semantic
+            requirements: services/semantic/requirements.txt
+            extra: pytest-asyncio
+          - service: integrations
+            requirements: services/integrations/requirements.txt
+            extra: pytest-asyncio
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -62,29 +99,37 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: ${{ matrix.requirements }}
-      - run: pip install -r ${{ matrix.requirements }} pytest pytest-asyncio ${{ matrix.extra || '' }}
+      - run: pip install -r ${{ matrix.requirements }} pytest pytest-asyncio pytest-timeout ${{ matrix.extra || '' }}
       - run: pip install -e packages/sdk-py
+      # Calls the Makefile target so PYTHONPATH has exactly ONE source of truth.
+      # Duplicating it here is what let this workflow drift and miss
+      # packages/schemas-py, which broke the moment services began importing
+      # dunetrace_schemas (migrations, key hashing, scopes).
+      # PYTEST_ADDOPTS keeps the timeout that kills and dumps the stack of any
+      # single hung test.
       - name: Run tests
         env:
-          PYTHONPATH: ${{ matrix.pythonpath }}
-        run: python -m pytest services/${{ matrix.service }}/tests/ -v
+          PYTEST_ADDOPTS: --timeout=120
+        run: make test-${{ matrix.service }}
 
   mcp-server:
     name: MCP Server
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e "packages/mcp-server" pytest mypy
-      - run: python -m pytest packages/mcp-server/tests/ -v
+      - run: pip install -e "packages/mcp-server" pytest pytest-timeout mypy
+      - run: python -m pytest packages/mcp-server/tests/ -v --timeout=120
       - run: python -m mypy packages/mcp-server/dunetrace_mcp/ --ignore-missing-imports --no-error-summary
 
   sdk-ts:
     name: SDK (TypeScript)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/sdk-ts
@@ -98,3 +143,16 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
+
+  # audit Finding 35: build every service image on PR. Previously images were only
+  # built on release tags, so broken Dockerfiles / unsatisfiable requirements
+  # (F3 semantic pip conflict, F4 alerts missing dep, F17 semantic missing SDK)
+  # shipped undetected until deploy. A build failure here now blocks the PR.
+  docker-build:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build all service images (no push)
+        run: docker compose build

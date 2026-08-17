@@ -8,6 +8,13 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=500]
       - id: check-merge-conflict
+      # audit Phase 10: block accidentally committed private keys and .env files.
+      # Excludes two files that document the GITHUB_APP_PRIVATE_KEY env-var format
+      # with a PEM-header placeholder (no key material) — the hook matches the
+      # header text, not real keys.
+      - id: detect-private-key
+        exclude: ^(\.env\.example|docs/integrations/github-app\.md)$
+      - id: check-case-conflict
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.11
@@ -29,8 +36,46 @@ repos:
           #        bandit cannot see through f-string construction of WHERE clauses
         files: ^(services|packages/sdk-py)/
 
+  # audit Phase 10 (Finding 36): secret scanning — catches hardcoded API keys /
+  # tokens / credentials before they're committed (the audit found plaintext key
+  # storage F5; this guards the source tree against committed secrets).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
   - repo: local
     hooks:
+      # audit Phase 10 (Finding 36): enforce the org_id-in-URL-path convention.
+      # scripts/check_endpoint_conventions.py existed but was wired nowhere; this
+      # is the tenant-isolation-drift guard referenced in api_svc/auth.py.
+      - id: endpoint-conventions
+        name: org_id-not-in-URL-path convention
+        language: system
+        entry: python scripts/check_endpoint_conventions.py
+        pass_filenames: false
+        files: ^services/.*/routers/.*\.py$
+
+      # Fail if the docs claim a detector/evaluator that doesn't exist in code
+      # (the drift that let README/marketing list unbuilt detectors). Runs when
+      # the detector-claim docs or the detector/evaluator/pack source change.
+      - id: validate-detector-docs
+        name: Detector/evaluator name consistency (docs vs code)
+        language: system
+        entry: python scripts/validate_detector_docs.py
+        pass_filenames: false
+        files: ^(README\.md|docs/.+\.md|packages/sdk-py/dunetrace/(detectors\.py|packs/.+\.py)|services/semantic/semantic_svc/evaluators/.+\.py)$
+
+      # Unit tests for the drift check itself — the same suite CI runs. Catches a
+      # stale expectation in the test (e.g. a newly-shipped detector not added to
+      # the expected-names list) locally instead of in CI.
+      - id: validate-detector-docs-test
+        name: Detector-docs drift check — unit tests
+        language: system
+        entry: python -m unittest scripts.test_validate_detector_docs
+        pass_filenames: false
+        files: ^(scripts/(validate_detector_docs|test_validate_detector_docs)\.py|packages/sdk-py/dunetrace/(detectors\.py|packs/.+\.py)|services/semantic/semantic_svc/evaluators/.+\.py)$
+
       - id: sdk-py-mypy
         name: SDK (Python) mypy
         language: system
@@ -51,3 +96,75 @@ repos:
         entry: python -m mypy packages/mcp-server/dunetrace_mcp/ --ignore-missing-imports --no-error-summary
         pass_filenames: false
         files: ^packages/mcp-server/.*\.py$
+
+      # Test hooks below call `make test-*` (services) so the PYTHONPATH for
+      # each service has exactly one source of truth — duplicating it here
+      # too is what let ci.yml's ingest PYTHONPATH silently drift and miss
+      # packages/schemas-py, which only mattered once ingest_svc/schemas.py
+      # started importing dunetrace_schemas. `files:` patterns cover every
+      # package a given suite actually depends on, not just its own service
+      # directory, so a change to a shared package still triggers the right
+      # tests.
+
+      - id: sdk-py-tests
+        name: SDK (Python) tests
+        language: system
+        entry: bash -c 'cd packages/sdk-py && python -m pytest tests/ -q'
+        pass_filenames: false
+        files: ^packages/sdk-py/.*\.py$
+
+      - id: schemas-py-tests
+        name: schemas-py tests
+        language: system
+        entry: make test-schemas
+        pass_filenames: false
+        files: ^packages/schemas-py/.*\.py$
+
+      - id: ingest-tests
+        name: Ingest service tests
+        language: system
+        entry: make test-ingest
+        pass_filenames: false
+        files: ^(services/ingest|packages/schemas-py|packages/sdk-py)/.*\.py$
+
+      - id: detector-tests
+        name: Detector service tests
+        language: system
+        entry: make test-detector
+        pass_filenames: false
+        files: ^(services/detector|packages/sdk-py)/.*\.py$
+
+      - id: explainer-tests
+        name: Explainer service tests
+        language: system
+        entry: make test-explainer
+        pass_filenames: false
+        files: ^(services/explainer|packages/sdk-py)/.*\.py$
+
+      - id: alerts-tests
+        name: Alerts service tests
+        language: system
+        entry: make test-alerts
+        pass_filenames: false
+        files: ^(services/alerts|services/explainer|packages/sdk-py)/.*\.py$
+
+      - id: api-tests
+        name: Customer API tests
+        language: system
+        entry: make test-api
+        pass_filenames: false
+        files: ^(services/api|services/explainer|packages/sdk-py)/.*\.py$
+
+      - id: mcp-tests
+        name: MCP server tests
+        language: system
+        entry: make test-mcp
+        pass_filenames: false
+        files: ^packages/mcp-server/.*\.py$
+
+      - id: sdk-ts-tests
+        name: SDK (TypeScript) tests
+        language: system
+        entry: make test-sdk-ts
+        pass_filenames: false
+        files: ^packages/sdk-ts/.*\.(ts|tsx)$

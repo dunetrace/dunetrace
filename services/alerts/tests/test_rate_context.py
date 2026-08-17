@@ -331,6 +331,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
             "severity": "HIGH",
             "run_id": f"run-{signal_id}",
             "agent_id": "agent-rc",
+            "org_id": "org-1",
             "agent_version": "v1",
             "step_index": 5,
             "confidence": 0.95,
@@ -351,7 +352,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
@@ -392,7 +393,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),
@@ -417,7 +418,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
@@ -441,7 +442,7 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()) as mock_mark,
@@ -471,13 +472,13 @@ class TestWorkerPollOnceRateContext(unittest.IsolatedAsyncioTestCase):
         rows = [self._make_row(1, "TOOL_LOOP"), self._make_row(2, "RETRY_STORM")]
         call_args_list = []
 
-        async def track_rc(agent_id, failure_type):
+        async def track_rc(org_id, agent_id, failure_type):
             call_args_list.append((agent_id, failure_type))
             return {}
 
         with (
             patch(
-                "alerts_svc.worker.fetch_unalerted_signals",
+                "alerts_svc.worker.claim_unalerted_signals",
                 AsyncMock(return_value=rows),
             ),
             patch("alerts_svc.worker.mark_alerted_batch", AsyncMock()),

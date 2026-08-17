@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Optional
 
 try:
@@ -34,6 +35,10 @@ async def init_pool() -> None:
         min_size=1,
         max_size=5,
         command_timeout=15,
+        # See ingest_svc/db/postgres.py::init_pool for why this is required —
+        # DATABASE_URL is Supabase's transaction-mode PgBouncer pooler, which
+        # is incompatible with asyncpg's default prepared-statement cache.
+        statement_cache_size=0,
     )
     logger.info("DB pool ready")
 
@@ -61,6 +66,11 @@ CREATE TABLE IF NOT EXISTS processed_runs (
     signal_count  INTEGER     NOT NULL DEFAULT 0,
     trigger       TEXT        NOT NULL   -- "completed" | "errored" | "stalled"
 );
+-- audit Finding 15: remember how many events a run had when we processed it, so
+-- late-arriving events (event count grew) trigger a re-detection instead of being
+-- silently ignored. Defaults to 0 for pre-existing rows (they'll reprocess once
+-- if any new event arrives, which is harmless — writes are deduped by run_id+type).
+ALTER TABLE processed_runs ADD COLUMN IF NOT EXISTS event_count INTEGER NOT NULL DEFAULT 0;
 
 -- Add shadow column to failure_signals if it doesn't exist.
 -- Shadow signals are stored but never sent to customers.
@@ -86,7 +96,7 @@ BEGIN
     END IF;
 END $$;
 
--- Persistent issue tracking: one row per (agent_id, failure_type) pair.
+-- Persistent issue tracking: one row per (org_id, agent_id, failure_type) triple.
 -- status: open | resolved | reopened
 -- clean_runs_since: consecutive runs with no signal of this type (reset to 0 on each hit).
 -- Resolved when clean_runs_since reaches CLEAN_RUNS_THRESHOLD (default 5).
@@ -129,6 +139,39 @@ CREATE TABLE IF NOT EXISTS custom_detector_results (
 CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
 
+-- Conversation modeling (Phase 3.1). A "run" has no other dedicated table
+-- anywhere in this codebase — it's just a run_id value shared across events/
+-- failure_signals rows — so this is genuinely new infrastructure, not a
+-- column bolted onto an existing table. conversation_id is nullable: every
+-- processed run gets a runs row regardless of whether the SDK's
+-- dt.run(conversation_id=...) was ever set, old runs and single-turn agents
+-- simply never get a conversations row or FK.
+CREATE TABLE IF NOT EXISTS conversations (
+    id            BIGSERIAL   PRIMARY KEY,
+    org_id        TEXT        NOT NULL,
+    agent_id      TEXT        NOT NULL,
+    user_id       TEXT,                     -- nullable, unpopulated for now — no SDK source exists yet
+    external_id   TEXT        NOT NULL,     -- the SDK's own conversation_id string
+    first_run_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_run_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    run_count     INTEGER     NOT NULL DEFAULT 0,
+    metadata      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (org_id, agent_id, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_org_agent ON conversations(org_id, agent_id);
+
+CREATE TABLE IF NOT EXISTS runs (
+    run_id          TEXT        PRIMARY KEY,
+    org_id          TEXT        NOT NULL,
+    agent_id        TEXT        NOT NULL,
+    agent_version   TEXT        NOT NULL,
+    conversation_id BIGINT      REFERENCES conversations(id),
+    started_at      TIMESTAMPTZ NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_runs_conversation ON runs(conversation_id) WHERE conversation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_runs_org_agent    ON runs(org_id, agent_id, started_at DESC);
+
 -- Performance indexes for baseline queries (processed_runs) and alert worker queries (failure_signals).
 CREATE INDEX IF NOT EXISTS idx_processed_runs_agent_version
     ON processed_runs(agent_id, agent_version, processed_at DESC);
@@ -136,6 +179,217 @@ CREATE INDEX IF NOT EXISTS idx_processed_runs_agent_version
 CREATE INDEX IF NOT EXISTS idx_failure_signals_agent_shadow_alerted
     ON failure_signals(agent_id, shadow, alerted, detected_at DESC);
 """
+
+# ── Multi-tenancy unification (v0.5.0) ──────────────────────────────────────────
+#
+# processed_runs/issues/custom_detectors/custom_detector_results all gain org_id.
+# Unlike ingest_svc, this service doesn't own api_keys — org_id is backfilled by
+# joining through events.org_id (agent_id -> most-recent org_id seen for that
+# agent), which ingest_svc's own migration guarantees is populated and NOT NULL.
+#
+# Startup-order hazard: docker-compose starts detector only after ingest has
+# *started* (service_started, not "migration complete"), so it's possible for
+# this service's first startup to race ingest's. If events.org_id doesn't exist
+# yet, the backfill/NOT NULL step is skipped this run and retried on the next
+# restart — every ensure_*_schema() call is idempotent, so this converges
+# without operator action once ingest's migration has actually run.
+_MULTI_TENANCY_DDL = """
+ALTER TABLE processed_runs        ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE issues                ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE custom_detectors      ADD COLUMN IF NOT EXISTS org_id TEXT;
+ALTER TABLE custom_detector_results ADD COLUMN IF NOT EXISTS org_id TEXT;
+"""
+
+_ORG_BACKFILL_TABLES_BY_AGENT = ("issues", "custom_detectors", "custom_detector_results")
+
+# ── Pack activation (Phase 1.0) ─────────────────────────────────────────────────
+#
+# packs is a small, Dunetrace-owned lookup table (which detector-pack classes
+# exist) — org_enabled_packs is the per-org activation side table, following
+# the same org_id-TEXT-no-FK convention every other org-scoped table in this
+# codebase uses (org_github_integrations, org_alert_integrations, etc.) rather
+# than a FK to organizations(id), which is itself TEXT (e.g. the literal
+# string 'default' in dev mode), not the uuid the original spec assumed.
+# pack_name DOES FK to packs(name) — that's Dunetrace's own small, rarely-
+# changing registry, not customer-controlled data, so the same "don't FK
+# across service/tenant boundaries" reasoning doesn't apply to it.
+_PACKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS packs (
+    name           TEXT         PRIMARY KEY,
+    description    TEXT         NOT NULL,
+    detector_names TEXT[]       NOT NULL DEFAULT '{}',
+    added_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS org_enabled_packs (
+    org_id      TEXT         NOT NULL,
+    pack_name   TEXT         NOT NULL REFERENCES packs(name),
+    enabled_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    enabled_by  TEXT,
+    PRIMARY KEY (org_id, pack_name)
+);
+CREATE INDEX IF NOT EXISTS idx_org_enabled_packs_org ON org_enabled_packs(org_id);
+"""
+
+# Per-run state metrics (Capability 3, Phase 3.3). One row per (run, state);
+# api_svc reads these to build cross-run state analytics. run_started_at is when
+# the run happened (from run.started), so trends bucket by run time, not compute
+# time. org_id TEXT NOT NULL, no FK — same convention as every org-scoped table.
+_RUN_STATE_METRICS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_state_metrics (
+    run_id         TEXT         NOT NULL,
+    org_id         TEXT         NOT NULL,
+    agent_id       TEXT         NOT NULL,
+    state          TEXT         NOT NULL,
+    total_ms       BIGINT       NOT NULL,
+    segment_count  INT          NOT NULL,
+    run_started_at TIMESTAMPTZ,
+    computed_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (run_id, state)
+);
+CREATE INDEX IF NOT EXISTS idx_rsm_agent
+    ON run_state_metrics(org_id, agent_id, run_started_at);
+"""
+
+# Per-shard poll watermark. Without it the run-discovery queries have no lower
+# time bound, so every 5s poll rescans every terminal event in the whole
+# retention window and anti-joins it against processed_runs — work proportional
+# to total history rather than to new runs. It also makes `events`' monthly
+# partitioning useless for the hottest queries in the system: the partition key
+# is received_at, and a predicate that never mentions received_at can't prune.
+#
+# NULL watermark means "never drained" and reproduces the original unbounded
+# scan, so a fresh install (or one migrating in) picks up all pending history on
+# its first poll and only then starts bounding. One row per shard because shards
+# progress independently.
+#
+# Keyed by (shard_count, shard_index), NOT shard_index alone. Which agents a
+# shard owns is a function of BOTH — `hashtext(agent_id) % shard_count` — so a
+# resize reshuffles ownership. Keyed by index alone, a shard that inherited new
+# agents on a resize kept the watermark it earned under the old topology and
+# skipped every one of their runs older than that bound, permanently and
+# silently. Under the composite key a resize simply presents as "never drained"
+# for the new topology, which reproduces the safe unbounded first scan.
+# Bounded retry for a run whose processing raised.
+#
+# The failure path used to write processed_runs(signal_count=0) — a permanent
+# "clean run" verdict that nothing can revisit, because a completed run never
+# gains events and so never re-enters the poll. process_run's guarded block is
+# not pure computation (seven baseline queries, a detector lookup, a parent
+# fetch, a lineage walk, all against a 5-connection pool), so one Postgres blip
+# silently discarded detection for every run in flight while the dashboard
+# showed them green.
+#
+# Leaving the run unmarked instead means it is retried on the next poll. This
+# table bounds that: a run that fails MAX_PROCESSING_ATTEMPTS times is marked
+# processed with the error recorded, so a deterministically-bad run cannot spin
+# forever and is still visible as failed rather than clean.
+_RUN_FAILURE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_processing_failures (
+    run_id           TEXT        PRIMARY KEY,
+    attempts         INT         NOT NULL DEFAULT 1,
+    last_error       TEXT,
+    last_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE processed_runs ADD COLUMN IF NOT EXISTS processing_error TEXT;
+"""
+
+_WATERMARK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS detector_watermarks (
+    shard_index  INT         NOT NULL,
+    shard_count  INT         NOT NULL DEFAULT 1,
+    watermark    TIMESTAMPTZ,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (shard_count, shard_index)
+);
+ALTER TABLE detector_watermarks ADD COLUMN IF NOT EXISTS shard_count INT NOT NULL DEFAULT 1;
+"""
+
+
+async def _backfill_org_id(conn) -> None:
+    """See module docstring above. No-ops (leaves org_id nullable) until
+    events.org_id exists and is populated."""
+    events_ready = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'events' AND column_name = 'org_id'
+        )
+        """
+    )
+    if not events_ready:
+        logger.warning(
+            "Multi-tenancy backfill deferred: events.org_id doesn't exist yet "
+            "(ingest_svc migration hasn't run). Will retry on next restart."
+        )
+        return
+
+    # processed_runs has run_id, which maps 1:1 to events.run_id — exact join,
+    # no ambiguity possible (every event in a run shares one org_id by construction).
+    await conn.execute(
+        """
+        UPDATE processed_runs pr
+        SET org_id = e.org_id
+        FROM (SELECT DISTINCT run_id, org_id FROM events) e
+        WHERE pr.run_id = e.run_id AND pr.org_id IS NULL
+        """
+    )
+    await conn.execute("UPDATE processed_runs SET org_id = 'default' WHERE org_id IS NULL")
+    await conn.execute("ALTER TABLE processed_runs ALTER COLUMN org_id SET NOT NULL")
+
+    # issues/custom_detectors/custom_detector_results have no run_id — backfill by
+    # agent_id's most-recently-seen org in events. Ambiguous agent_ids (same
+    # agent_id used by >1 org — only possible pre-migration) fall back to 'default'.
+    for table in _ORG_BACKFILL_TABLES_BY_AGENT:
+        await conn.execute(
+            f"""
+            UPDATE {table} t
+            SET org_id = e.org_id
+            FROM (
+                SELECT DISTINCT ON (agent_id) agent_id, org_id
+                FROM events
+                ORDER BY agent_id, received_at DESC
+            ) e
+            WHERE t.agent_id = e.agent_id AND t.org_id IS NULL
+            """
+        )
+        await conn.execute(f"UPDATE {table} SET org_id = 'default' WHERE org_id IS NULL")
+        await conn.execute(f"ALTER TABLE {table} ALTER COLUMN org_id SET NOT NULL")
+
+    # issues' UNIQUE constraint must widen to include org_id, or two orgs with an
+    # identically-named agent_id + failure_type would collide.
+    await conn.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'issues_agent_id_failure_type_key'
+            ) THEN
+                ALTER TABLE issues DROP CONSTRAINT issues_agent_id_failure_type_key;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'issues_org_agent_failure_type_key'
+            ) THEN
+                ALTER TABLE issues
+                    ADD CONSTRAINT issues_org_agent_failure_type_key
+                    UNIQUE (org_id, agent_id, failure_type);
+            END IF;
+        END $$;
+        """
+    )
+
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_processed_runs_org_agent_version "
+        "ON processed_runs(org_id, agent_id, agent_version, processed_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issues_org_agent ON issues(org_id, agent_id)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_custom_detectors_org_agent "
+        "ON custom_detectors(org_id, agent_id, status)"
+    )
+
 
 # Detectors that have graduated out of shadow mode.
 # Add a detector name here ONLY after verifying precision > 80% on real data.
@@ -158,15 +412,73 @@ LIVE_DETECTORS: set[str] = {
     "REASONING_STALL",
     "COST_SPIKE",
     "SESSION_LATENCY",
+    "PREMATURE_TERMINATION",
+    "UNREAD_TOOL_ERROR",
+    "TOOL_ARGUMENT_FABRICATION",
+    "RETRIEVED_CONTENT_INJECTION",
+    "HANDOFF_CONTEXT_LOSS",
+    "RUNAWAY_ITERATION",
+    "EXCESSIVE_RETRIEVAL",
+    "SILENT_TRUNCATION",
+    "AGENT_HANDOFF_FAILURE",
+    "MODEL_FALLBACK_DRIFT",
+    "MEMORY_POISONING",
+    "DELEGATION_LOOP",
 }
 
 
 async def ensure_detector_schema() -> None:
+    """Bring the SHARED schema up to date first, then this service's own tables.
+
+    Migrations own every definition more than one service touches, so this runs
+    before the local DDL below — booting detector against an empty database used
+    to crash on a table another service happened to create first.
+    """
+    from dunetrace_schemas.migrations import apply_migrations
+
+    if _pool:
+        async with _pool.acquire() as _c:
+            await apply_migrations(_c)
+
     if not _pool:
         return
     async with _pool.acquire() as conn:
         await conn.execute(_DETECTOR_SCHEMA)
+        await conn.execute(_MULTI_TENANCY_DDL)
+        await _backfill_org_id(conn)
+        await conn.execute(_PACKS_SCHEMA)
+        await _seed_packs(conn)
+        await conn.execute(_RUN_STATE_METRICS_SCHEMA)
+        await conn.execute(_WATERMARK_SCHEMA)
+        await conn.execute(_RUN_FAILURE_SCHEMA)
     logger.info("Detector schema ready")
+
+
+async def _seed_packs(conn) -> None:
+    """Registers every currently-imported DetectorPack into the packs table.
+    Idempotent (ON CONFLICT DO NOTHING on name) — safe to call on every
+    startup, including ones where a pack's description or detector list
+    changed: those get picked up via the explicit UPDATE below rather than
+    silently staying stale, since a pack is Dunetrace-owned code, not
+    customer data."""
+    from dunetrace.packs import PACK_REGISTRY  # import here: avoids a hard
+
+    # dependency from db.py's module-load time on the packs subpackage having
+    # finished registering everything yet (packs register on import, and
+    # detector_svc/detectors.py is what actually imports dunetrace.packs).
+    for pack in PACK_REGISTRY.values():
+        await conn.execute(
+            """
+            INSERT INTO packs (name, description, detector_names)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (name) DO UPDATE
+                SET description = EXCLUDED.description,
+                    detector_names = EXCLUDED.detector_names
+            """,
+            pack.name,
+            pack.description,
+            [d.__name__ for d in pack.detectors],
+        )
 
 
 # ── Reads ──────────────────────────────────────────────────────────────────────
@@ -179,6 +491,7 @@ _MIN_BASELINE_RUNS = 20
 
 
 async def fetch_step_count_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -191,6 +504,10 @@ async def fetch_step_count_baseline(
 
     Errored runs are excluded — early-exit errors pull P75 down and cause STEP_COUNT_INFLATION
     to fire on runs that took a perfectly normal number of steps for a complex task.
+
+    org_id is required: agent_id/agent_version are not guaranteed unique across
+    orgs, so without it a baseline could mix in another org's identically-named
+    agent's history.
     """
     if not _pool:
         return None
@@ -203,16 +520,17 @@ async def fetch_step_count_baseline(
                 -- not runs that errored out at step 1-2.
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             step_counts AS (
                 SELECT MAX(e.step_index) AS step_count
@@ -225,6 +543,7 @@ async def fetch_step_count_baseline(
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY step_count)     AS p75
             FROM step_counts
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -237,6 +556,7 @@ async def fetch_step_count_baseline(
 
 
 async def fetch_latency_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -251,7 +571,7 @@ async def fetch_latency_baseline(
 
     Used by SlowStepDetector to replace the hard-coded 15s/30s thresholds with a
     per-agent learned baseline.  Returns None when fewer than ``min_runs`` runs have
-    at least one matching event.
+    at least one matching event. org_id required — see fetch_step_count_baseline.
     """
     if not _pool:
         return None
@@ -262,16 +582,17 @@ async def fetch_latency_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             event_gaps AS (
                 SELECT
@@ -282,7 +603,7 @@ async def fetch_latency_baseline(
                     ) - e.timestamp) * 1000.0 AS gap_ms
                 FROM events e
                 WHERE e.run_id IN (SELECT run_id FROM recent)
-                  AND e.event_type = $5
+                  AND e.event_type = $6
             )
             SELECT
                 COUNT(DISTINCT run_id)                                              AS sample_size,
@@ -291,6 +612,7 @@ async def fetch_latency_baseline(
             WHERE gap_ms >= 0
               AND gap_ms IS NOT NULL
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -377,6 +699,7 @@ async def fetch_per_tool_latency_baselines(
 
 
 async def fetch_token_growth_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -400,16 +723,17 @@ async def fetch_token_growth_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             token_data AS (
                 SELECT
@@ -440,6 +764,7 @@ async def fetch_token_growth_baseline(
                 )                                                                           AS p75
             FROM run_growth
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -452,6 +777,7 @@ async def fetch_token_growth_baseline(
 
 
 async def fetch_llm_tool_ratio_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -474,16 +800,17 @@ async def fetch_llm_tool_ratio_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             run_counts AS (
                 SELECT
@@ -502,6 +829,7 @@ async def fetch_llm_tool_ratio_baseline(
                 )                                                                               AS p75
             FROM run_counts
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -514,6 +842,7 @@ async def fetch_llm_tool_ratio_baseline(
 
 
 async def fetch_total_tokens_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -536,16 +865,17 @@ async def fetch_total_tokens_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             run_tokens AS (
                 -- prompt_tokens may be in llm.called (direct SDK) or llm.responded (LangChain);
@@ -567,6 +897,7 @@ async def fetch_total_tokens_baseline(
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY total_tokens)       AS p75
             FROM run_tokens
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -579,6 +910,7 @@ async def fetch_total_tokens_baseline(
 
 
 async def fetch_duration_baseline(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
@@ -601,16 +933,17 @@ async def fetch_duration_baseline(
             WITH recent AS (
                 SELECT pr.run_id
                 FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
                   AND EXISTS (
                       SELECT 1 FROM events e
                       WHERE e.run_id = pr.run_id
                         AND e.event_type = 'run.completed'
                   )
                 ORDER BY pr.processed_at DESC
-                LIMIT $4
+                LIMIT $5
             ),
             run_durations AS (
                 SELECT
@@ -626,6 +959,7 @@ async def fetch_duration_baseline(
                 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY duration_s)         AS p75
             FROM run_durations
             """,
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
@@ -637,37 +971,175 @@ async def fetch_duration_baseline(
     return float(row["p75"]) if row["p75"] is not None else None
 
 
+async def prune_processed_runs(batch_size: int = 10_000) -> int:
+    """Delete processed_runs rows whose events are already gone. Returns the count.
+
+    `processed_runs` is one row per run, forever — nothing pruned it, while
+    `events` drops partitions at EVENT_RETENTION_DAYS. It's also the anti-join
+    target in fetch_completed_runs, so unbounded growth directly slows the
+    hottest query in the service.
+
+    The ordering constraint is the subtle part: a processed_runs row may only be
+    deleted once its run's events are gone. Delete it while the events remain and
+    the run looks unprocessed again — the detector re-runs every detector against
+    it and writes a second full set of duplicate signals.
+
+    Rather than couple this to ingest_svc's EVENT_RETENTION_DAYS (a value this
+    service doesn't own and could disagree with), the NOT EXISTS makes the
+    invariant hold by construction whatever retention is actually configured.
+
+    Candidates are chosen by that same absence-of-events test rather than by a
+    `processed_at` age bound. `processed_at` records when a run was last
+    *analysed*, not when it happened, and it is refreshed every time late events
+    trigger a re-detection — so an age bound over it never expires rows for runs
+    that were re-processed recently but whose events aged out long ago. That left
+    314 permanently unprunable rows here, each rendering as a hollow entry in the
+    run list. Selecting on event absence directly also guarantees every pass makes
+    progress; an age-bounded pass could return a full batch of rows that all still
+    have events and delete nothing.
+    """
+    if not _pool:
+        return 0
+    async with _pool.acquire() as conn:
+        deleted = await conn.fetchval(
+            """
+            WITH doomed AS (
+                SELECT pr.run_id
+                FROM processed_runs pr
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM events e WHERE e.run_id = pr.run_id
+                )
+                LIMIT $1
+            ),
+            removed AS (
+                DELETE FROM processed_runs p
+                USING doomed d
+                WHERE p.run_id = d.run_id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM events e WHERE e.run_id = p.run_id
+                  )
+                RETURNING 1
+            )
+            SELECT count(*) FROM removed
+            """,
+            batch_size,
+        )
+    return int(deleted or 0)
+
+
+async def get_watermark(shard_index: int, shard_count: int = 1) -> Optional[datetime]:
+    """This shard's poll watermark, or None if it has never fully drained.
+
+    None deliberately reproduces the unbounded scan — see _WATERMARK_SCHEMA. It's
+    the correct behaviour for a first poll (there may be arbitrarily old pending
+    work) and it self-corrects after one drained cycle.
+    """
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT watermark FROM detector_watermarks WHERE shard_index = $1 AND shard_count = $2",
+            shard_index,
+            shard_count,
+        )
+
+
+async def advance_watermark(shard_index: int, grace_secs: float, shard_count: int = 1) -> None:
+    """Move this shard's watermark up to NOW() - grace_secs.
+
+    `grace_secs` is the re-scan overlap: events that landed in the last
+    grace_secs stay inside the next poll's window, which covers a run whose
+    terminal event is written a moment after its earlier events and, more
+    importantly, keeps the late-event re-detection path (see
+    fetch_completed_runs) working for anything arriving within the window.
+
+    GREATEST means the watermark only ever moves forward, so a concurrent poll
+    or a clock adjustment can't drag it backwards into a wider scan.
+
+    Call this ONLY after a poll that drained its backlog. Advancing while runs
+    are still queued would move the window past unprocessed work — those runs
+    would never be detected.
+    """
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO detector_watermarks (shard_index, shard_count, watermark, updated_at)
+            VALUES ($1, $3, NOW() - ($2 || ' seconds')::INTERVAL, NOW())
+            ON CONFLICT (shard_count, shard_index) DO UPDATE
+            SET watermark  = GREATEST(
+                    detector_watermarks.watermark,
+                    NOW() - ($2 || ' seconds')::INTERVAL
+                ),
+                updated_at = NOW()
+            """,
+            shard_index,
+            str(grace_secs),
+            shard_count,
+        )
+
+
 async def fetch_completed_runs(
     limit: int,
     shard_count: int = 1,
     shard_index: int = 0,
+    watermark: Optional[datetime] = None,
 ) -> list[dict]:
     """Runs with a terminal event (run.completed or run.errored) that haven't been processed yet.
 
     When shard_count > 1 each worker instance claims only the runs whose agent_id
     hashes to its bucket: abs(hashtext(agent_id)) % shard_count = shard_index.
     shard_count=1 (default) bypasses the filter entirely.
+
+    `watermark` bounds the scan to runs touched by an event newer than it, which
+    is what lets Postgres prune `events` partitions instead of walking the whole
+    retention window on every poll. None = unbounded (first poll after install).
+
+    The bound is deliberately expressed as "runs with a recent event" rather than
+    "terminal events that are recent". Those differ for the late-event
+    re-detection path: a straggler event on an old run arrives with a *new*
+    received_at but its run's terminal event is old, so filtering on the terminal
+    event's timestamp would silently stop re-detecting those runs. Selecting the
+    run_id set first keeps that path intact while still pruning.
+
+    Intentionally not org_id-scoped: this worker processes every org's runs in one
+    poll loop (sharding is by agent_id hash bucket, not by org). org_id is returned
+    per-row so the caller can propagate it into processed_runs/failure_signals/issues.
     """
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
+            WITH touched AS (
+                SELECT DISTINCT run_id
+                FROM events
+                WHERE ($4::timestamptz IS NULL OR received_at > $4::timestamptz)
+                  AND ($2::int = 1 OR abs(hashtext(agent_id)) % $2 = $3)
+            )
             SELECT DISTINCT ON (e.run_id)
                 e.run_id,
                 e.agent_id,
                 e.agent_version,
+                e.org_id,
                 e.event_type AS trigger
             FROM events e
+            JOIN touched t ON t.run_id = e.run_id
             WHERE e.event_type IN ('run.completed', 'run.errored')
-              AND NOT EXISTS (
-                  SELECT 1 FROM processed_runs p WHERE p.run_id = e.run_id
+              AND (
+                  -- not yet processed …
+                  NOT EXISTS (SELECT 1 FROM processed_runs p WHERE p.run_id = e.run_id)
+                  -- … OR processed, but new events arrived since (audit Finding 15:
+                  -- late events must trigger a re-detection, not be dropped).
+                  OR (SELECT count(*) FROM events e2 WHERE e2.run_id = e.run_id)
+                     > (SELECT p.event_count FROM processed_runs p WHERE p.run_id = e.run_id)
               )
-              AND ($2::int = 1 OR abs(hashtext(e.agent_id)) % $2 = $3)
             ORDER BY e.run_id, e.received_at ASC
             LIMIT $1
             """,
             limit,
             shard_count,
             shard_index,
+            watermark,
         )
     return [dict(r) for r in rows]
 
@@ -677,10 +1149,22 @@ async def fetch_stalled_runs(
     limit: int,
     shard_count: int = 1,
     shard_index: int = 0,
+    watermark: Optional[datetime] = None,
 ) -> list[dict]:
     """Runs that started, never completed, and haven't received a new event in stall_timeout_secs — likely agents stuck mid-run.
 
     When shard_count > 1 only the runs whose agent_id hashes to shard_index are returned.
+    Not org_id-scoped — see fetch_completed_runs.
+
+    `watermark` bounds the driving `run.started` scan the same way
+    fetch_completed_runs is bounded; None = unbounded. Bounding is safe here even
+    though a stalled run's `run.started` ages out of the window: a run becomes
+    stall-eligible stall_timeout_secs after its last event (90s by default), which
+    is orders of magnitude inside the grace window, so it is always caught while
+    still visible. The one case that could outrun the window — the worker being
+    down longer than the grace period — is covered because the watermark is
+    persisted and only advances on a drained poll, so downtime leaves it behind
+    rather than skipping past the backlog.
     """
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
@@ -689,9 +1173,11 @@ async def fetch_stalled_runs(
                 e.run_id,
                 e.agent_id,
                 e.agent_version,
+                e.org_id,
                 'stalled' AS trigger
             FROM events e
             WHERE e.event_type = 'run.started'
+              AND ($5::timestamptz IS NULL OR e.received_at > $5::timestamptz)
               AND NOT EXISTS (
                   SELECT 1 FROM events t
                   WHERE t.run_id = e.run_id
@@ -712,8 +1198,32 @@ async def fetch_stalled_runs(
             limit,
             shard_count,
             shard_index,
+            watermark,
         )
     return [dict(r) for r in rows]
+
+
+async def fetch_run_lineage(run_id: str) -> Optional[dict]:
+    """One lightweight lineage row for a run — its identity and immediate parent,
+    read from `run.started` — without pulling the run's full event list.
+
+    Used to walk a delegation graph's parent_run_id chain one hop at a time
+    (see run_graph.py / the DELEGATION_LOOP detector), where fetching every
+    event of every ancestor would be wasteful — only agent_id + parent_run_id
+    are needed per hop. Returns None if the run has no `run.started` on record.
+    """
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT run_id, agent_id, agent_version, parent_run_id
+            FROM events
+            WHERE run_id = $1 AND event_type = 'run.started'
+            ORDER BY step_index ASC, timestamp ASC
+            LIMIT 1
+            """,
+            run_id,
+        )
+    return dict(row) if row else None
 
 
 async def fetch_run_events(run_id: str) -> list[dict]:
@@ -723,7 +1233,7 @@ async def fetch_run_events(run_id: str) -> list[dict]:
             """
             SELECT
                 event_type, run_id, agent_id, agent_version,
-                step_index, timestamp, payload, parent_run_id
+                step_index, timestamp, payload, parent_run_id, conversation_id
             FROM events
             WHERE run_id = $1
             ORDER BY step_index ASC, timestamp ASC
@@ -744,8 +1254,14 @@ async def fetch_run_events(run_id: str) -> list[dict]:
 # ── Writes ─────────────────────────────────────────────────────────────────────
 
 
-async def write_signals(signals: list, shadow: bool) -> int:
-    """Write FailureSignal objects to failure_signals. shadow=True stores them without alerting. Returns row count written."""
+async def write_signals(signals: list, shadow: bool, org_id: str) -> int:
+    """Write FailureSignal objects to failure_signals. shadow=True stores them without alerting. Returns row count written.
+
+    org_id is a parameter, not a field on FailureSignal — that dataclass is shared
+    with the SDK (packages/sdk-py/dunetrace/models.py), which has no concept of
+    org_id. All signals in one call come from processing a single run, which
+    belongs to exactly one org.
+    """
     if not signals:
         return 0
 
@@ -761,6 +1277,7 @@ async def write_signals(signals: list, shadow: bool) -> int:
             json.dumps(s.evidence),
             shadow,
             s.co_signal_count,
+            org_id,
         )
         for s in signals
     ]
@@ -770,31 +1287,159 @@ async def write_signals(signals: list, shadow: bool) -> int:
             """
             INSERT INTO failure_signals
                 (failure_type, severity, run_id, agent_id, agent_version,
-                 step_index, confidence, evidence, shadow, co_signal_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+                 step_index, confidence, evidence, shadow, co_signal_count, org_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
             """,
             rows,
         )
     return len(rows)
 
 
+# A run gets this many detection attempts before it is written off. Three
+# covers a transient pool timeout or a restart mid-run without letting a
+# genuinely undetectable run be retried on every poll forever.
+MAX_PROCESSING_ATTEMPTS = 3
+
+
+async def record_processing_failure(run_id: str, error: str) -> int:
+    """Count this failed attempt and return the running total."""
+    if not _pool:
+        return MAX_PROCESSING_ATTEMPTS
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO run_processing_failures (run_id, attempts, last_error)
+            VALUES ($1, 1, $2)
+            ON CONFLICT (run_id) DO UPDATE
+                SET attempts        = run_processing_failures.attempts + 1,
+                    last_error      = EXCLUDED.last_error,
+                    last_attempt_at = NOW()
+            RETURNING attempts
+            """,
+            run_id,
+            error[:2000],
+        )
+
+
+async def clear_processing_failures(run_id: str) -> None:
+    """Called after a run finally processes, so a transient blip leaves nothing
+    behind and the next failure starts its budget fresh."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute("DELETE FROM run_processing_failures WHERE run_id = $1", run_id)
+
+
 async def mark_run_processed(
-    run_id: str, agent_id: str, agent_version: str, trigger: str, signal_count: int
+    run_id: str,
+    agent_id: str,
+    agent_version: str,
+    trigger: str,
+    signal_count: int,
+    org_id: str,
+    event_count: int = 0,
+    processing_error: str = "",
 ) -> None:
-    """Record that this run has been processed. Prevents double-processing."""
+    """Record that this run has been processed. On a reprocess (audit Finding 15,
+    late events grew the count) UPDATE the stored event_count/signal_count so the
+    run isn't re-fetched forever."""
     async with _pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO processed_runs
-                (run_id, agent_id, agent_version, trigger, signal_count)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (run_id) DO NOTHING
+                (run_id, agent_id, agent_version, trigger, signal_count, org_id,
+                 event_count, processing_error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''))
+            ON CONFLICT (run_id) DO UPDATE
+                SET signal_count     = processed_runs.signal_count + EXCLUDED.signal_count,
+                    event_count      = EXCLUDED.event_count,
+                    processing_error = EXCLUDED.processing_error,
+                    processed_at     = NOW()
             """,
             run_id,
             agent_id,
             agent_version,
             trigger,
             signal_count,
+            org_id,
+            event_count,
+            processing_error,
+        )
+
+
+async def fetch_run_state(run_id: str) -> Optional[dict]:
+    """Return {'event_count', 'signal_types'} for a run's prior processing, or
+    None if never processed. `signal_types` is the set of failure_type values
+    already stored for the run — used to make re-detection additive (Finding 15):
+    we only write failure types not already recorded, so a reprocess never
+    duplicates a signal or re-alerts an existing one."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        prow = await conn.fetchrow(
+            "SELECT event_count FROM processed_runs WHERE run_id = $1", run_id
+        )
+        if prow is None:
+            return None
+        types = await conn.fetch(
+            "SELECT DISTINCT failure_type FROM failure_signals WHERE run_id = $1", run_id
+        )
+    return {
+        "event_count": prow["event_count"],
+        "signal_types": {t["failure_type"] for t in types},
+    }
+
+
+# ── Conversation modeling (Phase 3.1) ────────────────────────────────────────────
+
+
+async def upsert_run_and_conversation(
+    run_id: str,
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    started_at: float,
+    conversation_external_id: Optional[str],
+) -> None:
+    """Registers this run in the runs registry — called once per processed
+    run, regardless of whether conversation_id was ever set. When it was,
+    also upserts the owning conversation (creating it on first sight, else
+    bumping run_count/last_run_at) and links the run to its internal id.
+    ON CONFLICT DO NOTHING on runs mirrors mark_run_processed's own
+    idempotency guarantee — a run is only ever processed once under normal
+    operation."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        conversation_pk = None
+        if conversation_external_id:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO conversations (org_id, agent_id, external_id, run_count)
+                VALUES ($1, $2, $3, 1)
+                ON CONFLICT (org_id, agent_id, external_id) DO UPDATE
+                    SET last_run_at = NOW(),
+                        run_count   = conversations.run_count + 1
+                RETURNING id
+                """,
+                org_id,
+                agent_id,
+                conversation_external_id,
+            )
+            conversation_pk = row["id"]
+
+        await conn.execute(
+            """
+            INSERT INTO runs (run_id, org_id, agent_id, agent_version, conversation_id, started_at)
+            VALUES ($1, $2, $3, $4, $5, to_timestamp($6))
+            ON CONFLICT (run_id) DO NOTHING
+            """,
+            run_id,
+            org_id,
+            agent_id,
+            agent_version,
+            conversation_pk,
+            started_at,
         )
 
 
@@ -803,16 +1448,16 @@ async def mark_run_processed(
 CLEAN_RUNS_THRESHOLD = 5  # consecutive clean runs before an issue is marked resolved
 
 
-async def upsert_fired_issues(agent_id: str, fired_types: list[str]) -> None:
+async def upsert_fired_issues(org_id: str, agent_id: str, fired_types: list[str]) -> None:
     """For each failure type that fired this run: open a new issue or reopen/update an existing one."""
     if not fired_types or not _pool:
         return
     async with _pool.acquire() as conn:
         await conn.executemany(
             """
-            INSERT INTO issues (agent_id, failure_type, status, affected_runs, clean_runs_since)
-            VALUES ($1, $2, 'open', 1, 0)
-            ON CONFLICT (agent_id, failure_type) DO UPDATE
+            INSERT INTO issues (org_id, agent_id, failure_type, status, affected_runs, clean_runs_since)
+            VALUES ($1, $2, $3, 'open', 1, 0)
+            ON CONFLICT (org_id, agent_id, failure_type) DO UPDATE
                 SET last_seen        = NOW(),
                     affected_runs    = issues.affected_runs + 1,
                     clean_runs_since = 0,
@@ -825,11 +1470,11 @@ async def upsert_fired_issues(agent_id: str, fired_types: list[str]) -> None:
                         ELSE issues.resolved_at
                     END
             """,
-            [(agent_id, ft) for ft in fired_types],
+            [(org_id, agent_id, ft) for ft in fired_types],
         )
 
 
-async def advance_clean_runs(agent_id: str, fired_types: list[str]) -> None:
+async def advance_clean_runs(org_id: str, agent_id: str, fired_types: list[str]) -> None:
     """For open/reopened issues that did NOT fire this run: increment clean counter, resolve if threshold reached."""
     if not _pool:
         return
@@ -839,25 +1484,30 @@ async def advance_clean_runs(agent_id: str, fired_types: list[str]) -> None:
             UPDATE issues
             SET clean_runs_since = clean_runs_since + 1,
                 status      = CASE
-                    WHEN clean_runs_since + 1 >= $3 THEN 'resolved'
+                    WHEN clean_runs_since + 1 >= $4 THEN 'resolved'
                     ELSE status
                 END,
                 resolved_at = CASE
-                    WHEN clean_runs_since + 1 >= $3 THEN NOW()
+                    WHEN clean_runs_since + 1 >= $4 THEN NOW()
                     ELSE resolved_at
                 END
-            WHERE agent_id    = $1
+            WHERE org_id      = $1
+              AND agent_id    = $2
               AND status      IN ('open', 'reopened')
-              AND ($2::text[] IS NULL OR failure_type != ALL($2::text[]))
+              AND ($3::text[] IS NULL OR failure_type != ALL($3::text[]))
             """,
+            org_id,
             agent_id,
             fired_types or None,
             CLEAN_RUNS_THRESHOLD,
         )
 
 
-async def fetch_custom_detectors(agent_id: str) -> list[dict]:
-    """Load active and shadow custom detectors for the given agent_id (plus '*' wildcards)."""
+async def fetch_custom_detectors(org_id: str, agent_id: str) -> list[dict]:
+    """Load active and shadow custom detectors for the given org_id + agent_id (plus '*' wildcards).
+
+    A '*' wildcard applies to all agents within org_id — never across orgs.
+    """
     if not _pool:
         return []
     async with _pool.acquire() as conn:
@@ -865,10 +1515,12 @@ async def fetch_custom_detectors(agent_id: str) -> list[dict]:
             """
             SELECT id, name, config_json, status
             FROM custom_detectors
-            WHERE (agent_id = $1 OR agent_id = '*')
+            WHERE org_id = $1
+              AND (agent_id = $2 OR agent_id = '*')
               AND status IN ('shadow', 'active')
             ORDER BY id
             """,
+            org_id,
             agent_id,
         )
     return [
@@ -886,10 +1538,12 @@ async def fetch_custom_detectors(agent_id: str) -> list[dict]:
 
 async def record_custom_detector_results(
     results: list[dict],
+    org_id: str,
 ) -> None:
     """Bulk-insert custom detector evaluation results for shadow analytics.
 
-    Each entry: {detector_id, run_id, agent_id, fired}
+    Each entry: {detector_id, run_id, agent_id, fired}. org_id is a single param,
+    not per-entry — all results in one call come from evaluating one run.
     """
     if not results or not _pool:
         return
@@ -899,10 +1553,13 @@ async def record_custom_detector_results(
         async with conn.transaction():
             await conn.executemany(
                 """
-                INSERT INTO custom_detector_results (detector_id, run_id, agent_id, fired)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO custom_detector_results (detector_id, run_id, agent_id, fired, org_id)
+                VALUES ($1, $2, $3, $4, $5)
                 """,
-                [(r["detector_id"], r["run_id"], r["agent_id"], r["fired"]) for r in results],
+                [
+                    (r["detector_id"], r["run_id"], r["agent_id"], r["fired"], org_id)
+                    for r in results
+                ],
             )
             if all_ids:
                 await conn.execute(
@@ -932,6 +1589,7 @@ async def write_custom_signal(
     confidence: float,
     evidence: dict,
     shadow: bool,
+    org_id: str,
 ) -> None:
     """Write a custom detector signal directly as TEXT failure_type (no enum required)."""
     if not _pool:
@@ -941,8 +1599,8 @@ async def write_custom_signal(
             """
             INSERT INTO failure_signals
                 (failure_type, severity, run_id, agent_id, agent_version,
-                 step_index, confidence, evidence, shadow, co_signal_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 0)
+                 step_index, confidence, evidence, shadow, co_signal_count, org_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 0, $10)
             """,
             failure_type,
             severity,
@@ -953,50 +1611,56 @@ async def write_custom_signal(
             confidence,
             json.dumps(evidence),
             shadow,
+            org_id,
         )
 
 
-async def list_issues(agent_id: str, status: Optional[str] = None) -> list[dict]:
-    """Return issues for an agent, optionally filtered by status."""
+# ── Pack activation reads ───────────────────────────────────────────────────────
+
+
+async def fetch_org_enabled_packs(org_id: str) -> list[str]:
+    """Pack names currently activated for this org. Empty list if none —
+    never raises for an org with no row, since that's the default state."""
     if not _pool:
         return []
-
-    def _ts(v):
-        if v is None:
-            return None
-        return v.timestamp() if hasattr(v, "timestamp") else float(v)
-
-    where = "WHERE agent_id = $1"
-    params: list = [agent_id]
-    if status:
-        params.append(status.lower())
-        where += f" AND status = ${len(params)}"
-
     async with _pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"""
-            SELECT id, agent_id, failure_type, status,
-                   first_seen, last_seen, resolved_at,
-                   affected_runs, clean_runs_since
-            FROM issues
-            {where}
-            ORDER BY
-                CASE status WHEN 'open' THEN 0 WHEN 'reopened' THEN 1 ELSE 2 END,
-                last_seen DESC
-            """,
-            *params,
-        )
-    return [
-        {
-            "id": r["id"],
-            "agent_id": r["agent_id"],
-            "failure_type": r["failure_type"],
-            "status": r["status"],
-            "first_seen": _ts(r["first_seen"]),
-            "last_seen": _ts(r["last_seen"]),
-            "resolved_at": _ts(r["resolved_at"]),
-            "affected_runs": r["affected_runs"],
-            "clean_runs_since": r["clean_runs_since"],
-        }
-        for r in rows
-    ]
+        rows = await conn.fetch("SELECT pack_name FROM org_enabled_packs WHERE org_id = $1", org_id)
+    return [r["pack_name"] for r in rows]
+
+
+async def write_run_state_metrics(
+    run_id: str,
+    org_id: str,
+    agent_id: str,
+    run_started_ts: Optional[float],
+    states: dict,
+) -> None:
+    """Upsert one row per state for a run (Capability 3, Phase 3.3). Idempotent
+    on (run_id, state) — reprocessing a run overwrites its metrics rather than
+    duplicating them. `states` is summarize_states(events)["states"]."""
+    if not _pool or not states:
+        return
+    from datetime import datetime, timezone
+
+    started_at = datetime.fromtimestamp(run_started_ts, tz=timezone.utc) if run_started_ts else None
+    async with _pool.acquire() as conn:
+        for state, agg in states.items():
+            await conn.execute(
+                """
+                INSERT INTO run_state_metrics
+                    (run_id, org_id, agent_id, state, total_ms, segment_count, run_started_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (run_id, state) DO UPDATE
+                    SET total_ms = EXCLUDED.total_ms,
+                        segment_count = EXCLUDED.segment_count,
+                        run_started_at = EXCLUDED.run_started_at,
+                        computed_at = NOW()
+                """,
+                run_id,
+                org_id,
+                agent_id,
+                state,
+                int(agg["total_ms"]),
+                int(agg["count"]),
+                started_at,
+            )

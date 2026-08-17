@@ -14,11 +14,13 @@ from fastapi import APIRouter, HTTPException, Query, Request, status, Background
 
 from ingest_svc.auth import is_trusted
 from ingest_svc.db import (
-    insert_events,
+    get_event_store,
     insert_deploy_event,
     verify_api_key,
     create_api_key,
     fetch_policies,
+    get_agent_quota,
+    set_agent_quota,
 )
 from ingest_svc.schemas import (
     IngestRequest,
@@ -27,10 +29,44 @@ from ingest_svc.schemas import (
     DeployResponse,
     KeyCreateRequest,
     KeyCreateResponse,
+    PruneEventsRequest,
+    PruneEventsResponse,
+    QuotaSetRequest,
+    QuotaResponse,
 )
 
 logger = logging.getLogger("dunetrace.ingest")
 router = APIRouter()
+
+
+async def _resolve_org_id(request: Request, api_key: str) -> str:
+    """Resolve the org_id for this request. Raises 401 if it can't be resolved.
+
+    Trusted path: dunetrace-cloud's gateway has already authenticated the caller
+    and forwards its org identity via a header — no api_keys lookup here.
+    x-org-id is the current header name; x-customer-id is accepted as a fallback
+    for callers running an older cloud gateway build (pre-v0.5.0 naming).
+
+    Untrusted path (self-hosted): resolves org_id from the OSS api_keys table.
+    Keys are org-scoped, not agent-scoped — a valid key may submit events for
+    any agent_id under its org, discovered on first ingest.
+    """
+    if is_trusted(request):
+        org_id = request.headers.get("x-org-id") or request.headers.get("x-customer-id", "")
+        if not org_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Trusted request missing x-org-id",
+            )
+        return org_id
+
+    org_id = await verify_api_key(api_key)
+    if org_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or inactive API key",
+        )
+    return org_id
 
 
 @router.post(
@@ -40,16 +76,11 @@ router = APIRouter()
     summary="Ingest a batch of agent events",
 )
 async def ingest(
+    request: Request,
     body: IngestRequest,
     background_tasks: BackgroundTasks,
 ) -> IngestResponse:
-    # Auth
-    agent_id = await verify_api_key(body.api_key)
-    if agent_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or inactive API key",
-        )
+    org_id = await _resolve_org_id(request, body.api_key)
 
     # Accept immediately — 202 before any DB work
     batch_id = str(uuid.uuid4())
@@ -58,9 +89,19 @@ async def ingest(
     logger.info("Accepted. batch_id=%s agent_id=%s events=%d", batch_id, body.agent_id, n)
 
     # Persist after response is sent
-    background_tasks.add_task(_persist, body.events, batch_id, body.agent_id)
+    background_tasks.add_task(_persist, body.events, batch_id, org_id)
 
     return IngestResponse(accepted=n, batch_id=batch_id)
+
+
+def _header_api_key(request: Request) -> str:
+    """API key from ``Authorization: Bearer <key>``, or the ``X-Dunetrace-API-Key``
+    header. Returns "" when neither is present. Mirrors the OTLP receiver's helper
+    of the same name (ingest_svc/routers/otlp.py)."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    return request.headers.get("X-Dunetrace-API-Key", "").strip()
 
 
 @router.get(
@@ -71,18 +112,34 @@ async def ingest(
 async def get_policies(
     request: Request,
     agent_id: str = Query(...),
-    api_key: str = Query(...),
+    api_key: str = Query(""),
 ) -> dict:
     """
     Called by the SDK at run start to retrieve active policies.
-    Authenticates via api_key query param — same key used for event ingestion.
-    Trusted internal requests (from auth service) skip DB validation.
+
+    Authenticates via ``Authorization: Bearer <key>`` (preferred) or the
+    ``X-Dunetrace-API-Key`` header. The ``api_key`` query parameter is still
+    accepted so an older SDK build keeps working, but it is **deprecated**:
+    query strings are recorded verbatim in web-server and proxy access logs, so
+    a key sent that way leaks into logs on every request. The header takes
+    precedence when both are present. POST /v1/ingest is unaffected — it has
+    always carried the key in the request body.
     """
-    if not is_trusted(request):
-        resolved = await verify_api_key(api_key)
-        if resolved is None:
-            raise HTTPException(status_code=401, detail="Invalid API key")
-    policies = await fetch_policies(agent_id)
+    key = _header_api_key(request) or api_key
+    if not key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing API key. Provide it as 'Authorization: Bearer <key>'.",
+        )
+    if not _header_api_key(request) and api_key:
+        logger.warning(
+            "Deprecated: /v1/policies authenticated via api_key query param for "
+            "agent_id=%s. Query strings leak into access logs — send "
+            "'Authorization: Bearer <key>' instead.",
+            agent_id,
+        )
+    org_id = await _resolve_org_id(request, key)
+    policies = await fetch_policies(agent_id, org_id)
     return {"policies": policies}
 
 
@@ -92,62 +149,155 @@ async def get_policies(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Record a deploy marker for an agent",
 )
-async def mark_deploy(body: DeployRequest) -> DeployResponse:
-    agent_id = await verify_api_key(body.api_key)
-    if agent_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or inactive API key",
-        )
-    row_id = await insert_deploy_event(agent_id, body.version, body.meta)
-    logger.info("Deploy marked. agent_id=%s version=%s id=%d", agent_id, body.version, row_id)
+async def mark_deploy(request: Request, body: DeployRequest) -> DeployResponse:
+    org_id = await _resolve_org_id(request, body.api_key)
+    row_id = await insert_deploy_event(body.agent_id, body.version, body.meta, org_id)
+    logger.info(
+        "Deploy marked. agent_id=%s version=%s id=%d",
+        body.agent_id,
+        body.version,
+        row_id,
+    )
     return DeployResponse(
         id=row_id,
-        agent_id=agent_id,
+        agent_id=body.agent_id,
         version=body.version,
         deployed_at=time.time(),
     )
+
+
+def _check_admin_key(supplied: str) -> None:
+    """Raises 403 unless `supplied` matches the ADMIN_API_KEY env var (which must
+    itself be set — an unset/empty env var never matches, closed by default)."""
+    admin_key = os.getenv("ADMIN_API_KEY", "")
+    if not admin_key or not secrets.compare_digest(supplied, admin_key):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
 
 
 @router.post(
     "/v1/keys",
     response_model=KeyCreateResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Generate a new API key for an agent",
+    summary="Generate a new org-scoped API key",
     include_in_schema=False,
 )
 async def create_key(body: KeyCreateRequest) -> KeyCreateResponse:
     """Admin-only endpoint. Requires ADMIN_API_KEY env var to match body.admin_key."""
-    admin_key = os.getenv("ADMIN_API_KEY", "")
-    if not admin_key or not secrets.compare_digest(body.admin_key, admin_key):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
-    name = body.company_name or body.customer_id
-    key = await create_api_key(
-        body.agent_id, body.customer_id, company_name=name, rate_limit_rpm=body.rate_limit_rpm
-    )
+    _check_admin_key(body.admin_key)
+    name = body.org_name or body.org_id
+    key = await create_api_key(body.org_id, org_name=name, rate_limit_rpm=body.rate_limit_rpm)
     logger.info(
-        "API key created. agent_id=%s customer_id=%s company=%s rpm=%d",
-        body.agent_id,
-        body.customer_id,
-        name,
-        body.rate_limit_rpm,
+        "API key created. org_id=%s org_name=%s rpm=%d", body.org_id, name, body.rate_limit_rpm
     )
-    return KeyCreateResponse(
-        key=key, agent_id=body.agent_id, customer_id=body.customer_id, company_name=name
+    return KeyCreateResponse(key=key, org_id=body.org_id, org_name=name)
+
+
+@router.post(
+    "/admin/prune-events",
+    response_model=PruneEventsResponse,
+    summary="Manually run a retention pass (drop event partitions older than retention_days)",
+    include_in_schema=False,
+)
+async def prune_events(body: PruneEventsRequest) -> PruneEventsResponse:
+    """Admin-only endpoint. Requires ADMIN_API_KEY env var to match body.admin_key.
+
+    Runs the same retention pass as the daily background loop (see main.py's
+    _prune_loop) — for confirming a fix after the startup staleness warning, or
+    reclaiming space immediately rather than waiting for the next scheduled tick.
+    """
+    _check_admin_key(body.admin_key)
+    from ingest_svc.config import settings
+
+    retention_days = (
+        body.retention_days if body.retention_days is not None else settings.EVENT_RETENTION_DAYS
+    )
+    dropped = await get_event_store().prune_old_events(retention_days)
+    logger.info("Manual retention pass (via /admin/prune-events): %d partition(s) dropped", dropped)
+    return PruneEventsResponse(partitions_dropped=dropped, retention_days=retention_days)
+
+
+@router.get(
+    "/admin/keys/{key_id}/agents/{agent_id}/quota",
+    response_model=QuotaResponse,
+    summary="View this agent's rate-limit quota within its key's budget",
+    include_in_schema=False,
+)
+async def get_quota(key_id: int, agent_id: str, admin_key: str = Query(...)) -> QuotaResponse:
+    """Admin-only. key_id (not the raw key string — see /v1/keys's response) scopes
+    this to a single key, matching how the rate limiter itself enforces per-agent
+    sub-limits (see rate_limiter.py's module docstring)."""
+    _check_admin_key(admin_key)
+    from ingest_svc.rate_limiter import _DEFAULT_AGENT_QUOTA_PCT
+
+    override = await get_agent_quota(key_id, agent_id)
+    return QuotaResponse(
+        key_id=key_id,
+        agent_id=agent_id,
+        quota_pct=override if override is not None else _DEFAULT_AGENT_QUOTA_PCT,
+        is_override=override is not None,
     )
 
 
-async def _persist(events: list, batch_id: str, agent_id: str) -> None:
+@router.put(
+    "/admin/keys/{key_id}/agents/{agent_id}/quota",
+    response_model=QuotaResponse,
+    summary="Set this agent's rate-limit quota within its key's budget",
+    include_in_schema=False,
+)
+async def set_quota(key_id: int, agent_id: str, body: QuotaSetRequest) -> QuotaResponse:
+    """Admin-only. Overrides the default 20% share (see rate_limiter.py's
+    _DEFAULT_AGENT_QUOTA_PCT) for this one (key_id, agent_id) pair. Takes effect
+    within _CACHE_TTL seconds — the rate limiter caches quota lookups the same
+    way it caches rate_limit_rpm, not read fresh on every request."""
+    _check_admin_key(body.admin_key)
     try:
-        inserted = await insert_events(events, batch_id)
-        if inserted == len(events):
-            logger.debug("Persisted. batch_id=%s inserted=%d", batch_id, inserted)
+        await set_agent_quota(key_id, agent_id, body.quota_pct)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    logger.info(
+        "Agent quota set. key_id=%d agent_id=%s quota_pct=%s", key_id, agent_id, body.quota_pct
+    )
+    return QuotaResponse(
+        key_id=key_id, agent_id=agent_id, quota_pct=body.quota_pct, is_override=True
+    )
+
+
+def _is_policy_evaluation(e) -> bool:
+    """True for policy.evaluated observability records, which are routed to the
+    policy_evaluations table instead of being stored as run events."""
+    et = getattr(e, "event_type", None)
+    return getattr(et, "value", et) == "policy.evaluated"
+
+
+async def _persist(events: list, batch_id: str, org_id: str) -> None:
+    try:
+        store = get_event_store()
+        # Split observability records out of the run-event stream — they belong in
+        # policy_evaluations, not events (keeps run traces clean).
+        evals = [e for e in events if _is_policy_evaluation(e)]
+        trace_events = [e for e in events if not _is_policy_evaluation(e)]
+
+        if evals:
+            await store.insert_policy_evaluations(evals, batch_id, org_id)
+
+        if not trace_events:
+            logger.debug("Persisted. batch_id=%s policy_evals=%d", batch_id, len(evals))
+            return
+
+        inserted = await store.insert_events(trace_events, batch_id, org_id)
+        if inserted == len(trace_events):
+            logger.debug(
+                "Persisted. batch_id=%s inserted=%d policy_evals=%d",
+                batch_id,
+                inserted,
+                len(evals),
+            )
         else:
             logger.error(
                 "Persist shortfall. batch_id=%s inserted=%d expected=%d — events lost",
                 batch_id,
                 inserted,
-                len(events),
+                len(trace_events),
             )
     except Exception as exc:
         logger.error("Persist failed. batch_id=%s error=%s", batch_id, exc)

@@ -39,6 +39,15 @@ class Settings:
     # Minimum severity to alert on. One of: LOW, MEDIUM, HIGH, CRITICAL
     SLACK_MIN_SEVERITY: str = os.getenv("SLACK_MIN_SEVERITY", "LOW")
 
+    # Phase 4.1 — per-org Slack/Linear integration credentials are encrypted
+    # at rest by api_svc; this must match api_svc's own DUNETRACE_MASTER_KEY
+    # exactly, same convention as integrations_svc's Phase 2.1 split.
+    MASTER_KEY: str = os.getenv("DUNETRACE_MASTER_KEY", "")
+
+    # Linear (Phase 4.1). Base URL only — auth/team/project are per-org,
+    # stored in org_alert_integrations, not global config.
+    LINEAR_API_URL: str = os.getenv("LINEAR_API_URL", "https://api.linear.app/graphql")
+
     # Generic webhook
     # A JSON POST will be sent to this URL for every alert.
     # Useful for PagerDuty, Linear, custom webhooks, etc.
@@ -48,6 +57,29 @@ class Settings:
     # Worker
     POLL_INTERVAL: float = float(os.getenv("POLL_INTERVAL", "10"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "50"))
+
+    # Horizontal sharding by agent_id — same scheme as detector_svc. Run N
+    # replicas with SHARD_COUNT=N and SHARD_INDEX=0..N-1; each only claims
+    # signals whose agent_id hashes to its bucket, which keeps every
+    # (org_id, agent_id, failure_type) alert group whole on one worker.
+    # SHARD_COUNT=1 (default) disables the filter and relies on the claim alone.
+    #
+    # ALERTS_-prefixed vars win over the shared ones. Both workers reading the
+    # same SHARD_COUNT is convenient when they're scaled together and dangerous
+    # when they aren't: _load_dotenv() above pulls in the repo-root .env, so a
+    # `SHARD_COUNT=4` meant for four detector replicas would silently leave a
+    # lone alerts worker claiming only bucket 0 — three quarters of signals would
+    # never alert, with nothing in the logs to say so. The prefix is the escape
+    # hatch for scaling the two independently.
+    SHARD_COUNT: int = int(os.getenv("ALERTS_SHARD_COUNT") or os.getenv("SHARD_COUNT", "1"))
+    SHARD_INDEX: int = int(os.getenv("ALERTS_SHARD_INDEX") or os.getenv("SHARD_INDEX", "0"))
+
+    # How long a claim on a signal stays valid. A worker that dies between
+    # claiming and delivering strands its rows for at most this long; after it
+    # they're reclaimable. Must comfortably exceed the worst-case delivery time
+    # for one batch (explain + Slack/webhook/Linear round-trips with retries),
+    # or a slow-but-alive worker's rows get stolen and double-delivered.
+    CLAIM_TIMEOUT_SECS: float = float(os.getenv("CLAIM_TIMEOUT_SECS", "300"))
 
     # Alert deduplication — same (agent_id, failure_type) silenced for this window after first alert.
     # Set to 0 to disable. Suppressed count is reported when the window re-opens.
@@ -79,6 +111,18 @@ class Settings:
 
 
 settings = Settings()
+
+# Fail fast on misconfigured replicas rather than silently claiming no work —
+# mirrors detector_svc/config.py's identical guard.
+if settings.SHARD_COUNT < 1:
+    raise ValueError(f"SHARD_COUNT must be >= 1, got {settings.SHARD_COUNT}")
+if not (0 <= settings.SHARD_INDEX < settings.SHARD_COUNT):
+    raise ValueError(
+        f"SHARD_INDEX must be in [0, SHARD_COUNT), "
+        f"got SHARD_INDEX={settings.SHARD_INDEX} SHARD_COUNT={settings.SHARD_COUNT}"
+    )
+if settings.CLAIM_TIMEOUT_SECS <= 0:
+    raise ValueError(f"CLAIM_TIMEOUT_SECS must be > 0, got {settings.CLAIM_TIMEOUT_SECS}")
 
 # Severity order for threshold comparisons
 SEVERITY_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
@@ -127,3 +171,115 @@ def load_alert_policies(yml_path: str | None = None) -> dict[str, dict]:
 def get_alert_policy(policies: dict[str, dict], failure_type: str) -> dict:
     """Return policy for failure_type, falling back to immediate."""
     return policies.get(failure_type.upper(), _DEFAULT_POLICY)
+
+
+# ── Per-detector destination routing (Phase 4.1) ──────────────────────────────
+#
+# "Configurable per detector: which signals go to Slack, which go to Linear."
+# Recognized destination names — "linear" is accepted here even though no
+# sender exists for it yet (Phase 4.1's Linear side isn't built); a detector
+# routed only to "linear" today silently delivers nowhere, same as the
+# pre-existing "no destinations globally configured" case deliver() already
+# tolerates. Not a bug — a sequencing consequence, see BACKLOG.md.
+_VALID_DESTINATIONS = {"slack", "webhook", "linear"}
+
+
+def load_detector_destinations(yml_path: str | None = None) -> dict[str, list[str]]:
+    """Parse detectors.yml's per-detector `destinations` key and return
+    {failure_type_upper: [dest, ...]}. A detector absent from the returned
+    dict means "no override" — deliver() falls back to sending to every
+    globally-enabled destination, exactly today's pre-4.1 behavior. Safe to
+    call at import time — returns {} on any error."""
+    path = yml_path or os.getenv("DETECTORS_YML", "/app/detectors.yml")
+    try:
+        import yaml
+
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+        default_section = raw.get("default") or {}
+        destinations: dict[str, list[str]] = {}
+        for detector_key, cfg in default_section.items():
+            if not isinstance(cfg, dict):
+                continue
+            dests = cfg.get("destinations")
+            if not isinstance(dests, list):
+                continue
+            valid = [d for d in dests if d in _VALID_DESTINATIONS]
+            if valid:
+                destinations[detector_key.upper()] = valid
+        return destinations
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        import logging
+
+        logging.getLogger("dunetrace.alerts.config").warning(
+            "Failed to load detector destinations from %s: %s — using default routing for all",
+            path,
+            exc,
+        )
+        return {}
+
+
+def get_detector_destinations(
+    destinations: dict[str, list[str]], failure_type: str
+) -> list[str] | None:
+    """Return the destination override for failure_type, or None meaning
+    "no override — send to every globally-enabled destination"."""
+    return destinations.get(failure_type.upper())
+
+
+# ── Semantic evaluator confidence floors (Phase 1.4.1) ────────────────────────
+#
+# Below-threshold semantic signals are still written and stored (visible in
+# the dashboard) but never alerted — see worker.py's poll_once(). Structural
+# signals are unaffected; this only gates rows with source == "semantic".
+
+_DEFAULT_SEMANTIC_CONFIDENCE_FLOOR = 0.6
+
+
+def load_semantic_confidence_floors(yml_path: str | None = None) -> dict[str, float]:
+    """Parse docs/config/semantic-evaluators.yml into
+    {evaluator_name_upper: alert_confidence_floor}. Falls back to {} (meaning
+    every evaluator uses _DEFAULT_SEMANTIC_CONFIDENCE_FLOOR) for a missing
+    file, missing PyYAML, or any parse error. Safe to call at import time."""
+    path = yml_path or os.getenv(
+        "SEMANTIC_EVALUATORS_YML", "/app/docs/config/semantic-evaluators.yml"
+    )
+    try:
+        import yaml
+
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+        floors: dict[str, float] = {}
+        for evaluator_key, cfg in raw.items():
+            if not isinstance(cfg, dict):
+                continue
+            floor = cfg.get("alert_confidence_floor")
+            if floor is None:
+                continue
+            try:
+                value = float(floor)
+            except (TypeError, ValueError):
+                continue
+            if 0.0 <= value <= 1.0:
+                floors[evaluator_key.upper()] = value
+        return floors
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        import logging
+
+        logging.getLogger("dunetrace.alerts.config").warning(
+            "Failed to load semantic confidence floors from %s: %s — using default %.1f for all",
+            path,
+            exc,
+            _DEFAULT_SEMANTIC_CONFIDENCE_FLOOR,
+        )
+        return {}
+
+
+def get_semantic_confidence_floor(floors: dict[str, float], evaluator: str) -> float:
+    """Return the alert confidence floor for a semantic evaluator, falling
+    back to _DEFAULT_SEMANTIC_CONFIDENCE_FLOOR (0.6)."""
+    return floors.get(evaluator.upper(), _DEFAULT_SEMANTIC_CONFIDENCE_FLOOR)

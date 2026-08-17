@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dunetrace-schemas"
+version = "0.1.0"
+description = "Canonical Pydantic v2 wire-format schemas shared across Dunetrace backend services"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]
+keywords = ["ai", "agents", "observability", "llm", "monitoring"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Deliberately minimal — this package validates wire payloads at service
+# boundaries (ingest, and any future consumer). It does NOT depend on the
+# `dunetrace` SDK package, which guarantees zero required dependencies of
+# its own; enum parity between the two is enforced by a test, not an import.
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["dunetrace_schemas*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"

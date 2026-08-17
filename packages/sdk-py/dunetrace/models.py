@@ -1,12 +1,14 @@
 """
 Core data models. No external dependencies.
-Content fields store SHA-256 hashes — raw text never leaves your process.
+Content fields carry raw text — tool args, tool output, LLM output, and errors
+are transmitted as-is to the backend over TLS.
 """
 
 from __future__ import annotations
 
 import hashlib
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -32,6 +34,33 @@ class EventType(str, Enum):
     RETRIEVAL_RESPONDED = "retrieval.responded"
     EXTERNAL_SIGNAL = "external.signal"
     POLICY_TRIGGERED = "policy.triggered"
+    # Policy evaluation observability (rate-limited): one record per policy
+    # evaluation, shipped via the normal transport but routed by ingest into the
+    # policy_evaluations table rather than stored as a run event. Kept in sync
+    # with dunetrace_schemas.enums.EventType (test_sdk_parity.py).
+    POLICY_EVALUATED = "policy.evaluated"
+    # Voice-agent events (detector pack "voice"). Additive: emitted only by the
+    # optional voice-specific RunContext helpers; no built-in detector reads
+    # them until the voice pack is active. Kept value-for-value in sync with
+    # dunetrace_schemas.enums.EventType (enforced by test_sdk_parity.py).
+    TRANSCRIPTION_RECEIVED = "transcription.received"
+    TTS_GENERATED = "tts.generated"
+    VOICE_ACTIVITY_DETECTED = "voice_activity.detected"
+    TURN_TAKING = "turn_taking.changed"
+    RECORDING_AVAILABLE = "recording.available"
+    # Human-in-the-loop approval events (Capability 2). Emitted around a
+    # require_approval policy gate. Kept value-for-value in sync with
+    # dunetrace_schemas.enums.EventType (enforced by test_sdk_parity.py).
+    APPROVAL_REQUESTED = "approval.requested"
+    APPROVAL_GRANTED = "approval.granted"
+    APPROVAL_DENIED = "approval.denied"
+    APPROVAL_TIMEOUT = "approval.timeout"
+    # Agent memory channel (Capability 1). Content written to / read from / cleared
+    # in agent memory, so a run's persisted state is observable. Kept value-for-
+    # value in sync with dunetrace_schemas.enums.EventType (test_sdk_parity.py).
+    MEMORY_WRITTEN = "memory.written"
+    MEMORY_READ = "memory.read"
+    MEMORY_CLEARED = "memory.cleared"
 
 
 class Severity(str, Enum):
@@ -48,7 +77,9 @@ class FailureType(str, Enum):
     GOAL_ABANDONMENT = "GOAL_ABANDONMENT"
     PROMPT_INJECTION_SIGNAL = "PROMPT_INJECTION_SIGNAL"
     RAG_EMPTY_RETRIEVAL = "RAG_EMPTY_RETRIEVAL"
+    EXCESSIVE_RETRIEVAL = "EXCESSIVE_RETRIEVAL"
     LLM_TRUNCATION_LOOP = "LLM_TRUNCATION_LOOP"
+    SILENT_TRUNCATION = "SILENT_TRUNCATION"
     CONTEXT_BLOAT = "CONTEXT_BLOAT"
     SLOW_STEP = "SLOW_STEP"
     RETRY_STORM = "RETRY_STORM"
@@ -63,6 +94,17 @@ class FailureType(str, Enum):
     POLICY_VIOLATION = "POLICY_VIOLATION"
     COST_SPIKE = "COST_SPIKE"
     SESSION_LATENCY = "SESSION_LATENCY"
+    PREMATURE_TERMINATION = "PREMATURE_TERMINATION"
+    UNREAD_TOOL_ERROR = "UNREAD_TOOL_ERROR"
+    TOOL_ARGUMENT_FABRICATION = "TOOL_ARGUMENT_FABRICATION"
+    RETRIEVED_CONTENT_INJECTION = "RETRIEVED_CONTENT_INJECTION"
+    HANDOFF_CONTEXT_LOSS = "HANDOFF_CONTEXT_LOSS"
+    AGENT_HANDOFF_FAILURE = "AGENT_HANDOFF_FAILURE"
+    RUNAWAY_ITERATION = "RUNAWAY_ITERATION"
+    MODEL_FALLBACK_DRIFT = "MODEL_FALLBACK_DRIFT"
+    MEMORY_POISONING = "MEMORY_POISONING"
+    DELEGATION_LOOP = "DELEGATION_LOOP"
+    OVERSIZED_TOOL_ARGUMENTS = "OVERSIZED_TOOL_ARGUMENTS"
     CUSTOM = "CUSTOM"  # sentinel for user-defined custom detectors
 
 
@@ -71,7 +113,7 @@ class FailureType(str, Enum):
 
 @dataclass
 class AgentEvent:
-    """A single instrumentation event emitted by the SDK. All content fields are hashed — no raw prompts or outputs."""
+    """A single instrumentation event emitted by the SDK."""
 
     event_type: EventType
     run_id: str
@@ -81,6 +123,13 @@ class AgentEvent:
     timestamp: float = field(default_factory=time.time)
     payload: Dict[str, Any] = field(default_factory=dict)
     parent_run_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    # audit Finding 14: a stable per-event id, generated at construction time so
+    # it survives the durable retry queue unchanged — the ingest side dedups on
+    # it (ON CONFLICT DO NOTHING), so an at-least-once retry never duplicates
+    # events (which would otherwise inflate counts into phantom signals).
+    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -92,6 +141,9 @@ class AgentEvent:
             "timestamp": self.timestamp,
             "payload": self.payload,
             "parent_run_id": self.parent_run_id,
+            "trace_id": self.trace_id,
+            "conversation_id": self.conversation_id,
+            "event_id": self.event_id,
         }
 
 
@@ -101,11 +153,21 @@ class AgentEvent:
 @dataclass
 class ToolCall:
     tool_name: str
-    args_hash: str
+    args: str
     step_index: int
     timestamp: float
     success: Optional[bool] = None
-    error_hash: Optional[str] = None  # hash_content(error_message) when success=False
+    error: Optional[str] = None  # raw error message when success=False
+    output_length: Optional[int] = None
+    output: Optional[str] = (
+        None  # raw tool response body, when the caller passes output= to tool_responded()
+    )
+    # True length of `args` before any transport-side truncation. The OTLP
+    # ingest path caps stored args at OTLP_MAX_ATTR_CHARS (8192), which is below
+    # OVERSIZED_TOOL_ARGUMENTS' threshold — so `len(args)` alone could never fire
+    # that detector on an OTel-ingested run. None on the SDK path, where args are
+    # never truncated and `len(args)` is already the true length.
+    args_length: Optional[int] = None
 
 
 @dataclass
@@ -121,6 +183,26 @@ class LlmCall:
     output_length: Optional[int] = None
     completion_tokens: Optional[int] = None
     reasoning_tokens: Optional[int] = None
+    # Raw LLM output text. Nullable: None when the caller didn't pass output=, or
+    # when transmission was opted out (DUNETRACE_OMIT_LLM_OUTPUT_TEXT=1) on the
+    # server-reconstructed side. Detectors/evaluators that only need the size
+    # keep reading output_length; those that need the text read this.
+    output_text: Optional[str] = None
+    # Which vendor served the call: "openai", "anthropic", "mistral". Set by the
+    # auto-instrumentation patchers, which know the answer for free. Nullable:
+    # manual run.llm_called() callers and events recorded before this field
+    # existed leave it None, and cost lookup never depends on it (the price
+    # tables key off the model name alone). Declared last so the positional
+    # construction used across the detector tests keeps working.
+    provider: Optional[str] = None
+    # Per-run sequence number correlating this call with its response event.
+    # Ordering alone cannot do it: a streamed call's llm.responded lands whenever
+    # the caller drains the stream, so two overlapping streams emit
+    # called(A), called(B), responded(A), responded(B) — and the server-side
+    # builders' LIFO pop would hand B's response to A. None for manual callers
+    # and for events recorded before this field existed; the builders fall back
+    # to positional pairing then.
+    call_id: Optional[int] = None
 
 
 @dataclass
@@ -145,6 +227,28 @@ class RetrievalResult:
     result_count: int
     top_score: Optional[float]
     step_index: int
+    content: Optional[str] = (
+        None  # raw retrieved text, when the caller passes content= to retrieval_responded()
+    )
+
+
+@dataclass
+class MemoryEvent:
+    """A single agent-memory operation (write/read/clear) within a run.
+
+    Emitted via ``run.memory_written``/``memory_read``/``memory_cleared`` or
+    auto-captured from framework memory (LangGraph store, CrewAI memory). Like
+    ``ExternalSignal`` it annotates the current step rather than advancing it.
+    Server-side, ``run_builder`` reconstructs these from ``memory.*`` events so
+    the MEMORY_POISONING detector can inspect written content and its provenance.
+    """
+
+    op: str  # "written" | "read" | "cleared"
+    key: Optional[str]  # None only for a clear-all (memory_cleared() with no key)
+    step_index: int
+    timestamp: float
+    value: Optional[str] = None  # written content; None for read/clear
+    source: Optional[str] = None  # provenance of a written value; None when unknown
 
 
 @dataclass
@@ -160,10 +264,12 @@ class RunState:
     retrievals: List[RetrievalResult] = field(default_factory=list)
     events: List[AgentEvent] = field(default_factory=list)
     external_signals: List[ExternalSignal] = field(default_factory=list)
+    memory_events: List[MemoryEvent] = field(default_factory=list)
     step_durations_ms: Dict[int, int] = field(default_factory=dict)
     current_step: int = 0
     exit_reason: Optional[str] = None
-    input_text_hash: Optional[str] = None
+    input_text: Optional[str] = None
+    system_prompt: Optional[str] = None
     # Cross-run baselines populated by the server before detectors run.
     # None = insufficient history. Local self-hosted mode may leave these None.
     baseline_p75_steps: Optional[float] = None
@@ -186,7 +292,7 @@ class RiskScore:
     """
     Aggregate run-level risk assessment produced by RiskEngine.
 
-    Captures the overall confidence that this run contains a behavioral failure,
+    Captures the overall confidence that this run contains a structural failure,
     along with the per-feature breakdown that explains why. Used by the alert
     layer to gate, prioritize, and explain alerts — not a replacement for
     individual FailureSignals.
@@ -265,11 +371,6 @@ class CallableExporter:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def hash_content(text: str) -> str:
-    """SHA-256, truncated to 16 chars. Used for all content fields."""
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def agent_version(system_prompt: str, model: str, tools: List[str]) -> str:

@@ -1,0 +1,35 @@
+# Trial-tier strict limits
+#
+# Stop a run that makes too many tool calls, but apply the stricter cap only to
+# lower-value tiers/plans — trial agents and free/starter orgs. Paid, higher-tier
+# usage is left alone by this policy.
+#
+# Demonstrates:
+#   * a pure-expression policy (trigger: expression) — no metric/tool-name flat
+#     condition, the whole condition lives in `match`
+#   * AND of a run-metric threshold with an OR of two metadata conditions
+#
+# NOTE: agent.* and org.* have no runtime source yet (see BACKLOG.md), so this
+# policy will not fire until that metadata is populated — it is included to show
+# the tier-gating shape. run.tool_call_count IS wired today; to gate purely on
+# call count now, drop the `or:` block.
+#
+# See docs/policies/condition-expressions.md.
+
+name: trial-tier-tool-call-cap
+agent_id: "*"
+priority: 20
+enabled: true
+
+condition:
+  trigger: expression            # pure-expression policy — no flat trigger
+  match:
+    run.tool_call_count: {gt: 8}     # more than 8 tool calls in the run...
+    or:                              # ...AND the caller is a lower tier/plan
+      - agent.tier: {eq: "trial"}
+      - org.plan: {in: ["free", "starter"]}
+
+action:
+  type: stop
+  params:
+    message: "Trial/free tier tool-call limit reached — stopping the run."

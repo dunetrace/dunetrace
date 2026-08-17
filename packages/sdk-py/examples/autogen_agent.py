@@ -5,7 +5,7 @@ Shows an AssistantAgent + RoundRobinGroupChat monitored via DunetraceAutoGenObse
 Every LLM call is tracked by wrapping the model client with DunetraceModelClient.
 
 Install:
-    pip install 'dunetrace' autogen-agentchat autogen-ext python-dotenv
+    pip install dunetrace autogen-agentchat autogen-ext python-dotenv
 
 Run (happy path):
     OPENAI_API_KEY=sk-... python examples/autogen_agent.py
@@ -22,16 +22,28 @@ import asyncio
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+    # Reads the repo-root .env — including OPENAI_API_KEY. This example makes
+    # real, billable LLM calls, and will pick up a key from there even if you
+    # don't pass one on the command line.
+    load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+except ImportError:
+    pass  # python-dotenv is optional; fall back to the ambient environment.
 
-from autogen_agentchat.agents import AssistantAgent
-from autogen_agentchat.teams import RoundRobinGroupChat
-from autogen_agentchat.conditions import MaxMessageTermination
-from autogen_agentchat.messages import TextMessage
-from autogen_ext.models.openai import OpenAIChatCompletionClient
-from autogen_core.tools import FunctionTool
+try:
+    from autogen_agentchat.agents import AssistantAgent
+    from autogen_agentchat.teams import RoundRobinGroupChat
+    from autogen_agentchat.conditions import MaxMessageTermination
+    from autogen_agentchat.messages import TextMessage
+    from autogen_ext.models.openai import OpenAIChatCompletionClient
+    from autogen_core.tools import FunctionTool
+except ImportError as exc:
+    raise SystemExit(
+        f"This example needs AutoGen — {exc.name} is not installed.\n"
+        "  pip install dunetrace autogen-agentchat autogen-ext python-dotenv"
+    ) from None
 
 from dunetrace import Dunetrace
 from dunetrace.integrations.autogen import DunetraceAutoGenObserver

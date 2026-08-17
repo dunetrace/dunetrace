@@ -9,6 +9,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import sys
 import os
 
@@ -16,7 +17,13 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ingest_svc.otel import otlp_to_events, _classify, _val, _trace_to_uuid
+from ingest_svc.otel import (
+    otlp_to_events,
+    protobuf_to_resource_spans,
+    _classify,
+    _val,
+    _trace_to_uuid,
+)
 
 # ── _val ──────────────────────────────────────────────────────────────────────
 
@@ -129,6 +136,19 @@ def test_minimal_root_span_only():
     events = otlp_to_events([_make_resource_span("trace1", [root])])
     types = [e["event_type"] for e in events]
     assert types == ["run.started", "run.completed"]
+
+
+def test_every_event_carries_the_raw_otel_trace_id():
+    """trace_id must be the RAW OTel traceId, not the lossy _trace_to_uuid()
+    conversion used for run_id — external evaluation integrations (Langfuse/
+    LangSmith/Braintrust) correlate against the real trace_id."""
+    root = _span("aaaa", "", "my-agent", 1_000_000_000_000, 2_000_000_000_000)
+    events = otlp_to_events([_make_resource_span("4bf92f3577b34da6a3ce929d0e0e4736", [root])])
+    assert len(events) == 2
+    for e in events:
+        assert e["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
+        assert e["run_id"] == "4bf92f35-77b3-4da6-a3ce-929d0e0e4736"
+        assert e["trace_id"] != e["run_id"]
     assert events[0]["agent_id"] == "my-agent"
     assert events[0]["agent_version"] == "1.0"
 
@@ -261,3 +281,420 @@ def test_multiple_traces_in_one_batch():
     assert "agent-a" in agent_ids
     assert "agent-b" in agent_ids
     assert len(run_ids) == 2
+
+
+# ── Phase 1: convention completeness ─────────────────────────────────────────────
+
+
+def test_llm_model_is_not_taken_from_gen_ai_system():
+    """gen_ai.system is the provider, not the model. A span carrying only the
+    provider must not record model='openai' (the old fallback bug)."""
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    llm = _span(
+        "llm1",
+        "root",
+        "openai.chat",
+        1_100_000_000_000,
+        1_900_000_000_000,
+        attrs=[_attr("gen_ai.system", "stringValue", "openai")],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, llm])])
+    called = next(e for e in events if e["event_type"] == "llm.called")
+    assert called["payload"]["model"] != "openai"
+    assert called["payload"]["model"] == ""
+
+
+def test_llm_model_falls_back_to_response_model():
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    llm = _span(
+        "llm1",
+        "root",
+        "chat",
+        1_100_000_000_000,
+        1_900_000_000_000,
+        attrs=[
+            _attr("gen_ai.system", "stringValue", "anthropic"),
+            _attr("gen_ai.response.model", "stringValue", "claude-3-5-sonnet-20241022"),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, llm])])
+    called = next(e for e in events if e["event_type"] == "llm.called")
+    assert called["payload"]["model"] == "claude-3-5-sonnet-20241022"
+
+
+def test_llm_output_text_extracted_and_length_set():
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    llm = _span(
+        "llm1",
+        "root",
+        "chat",
+        1_100_000_000_000,
+        1_900_000_000_000,
+        attrs=[
+            _attr("gen_ai.request.model", "stringValue", "gpt-4o"),
+            _attr("gen_ai.completion", "stringValue", "The answer is 42."),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, llm])])
+    resp = next(e for e in events if e["event_type"] == "llm.responded")
+    assert resp["payload"]["output"] == "The answer is 42."
+    assert resp["payload"]["output_length"] == len("The answer is 42.")
+
+
+def test_tool_args_and_output_extracted():
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    tool = _span(
+        "t1",
+        "root",
+        "search",
+        1_200_000_000_000,
+        1_500_000_000_000,
+        attrs=[
+            _attr("gen_ai.tool.name", "stringValue", "web_search"),
+            _attr("traceloop.entity.input", "stringValue", '{"query": "otel"}'),
+            _attr("tool.result", "stringValue", "3 results"),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, tool])])
+    called = next(e for e in events if e["event_type"] == "tool.called")
+    resp = next(e for e in events if e["event_type"] == "tool.responded")
+    assert called["payload"]["args"] == '{"query": "otel"}'
+    assert resp["payload"]["output"] == "3 results"
+    assert resp["payload"]["output_length"] == len("3 results")
+
+
+def test_tool_args_serialized_from_kvlist():
+    """Structured (non-string) args are JSON-serialized to the string the event
+    schema expects."""
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    tool = _span(
+        "t1",
+        "root",
+        "search",
+        1_200_000_000_000,
+        1_500_000_000_000,
+        attrs=[
+            _attr("tool.name", "stringValue", "search"),
+            {
+                "key": "tool.arguments",
+                "value": {
+                    "kvlistValue": {"values": [{"key": "q", "value": {"stringValue": "hello"}}]}
+                },
+            },
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, tool])])
+    called = next(e for e in events if e["event_type"] == "tool.called")
+    assert json.loads(called["payload"]["args"]) == {"q": "hello"}
+
+
+def test_retrieval_content_extracted():
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    ret = _span(
+        "r1",
+        "root",
+        "vectorstore.query",
+        1_300_000_000_000,
+        1_600_000_000_000,
+        attrs=[
+            _attr("retrieval.index_name", "stringValue", "kb"),
+            _attr("retrieval.result_count", "intValue", "2"),
+            _attr("retrieval.documents", "stringValue", "doc A. doc B."),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, ret])])
+    resp = next(e for e in events if e["event_type"] == "retrieval.responded")
+    assert resp["payload"]["content"] == "doc A. doc B."
+
+
+# ── Phase 3: robustness ──────────────────────────────────────────────────────────
+
+
+def test_long_content_is_truncated(monkeypatch):
+    monkeypatch.setattr("ingest_svc.config.settings.OTLP_MAX_ATTR_CHARS", 5)
+    root = _span("root", "", "agent", 1_000_000_000_000, 3_000_000_000_000)
+    llm = _span(
+        "llm1",
+        "root",
+        "chat",
+        1_100_000_000_000,
+        1_900_000_000_000,
+        attrs=[
+            _attr("gen_ai.request.model", "stringValue", "gpt-4o"),
+            _attr("gen_ai.completion", "stringValue", "x" * 10_000),
+        ],
+    )
+    events = otlp_to_events([_make_resource_span("t", [root, llm])])
+    resp = next(e for e in events if e["event_type"] == "llm.responded")
+    assert len(resp["payload"]["output"]) == 5
+
+
+def test_empty_service_name_does_not_sink_the_batch():
+    """A present-but-empty service.name must not produce agent_id='' (which would
+    fail IngestEvent validation and drop the whole batch)."""
+    root = _span("root", "", "root", 1_000_000_000_000, 2_000_000_000_000)
+    events = otlp_to_events([_make_resource_span("t", [root], service_name="")])
+    assert events  # not dropped
+    assert all(e["agent_id"] == "unknown-agent" for e in events)
+
+
+# ── protobuf_to_resource_spans (D11) ────────────────────────────────────────────
+
+
+def _protobuf_export_request(agent_id="proto-agent", span_name="root"):
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+        ExportTraceServiceRequest,
+    )
+    from opentelemetry.proto.common.v1.common_pb2 import AnyValue
+
+    req = ExportTraceServiceRequest()
+    rs = req.resource_spans.add()
+    rs.resource.attributes.add(key="service.name", value=AnyValue(string_value=agent_id))
+    ss = rs.scope_spans.add()
+    span = ss.spans.add()
+    span.trace_id = bytes.fromhex("4bf92f3577b34da6a3ce929d0e0e4736")
+    span.span_id = bytes.fromhex("00f067aa0ba902b7")
+    span.name = span_name
+    span.start_time_unix_nano = 1_000_000_000_000
+    span.end_time_unix_nano = 2_000_000_000_000
+    return req
+
+
+def test_protobuf_to_resource_spans_matches_json_shape():
+    req = _protobuf_export_request()
+    resource_spans = protobuf_to_resource_spans(req.SerializeToString())
+
+    assert len(resource_spans) == 1
+    rs = resource_spans[0]
+    assert rs["resource"]["attributes"][0] == {
+        "key": "service.name",
+        "value": {"stringValue": "proto-agent"},
+    }
+    span = rs["scopeSpans"][0]["spans"][0]
+    assert span["startTimeUnixNano"] == "1000000000000"
+    assert span["endTimeUnixNano"] == "2000000000000"
+
+
+def test_protobuf_trace_id_decoded_to_hex_not_base64():
+    """MessageToDict base64-encodes bytes fields by default — traceId/spanId
+    must be corrected to plain hex, matching the OTLP JSON convention and
+    what _trace_to_uuid()/the rest of this module already expect."""
+    req = _protobuf_export_request()
+    resource_spans = protobuf_to_resource_spans(req.SerializeToString())
+    span = resource_spans[0]["scopeSpans"][0]["spans"][0]
+    assert span["traceId"] == "4bf92f3577b34da6a3ce929d0e0e4736"
+    assert span["spanId"] == "00f067aa0ba902b7"
+
+
+def test_protobuf_output_produces_valid_dunetrace_events():
+    """End-to-end: a protobuf-sourced resourceSpans list must produce the
+    same event shape as the equivalent JSON input."""
+    req = _protobuf_export_request(agent_id="proto-agent")
+    resource_spans = protobuf_to_resource_spans(req.SerializeToString())
+    events = otlp_to_events(resource_spans)
+
+    assert any(e["event_type"] == "run.started" for e in events)
+    assert any(e["event_type"] == "run.completed" for e in events)
+    assert all(e["agent_id"] == "proto-agent" for e in events)
+
+
+def test_protobuf_malformed_bytes_raises():
+    with pytest.raises(Exception):
+        protobuf_to_resource_spans(b"\xff\xff\xff not a real protobuf message at all")
+
+
+# ── Per-resource / per-trace error isolation (D11) ──────────────────────────────
+
+
+def test_malformed_resource_span_does_not_affect_others():
+    """One resourceSpan with an unexpected structure must not prevent a
+    sibling, well-formed resourceSpan in the same batch from producing
+    events — see otlp_to_events()'s docstring."""
+    good_root = _span("aaaa", "", "root", 1_000_000_000_000, 2_000_000_000_000)
+    good_resource = _make_resource_span(
+        "4bf92f3577b34da6a3ce929d0e0e4736", [good_root], service_name="good-agent"
+    )
+    # "resource" is a string instead of a dict — .get("attributes", []) on
+    # a str raises AttributeError inside the mapper's resource-attrs step.
+    bad_resource = {"resource": "not-a-dict", "scopeSpans": [{"spans": [good_root]}]}
+
+    events = otlp_to_events([bad_resource, good_resource])
+
+    assert any(e["agent_id"] == "good-agent" for e in events)
+    assert any(e["event_type"] == "run.started" for e in events)
+
+
+def test_malformed_trace_does_not_affect_other_traces():
+    """One trace whose spans are unprocessable must not prevent a sibling
+    trace in the same batch from producing events."""
+    good_root = _span("aaaa", "", "root", 1_000_000_000_000, 2_000_000_000_000)
+    good_resource = _make_resource_span("4bf92f3577b34da6a3ce929d0e0e4736", [good_root])
+
+    # A span whose startTimeUnixNano can't be coerced to int — raises inside
+    # the chronological sort in _events_for_trace(). Distinct traceId from
+    # the good span above — _span() hardcodes traceId, so it must be
+    # overridden here, otherwise both spans land in the same trace bucket
+    # (otlp_to_events groups by traceId, not by which resourceSpan a span
+    # came from) and this test would poison the "good" trace instead of
+    # proving isolation between two separate ones.
+    bad_span = _span("bbbb", "", "root", "not-a-number", 2_000_000_000_000)
+    bad_span["traceId"] = "11112222" * 4
+    bad_resource = _make_resource_span(bad_span["traceId"], [bad_span])
+
+    events = otlp_to_events([bad_resource, good_resource])
+
+    run_ids = {e["run_id"] for e in events}
+    assert len(run_ids) == 1  # only the good trace survived
+    assert any(e["event_type"] == "run.started" for e in events)
+
+
+def test_all_malformed_returns_empty_list_not_raise():
+    bad_resource = {"resource": "not-a-dict", "scopeSpans": "also-not-a-list"}
+    events = otlp_to_events([bad_resource])
+    assert events == []
+
+
+# ── Split-batch run boundaries ────────────────────────────────────────────────
+#
+# OTel exporters batch by size and time, never by trace — Python's
+# BatchSpanProcessor defaults to a 5s schedule delay — and a root span ends
+# AFTER its children. So any agent run longer than the batch delay arrives split
+# across export requests. Treating each request as a self-contained run
+# synthesised a completed run per request, so one real trace became several
+# completed runs sharing a run_id.
+
+_SPLIT_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+
+def _leaf(span_id, name, start_ns, end_ns):
+    return _span(span_id, "root0000", name, start_ns, end_ns)
+
+
+def test_batch_without_the_root_span_does_not_open_or_close_a_run():
+    events = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [
+                    _leaf("c1", "chat gpt-4o", 1_000_000_000_000, 2_000_000_000_000),
+                    _leaf("c2", "tool search", 2_000_000_000_000, 3_000_000_000_000),
+                ],
+            )
+        ]
+    )
+    types = [e["event_type"] for e in events]
+
+    assert "run.started" not in types
+    assert "run.completed" not in types
+    assert "run.errored" not in types
+    # The leaf work is still recorded — only the run boundaries are withheld.
+    assert types, "leaf spans should still produce events"
+
+
+def test_batch_with_the_root_span_opens_and_closes_the_run():
+    events = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [
+                    _span("root0000", "", "agent run", 1_000_000_000_000, 9_000_000_000_000),
+                    _leaf("c1", "chat gpt-4o", 1_000_000_000_000, 2_000_000_000_000),
+                ],
+            )
+        ]
+    )
+    types = [e["event_type"] for e in events]
+
+    assert types[0] == "run.started"
+    assert types[-1] == "run.completed"
+
+
+def test_a_split_trace_produces_exactly_one_run_completion():
+    first = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [_leaf("c1", "chat gpt-4o", 1_000_000_000_000, 2_000_000_000_000)],
+            )
+        ]
+    )
+    second = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [
+                    _leaf("c2", "tool search", 2_000_000_000_000, 3_000_000_000_000),
+                    _span("root0000", "", "agent run", 1_000_000_000_000, 9_000_000_000_000),
+                ],
+            )
+        ]
+    )
+    completions = [e for e in first + second if e["event_type"] in ("run.completed", "run.errored")]
+    assert len(completions) == 1
+
+
+def test_all_batches_of_one_trace_share_a_run_id():
+    first = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [_leaf("c1", "chat gpt-4o", 1_000_000_000_000, 2_000_000_000_000)],
+            )
+        ]
+    )
+    second = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [_span("root0000", "", "agent run", 1_000_000_000_000, 9_000_000_000_000)],
+            )
+        ]
+    )
+    assert {e["run_id"] for e in first + second} == {"4bf92f35-77b3-4da6-a3ce-929d0e0e4736"}
+
+
+def test_errored_root_still_produces_run_errored():
+    events = otlp_to_events(
+        [
+            _make_resource_span(
+                _SPLIT_TRACE,
+                [
+                    _span(
+                        "root0000",
+                        "",
+                        "agent run",
+                        1_000_000_000_000,
+                        9_000_000_000_000,
+                        status_code=2,
+                    )
+                ],
+            )
+        ]
+    )
+    assert events[-1]["event_type"] == "run.errored"
+
+
+def test_tool_args_carry_their_pre_truncation_length():
+    """Stored args are capped at OTLP_MAX_ATTR_CHARS (8192), which is BELOW
+    OVERSIZED_TOOL_ARGUMENTS' 10,000 threshold — so without args_length that
+    detector could never fire on an OTel-ingested run."""
+    from ingest_svc.otel import otlp_to_events
+
+    huge = "x" * 40_000
+    span = _span(
+        "t1",
+        "root0000",
+        "tool web_search",
+        1_000_000_000_000,
+        2_000_000_000_000,
+        attrs=[_attr("gen_ai.tool.call.arguments", "stringValue", huge)],
+    )
+    events = otlp_to_events([_make_resource_span("4bf92f3577b34da6a3ce929d0e0e4736", [span])])
+    called = [e for e in events if e["event_type"] == "tool.called"]
+    assert called, "expected a tool.called event"
+
+    payload = called[0]["payload"]
+    # The stored string IS truncated — that part is deliberate.
+    assert len(payload["args"]) < len(huge)
+    # ...but the true length survives, so length-based detection stays honest.
+    assert payload["args_length"] == 40_000

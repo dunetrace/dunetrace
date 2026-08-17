@@ -2,7 +2,7 @@
 
 Runtime observability for AI agents. Detects tool loops, cost spikes, context bloat, and 14 more failure patterns — automatically, on every run.
 
-Zero runtime dependencies. Works with any Node.js AI framework. Node 22+.
+Zero runtime dependencies by default. Works with any Node.js AI framework. Node 22+. (Durable retry is opt-in and adds one optional peer dependency — see [Durable retry](#durable-retry).)
 
 ## Install
 
@@ -27,12 +27,12 @@ await dt.run("my-agent", { model: "gpt-4o", tools: ["web_search"] }, async (run)
     completionTokens: res.usage?.completion_tokens,
     latencyMs:        Date.now() - t0,
     finishReason:     res.choices[0].finish_reason ?? "stop",
-    outputText:       res.choices[0].message.content ?? "",  // hashed, never sent raw
+    outputText:       res.choices[0].message.content ?? "",  // sent as-is
   });
 
   // Before + after each tool call
   const toolStart = Date.now();
-  run.toolCalled("web_search", { query });          // args are SHA-256 hashed
+  run.toolCalled("web_search", { query });          // args are sent as-is
   const results = await webSearch(query);
   run.toolResponded("web_search", true, results.length, Date.now() - toolStart);
 
@@ -107,43 +107,47 @@ function myHelper() {
 }
 ```
 
+## Auto-instrument the OpenAI / Anthropic SDKs
+
+Patch once at startup and every client instance is tracked inside a `dt.run()` — including clients constructed by code you don't control:
+
+```typescript
+import OpenAI from "openai";
+import { Dunetrace, autoInstrument } from "dunetrace";
+
+const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+autoInstrument({ openai: OpenAI });   // → ["openai"]
+
+const openai = new OpenAI();          // constructed after the patch — still tracked
+await dt.run("my-agent", {}, async () => {
+  await openai.chat.completions.create({ model: "gpt-4o", messages });
+});
+```
+
+`autoInstrument()` with no arguments auto-detects via `require`, which only resolves under CommonJS — **pass the imported class if you use ESM or a bundler**. It patches the resource prototype shared by every client, which works under ESM, CommonJS, and bundlers alike. Idempotent, and safe to combine with `dt.wrapOpenAI()`.
+
+It covers four targets — `openai`, `anthropic`, `mistral`, and `http` — narrowable via `targets`.
+
+**Streaming is tracked.** `llm.called` fires at call time; the stream comes back through a pass-through proxy that observes chunks as you pull them and emits `llm.responded` when it ends. Nothing is consumed on your behalf, and `.tee()` / `.controller` still work. Pass `stream_options: { include_usage: true }` for OpenAI or the API never sends token counts.
+
+**HTTP is tracked** via the global `fetch` — `tool.called` / `tool.responded` named by hostname, the Node counterpart to the Python SDK's `httpx`/`requests` patches. Requests made *by* an instrumented LLM SDK are excluded, so one LLM call doesn't also count as a tool call; so is Dunetrace's own ingest traffic.
+
+Emission failures never propagate into your call.
+
+To instrument a single client rather than the whole SDK:
+
+```typescript
+const openai = dt.wrapOpenAI(new OpenAI());
+const claude = dt.wrapAnthropic(new Anthropic());
+```
+
+See [docs/integrate-typescript-agent.md](../../docs/integrate-typescript-agent.md#auto-instrumentation) for the full picture, including what isn't covered.
+
 ## Deploy markers
 
 ```typescript
 // Call from CI/CD or app startup — correlates signal spikes with releases
 dt.markDeploy("my-agent", "v1.4.2", { env: "production", commit: "abc1234" });
-```
-
-## Langfuse integration
-
-Correlate a Dunetrace run with a Langfuse trace using a shared UUID — jump straight from a detected signal to the full Langfuse trace.
-
-```typescript
-import { randomUUID } from "node:crypto";
-import { Langfuse } from "langfuse";
-
-const langfuse = new Langfuse({ publicKey: "pk-lf-…", secretKey: "sk-lf-…" });
-const sharedId = randomUUID();
-
-const trace = langfuse.trace({ id: sharedId, name: "my-agent" });
-
-await dt.run("my-agent", { runId: sharedId, model: "gpt-4o" }, async (run) => {
-  // run.runId === sharedId === Langfuse trace ID
-  run.finalAnswer();
-});
-
-await langfuse.flushAsync();
-```
-
-See the full example: `examples/langfuse_agent.ts`
-
-```bash
-# Happy path
-OPENAI_API_KEY=sk-… LANGFUSE_PUBLIC_KEY=pk-lf-… LANGFUSE_SECRET_KEY=sk-lf-… \
-  npm run example:langfuse
-
-# Tool loop — triggers TOOL_LOOP signal + LLM root cause analysis
-SCENARIO=tool_loop … npm run example:langfuse:loop
 ```
 
 ## Vercel AI SDK integration
@@ -180,6 +184,36 @@ See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, N
 | `apiKey` | `""` | API key (required for production) |
 | `flushIntervalMs` | `200` | Background buffer drain interval (ms) |
 | `emitAsJson` | `false` | Loki NDJSON mode |
+| `emitter` | `HttpBatchEmitter` | Custom batch-shipping strategy — see [Durable retry](#durable-retry) |
+
+## Durable retry
+
+By default, a batch that fails to ship (backend down, network error) is dropped — same behavior as before this was made pluggable. `DurableRetryEmitter` wraps the default emitter to persist failed batches to a local SQLite queue instead, surviving a backend outage across process restarts:
+
+```ts
+import { Dunetrace, DurableRetryEmitter, HttpBatchEmitter } from "dunetrace";
+
+const dt = new Dunetrace({
+  endpoint: "https://ingest.dunetrace.com",
+  apiKey:   "dt_live_...",
+  emitter:  new DurableRetryEmitter(
+    new HttpBatchEmitter("https://ingest.dunetrace.com", "dt_live_...")
+  ),
+});
+```
+
+Requires the optional peer dependency `better-sqlite3` (`npm install better-sqlite3`) — its synchronous API matches this emitter's own single-threaded access pattern. If it isn't installed, or the queue file can't be created, `DurableRetryEmitter` degrades to "failed batches are dropped" (a warning is logged once) rather than crashing the host application.
+
+| Option | Default | Description |
+|---|---|---|
+| `queuePath` | `~/.dunetrace/queue-ts.db` | Also configurable via `DUNETRACE_QUEUE_PATH` env var. Deliberately a different filename from the Python SDK's `queue.db` — a mixed-language deployment sharing `~/.dunetrace/` can't have one SDK corrupt the other's queue file. |
+| `maxQueueEvents` | `100_000` | Oldest batches are evicted first once exceeded |
+| `maxQueueBytes` | `100 * 1024 * 1024` (100MB) | Whichever cap (events or bytes) is hit first triggers eviction |
+| `retryIntervalMs` | `30_000` | How often the backlog is retried, ± jitter |
+| `retryJitterMs` | `5_000` | Prevents a thundering herd if many instances reconnect together |
+| `maxBatchesPerRetry` | `50` | Backlog batches retried per `ship()` call, oldest first — stops at the first failure rather than skipping ahead, since order matters more than exhausting the backlog in one pass |
+
+Node.js only — there is no browser build of this SDK today (`engines.node >= 22`, CommonJS, no bundler target), so there's no IndexedDB fallback to reach for.
 
 ## Run API
 
@@ -188,38 +222,28 @@ See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, N
 | `run.llmCalled(model, promptTokens?)` | Before each LLM API call |
 | `run.llmResponded({ completionTokens?, latencyMs?, finishReason?, outputText? })` | After LLM responds |
 | `run.toolCalled(toolName, args?)` | Before each tool execution |
-| `run.toolResponded(toolName, success, outputLength?, latencyMs?, error?)` | After tool returns |
+| `run.toolResponded(toolName, success, outputLength?, latencyMs?, error?, output?)` | After tool returns |
 | `run.retrievalCalled(indexName, query?)` | Before vector search |
-| `run.retrievalResponded(indexName, resultCount, topScore?, latencyMs?)` | After retrieval returns |
+| `run.retrievalResponded(indexName, resultCount, topScore?, latencyMs?, content?)` | After retrieval returns |
 | `run.externalSignal(signalName, source?, meta?)` | Rate limits, cache misses, upstream errors |
+| `run.memoryWritten(key, value, source?)` | Agent persisted something to its memory (`source`: `user_input` / `retrieval` / `tool_output` / `llm_output` / `agent_reasoning` / `external`) |
+| `run.memoryRead(key)` | Agent read from its memory |
+| `run.memoryCleared(key?)` | Memory cleared (a key, or all when omitted) |
 | `run.finalAnswer()` | When agent produces its final output |
-| `run.runId` | Read-only UUID — pass to Langfuse as the trace ID for correlation |
-
-## Privacy
-
-All content fields are SHA-256 hashed inside your process before transmission — raw content never leaves your agent.
-
-| Field | Transmitted as |
-|---|---|
-| User input | `input_hash` (16-char hex) |
-| Tool arguments | `args_hash` |
-| LLM outputs | `output_hash` |
-| Error messages | `error_hash` |
-| Retrieval queries | `query_hash` |
-
-Token counts, latencies, step counts, and model names are sent as plain metadata.
+| `run.runId` | Read-only UUID — use to correlate with an external tracing system |
 
 ## What it detects
 
-17 structural detectors run on every completed run — no LLM, no configuration required.
+28 structural detectors run on every completed run — no LLM, no configuration required. Detection runs server-side (the same detector worker processes every agent's events regardless of source SDK), so additions here apply to TypeScript agents automatically. A few of the main ones:
 
 | Category | Detectors |
 |---|---|
-| Loops | `TOOL_LOOP` `TOOL_THRASHING` `RETRY_STORM` `LLM_TRUNCATION_LOOP` |
-| Cost & latency | `COST_SPIKE` `SESSION_LATENCY` `CONTEXT_BLOAT` `SLOW_STEP` |
-| Goal failures | `GOAL_ABANDONMENT` `TOOL_AVOIDANCE` `FIRST_STEP_FAILURE` `STEP_COUNT_INFLATION` |
-| Quality | `REASONING_STALL` `EMPTY_LLM_RESPONSE` `RAG_EMPTY_RETRIEVAL` `CASCADING_TOOL_FAILURE` |
-| Security | `PROMPT_INJECTION_SIGNAL` |
+| Loops | `TOOL_LOOP` `RETRY_STORM` `DELEGATION_LOOP` |
+| Cost & latency | `COST_SPIKE` `SESSION_LATENCY` |
+| Security | `PROMPT_INJECTION_SIGNAL` `MEMORY_POISONING` |
+| Silent degradation | `PREMATURE_TERMINATION` `RUNAWAY_ITERATION` |
+
+→ [docs/detectors.md](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md) for the full list of 28 detectors
 
 You can also define **custom detectors** in plain English from the dashboard or API. They run in shadow mode on every run and accumulate results before any alert fires. → [Custom detectors](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md#custom-detectors)
 
@@ -238,7 +262,7 @@ Dashboard → `http://localhost:3000` · Ingest → `http://localhost:8001`
 npm test
 ```
 
-67 tests, all offline — no running stack required.
+123 tests, all offline — no running stack required.
 
 ## Links
 

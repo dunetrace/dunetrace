@@ -42,7 +42,7 @@ services:
       AUTH_MODE: dev
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
-      PYTHONPATH: /app/services/ingest
+      PYTHONPATH: /app/packages/schemas-py:/app/services/ingest
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\" || exit 1"]
       interval: 10s
@@ -61,7 +61,7 @@ services:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       POLL_INTERVAL: 5
       STALL_TIMEOUT_SECS: 60
-      PYTHONPATH: /app/packages/sdk-py:/app/services/detector
+      PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/detector
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,22 +82,120 @@ services:
     restart: unless-stopped
     volumes:
       - ./detectors.yml:/app/detectors.yml:ro
+      - ./docs/config/semantic-evaluators.yml:/app/docs/config/semantic-evaluators.yml:ro
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       POLL_INTERVAL: 10
-      PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/alerts
+      PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/explainer:/app/services/alerts
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-}
       SLACK_MIN_SEVERITY: ${SLACK_MIN_SEVERITY:-LOW}
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3000}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
       detector:
         condition: service_started
     command: ["python", "-m", "alerts_svc.worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  semantic:
+    build:
+      context: .
+      dockerfile: services/semantic/Dockerfile
+    # on-failure, not unless-stopped: this worker exits 0 when its
+    # *_WORKER_ENABLED flag is false (the default), and unless-stopped
+    # would restart-loop it forever.
+    restart: on-failure
+    volumes:
+      - ./docs/config/semantic-sampling.yml:/app/docs/config/semantic-sampling.yml:ro
+      - ./docs/config/semantic-evaluators.yml:/app/docs/config/semantic-evaluators.yml:ro
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      POLL_INTERVAL: 15
+      SEMANTIC_WORKER_ENABLED: ${SEMANTIC_WORKER_ENABLED:-false}
+      SEMANTIC_LLM_PROVIDER: ${SEMANTIC_LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION: ${SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION:-false}
+      HALLUCINATION_MODEL: ${HALLUCINATION_MODEL:-}
+      TASK_COMPLETION_MODEL: ${TASK_COMPLETION_MODEL:-}
+      TASK_UNDERSTANDING_FAILURE_MODEL: ${TASK_UNDERSTANDING_FAILURE_MODEL:-}
+      OFF_TOPIC_DRIFT_MODEL: ${OFF_TOPIC_DRIFT_MODEL:-}
+      USER_FRUSTRATION_MODEL: ${USER_FRUSTRATION_MODEL:-}
+      CONFUSION_LOOP_MODEL: ${CONFUSION_LOOP_MODEL:-}
+      SYCOPHANCY_SIGNAL_MODEL: ${SYCOPHANCY_SIGNAL_MODEL:-}
+      # audit Finding 17: this env override was dropping /app/packages/sdk-py, so
+      # explainer_svc's `import dunetrace` failed even after the Dockerfile fix.
+      PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/explainer:/app/services/semantic
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+    command: ["python", "-m", "semantic_svc.worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  integrations:
+    build:
+      context: .
+      dockerfile: services/integrations/Dockerfile
+    # on-failure, not unless-stopped: this worker exits 0 when its
+    # *_WORKER_ENABLED flag is false (the default), and unless-stopped
+    # would restart-loop it forever.
+    restart: on-failure
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      WAKE_INTERVAL: 15
+      INTEGRATIONS_WORKER_ENABLED: ${INTEGRATIONS_WORKER_ENABLED:-false}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+      PYTHONPATH: /app/packages/schemas-py:/app/services/integrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+    command: ["python", "-m", "integrations_svc.worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  elevenlabs:
+    build:
+      context: .
+      dockerfile: services/integrations/Dockerfile
+    # on-failure, not unless-stopped: this worker exits 0 when its
+    # *_WORKER_ENABLED flag is false (the default), and unless-stopped
+    # would restart-loop it forever.
+    restart: on-failure
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      WAKE_INTERVAL: 60
+      ELEVENLABS_WORKER_ENABLED: ${ELEVENLABS_WORKER_ENABLED:-false}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+      PYTHONPATH: /app/packages/schemas-py:/app/services/integrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+    command: ["python", "-m", "integrations_svc.elevenlabs_worker"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
       interval: 30s
@@ -115,16 +213,21 @@ services:
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       AUTH_MODE: dev
-      PYTHONPATH: /app/packages/sdk-py:/app/services/explainer:/app/services/api
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
-      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/explainer:/app/services/api
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_REPO: ${GITHUB_REPO:-}
       GITHUB_BASE_BRANCH: ${GITHUB_BASE_BRANCH:-main}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+    volumes:
+      # Voice cost rates (Phase 2.2). Optional: the API falls back to built-in
+      # defaults if this file is absent. Mounted so operators can edit rates.
+      - ./voice-pricing.yml:/app/voice-pricing.yml:ro
     depends_on:
       postgres:
         condition: service_healthy

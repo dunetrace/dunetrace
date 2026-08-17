@@ -1,5 +1,13 @@
 from dunetrace.client import Dunetrace, DunetraceClient
 from dunetrace.context import get_current_run
+from dunetrace.emitters import (
+    BatchingEmitter,
+    HttpBatchingEmitter,
+    NoopBatchingEmitter,
+    ConsoleBatchingEmitter,
+    FileBatchingEmitter,
+    DurableRetryEmitter,
+)
 from dunetrace.middleware import DunetraceASGIMiddleware, DunetraceWSGIMiddleware
 from dunetrace.models import (
     RunState,
@@ -15,7 +23,7 @@ from dunetrace.detectors import (
     run_detectors,
     PROMPT_INJECTION_DETECTOR,
 )
-from dunetrace.policies import Policy, PolicyViolation
+from dunetrace.policies import ApprovalDenied, Policy, PolicyViolation
 from dunetrace.risk_engine import RiskEngine
 
 from importlib.metadata import version, PackageNotFoundError
@@ -39,8 +47,15 @@ __all__ = [
     "PROMPT_INJECTION_DETECTOR",
     "Policy",
     "PolicyViolation",
+    "ApprovalDenied",
     "RiskEngine",
     "RiskScore",
     "Exporter",
     "CallableExporter",
+    "BatchingEmitter",
+    "HttpBatchingEmitter",
+    "NoopBatchingEmitter",
+    "ConsoleBatchingEmitter",
+    "FileBatchingEmitter",
+    "DurableRetryEmitter",
 ]

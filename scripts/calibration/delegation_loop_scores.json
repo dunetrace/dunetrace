@@ -1,0 +1,35 @@
+{
+  "sweep": {
+    "3": {
+      "fp_rate": 0.5,
+      "tp_recall": 1.0,
+      "ship": false
+    },
+    "4": {
+      "fp_rate": 0.1429,
+      "tp_recall": 1.0,
+      "ship": true
+    },
+    "5": {
+      "fp_rate": 0.0,
+      "tp_recall": 0.9286,
+      "ship": true
+    },
+    "6": {
+      "fp_rate": 0.0,
+      "tp_recall": 0.8571,
+      "ship": true
+    },
+    "7": {
+      "fp_rate": 0.0,
+      "tp_recall": 0.4286,
+      "ship": true
+    },
+    "8": {
+      "fp_rate": 0.0,
+      "tp_recall": 0.4286,
+      "ship": true
+    }
+  },
+  "recommended_min_loop_runs": 5
+}

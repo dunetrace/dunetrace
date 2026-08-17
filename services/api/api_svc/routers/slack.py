@@ -27,7 +27,15 @@ from urllib.parse import unquote_plus
 from fastapi import APIRouter, Request, Response
 
 from api_svc.config import settings
-from api_svc.db.queries import mark_signal_resolved, record_false_positive
+from api_svc.db.queries import (
+    get_approval,
+    mark_signal_resolved,
+    record_false_positive,
+    set_approval_decision,
+    snooze_pattern,
+)
+
+_SNOOZE_HOURS = 24
 
 logger = logging.getLogger("dunetrace.api.slack")
 
@@ -48,6 +56,45 @@ def _verify_signature(body: bytes, timestamp: str, signature: str) -> bool:
         return hmac.compare_digest(f"v0={digest}", signature)
     except Exception:
         return False
+
+
+async def _handle_approval_action(action_id: str, value: dict, user_name: str) -> Response:
+    """Record an Approve/Deny click on an approval request (Capability 2). The
+    org_id comes from the button value, which is safe here because the Slack
+    signature was already verified above — this callback carries no Dunetrace
+    API key, so the signed value blob is the trust anchor (same model the
+    signal-alert buttons already use)."""
+    approval_id = int(value.get("approval_id", 0))
+    org_id = value.get("org_id", "")
+    if not approval_id or not org_id:
+        return Response(status_code=400)
+
+    decision = "granted" if action_id == "approve_request" else "denied"
+    updated = await set_approval_decision(
+        org_id, approval_id, decision, decided_by=user_name, decision_channel="slack"
+    )
+    if updated is not None:
+        verb = "approved" if decision == "granted" else "denied"
+        logger.info("Approval %s %s by %s", approval_id, verb, user_name)
+        return Response(
+            content=json.dumps({"text": f":white_check_mark: Request {verb} by {user_name}."}),
+            media_type="application/json",
+        )
+
+    # set returned None — already decided (a race with the SDK's timeout or a
+    # second click) or gone. Report the current state rather than a bare error.
+    existing = await get_approval(org_id, approval_id)
+    if existing is None:
+        return Response(
+            content=json.dumps({"text": ":warning: That approval no longer exists."}),
+            media_type="application/json",
+        )
+    return Response(
+        content=json.dumps(
+            {"text": f":information_source: Already resolved: {existing['status']}."}
+        ),
+        media_type="application/json",
+    )
 
 
 @router.post("/v1/slack/callback", include_in_schema=False)
@@ -91,15 +138,22 @@ async def slack_callback(request: Request) -> Response:
         logger.error("Slack callback: bad action value: %s", action.get("value"))
         return Response(status_code=400)
 
+    # Approval buttons (Capability 2, Phase 2.3) carry a different value shape
+    # ({approval_id, org_id, tool_name}), so handle them before the signal-alert
+    # fields are read below — otherwise the signal validation would 400 them.
+    if action_id in ("approve_request", "deny_request"):
+        return await _handle_approval_action(action_id, value, user_name)
+
     signal_id = int(value.get("signal_id", 0))
     agent_id = value.get("agent_id", "")
     failure_type = value.get("failure_type", "")
+    org_id = value.get("org_id", "")
 
-    if not signal_id or not agent_id or not failure_type:
+    if not signal_id or not agent_id or not failure_type or not org_id:
         return Response(status_code=400)
 
     if action_id == "mark_resolved":
-        updated = await mark_signal_resolved(signal_id)
+        updated = await mark_signal_resolved(org_id, signal_id)
         logger.info(
             "Signal %d marked resolved by %s (agent=%s type=%s updated=%s)",
             signal_id,
@@ -114,7 +168,7 @@ async def slack_callback(request: Request) -> Response:
         )
 
     if action_id == "false_positive":
-        override = await record_false_positive(signal_id, agent_id, failure_type)
+        override = await record_false_positive(org_id, signal_id, agent_id, failure_type)
         fp_count = override.get("fp_count", 1)
         silenced = override.get("silenced", False)
         floor = override.get("confidence_floor", 0.1)
@@ -139,6 +193,22 @@ async def slack_callback(request: Request) -> Response:
             )
         return Response(
             content=json.dumps({"text": msg}),
+            media_type="application/json",
+        )
+
+    if action_id == "snooze":
+        result = await snooze_pattern(org_id, agent_id, failure_type, hours=_SNOOZE_HOURS)
+        logger.info(
+            "Pattern snoozed by %s — agent=%s type=%s until=%s",
+            user_name,
+            agent_id,
+            failure_type,
+            result.get("snoozed_until"),
+        )
+        return Response(
+            content=json.dumps(
+                {"text": f":zzz: Snoozed {failure_type} on `{agent_id}` for {_SNOOZE_HOURS}h."}
+            ),
             media_type="application/json",
         )
 

@@ -1,0 +1,16 @@
+asyncpg==0.29.0
+# audit Finding 3 (HIGH): was pinned ==1.0.1, which is unsatisfiable against
+# deepeval 4.0.9's python-dotenv>=1.1.1,<2.0.0 constraint — the semantic image
+# could not build. Bumped to deepeval's supported range. (Authorized during audit
+# to enable Phase 3 semantic-evaluator testing.)
+# Lower bound raised to 1.2.2 for GHSA (set_key symlink-following arbitrary file
+# overwrite); upper bound kept for deepeval compatibility.
+python-dotenv>=1.2.2,<2.0.0
+PyYAML==6.0.2
+deepeval==4.0.9
+anthropic>=0.40
+# Only imported when SEMANTIC_LLM_PROVIDER=mistral. Pinned to v2+: v2.0 moved
+# every module under mistralai.client, and evaluators/mistral_model.py imports
+# from there. Shipped in the image for the same reason anthropic is, so
+# switching provider is an env change rather than an image rebuild.
+mistralai>=2.0

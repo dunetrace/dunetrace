@@ -31,7 +31,11 @@ services:
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
       ENV: dev
-      AUTH_MODE: dev
+      # Defaults to dev so the quickstart works with no setup, but overridable
+      # from the environment (AUTH_MODE=prod) without editing this file. The
+      # service code itself defaults to prod — this line is what makes the
+      # compose quickstart open, so set AUTH_MODE=prod before exposing a port.
+      AUTH_MODE: ${AUTH_MODE:-dev}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
       interval: 10s
@@ -81,16 +85,16 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
-      AUTH_MODE: dev
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
-      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      AUTH_MODE: ${AUTH_MODE:-dev}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_REPO: ${GITHUB_REPO:-}
       GITHUB_BASE_BRANCH: ${GITHUB_BASE_BRANCH:-main}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      # Encrypts integration credentials that the integrations/elevenlabs
+      # workers decrypt — the value must match across all three.
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -100,6 +104,78 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # ── Optional workers ────────────────────────────────────────────────────────
+  # All three are OFF by default: each logs one line and exits 0 without opening
+  # a DB connection unless its *_WORKER_ENABLED flag is true, so leaving them
+  # here costs nothing. Expect them to show as Exited(0) until you enable them.
+
+  semantic:
+    image: ghcr.io/dunetrace/dunetrace-semantic:latest
+    # on-failure, not unless-stopped: this worker exits 0 when its
+    # *_WORKER_ENABLED flag is false (the default), and unless-stopped
+    # would restart-loop it forever.
+    restart: on-failure
+    volumes:
+      - ./docs/config/semantic-sampling.yml:/app/docs/config/semantic-sampling.yml:ro
+      - ./docs/config/semantic-evaluators.yml:/app/docs/config/semantic-evaluators.yml:ro
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      POLL_INTERVAL: 15
+      SEMANTIC_WORKER_ENABLED: ${SEMANTIC_WORKER_ENABLED:-false}
+      SEMANTIC_LLM_PROVIDER: ${SEMANTIC_LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION: ${SEMANTIC_ALLOW_CROSS_PROVIDER_SECOND_OPINION:-false}
+      HALLUCINATION_MODEL: ${HALLUCINATION_MODEL:-}
+      TASK_COMPLETION_MODEL: ${TASK_COMPLETION_MODEL:-}
+      TASK_UNDERSTANDING_FAILURE_MODEL: ${TASK_UNDERSTANDING_FAILURE_MODEL:-}
+      OFF_TOPIC_DRIFT_MODEL: ${OFF_TOPIC_DRIFT_MODEL:-}
+      USER_FRUSTRATION_MODEL: ${USER_FRUSTRATION_MODEL:-}
+      CONFUSION_LOOP_MODEL: ${CONFUSION_LOOP_MODEL:-}
+      SYCOPHANCY_SIGNAL_MODEL: ${SYCOPHANCY_SIGNAL_MODEL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+
+  integrations:
+    image: ghcr.io/dunetrace/dunetrace-integrations:latest
+    # on-failure, not unless-stopped: this worker exits 0 when its
+    # *_WORKER_ENABLED flag is false (the default), and unless-stopped
+    # would restart-loop it forever.
+    restart: on-failure
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      WAKE_INTERVAL: 15
+      INTEGRATIONS_WORKER_ENABLED: ${INTEGRATIONS_WORKER_ENABLED:-false}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
+
+  # Same image as `integrations`, different worker entrypoint.
+  elevenlabs:
+    image: ghcr.io/dunetrace/dunetrace-integrations:latest
+    # on-failure, not unless-stopped: this worker exits 0 when its
+    # *_WORKER_ENABLED flag is false (the default), and unless-stopped
+    # would restart-loop it forever.
+    restart: on-failure
+    environment:
+      DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      WAKE_INTERVAL: 60
+      ELEVENLABS_WORKER_ENABLED: ${ELEVENLABS_WORKER_ENABLED:-false}
+      DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+    command: ["python", "-m", "integrations_svc.elevenlabs_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_started
 
   dashboard:
     image: nginx:alpine

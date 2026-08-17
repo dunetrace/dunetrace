@@ -23,6 +23,12 @@ docker compose up -d --force-recreate alerts
 
 Each Slack alert includes: failure type, severity, confidence, what happened, why it matters, a concrete code fix targeted at the specific failure pattern detected, a one-line rate context summary showing how common this pattern is for the agent, and a **View Run** button that deep-links directly to that run's detail panel in the dashboard.
 
+Three action buttons let you respond directly from Slack:
+
+- **Mark resolved** — sets `resolved_at` on the signal.
+- **Not a problem** — records a false positive (`agent_detector_overrides`); after 3 false positives for the same `(agent_id, failure_type)`, that detector is silenced for that agent until manually reset.
+- **Snooze 24h** — mutes this `(agent_id, failure_type)` for 24 hours without affecting the false-positive count. Unlike "Not a problem," snoozing is a deliberate temporary decision ("I know about this, stop paging me today"), not accumulated feedback about detector accuracy — the two mechanisms are independent and don't interact.
+
 When token data is available for the run, a `:moneybag:` line is included showing total tokens consumed and estimated cost (e.g. `:moneybag: *Tokens:* 581 (wasted)  *Cost:* ~$0.00`). This uses actual `prompt_tokens + completion_tokens` from SDK-recorded `llm.responded` events.
 
 > **Note:** `docker compose restart alerts` does not re-read `.env`. Use `docker compose up -d alerts` to recreate the container and pick up env var changes.
@@ -81,6 +87,29 @@ The alerts worker polls every 10 seconds for unalerted signals (`shadow=FALSE AN
 
 If the worker crashes between sending and marking, the signal will be re-sent on restart. Design receivers to be idempotent.
 
+### Running more than one alerts worker
+
+Safe, but only because signals are **claimed** before delivery. `alerted` is set
+after a successful send, so it can't serve as the claim on its own — two workers
+scanning the same window would both see `alerted = FALSE`, both deliver, and you'd
+get duplicate Slack messages. The `ALERT_DEDUP_WINDOW` check doesn't prevent it
+either, since both read the window before either writes it.
+
+`claim_unalerted_signals` stamps `failure_signals.alert_claimed_at` in the same
+statement that selects the rows (`FOR UPDATE SKIP LOCKED`), so a row can only be
+picked up by one worker. To actually scale throughput, also shard: set
+`SHARD_COUNT=N` and give each replica a distinct `SHARD_INDEX`, exactly as with the
+detector. Sharding on `agent_id` matters beyond throughput — the worker sends one
+alert per `(org_id, agent_id, failure_type)` group, so a group must stay whole on
+one worker.
+
+Claims expire after `CLAIM_TIMEOUT_SECS` (default 300) so a worker that dies
+mid-delivery doesn't strand its rows. Set it comfortably above your worst-case
+delivery time for a full batch: if it expires while a worker is still alive and
+working, another replica takes the row and the alert goes out twice.
+
+See [architecture.md](architecture.md#alerts-worker-sharding-plus-claiming).
+
 ---
 
 ## Weekly digest
@@ -112,3 +141,18 @@ Delivery is deduplicated via a `digest_log` table. If a digest was sent within t
 ## Shadow mode
 
 Signals in shadow mode are stored and visible in the dashboard but never delivered to Slack or webhooks. See [detectors.md](detectors.md#shadow-mode) for how to promote a detector to live.
+
+---
+
+## Per-detector destination routing
+
+By default every alertable signal goes to every globally-enabled destination (Slack and/or the generic webhook). To route specific failure types to specific destinations, add a `destinations` list to that detector's block in `detectors.yml`:
+
+```yaml
+default:
+  tool_loop:
+    threshold: 3
+    destinations: [slack]   # only Slack, even if WEBHOOK_URL is also configured
+```
+
+Valid values: `slack`, `webhook`, `linear` (Linear delivery itself is not yet implemented — a detector routed only to `linear` today delivers nowhere until that lands). Restart the alerts worker (`docker compose restart alerts`) to apply changes.

@@ -18,14 +18,10 @@ const MODEL        = "gpt-4o";
 const TOOLS        = ["web_search", "calculator", "read_file"];
 const SYSTEM_PROMPT = "You are a research assistant that finds academic papers.";
 
-// ── Hashing (must match Python SDK exactly) ───────────────────────────────────
+// ── Agent version fingerprint (must match Python SDK exactly) ────────────────
 
 function sha256hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
-}
-
-function hashContent(text: string): string {
-  return sha256hex(text).slice(0, 16);
 }
 
 /** Replicates Python: f"{system_prompt}:{model}:{sorted(tools)}" where sorted(tools)
@@ -97,8 +93,8 @@ async function runAgent(): Promise<string> {
   const { emit, currentStep } = makeEmitter(runId, version);
 
   const USER_INPUT  = "Find recent papers on LLM agent failure modes and hallucination";
-  const SEARCH_ARGS = hashContent("LLM agent failures 2024 arxiv");
-  const ERROR_HASH  = hashContent("ConnectionError: upstream API timeout after 10s");
+  const SEARCH_ARGS = JSON.stringify({ query: "LLM agent failures 2024 arxiv" });
+  const ERROR_TEXT  = "ConnectionError: upstream API timeout after 10s";
 
   const events: AgentEvent[] = [];
 
@@ -111,7 +107,7 @@ async function runAgent(): Promise<string> {
     step_index:    0,
     timestamp:     Date.now() / 1000,
     payload: {
-      input_hash: hashContent(USER_INPUT),
+      input_text: USER_INPUT,
       model:      MODEL,
       tools:      TOOLS,
     },
@@ -121,43 +117,43 @@ async function runAgent(): Promise<string> {
   events.push(emit("llm.called",    { model: MODEL }));
   events.push(emit("llm.responded", {
     finish_reason: "tool_calls",
-    output_hash:   hashContent("I will search for recent papers on LLM failures"),
+    output:        "I will search for recent papers on LLM failures",
     output_length: 68,
     latency_ms:    843,
   }, false));
 
-  events.push(emit("tool.called",    { tool_name: "web_search", args_hash: SEARCH_ARGS }));
-  events.push(emit("tool.responded", { tool_name: "web_search", success: false, error_hash: ERROR_HASH }, false));
+  events.push(emit("tool.called",    { tool_name: "web_search", args: SEARCH_ARGS }));
+  events.push(emit("tool.responded", { tool_name: "web_search", success: false, error: ERROR_TEXT }, false));
 
   // ── Iteration 2: LLM retries same search ─────────────────────────────────
   events.push(emit("llm.called",    { model: MODEL }));
   events.push(emit("llm.responded", {
     finish_reason: "tool_calls",
-    output_hash:   hashContent("The search timed out, let me retry"),
+    output:        "The search timed out, let me retry",
     output_length: 52,
     latency_ms:    912,
   }, false));
 
-  events.push(emit("tool.called",    { tool_name: "web_search", args_hash: SEARCH_ARGS }));
-  events.push(emit("tool.responded", { tool_name: "web_search", success: false, error_hash: ERROR_HASH }, false));
+  events.push(emit("tool.called",    { tool_name: "web_search", args: SEARCH_ARGS }));
+  events.push(emit("tool.responded", { tool_name: "web_search", success: false, error: ERROR_TEXT }, false));
 
   // ── Iteration 3: third attempt — RETRY_STORM threshold (≥3) ──────────────
   events.push(emit("llm.called",    { model: MODEL }));
   events.push(emit("llm.responded", {
     finish_reason: "tool_calls",
-    output_hash:   hashContent("One more attempt at the search"),
+    output:        "One more attempt at the search",
     output_length: 44,
     latency_ms:    876,
   }, false));
 
-  events.push(emit("tool.called",    { tool_name: "web_search", args_hash: SEARCH_ARGS }));
-  events.push(emit("tool.responded", { tool_name: "web_search", success: false, error_hash: ERROR_HASH }, false));
+  events.push(emit("tool.called",    { tool_name: "web_search", args: SEARCH_ARGS }));
+  events.push(emit("tool.responded", { tool_name: "web_search", success: false, error: ERROR_TEXT }, false));
 
   // ── Iteration 4: gives up ─────────────────────────────────────────────────
   events.push(emit("llm.called",    { model: MODEL }));
   events.push(emit("llm.responded", {
     finish_reason: "stop",
-    output_hash:   hashContent("I was unable to complete the search due to connectivity issues"),
+    output:        "I was unable to complete the search due to connectivity issues",
     output_length: 118,
     latency_ms:    761,
   }, false));

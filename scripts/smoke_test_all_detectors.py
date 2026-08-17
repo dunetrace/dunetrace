@@ -131,35 +131,35 @@ def scenario_tool_loop() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"tool_name": "search", "args_hash": "h1"},
+                {"tool_name": "search", "args": "h1"},
             ),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 2,
-                {"tool_name": "search", "args_hash": "h1"},
+                {"tool_name": "search", "args": "h1"},
             ),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 3,
-                {"tool_name": "search", "args_hash": "h1"},
+                {"tool_name": "search", "args": "h1"},
             ),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 4,
-                {"tool_name": "search", "args_hash": "h1"},
+                {"tool_name": "search", "args": "h1"},
             ),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 5,
-                {"tool_name": "search", "args_hash": "h1"},
+                {"tool_name": "search", "args": "h1"},
             ),
             ev("run.completed", rid, AGENT_ID, 5, {"exit_reason": "completed"}),
         ],
@@ -180,42 +180,42 @@ def scenario_tool_thrashing() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"tool_name": "search", "args_hash": "h1"},
+                {"tool_name": "search", "args": "h1"},
             ),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 2,
-                {"tool_name": "database", "args_hash": "h2"},
+                {"tool_name": "database", "args": "h2"},
             ),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 3,
-                {"tool_name": "search", "args_hash": "h3"},
+                {"tool_name": "search", "args": "h3"},
             ),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 4,
-                {"tool_name": "database", "args_hash": "h4"},
+                {"tool_name": "database", "args": "h4"},
             ),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 5,
-                {"tool_name": "search", "args_hash": "h5"},
+                {"tool_name": "search", "args": "h5"},
             ),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 6,
-                {"tool_name": "database", "args_hash": "h6"},
+                {"tool_name": "database", "args": "h6"},
             ),
             ev("run.completed", rid, AGENT_ID, 6, {"exit_reason": "completed"}),
         ],
@@ -314,7 +314,8 @@ def scenario_llm_truncation_loop() -> str:
 
 
 def scenario_context_bloat() -> str:
-    """CONTEXT_BLOAT: prompt tokens grow 3.2× over 3 LLM calls."""
+    """CONTEXT_BLOAT: prompt tokens grow 3.5x over 3 LLM calls, clearing both
+    the growth-factor threshold (3.0x) and the MIN_LAST_TOKENS floor (2000)."""
     rid = mk_run_id("bloat")
     ingest(
         AGENT_ID,
@@ -327,7 +328,7 @@ def scenario_context_bloat() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"finish_reason": "stop", "prompt_tokens": 100, "output_length": 50},
+                {"finish_reason": "stop", "prompt_tokens": 700, "output_length": 50},
             ),
             ev("llm.called", rid, AGENT_ID, 2, {"model": "test"}),
             ev(
@@ -335,7 +336,7 @@ def scenario_context_bloat() -> str:
                 rid,
                 AGENT_ID,
                 2,
-                {"finish_reason": "stop", "prompt_tokens": 200, "output_length": 50},
+                {"finish_reason": "stop", "prompt_tokens": 1600, "output_length": 50},
             ),
             ev("llm.called", rid, AGENT_ID, 3, {"model": "test"}),
             ev(
@@ -343,7 +344,7 @@ def scenario_context_bloat() -> str:
                 rid,
                 AGENT_ID,
                 3,
-                {"finish_reason": "stop", "prompt_tokens": 320, "output_length": 50},
+                {"finish_reason": "stop", "prompt_tokens": 2500, "output_length": 50},
             ),
             ev("run.completed", rid, AGENT_ID, 3, {"exit_reason": "completed"}),
         ],
@@ -367,7 +368,7 @@ def scenario_slow_step() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"tool_name": "slow_api", "args_hash": "h1"},
+                {"tool_name": "slow_api", "args": "h1"},
                 ts=T,
             ),
             # run.completed at T+20: step_durations_ms[1] = 20 000 ms > 15 000 ms threshold
@@ -385,7 +386,12 @@ def scenario_slow_step() -> str:
 
 
 def scenario_retry_storm() -> str:
-    """RETRY_STORM: same tool, 3 consecutive success=False calls (args vary)."""
+    """RETRY_STORM: same tool, 3 consecutive success=False calls (args vary).
+
+    tool_name must be on the tool.responded payload too — run_builder.py
+    backfills success onto the matching ToolCall by tool_name (not step_index),
+    same as the real SDK's tool_responded() always includes it.
+    """
     rid = mk_run_id("retry-storm")
     ingest(
         AGENT_ID,
@@ -397,25 +403,25 @@ def scenario_retry_storm() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"tool_name": "payment_api", "args_hash": "h1"},
+                {"tool_name": "payment_api", "args": "h1"},
             ),
-            ev("tool.responded", rid, AGENT_ID, 1, {"success": False}),
+            ev("tool.responded", rid, AGENT_ID, 1, {"tool_name": "payment_api", "success": False}),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 2,
-                {"tool_name": "payment_api", "args_hash": "h2"},
+                {"tool_name": "payment_api", "args": "h2"},
             ),
-            ev("tool.responded", rid, AGENT_ID, 2, {"success": False}),
+            ev("tool.responded", rid, AGENT_ID, 2, {"tool_name": "payment_api", "success": False}),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 3,
-                {"tool_name": "payment_api", "args_hash": "h3"},
+                {"tool_name": "payment_api", "args": "h3"},
             ),
-            ev("tool.responded", rid, AGENT_ID, 3, {"success": False}),
+            ev("tool.responded", rid, AGENT_ID, 3, {"tool_name": "payment_api", "success": False}),
             ev("run.completed", rid, AGENT_ID, 3, {"exit_reason": "error"}),
         ],
     )
@@ -445,7 +451,11 @@ def scenario_empty_llm_response() -> str:
 
 
 def scenario_cascading_tool_failure() -> str:
-    """CASCADING_TOOL_FAILURE: 3 consecutive fails across 2 distinct tools."""
+    """CASCADING_TOOL_FAILURE: 3 consecutive fails across 2 distinct tools.
+
+    tool_name must be on the tool.responded payload too — see the note on
+    scenario_retry_storm().
+    """
     rid = mk_run_id("cascade")
     ingest(
         AGENT_ID,
@@ -457,25 +467,25 @@ def scenario_cascading_tool_failure() -> str:
                 rid,
                 AGENT_ID,
                 1,
-                {"tool_name": "db_lookup", "args_hash": "h1"},
+                {"tool_name": "db_lookup", "args": "h1"},
             ),
-            ev("tool.responded", rid, AGENT_ID, 1, {"success": False}),
+            ev("tool.responded", rid, AGENT_ID, 1, {"tool_name": "db_lookup", "success": False}),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 2,
-                {"tool_name": "search_api", "args_hash": "h2"},
+                {"tool_name": "search_api", "args": "h2"},
             ),
-            ev("tool.responded", rid, AGENT_ID, 2, {"success": False}),
+            ev("tool.responded", rid, AGENT_ID, 2, {"tool_name": "search_api", "success": False}),
             ev(
                 "tool.called",
                 rid,
                 AGENT_ID,
                 3,
-                {"tool_name": "db_lookup", "args_hash": "h3"},
+                {"tool_name": "db_lookup", "args": "h3"},
             ),
-            ev("tool.responded", rid, AGENT_ID, 3, {"success": False}),
+            ev("tool.responded", rid, AGENT_ID, 3, {"tool_name": "db_lookup", "success": False}),
             ev("run.errored", rid, AGENT_ID, 3),
         ],
     )
@@ -529,7 +539,7 @@ def _baseline_run() -> list[dict]:
             1,
             {"finish_reason": "stop", "prompt_tokens": 50, "output_length": 30},
         ),
-        _infl_ev("tool.called", rid, 2, {"tool_name": "search", "args_hash": "h"}),
+        _infl_ev("tool.called", rid, 2, {"tool_name": "search", "args": "h"}),
         _infl_ev("tool.responded", rid, 2, {"success": True}),
         _infl_ev("llm.called", rid, 3, {"model": "test"}),
         _infl_ev(
@@ -556,7 +566,7 @@ def _baseline_run() -> list[dict]:
     ]
 
 
-def inject_inflation_baseline(n: int = 10) -> None:
+def inject_inflation_baseline(n: int = 20) -> None:
     """Inject n baseline runs (separate batches to avoid MAX_BATCH_SIZE)."""
     for _ in range(n):
         events = _baseline_run()
@@ -583,9 +593,7 @@ def scenario_step_count_inflation() -> str:
                 },
             )
         )
-        events.append(
-            _infl_ev("tool.called", rid, i, {"tool_name": "search", "args_hash": f"h{i}"})
-        )
+        events.append(_infl_ev("tool.called", rid, i, {"tool_name": "search", "args": f"h{i}"}))
         events.append(_infl_ev("tool.responded", rid, i, {"success": True}))
     events.append(_infl_ev("run.completed", rid, 20, {"exit_reason": "completed"}))
     ingest(INFL_AGENT_ID, rid, events)
@@ -636,8 +644,11 @@ def main() -> None:
     wait_healthy(API_URL, "api")
 
     # ── 2. Baseline for STEP_COUNT_INFLATION ─────────────────────────────────
-    print("\n[2/5] Injecting 10 baseline runs for STEP_COUNT_INFLATION...")
-    inject_inflation_baseline(10)
+    # _MIN_BASELINE_RUNS in services/detector/detector_svc/db.py is 20 — fewer
+    # historical runs and fetch_step_count_baseline() returns None, so the
+    # detector never fires regardless of how inflated the real run's step count is.
+    print("\n[2/5] Injecting 20 baseline runs for STEP_COUNT_INFLATION...")
+    inject_inflation_baseline(20)
     print("      Waiting 20 s for detector to process baseline runs...")
     time.sleep(20)
 

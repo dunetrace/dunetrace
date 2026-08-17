@@ -10,6 +10,18 @@ framework that doesn't have a dedicated middleware.
 
 Sends events to http://localhost:8001. Start the backend first:
     docker compose up
+
+Also ship these runs to your own OTel backend (Datadog, Grafana, Honeycomb, ...)
+with no code change here — export is env-driven. Install the extra and set:
+
+    pip install 'dunetrace[otel]'
+    export DUNETRACE_OTEL_ENABLED=1
+    export DUNETRACE_OTEL_ENDPOINT=http://localhost:4317   # your OTLP collector
+    python examples/basic_agent.py
+
+The same runs then appear as OTel traces (dunetrace.run with nested LLM/tool
+spans) in your backend, alongside the Dunetrace dashboard. See
+docs/integrations/opentelemetry.md and the runnable harness in otel/.
 """
 
 import os
@@ -117,7 +129,7 @@ def rag_empty_run(user_input: str) -> None:
         run.llm_called("gpt-4o", prompt_tokens=150)
         run.llm_responded(finish_reason="tool_calls")
 
-        run.retrieval_called("product-docs", query_hash="abc123")
+        run.retrieval_called("product-docs", query=user_input)
         run.retrieval_responded("product-docs", result_count=0, latency_ms=45)
 
         # Agent answers from memory despite empty retrieval

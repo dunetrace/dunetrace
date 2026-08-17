@@ -1,115 +1,23 @@
 # Dunetrace MCP Server
 
-Query agent signals, run details, and health scores directly from Claude Code, Cursor, Codex, or any MCP-compatible client - without leaving your editor.
+Query agent signals, run details, and health scores directly from Claude Code, Cursor, Codex, or any MCP-compatible client — without leaving your editor. Read-only for signals and runs; nine tools write — the policy and custom-detector lifecycle operations, plus `resolve_issue` and `trigger_explain`. See the ✎ markers in [docs/mcp-server.md](../../docs/mcp-server.md) for which ones, and what each affects.
 
----
-
-## What it is
-
-The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](https://modelcontextprotocol.io). Your editor (or any LLM) can call it as a tool and ask things like:
-
-- *"Is my `research-agent` healthy?"*
-- *"What failed in the last 24 hours?"*
-- *"Show me signal #42 — what happened and how do I fix it?"*
-- *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
-- *"Walk me through run `abc123` step by step."*
-
-Signal data is read-only. Only hashed metadata is exposed — no raw prompts, tool arguments, or model outputs ever leave your process. Write operations (create/update/delete) are available for policies and custom detectors.
-
----
-
-## Prerequisites
-
-- Dunetrace backend running (`docker compose up -d`)
-- Python 3.11+
-- The Customer API accessible at `http://localhost:8002` (or set `DUNETRACE_API_URL`)
-
----
-
-## Install
+Setup (install, client config for Claude Code / Cursor / Codex, environment variables) is covered in **[docs/mcp-server.md](../../docs/mcp-server.md)** — the quick version:
 
 ```bash
 pip install dunetrace-mcp
 ```
 
-Or install from source (for development):
-
-```bash
-cd packages/mcp-server
-pip install -e .
-```
-
----
-
-## Client setup
-
-### Claude Code
-
-Add to `~/.claude.json`:
-
 ```json
 {
   "mcpServers": {
     "dunetrace": {
       "command": "dunetrace-mcp",
-      "env": {
-        "DUNETRACE_API_URL": "http://localhost:8002",
-        "DUNETRACE_API_KEY": "dt_dev_test"
-      }
+      "env": { "DUNETRACE_API_URL": "http://localhost:8002", "DUNETRACE_API_KEY": "dt_dev_test" }
     }
   }
 }
 ```
-
-Restart Claude Code. The `dunetrace` server will appear in the MCP tools list.
-
-### Cursor
-
-Create `.cursor/mcp.json` in your project root (or global `~/.cursor/mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "dunetrace": {
-      "command": "dunetrace-mcp",
-      "env": {
-        "DUNETRACE_API_URL": "http://localhost:8002",
-        "DUNETRACE_API_KEY": "dt_dev_test"
-      }
-    }
-  }
-}
-```
-
-### Codex / SSE clients
-
-Run the server in SSE mode (listens on `:8000` by default):
-
-```bash
-dunetrace-mcp --sse
-dunetrace-mcp --sse --port 9000   # custom port
-```
-
-Point your client's tool endpoint at `http://localhost:8000/sse`.
-
-### Manual test (stdio)
-
-```bash
-dunetrace-mcp
-```
-
-The server speaks MCP over stdin/stdout. You can pipe JSON-RPC messages manually or use the MCP Inspector.
-
----
-
-## Environment variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `DUNETRACE_API_URL` | `http://localhost:8002` | Customer API base URL |
-| `DUNETRACE_API_KEY` | `dt_dev_test` | Bearer token (auth header) |
-
-For production, set `DUNETRACE_API_KEY` to your real API key.
 
 ---
 
@@ -150,7 +58,7 @@ Get recent failure signals for a specific agent, with titles, explanations, and 
 🟠 [HIGH] TOOL_LOOP  conf=90%  step=7  6h ago
    Tool loop detected: `web_search` called 6× in steps 2–7
    What: The agent called web_search 6 times with identical args.
-   Fix:  Deduplicate `web_search` calls — identical args hash seen 6×
+   Fix:  Deduplicate `web_search` calls — identical arguments seen 6×
 ```
 
 ---
@@ -184,14 +92,14 @@ Why it matters:
   Looping agents burn tokens without producing value. A 5-step loop at
   typical gpt-4o pricing costs $0.15–$0.30 with nothing to show for it.
 
-Evidence (hashed/structural data):
+Evidence:
   tool: web_search
   count: 6
   args_identical: True
-  args_hashes: ['ffa8f58f', 'ffa8f58f', …+4 more]
+  args: ['{"query": "LLM benchmarks"}', '{"query": "LLM benchmarks"}', …+4 more]
 
 Suggested fixes (2):
-  1. Deduplicate `web_search` calls — identical args hash seen 6×
+  1. Deduplicate `web_search` calls — identical arguments seen 6×
      ```python
      seen = set()
      if args not in seen:
@@ -200,8 +108,6 @@ Suggested fixes (2):
      ```
   2. Set a hard step limit as a circuit breaker
 ```
-
-> **Privacy note:** The `args_hashes` field contains SHA-256 hashes of the original tool arguments — the raw arguments never leave your agent process.
 
 ---
 
@@ -264,7 +170,7 @@ Exit:     run.completed
 Signals (1):
   🟠 TOOL_LOOP  [HIGH]  conf=90%  step=7
      Tool loop detected: `web_search` called 6× in steps 2–7
-     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
+     Fix: Deduplicate `web_search` calls — identical arguments seen 6×
 
 Event timeline (18 events):
   [  0]    +0.0s  run.started
@@ -377,7 +283,7 @@ Most recent signals:
   🟠 TOOL_LOOP  conf=90%  6h ago  run=019e217d…
      The agent called `web_search` 6 times with identical args.
      Impact: Looping agents burn tokens without producing value.
-     Fix: Deduplicate `web_search` calls — identical args hash seen 6×
+     Fix: Deduplicate `web_search` calls — identical arguments seen 6×
 
 Health components:
   failure_rate         ███░░░░░░░░░░░░░░░░░  7/40
@@ -408,6 +314,61 @@ RUN ID       STARTED                  DUR  STEPS SIGS  STATUS
 019e217d-bd2 6h ago                   5.6s     8  🔴 1
 019e2163-a89 6h ago                   4.7s     8  🔴 1
 019e2163-66f 6h ago                   4.8s     4  ✅  0
+```
+
+---
+
+### `list_voice_calls`
+
+List recent voice calls with call-level metrics: duration, how the call ended, silence percentage, voice signal count, and cost. A "call" is a voice agent's conversation (the runs that share one conversation id).
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | "" | Filter to one voice agent (optional) |
+| `completion_status` | string | "" | `natural` \| `dropped` \| `escalated` (optional) |
+| `cost_bucket` | string | "" | `low` (<$0.10) \| `medium` ($0.10–$1) \| `high` (>$1) (optional) |
+| `limit` | int | 20 | Max calls to return (max 100) |
+
+**Example output:**
+```
+Voice calls
+
+ CALL  AGENT              WHEN          DUR SILENCE  SIGS      COST  STATUS
+────────────────────────────────────────────────────────────────────────────────────
+  101  voice-support      5m ago        92s     12%     0 $  0.0423  ✅ natural
+  102  voice-support      15m ago       45s     55%  🔴 2 $  0.5000  🔴 dropped
+```
+
+---
+
+### `get_call_detail`
+
+One voice call's full picture: call-level metrics, per-stage cost breakdown (STT / LLM / TTS / telephony), the voice failure signals detected, and links to the call audio when recorded.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `conversation_id` | int | required | Call id (from `list_voice_calls`) |
+
+**Example output:**
+```
+Call #102  (voice-support)
+  Ended:      🔴 dropped
+  Duration:   45s over 2 run(s)
+  Silence:    55%
+  Talk ratio: agent 62% / caller 38%
+  Cost:       $0.5000
+              stt=$0.1000  llm=$0.3000  tts=$0.1000
+
+Voice signals (2):
+  🔴 VOICE_DEAD_AIR
+  🔴 VOICE_TRUNCATED_RESPONSE
+
+Recordings (1):
+  🎧 https://audio.example/conv-def.wav  (45s)
 ```
 
 ---
@@ -449,15 +410,15 @@ Waste by failure type (30 days):
 
 ### `get_instrumentation_guide`
 
-Get a quick-start code snippet for instrumenting an agent with Dunetrace. Works for Python, LangChain/LangGraph, TypeScript, and plain tool-call tracking.
+Get a quick-start code snippet for instrumenting an agent with Dunetrace. Works for Python, LangChain/LangGraph, TypeScript, Haystack, voice agents, plain tool-call tracking, and OpenTelemetry.
 
 **Arguments:**
 
 | Argument | Type | Default | Description |
 |---|---|---|---|
-| `framework` | string | required | Framework name: `python`, `langchain`, `langgraph`, `typescript`, or `tools` |
+| `framework` | string | required | Framework name: `python`, `langchain`, `langgraph`, `typescript`, `haystack`, `tools`, `voice`, or `otel` |
 
-Aliases accepted: `lc`, `lc-graph`, `lc_graph`, `langgraph`, `ts`, `js`, `javascript`, `node`, `tracking`, `tool_calls` (and more).
+Aliases accepted: `lc`, `lc-graph`, `lc_graph`, `langgraph`, `ts`, `js`, `javascript`, `node`, `tracking`, `tool_calls`, `voice-agent`, `stt`, `tts`, `speech`, `otlp`, `opentelemetry` (and more).
 
 ---
 
@@ -490,7 +451,7 @@ List all fixes that have been applied for an agent's signals, with type, deliver
 
 ### `trigger_explain`
 
-Trigger LLM-powered root cause analysis for a signal. Fetches the Langfuse trace, runs analysis, and returns a structured fix (prompt addition or code change).
+Trigger root-cause analysis for a signal, built natively from the run's own stored events — no external tracing system required. Returns a `fix_category`: `dunetrace_native` (a runtime policy Dunetrace can apply directly) or `customer_code` (a prompt/code diff you apply yourself, or via a GitHub PR for `code_change` fixes).
 
 **Note:** Makes an LLM call — may take 5–15 seconds.
 
@@ -608,6 +569,55 @@ List open or resolved issues for an agent. Issues are aggregated across runs —
 
 ---
 
+### `search_issues`
+
+Search issues across **all** agents in your org — fleet-wide triage, where `list_agent_issues` is scoped to one agent.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `query` | string | `""` | Substring match against agent_id / failure_type / resolution_notes. Empty matches everything |
+| `status` | string | `""` | Filter: `open`, `resolved`, or `reopened`. Empty = all |
+| `agent_id` | string | `""` | Restrict to one agent. Empty = all agents |
+| `failure_type` | string | `""` | Restrict to one detector, e.g. `TOOL_LOOP` |
+| `limit` | int | 20 | Max issues to return |
+
+`query` is a plain substring match, not full-text search or relevance ranking — issues have no free-text title beyond `resolution_notes`, which is only populated once an issue has been manually resolved.
+
+---
+
+### `get_issue`
+
+Full context for a single issue — metadata, affected runs, root cause, and a suggested fix. The deep-dive tool for one issue found via `search_issues` or `list_agent_issues`.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `issue_id` | int | required | Integer issue ID |
+
+**Note:** may trigger an LLM call to generate the root cause/fix (the same native analysis `trigger_explain` uses) and can take 5–15 seconds. With no LLM key configured on the backend, `root_cause`/`suggested_fix` are omitted and the rest of the report still returns.
+
+`code_references` is always empty for now — Dunetrace has no source-mapping capability yet.
+
+---
+
+### `resolve_issue` ✎
+
+Manually mark an issue resolved with notes on what fixed it — for when you've made a code/prompt change and want to close the loop, distinct from Dunetrace's automatic resolve-after-5-clean-runs detection.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `issue_id` | int | required | Integer issue ID to resolve |
+| `resolution_notes` | string | required | What fixed it, e.g. "Added a per-tool call limit of 3 in the agent's retry loop." |
+
+If the failure recurs later the issue reopens automatically, whether it was auto- or manually-resolved — `resolution_notes` is kept as a historical record either way.
+
+---
+
 ### `get_failure_pattern_detail`
 
 Deep dive into a specific failure type: evidence aggregates, a 14-day trend with ASCII bar chart, co-occurring signals, and top example runs.
@@ -661,7 +671,7 @@ You:   I got a Slack alert for TOOL_LOOP on research-agent. What's happening?
 
 Agent: [calls summarize_agent("research-agent")]
        Health is 41/100. TOOL_LOOP is systemic — 46 signals across 36% of
-       runs. The fix is to deduplicate web_search calls (identical args hash
+       runs. The fix is to deduplicate web_search calls (identical arguments
        seen 6× per run). Signal #495 is the most recent. Want the code?
 
 You:   Yes, show me signal #495.
@@ -704,16 +714,15 @@ Agent: [calls get_agent_patterns("research-agent")]
 
 ---
 
-## Privacy
+## Data Handling
 
-All data served by the MCP tools comes from the Dunetrace Customer API, which stores only hashed or structural metadata:
+All data served by the MCP tools comes from the Dunetrace Customer API:
 
-- Tool arguments → SHA-256 hash (shown as `args_hashes`)
-- LLM prompts and outputs → SHA-256 hash (never stored)
+- Tool arguments, LLM prompts and outputs → stored and returned as-is (shown as `args`, `output`, etc. in evidence)
 - Token counts, latency, step counts → stored as plain numbers
 - Run and signal metadata → stored as plain text
 
-The `evidence` dict in signal responses contains the hashed fingerprints the detector used — not the original content.
+The `evidence` dict in signal responses contains the actual content the detector used, not a hash of it.
 
 ---
 
@@ -724,7 +733,7 @@ cd packages/mcp-server
 python -m pytest tests/ -v
 ```
 
-154 tests, all offline — no running stack required.
+188 tests, all offline — no running stack required.
 
 ---
 
@@ -736,9 +745,9 @@ python -m pytest tests/ -v
 dunetrace_mcp/
   __init__.py
   client.py      # thin httpx wrapper around the Customer API
-  server.py      # FastMCP server with 26 tools + 6 doc resources
+  server.py      # FastMCP server with 31 tools + 8 doc resources
 tests/
-  test_tools.py  # 154 unit tests (all offline)
+  test_tools.py  # 188 unit tests (all offline)
 pyproject.toml
 README.md
 ```

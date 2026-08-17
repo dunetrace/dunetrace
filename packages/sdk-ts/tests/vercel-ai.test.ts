@@ -154,7 +154,7 @@ describe("instrumentGenerateTextOptions()", () => {
 
     const toolCalled = events.find(e => e.event_type === "tool.called");
     expect(toolCalled!.payload["tool_name"]).toBe("weather");
-    expect(toolCalled!.payload["args_hash"]).toBeTruthy();
+    expect(toolCalled!.payload["args"]).toBe(JSON.stringify({ city: "Paris" }));
 
     await dt.shutdown();
   });
@@ -187,7 +187,7 @@ describe("instrumentGenerateTextOptions()", () => {
     const toolResponded = events.find(e => e.event_type === "tool.responded");
     expect(toolResponded).toBeDefined();
     expect(toolResponded!.payload["success"]).toBe(false);
-    expect(toolResponded!.payload["error_hash"]).toBeTruthy();
+    expect(toolResponded!.payload["error"]).toBe("Error: upstream 500");
 
     await dt.shutdown();
   });
@@ -391,13 +391,13 @@ describe("traceGenerateText()", () => {
     await dt.shutdown();
   });
 
-  it("derives a distinct input_hash from an array-form prompt", async () => {
+  it("derives distinct raw input_text from an array-form prompt", async () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
 
     const fakeGenerateText = async () => ({ text: "ok" });
 
-    const hashFor = async (content: string): Promise<string> => {
+    const inputTextFor = async (content: string): Promise<string> => {
       await traceGenerateText(
         dt,
         "array-prompt-agent",
@@ -405,20 +405,19 @@ describe("traceGenerateText()", () => {
         fakeGenerateText as never,
         { model: FAKE_MODEL as never, prompt: [{ role: "user", content }] } as never,
       );
-      return events.filter(e => e.event_type === "run.started").at(-1)!.payload["input_hash"] as string;
+      return events.filter(e => e.event_type === "run.started").at(-1)!.payload["input_text"] as string;
     };
 
-    const hashA = await hashFor("What is 2+2?");
-    const hashB = await hashFor("What is 9+9?");
+    const inputA = await inputTextFor("What is 2+2?");
+    const inputB = await inputTextFor("What is 9+9?");
 
-    expect(hashA).toBeTruthy();
-    expect(hashB).toBeTruthy();
-    expect(hashA).not.toBe(hashB);
+    expect(inputA).toBe("What is 2+2?");
+    expect(inputB).toBe("What is 9+9?");
 
     await dt.shutdown();
   });
 
-  it("derives input_hash from messages when prompt and userInput are absent", async () => {
+  it("derives input_text from messages when prompt and userInput are absent", async () => {
     const dt     = new Dunetrace({ endpoint: "http://localhost:8001" });
     const events = captureEvents(dt);
 
@@ -433,7 +432,7 @@ describe("traceGenerateText()", () => {
     );
 
     const started = events.find(e => e.event_type === "run.started")!;
-    expect(started.payload["input_hash"]).toBeTruthy();
+    expect(started.payload["input_text"]).toBe("What is 2+2?");
 
     await dt.shutdown();
   });

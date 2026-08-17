@@ -1,4 +1,8 @@
 asyncpg==0.29.0
 httpx==0.28.1
-python-dotenv==1.0.1
+python-dotenv>=1.2.2
 PyYAML>=6.0
+# audit Finding 4 (BLOCKER): alerts_svc/crypto.py imports cryptography to decrypt
+# per-org Slack/Linear creds, but it was missing here — clean builds crash-looped
+# with ModuleNotFoundError. Matches services/api/requirements.txt.
+cryptography>=42

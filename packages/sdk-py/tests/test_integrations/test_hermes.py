@@ -186,23 +186,23 @@ class TestHermesEventSequence(unittest.TestCase):
         run_ids = {e.run_id for e in events}
         self.assertEqual(len(run_ids), 1)
 
-    def test_run_started_has_input_hash(self):
+    def test_run_started_has_input_text(self):
         events = self._run_happy()
         started = events[0]
-        self.assertIn("input_hash", started.payload)
-        self.assertNotEqual(started.payload["input_hash"], "")
+        self.assertIn("input_text", started.payload)
+        self.assertNotEqual(started.payload["input_text"], "")
 
-    def test_tool_called_has_args_hash(self):
+    def test_tool_called_has_args(self):
         events = self._run_happy()
         tc = [e for e in events if e.event_type == EventType.TOOL_CALLED][0]
-        self.assertIn("args_hash", tc.payload)
+        self.assertIn("args", tc.payload)
 
     def test_tool_responded_success_true(self):
         events = self._run_happy()
         tr = [e for e in events if e.event_type == EventType.TOOL_RESPONDED][0]
         self.assertTrue(tr.payload["success"])
 
-    def test_tool_failure_emits_error_hash(self):
+    def test_tool_failure_emits_error(self):
         plugin, emitted = _make_plugin()
         tid = "s:t:fail"
         plugin._pre_llm_call(turn_id=tid)
@@ -220,7 +220,7 @@ class TestHermesEventSequence(unittest.TestCase):
 
         tr = [e for e in emitted if e.event_type == EventType.TOOL_RESPONDED][0]
         self.assertFalse(tr.payload["success"])
-        self.assertIn("error_hash", tr.payload)
+        self.assertEqual(tr.payload["error"], "timeout")
 
     def test_interrupted_run_emits_run_errored(self):
         plugin, emitted = _make_plugin()
