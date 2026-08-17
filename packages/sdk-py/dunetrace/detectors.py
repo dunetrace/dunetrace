@@ -551,15 +551,23 @@ class SlowStepDetector(BaseDetector):
     ]
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
 
-    def _threshold_for(self, event_type: str, state: Optional[RunState] = None) -> tuple[int, str]:
+    def _threshold_for(self, event_type: str, state: Optional[RunState] = None, tool_name: Optional[str] = None) -> tuple[int, str]:
         for prefix, static_ms, label in self.THRESHOLDS:
             if not prefix or event_type.startswith(prefix):
                 if state is not None:
-                    if prefix == "tool.called" and state.baseline_p75_latency_tool is not None:
-                        return (
-                            int(state.baseline_p75_latency_tool * self.INFLATION_FACTOR),
-                            label,
-                        )
+                    if prefix == "tool.called":
+                        # Check for per-tool baseline first
+                        if tool_name and state.baseline_p75_latency_by_tool and tool_name in state.baseline_p75_latency_by_tool:
+                            return (
+                                int(state.baseline_p75_latency_by_tool[tool_name] * self.INFLATION_FACTOR),
+                                label,
+                            )
+                        # Fallback to global tool baseline
+                        if state.baseline_p75_latency_tool is not None:
+                            return (
+                                int(state.baseline_p75_latency_tool * self.INFLATION_FACTOR),
+                                label,
+                            )
                     if prefix == "llm.called" and state.baseline_p75_latency_llm is not None:
                         return (
                             int(state.baseline_p75_latency_llm * self.INFLATION_FACTOR),
@@ -586,14 +594,18 @@ class SlowStepDetector(BaseDetector):
         # step determines the threshold, not the responding or completing event.
         step_event_type: dict[int, str] = {}
         step_timestamp: dict[int, float] = {}
+        step_tool_name: dict[int, str] = {}
         for e in agent_events:
             if e.step_index not in step_event_type:
                 step_event_type[e.step_index] = e.event_type.value
                 step_timestamp[e.step_index] = e.timestamp
+                if e.event_type.value == "tool.called":
+                    step_tool_name[e.step_index] = e.payload.get("tool_name", "")
 
         for step_idx, duration_ms in state.step_durations_ms.items():
             event_type = step_event_type.get(step_idx, "")
-            threshold_ms, label = self._threshold_for(event_type, state)
+            tool_name = step_tool_name.get(step_idx)
+            threshold_ms, label = self._threshold_for(event_type, state, tool_name)
 
             if duration_ms > threshold_ms:
                 ratio = duration_ms / threshold_ms
@@ -620,16 +632,17 @@ class SlowStepDetector(BaseDetector):
             "all_slow_steps": {
                 k: v
                 for k, v in state.step_durations_ms.items()
-                if v > self._threshold_for(step_event_type.get(k, ""), state)[0]
+                if v > self._threshold_for(step_event_type.get(k, ""), state, step_tool_name.get(k))[0]
             },
         }
 
         # Include the raw P75 baseline so dashboards can show what normal looks like.
-        if (
-            worst_event_type.startswith("tool.called")
-            and state.baseline_p75_latency_tool is not None
-        ):
-            evidence["baseline_p75"] = round(state.baseline_p75_latency_tool, 1)
+        if worst_event_type.startswith("tool.called"):
+            worst_tool_name = step_tool_name.get(worst_step_idx)
+            if worst_tool_name and state.baseline_p75_latency_by_tool and worst_tool_name in state.baseline_p75_latency_by_tool:
+                evidence["baseline_p75"] = round(state.baseline_p75_latency_by_tool[worst_tool_name], 1)
+            elif state.baseline_p75_latency_tool is not None:
+                evidence["baseline_p75"] = round(state.baseline_p75_latency_tool, 1)
         elif (
             worst_event_type.startswith("llm.called") and state.baseline_p75_latency_llm is not None
         ):

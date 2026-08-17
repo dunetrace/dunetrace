@@ -302,6 +302,74 @@ async def fetch_latency_baseline(
         return None
     return float(row["p75"]) if row["p75"] is not None else None
 
+async def fetch_per_tool_latency_baselines(
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[dict[str, float]]":
+    """
+    P75 wall-clock gap (ms) that follows each 'tool.called' event, grouped by tool name.
+    """
+    if not _pool:
+        return None
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH recent AS (
+                SELECT pr.run_id
+                FROM processed_runs pr
+                WHERE pr.agent_id      = $1
+                  AND pr.agent_version = $2
+                  AND pr.run_id       != $3
+                  AND EXISTS (
+                      SELECT 1 FROM events e
+                      WHERE e.run_id = pr.run_id
+                        AND e.event_type = 'run.completed'
+                  )
+                ORDER BY pr.processed_at DESC
+                LIMIT $4
+            ),
+            event_gaps AS (
+                SELECT
+                    e.run_id,
+                    e.payload->>'tool_name' as tool_name,
+                    (LEAD(e.timestamp) OVER (
+                        PARTITION BY e.run_id
+                        ORDER BY e.step_index, e.timestamp
+                    ) - e.timestamp) * 1000.0 AS gap_ms
+                FROM events e
+                WHERE e.run_id IN (SELECT run_id FROM recent)
+                  AND e.event_type = 'tool.called'
+            ),
+            stats AS (
+                SELECT
+                    tool_name,
+                    COUNT(DISTINCT run_id) AS sample_size,
+                    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY gap_ms) AS p75
+                FROM event_gaps
+                WHERE gap_ms >= 0
+                  AND gap_ms IS NOT NULL
+                  AND tool_name IS NOT NULL
+                GROUP BY tool_name
+            )
+            SELECT tool_name, p75
+            FROM stats
+            WHERE sample_size >= $5
+            """,
+            agent_id,
+            agent_version,
+            exclude_run_id,
+            lookback,
+            min_runs,
+        )
+
+    if not rows:
+        return None
+    return {r["tool_name"]: float(r["p75"]) for r in rows if r["p75"] is not None}
+
 
 async def fetch_token_growth_baseline(
     agent_id: str,
