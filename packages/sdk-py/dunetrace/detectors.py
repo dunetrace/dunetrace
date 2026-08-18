@@ -28,7 +28,8 @@ import logging
 import re
 import time
 from collections import Counter, deque
-from typing import Deque, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit as _urlsplit
 
 from dunetrace.models import (
     AgentEvent,
@@ -2996,6 +2997,897 @@ class DelegationLoopDetector(BaseDetector):
         )
 
 
+# ── UNGROUNDED_DESTINATION ────────────────────────────────────────────────────
+#
+# Shared extraction helpers. These deliberately do NOT replace
+# ToolArgumentFabricationDetector's own _try_parse_args/_collect_leaf_texts, even
+# though the parsing half overlaps: that detector is calibrated and live, and
+# re-pointing it at shared code — however behaviour-preserving it looks — is a
+# regression risk taken for style. The duplication is ~20 lines and bounded.
+
+# Multi-label public suffixes. The real Public Suffix List has ~9,000 entries and
+# needs periodic refreshes; the core SDK has zero required dependencies, so it
+# cannot carry one. This bundled subset covers the exfiltration-relevant tail:
+# country-code second-levels, and the free shared-hosting providers an attacker
+# can stand a destination up on in minutes.
+#
+# Incompleteness degrades safely and cannot cause a missed detection, because
+# GROUNDING never consults this table — grounding compares full hostnames. It is
+# used only for (a) allowlist parenting and (b) novelty-baseline keys, where a
+# missing entry just makes the allowlist less generous and the baseline key more
+# specific. Both fail toward firing, not toward silence.
+_MULTI_LABEL_SUFFIXES = frozenset(
+    {
+        "co.uk",
+        "org.uk",
+        "ac.uk",
+        "gov.uk",
+        "me.uk",
+        "net.uk",
+        "com.au",
+        "net.au",
+        "org.au",
+        "edu.au",
+        "gov.au",
+        "co.jp",
+        "or.jp",
+        "ne.jp",
+        "ac.jp",
+        "go.jp",
+        "co.nz",
+        "co.za",
+        "co.in",
+        "co.kr",
+        "com.br",
+        "com.mx",
+        "com.cn",
+        "com.sg",
+        "com.hk",
+        "com.tw",
+        "com.tr",
+        "com.ar",
+        "com.pl",
+        "github.io",
+        "gitlab.io",
+        "pages.dev",
+        "workers.dev",
+        "web.app",
+        "firebaseapp.com",
+        "vercel.app",
+        "netlify.app",
+        "herokuapp.com",
+        "azurewebsites.net",
+        "blob.core.windows.net",
+        "s3.amazonaws.com",
+        "r2.dev",
+        "trycloudflare.com",
+        "ngrok.io",
+        "ngrok-free.app",
+        "glitch.me",
+        "repl.co",
+        "replit.dev",
+        "surge.sh",
+        "onrender.com",
+        "fly.dev",
+        "cloudfunctions.net",
+        "run.app",
+        "appspot.com",
+    }
+)
+
+# Last labels accepted for bare-domain extraction. Only consulted when
+# bare_domain is explicitly enabled (it is off by default) — a bare-domain regex
+# with no TLD gate matches "report.pdf", "v1.2.3" and "obj.method".
+_COMMON_TLDS = frozenset(
+    {
+        "com",
+        "net",
+        "org",
+        "io",
+        "co",
+        "ai",
+        "app",
+        "dev",
+        "cloud",
+        "sh",
+        "me",
+        "info",
+        "biz",
+        "xyz",
+        "top",
+        "site",
+        "online",
+        "test",
+        "example",
+        "uk",
+        "de",
+        "fr",
+        "nl",
+        "eu",
+        "us",
+        "ca",
+        "au",
+        "jp",
+        "cn",
+        "in",
+        "br",
+        "ru",
+        "ch",
+        "se",
+        "no",
+        "fi",
+        "it",
+        "es",
+        "pl",
+        "tr",
+        "za",
+        "mx",
+        "kr",
+    }
+)
+
+_DEST_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]*[\w-]\b")
+_DEST_URL_RE = re.compile(r"\bhttps?://[^\s\"'<>\\)\]}]+", re.IGNORECASE)
+_DEST_BARE_DOMAIN_RE = re.compile(
+    r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b", re.IGNORECASE
+)
+
+# Memory write sources an attacker can reach. Same vocabulary MEMORY_POISONING
+# uses (see MemoryPoisonedDetector._UNTRUSTED_SOURCES) — kept as its own constant
+# so neither detector's calibration can silently move the other's.
+_UNTRUSTED_MEMORY_SOURCES = frozenset({"retrieval", "tool_output", "external"})
+
+
+def _normalize_host(host: str) -> str:
+    """Lowercase, strip userinfo/port/trailing dot, and IDNA-normalize a hostname.
+
+    IDNA folding is stdlib (`str.encode("idna")`) and collapses a homograph-
+    adjacent evasion class for free. It raises on plenty of real-world input
+    (over-long labels, empty labels), so it is strictly best-effort.
+    """
+    h = host.strip().strip(".").lower()
+    if "@" in h:  # userinfo
+        h = h.rsplit("@", 1)[1]
+    if h.startswith("["):  # IPv6 literal
+        return h.split("]", 1)[0] + "]"
+    if ":" in h:
+        h = h.split(":", 1)[0]
+    # str.isascii() is a C-level flag check; the equivalent
+    # `any(ord(c) > 127 for c in h)` is a Python-level loop per host and showed
+    # up in profiling on args carrying hundreds of candidates.
+    if not h.isascii():
+        try:
+            h = h.encode("idna").decode("ascii")
+        except Exception:
+            pass
+    return h
+
+
+def _registrable_domain(host: str) -> str:
+    """eTLD+1 for a normalized host, using the bundled suffix table.
+
+    Allowlist parenting and novelty keys only — never grounding. See the
+    _MULTI_LABEL_SUFFIXES comment for why that distinction is load-bearing.
+    """
+    labels = host.split(".")
+    if len(labels) < 3:
+        return host
+    if ".".join(labels[-2:]) in _MULTI_LABEL_SUFFIXES:
+        return ".".join(labels[-3:])
+    if ".".join(labels[-3:]) in _MULTI_LABEL_SUFFIXES:
+        return ".".join(labels[-4:]) if len(labels) >= 4 else host
+    return ".".join(labels[-2:])
+
+
+def _host_in_allowlist(host: str, allowlist) -> bool:
+    """Label-aware suffix match: `corp.com` covers `mail.corp.com` but NOT
+    `evilcorp.com`. A plain endswith() would let an attacker register the latter
+    and inherit the allowlist entry."""
+    h = host.lower()
+    for entry in allowlist or ():
+        e = str(entry).strip().lower().lstrip(".")
+        if not e:
+            continue
+        if h == e or h.endswith("." + e):
+            return True
+    return False
+
+
+def _parse_tool_args(args_text: str):
+    """JSON first, then Python literal — the Python SDK emits str(dict) and the
+    TS SDK emits JSON.stringify. Returns None when neither parses."""
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            return parser(args_text)
+        except Exception:
+            continue
+    return None
+
+
+def _walk_arg_strings(value, max_depth: int = 12, max_nodes: int = 5000) -> List[Tuple[str, str]]:
+    """Yield (path, text) for every string leaf of a parsed args structure.
+
+    Values only, never keys — a key named "email" is schema, not data. Non-string
+    leaves are skipped rather than stringified: an int can never be a
+    destination, and stringifying it only adds noise for the regexes to chew on.
+
+    Bounded by depth AND node count. This runs inside the user's agent process
+    on the in-path path, so a deeply nested or merely enormous payload must
+    degrade to partial extraction, never to a RecursionError or a hang.
+    """
+    out: List[Tuple[str, str]] = []
+    remaining = [max_nodes]
+
+    def walk(node, path: str, depth: int) -> None:
+        if remaining[0] <= 0 or depth > max_depth:
+            return
+        remaining[0] -= 1
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}" if path else str(k), depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]", depth + 1)
+        elif isinstance(node, (set, frozenset)):
+            # Sets have no stable iteration order; sort so arg_path and the
+            # chosen candidate are deterministic across runs and processes.
+            for i, v in enumerate(sorted(node, key=repr)):
+                walk(v, f"{path}[{i}]", depth + 1)
+        elif isinstance(node, str):
+            out.append((path or "<root>", node))
+
+    walk(value, "", 0)
+    return out
+
+
+class UngroundedDestinationDetector(BaseDetector):
+    """
+    A tool call sends data to a destination — an email address, a URL host, a
+    bare domain — that does not appear anywhere in the run's own trusted input
+    surface. The actuation signature of agent data exfiltration: after a
+    successful injection, the agent emails `attacker@evil.test`, an address the
+    legitimate task never mentioned.
+
+    PROVENANCE-BASED, NOT NOVELTY-BASED, and that is the whole design. An
+    open-destination agent (a support agent emailing an ever-new customer every
+    run) makes per-destination history worthless — every legitimate run contains
+    a destination never seen before. So the default mode never asks "have I seen
+    this destination before"; it asks "did THIS RUN's own trusted inputs contain
+    this string". A support agent whose CRM lookup returned the customer's
+    address is silent by construction, forever, no matter how many new customers
+    it writes to.
+
+    Three checks, in order:
+
+    1. EXTRACT destination candidates from each tool call's args, recursing
+       through nested structures (values only, never keys), bounded by depth and
+       node count.
+    2. GROUNDING. Is the destination present in the run's trusted-input surface?
+       Grounded → silent. The surface is enumerated in _partition_surfaces();
+       the deliberate exclusion is LLM output and the agent's own earlier tool
+       args, because grounding on the model's own text is circular — an injected
+       model would emit the destination and thereby ground it.
+    3. TAINT. Does the ungrounded destination appear in attacker-controllable
+       content: an untrusted-source memory value, or a content block carrying an
+       injection marker?
+
+    CONDITIONAL DEMOTION resolves the conflict at the heart of this. Tool output
+    and retrieval content are simultaneously the legitimate way a destination
+    enters a run (a CRM lookup returns the customer's email) and the attacker's
+    primary injection channel (a poisoned document carries theirs). A block that
+    matches an injection marker is therefore REMOVED from the grounded surface
+    and MOVED to the taint surface. Clean blocks ground normally. The same rule
+    applies to the user's own input when the run carries a PROMPT_INJECTION
+    signal. One rule, three channels.
+
+    Severity: HIGH when ungrounded. CRITICAL when ungrounded AND tainted — the
+    difference between "this address came from nowhere I can see" and "this
+    address came from content an attacker controls".
+
+    Alert wording is deliberately "verify this destination", never "you are
+    breached". The commonest false positive is a destination that arrived
+    through instrumentation this run didn't capture, and an alert that overstates
+    it teaches operators to ignore the detector.
+
+    Cross-run taint (T6): a destination planted in run N's memory and read back
+    in run N+2 is ungrounded in N+2 but has no in-run taint source, because
+    `memory.read` carries only a key — the SDK never sees the value that came
+    back, so there is nothing to reconstruct. evaluate_cross_run_memory_taint()
+    closes that, fed by the worker from prior `memory.written` events for the
+    same agent and key. Deferred and NOT implemented: taint from an injection
+    signal on an ancestor run. Ancestor signals are derived, not ingested, so
+    whether the parent's signals exist when the child is processed depends on
+    poll ordering — which would make this detector's severity nondeterministic.
+    Sequential runs sharing a memory store are also not in a parent_run_id chain
+    at all, so an ancestor walk would not have covered the memory case anyway.
+
+    In-path use: this detector is in TIER1_DETECTORS, so a trigger="signal"
+    policy can stop a send BEFORE it executes (RunContext.tool_called appends the
+    call and evaluates policies before the tool body runs). Two attributes exist
+    for that path and matter only there: TOOL_NAME_SCOPE limits which tools are
+    scanned, and MAX_SCAN_NS is a hard wall-clock abort that returns None rather
+    than adding latency to the agent. Degradation is prevent → detect, never
+    detect → nothing: the server-side instance runs unscoped with a far larger
+    budget and still catches whatever the in-path pass skipped.
+
+    Novelty mode (MODE="provenance+novelty") is a secondary, per-agent opt-in for
+    CLOSED-destination agents (billing, internal reporting) where history
+    genuinely defines normal. It evaluates only destinations that PASSED
+    grounding, so it can never double-fire with provenance mode, and it needs a
+    server-supplied baseline — the in-path instance has no database and stays
+    provenance-only regardless of config.
+
+    Known limit: taint matching is verbatim-string. A destination the agent
+    ASSEMBLES from fragments ("email the user at the domain in field X") never
+    appears whole in any taint source, so it stays HIGH rather than escalating to
+    CRITICAL. Encoded destinations are the same class. Out of scope — that is
+    what approval policies on send-class tools are for.
+
+    Tunable: CANDIDATE_TYPES, ALLOWLISTED_DOMAINS, MODE, MIN_BASELINE_RUNS,
+    MAX_CANDIDATES_PER_RUN, MAX_DEPTH, MAX_NODES, MAX_SCAN_NS, TOOL_NAME_SCOPE,
+    SEND_TOOL_PATTERNS, CASE_SENSITIVE.
+    """
+
+    name = "UNGROUNDED_DESTINATION"
+    SEVERITY = None  # computed per-signal: MEDIUM | HIGH | CRITICAL
+
+    CANDIDATE_TYPES = ["email", "url"]  # + "bare_domain" (off: FP-prone, see module notes)
+    ALLOWLISTED_DOMAINS: List[str] = []
+    MODE = "provenance"  # "provenance" | "provenance+novelty"
+    MIN_BASELINE_RUNS = 20  # matches detector_svc/db.py::_MIN_BASELINE_RUNS
+    MAX_CANDIDATES_PER_RUN = 50
+    MAX_DEPTH = 12
+    MAX_NODES = 5000
+    # Hard wall-clock abort. Generous by default (server-side, off the agent's
+    # critical path); the TIER1 instance is constructed with the 1ms in-path
+    # budget. Exceeding it returns None — see the fail-open note in the docstring.
+    MAX_SCAN_NS = 50_000_000
+    # Total trusted+taint content this detector will scan. Above it the run is
+    # skipped entirely (fail open) rather than evaluated against a truncated
+    # corpus — see the guard in on_run_completion for why truncation is unsafe.
+    # The TIER1 instance is constructed with a much tighter in-path value.
+    MAX_SURFACE_CHARS = 20_000_000
+    # Longest tool-args string parsed structurally. Above it the args are scanned
+    # as raw text, truncated to this length — see the guard's comment for why
+    # truncating args is safe in a way truncating the surface is not.
+    MAX_ARGS_CHARS = 1_000_000
+    # None = scan every tool. A list of substrings limits scanning to
+    # destination-bearing tools, which is all that matters for prevention.
+    TOOL_NAME_SCOPE: Optional[List[str]] = None
+    SEND_TOOL_PATTERNS = [
+        "send",
+        "email",
+        "mail",
+        "message",
+        "post",
+        "publish",
+        "upload",
+        "webhook",
+        "http",
+        "request",
+        "fetch",
+        "notify",
+        "share",
+    ]
+    CASE_SENSITIVE = False
+
+    # Injection markers for conditional demotion. Intentionally the union of
+    # RETRIEVED_CONTENT_INJECTION's and MEMORY_POISONING's unambiguous override
+    # signatures — demotion should be at least as sensitive as either detector,
+    # since a block either of them would flag must not be allowed to ground.
+    DEMOTION_PHRASES = [
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "ignore prior instructions",
+        "ignore the above instructions",
+        "disregard previous instructions",
+        "disregard all previous instructions",
+        "disregard prior instructions",
+        "disregard the above",
+        "forget previous instructions",
+        "forget all previous instructions",
+        "forget everything above",
+        "your new task is",
+        "you should now",
+        "override safety",
+        "bypass safety",
+        "bypass your restrictions",
+        "jailbreak",
+        "dan mode",
+    ]
+    _DEMOTION_ROLE_RE = re.compile(r"(?:^|\n)\s*(system|assistant)\s*:", re.IGNORECASE)
+    _DEMOTION_DELIM_RE = re.compile(
+        r"\[/?INST\]|<<SYS>>|<</SYS>>|<\|im_start\|>|<\|system\|>|###\s*system",
+        re.IGNORECASE,
+    )
+
+    # ── Extraction ───────────────────────────────────────────────────────────
+
+    # Cheap necessary conditions for the two structural regexes. A substring scan
+    # of a pre-lowered string is memchr-fast (~37µs per 100KB); the equivalent
+    # IGNORECASE regex is ~2.2ms. Since a regex match is impossible unless its
+    # anchor text is present, gating on these is semantics-preserving and turns
+    # the dominant cost into a rounding error on the overwhelmingly common
+    # no-marker path. (An alternation regex over the phrase list was measured at
+    # ~25ms per 100KB — 40x slower than the plain loop. Do not "optimize" this
+    # back into one pattern.)
+    _ROLE_HINTS = ("system", "assistant")
+    _DELIM_HINTS = ("[inst", "<<sys", "</sys", "<|im", "<|system", "###")
+
+    def _phrase_hints(self):
+        """First token of each phrase — a necessary condition for that phrase, so
+        their union is a necessary condition for the whole list. DERIVED, not
+        hardcoded: DEMOTION_PHRASES is a tunable, and a hardcoded hint set would
+        silently stop matching an operator's added phrases."""
+        key = tuple(self.DEMOTION_PHRASES or ())
+        cached = getattr(self, "_phrase_hints_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        hints = tuple({(p.split()[0].lower() if p.split() else p.lower()) for p in key})
+        self._phrase_hints_cache = (key, hints)
+        return hints
+
+    def _demotion_marker(self, text: str) -> Optional[str]:
+        low = text if self.CASE_SENSITIVE else text.lower()
+
+        if any(h in low for h in self._phrase_hints()):
+            for phrase in self.DEMOTION_PHRASES:
+                needle = phrase if self.CASE_SENSITIVE else phrase.lower()
+                if needle in low:
+                    return phrase
+
+        if any(h in low for h in self._ROLE_HINTS) and self._DEMOTION_ROLE_RE.search(text):
+            return "embedded_role_marker"
+        if any(h in low for h in self._DELIM_HINTS) and self._DEMOTION_DELIM_RE.search(text):
+            return "instruction_delimiter"
+        return None
+
+    def _destinations_in(self, text: str) -> List[Tuple[str, str, str]]:
+        """(destination, destination_type, host) for every candidate in `text`.
+
+        Emails keep the full address as the match key — `a+x@corp.com` and
+        `a@corp.com` route to the same mailbox but are different destinations to
+        a reviewer, and collapsing them would let a tagged address inherit an
+        untagged one's grounding.
+        """
+        found: List[Tuple[str, str, str]] = []
+        types = set(self.CANDIDATE_TYPES or ())
+
+        if "email" in types:
+            for m in _DEST_EMAIL_RE.findall(text):
+                addr = m.lower()
+                found.append((addr, "email", _normalize_host(addr.rsplit("@", 1)[1])))
+
+        if "url" in types:
+            for raw in _DEST_URL_RE.findall(text):
+                try:
+                    host = _urlsplit(raw.rstrip(".,;")).hostname or ""
+                except Exception:
+                    host = ""
+                if not host:
+                    continue
+                h = _normalize_host(host)
+                if h:
+                    found.append((h, "url", h))
+
+        if "bare_domain" in types:
+            # Emails and URLs already consumed their hosts; strip them so the
+            # same host isn't reported twice under two types.
+            residue = _DEST_EMAIL_RE.sub(" ", text)
+            residue = _DEST_URL_RE.sub(" ", residue)
+            for raw in _DEST_BARE_DOMAIN_RE.findall(residue):
+                h = _normalize_host(raw)
+                if not h or "." not in h:
+                    continue
+                if h.rsplit(".", 1)[1] not in _COMMON_TLDS:
+                    continue
+                found.append((h, "bare_domain", h))
+
+        return found
+
+    def _in_scope(self, tool_name: str) -> bool:
+        if self.TOOL_NAME_SCOPE is None:
+            return True
+        name = tool_name if self.CASE_SENSITIVE else tool_name.lower()
+        return any(str(p).lower() in name for p in self.TOOL_NAME_SCOPE)
+
+    def _is_send_tool(self, tool_name: str) -> bool:
+        name = tool_name if self.CASE_SENSITIVE else tool_name.lower()
+        return any(str(p).lower() in name for p in self.SEND_TOOL_PATTERNS)
+
+    # ── Grounded / taint surfaces ────────────────────────────────────────────
+
+    def _input_is_injected(self, state: RunState) -> Optional[str]:
+        """True when the run's own input carries an injection signal.
+
+        Two sources because the two paths differ: server-side the SDK's
+        precomputed evidence rides on the run.started payload; in-path it may not
+        be attached yet, so the marker vocabulary is also applied directly.
+        """
+        for e in state.events:
+            if e.event_type == EventType.RUN_STARTED and (e.payload or {}).get("injection_signal"):
+                return "injection_signal"
+        if state.input_text:
+            return self._demotion_marker(state.input_text)
+        return None
+
+    def _partition_surfaces(self, state: RunState):
+        """Split run content into (grounded_texts, taint_blocks, surfaces_used).
+
+        Grounded — and why each is trusted:
+          input_text     the task the principal actually asked for; this IS intent
+          system_prompt  operator-authored config (fixed archive addresses etc.)
+          tool output    a value the SYSTEM returned; the entry that keeps
+                         open-destination agents silent
+          retrieval      same argument: corpus data the system supplied
+          memory value   written earlier from a channel the attacker can't reach
+
+        Excluded, deliberately:
+          llm output     circular — an injected model would ground itself
+          earlier args   circular for the same reason
+          untrusted mem  that's the taint set
+          tool names     labels, not destinations
+        """
+        grounded: List[str] = []
+        taint: List[dict] = []
+        used: List[str] = []
+
+        injected_input = self._input_is_injected(state)
+        if state.input_text:
+            if injected_input:
+                taint.append(
+                    {
+                        "kind": "user_input",
+                        "text": state.input_text,
+                        "step_index": 0,
+                        "matched_marker": injected_input,
+                    }
+                )
+            else:
+                grounded.append(state.input_text)
+                used.append("input_text")
+
+        if state.system_prompt:
+            grounded.append(state.system_prompt)
+            used.append("system_prompt")
+
+        for tc in state.tool_calls:
+            if not tc.output:
+                continue
+            marker = self._demotion_marker(tc.output)
+            if marker:
+                taint.append(
+                    {
+                        "kind": "tool_output",
+                        "text": tc.output,
+                        "tool_name": tc.tool_name,
+                        "step_index": tc.step_index,
+                        "matched_marker": marker,
+                    }
+                )
+            else:
+                grounded.append(tc.output)
+                if "tool_output" not in used:
+                    used.append("tool_output")
+
+        for r in state.retrievals:
+            if not r.content:
+                continue
+            marker = self._demotion_marker(r.content)
+            if marker:
+                taint.append(
+                    {
+                        "kind": "retrieval",
+                        "text": r.content,
+                        "index_name": r.index_name,
+                        "step_index": r.step_index,
+                        "matched_marker": marker,
+                    }
+                )
+            else:
+                grounded.append(r.content)
+                if "retrieval" not in used:
+                    used.append("retrieval")
+
+        reads = [m for m in state.memory_events if m.op == "read"]
+        for m in state.memory_events:
+            if m.op != "written" or not m.value:
+                continue
+            if m.source in _UNTRUSTED_MEMORY_SOURCES:
+                taint.append(
+                    {
+                        "kind": "memory_write",
+                        "text": m.value,
+                        "memory_key": m.key,
+                        "memory_source": m.source,
+                        "step_index": m.step_index,
+                        "read_back": any(
+                            r.key == m.key and r.step_index >= m.step_index for r in reads
+                        ),
+                        "matched_marker": self._demotion_marker(m.value),
+                    }
+                )
+            else:
+                grounded.append(m.value)
+                if "memory" not in used:
+                    used.append("memory")
+
+        return grounded, taint, used
+
+    def _contains(self, needle: str, haystack: str) -> bool:
+        if self.CASE_SENSITIVE:
+            return needle in haystack
+        return needle.lower() in haystack.lower()
+
+    # ── Cross-run taint (T6), fed by the worker ──────────────────────────────
+
+    def evaluate_cross_run_memory_taint(self, destination: str, prior_writes: List[dict]):
+        """Taint from a PRIOR run's memory write, for a key this run read back.
+
+        `prior_writes` is supplied by the detector worker (see
+        detector_svc/db.py::fetch_memory_writes) as dicts with key/value/source/
+        run_id/step_index. Pure and injected, so it unit-tests without a database
+        — the same shape DelegationLoopDetector.evaluate_delegation_cycle uses.
+
+        Kept off on_run_completion deliberately: the in-path instance has no
+        database, and a detector that silently needs one would be a trap.
+        """
+        for w in prior_writes or ():
+            value = w.get("value") or ""
+            if w.get("source") not in _UNTRUSTED_MEMORY_SOURCES:
+                continue
+            if not self._contains(destination, value):
+                continue
+            return {
+                "kind": "memory_write",
+                "memory_key": w.get("key"),
+                "memory_source": w.get("source"),
+                "read_back": True,  # the worker only queries keys this run read
+                "cross_run": True,
+                "origin_run_id": w.get("run_id"),
+                "step_index": w.get("step_index"),
+                "matched_marker": self._demotion_marker(value),
+                "signal_id": None,  # reserved for deferred ancestor-signal taint
+            }
+        return None
+
+    def collect_destinations(self, state: RunState):
+        """(grounded, ungrounded) destination tuples for this run, as
+        [(destination, destination_type, host), ...].
+
+        Server-side helper for the novelty pass and the baseline write. A pure
+        function of RunState rather than state stashed on the instance during
+        on_run_completion(): detector instances are reused across runs, so a
+        stashed list would leak one run's destinations into the next — and into
+        another agent's, once the worker is sharded.
+        """
+        grounded_texts, _taint, _used = self._partition_surfaces(state)
+        corpus = "\n".join(grounded_texts)
+        corpus_cmp = corpus if self.CASE_SENSITIVE else corpus.lower()
+
+        grounded: List[Tuple[str, str, str]] = []
+        ungrounded: List[Tuple[str, str, str]] = []
+        seen: set = set()
+        for tc in state.tool_calls:
+            if not self._in_scope(tc.tool_name):
+                continue
+            parsed = _parse_tool_args(tc.args)
+            leaves = (
+                _walk_arg_strings(parsed, self.MAX_DEPTH, self.MAX_NODES)
+                if parsed is not None
+                else [("<raw>", tc.args)]
+            )
+            for _path, text in leaves:
+                for dest, dtype, host in self._destinations_in(text):
+                    if dest in seen:
+                        continue
+                    seen.add(dest)
+                    if _host_in_allowlist(host, self.ALLOWLISTED_DOMAINS):
+                        continue
+                    dest_cmp = dest if self.CASE_SENSITIVE else dest.lower()
+                    (grounded if dest_cmp in corpus_cmp else ungrounded).append((dest, dtype, host))
+        return grounded, ungrounded
+
+    # ── Novelty mode, fed by the worker ──────────────────────────────────────
+
+    def evaluate_novelty(self, grounded_destinations, baseline, baseline_runs: int):
+        """Secondary mode for CLOSED-destination agents.
+
+        Evaluates only destinations that PASSED grounding, so it can never
+        double-fire with the provenance verdict. Returns None below
+        MIN_BASELINE_RUNS — an immature baseline makes every destination look
+        novel, which is exactly the alert storm that would get this switched off.
+        """
+        if not self.MODE or "novelty" not in self.MODE:
+            return None
+        if baseline_runs < self.MIN_BASELINE_RUNS:
+            return None
+        known = set(baseline or ())
+        for dest, dtype, host in grounded_destinations or ():
+            key = dest if dtype == "email" else _registrable_domain(host)
+            if key in known:
+                continue
+            return {"destination": dest, "destination_type": dtype, "novelty_key": key}
+        return None
+
+    # ── Main ─────────────────────────────────────────────────────────────────
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        if not state.tool_calls:
+            return None
+        started_ns = time.perf_counter_ns()
+
+        # Surface size guard. In-path this runs inside the agent process, and a
+        # run carrying megabytes of captured tool output would cost real latency.
+        # It aborts rather than scanning a TRUNCATED corpus: a short corpus makes
+        # grounded destinations read as ungrounded, and a false positive in-path
+        # can block a legitimate send via a stop policy. Fail open, not loud.
+        surface_chars = (
+            len(state.input_text or "")
+            + len(state.system_prompt or "")
+            + sum(len(tc.output or "") for tc in state.tool_calls)
+            + sum(len(r.content or "") for r in state.retrievals)
+            + sum(len(m.value or "") for m in state.memory_events)
+        )
+        if surface_chars > self.MAX_SURFACE_CHARS:
+            return None
+
+        grounded_texts, taint_blocks, surfaces_used = self._partition_surfaces(state)
+        grounded_corpus = "\n".join(grounded_texts)
+        # Case-fold the corpus and every taint block ONCE. Doing it inside
+        # _contains() re-allocated the entire corpus per candidate, which turned
+        # a 400-candidate run against a 500KB corpus into 200MB of transient
+        # string churn.
+        grounded_cmp = grounded_corpus if self.CASE_SENSITIVE else grounded_corpus.lower()
+        for block in taint_blocks:
+            raw = block.get("text") or ""
+            block["_cmp"] = raw if self.CASE_SENSITIVE else raw.lower()
+
+        # Fabrication stops the whole run when a tool output is missing, because
+        # its claim is "no source exists" and an unseen output falsifies that.
+        # This detector must not: with tool output rarely instrumented, aborting
+        # would blind it on most real traffic — the traffic exfiltration happens
+        # in. Missing outputs become a confidence penalty instead, and never
+        # weaken taint, which is independent positive evidence.
+        visibility_complete = not any(
+            tc.success is not None and not tc.output for tc in state.tool_calls
+        )
+
+        best: Optional[Dict[str, Any]] = None
+        candidate_count = 0
+        ungrounded_count = 0
+        truncated = False
+        grounded_seen: List[Tuple[str, str, str]] = []
+
+        for tc in state.tool_calls:
+            if not self._in_scope(tc.tool_name):
+                continue
+            if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                # Fail open. The server-side instance runs unscoped with a much
+                # larger budget, so an in-path abort costs prevention, not
+                # detection. Silent by design: this path is the user's agent
+                # process, and neither an exception nor a log line belongs there.
+                return None
+
+            if len(tc.args) > self.MAX_ARGS_CHARS:
+                # Truncating ARGS can only cause a missed detection, never a
+                # false one — the exact opposite of truncating the grounded
+                # corpus, which is why that one aborts instead. In-path this is
+                # the right trade: prevention degrades to server-side detection.
+                # (ast.literal_eval alone costs ~900µs on a 10KB arg, most of the
+                # in-path budget, so this guard has to come before the parse.)
+                leaves = [("<truncated>", tc.args[: self.MAX_ARGS_CHARS])]
+            else:
+                parsed = _parse_tool_args(tc.args)
+                leaves = (
+                    _walk_arg_strings(parsed, self.MAX_DEPTH, self.MAX_NODES)
+                    if parsed is not None
+                    else [("<raw>", tc.args)]
+                )
+            # Parsing a large structure is itself a real cost, so re-check before
+            # walking it — otherwise a single 400-element arg blows the whole
+            # in-path budget between two per-tool checks.
+            if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                return None
+
+            for leaf_i, (path, text) in enumerate(leaves):
+                if (leaf_i & 63) == 0 and time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                    return None
+                for cand_i, (dest, dtype, host) in enumerate(self._destinations_in(text)):
+                    # One leaf can hold hundreds of candidates (a 400-recipient
+                    # send), so the budget has to be checked here too — the
+                    # per-leaf check never fires when there is only one leaf.
+                    if (
+                        cand_i & 31
+                    ) == 0 and time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                        return None
+                    candidate_count += 1
+                    if candidate_count > self.MAX_CANDIDATES_PER_RUN:
+                        truncated = True
+                        break
+                    if _host_in_allowlist(host, self.ALLOWLISTED_DOMAINS):
+                        continue
+                    dest_cmp = dest if self.CASE_SENSITIVE else dest.lower()
+                    if dest_cmp in grounded_cmp:
+                        grounded_seen.append((dest, dtype, host))
+                        continue
+
+                    ungrounded_count += 1
+                    taint = None
+                    for block in taint_blocks:
+                        if dest_cmp in block["_cmp"]:
+                            taint = {k: v for k, v in block.items() if k not in ("text", "_cmp")}
+                            break
+
+                    severity = Severity.CRITICAL if taint else Severity.HIGH
+                    confidence = 0.85 if taint else 0.65
+                    if taint and taint.get("read_back"):
+                        confidence = 0.92
+                    if not visibility_complete:
+                        confidence -= 0.15
+                        if not taint:
+                            severity = Severity.HIGH
+                    if self._is_send_tool(tc.tool_name):
+                        confidence += 0.05
+                    confidence = round(max(0.30, min(0.95, confidence)), 4)
+
+                    rank = (2 if severity == Severity.CRITICAL else 1, confidence)
+                    if best is None or rank > best["rank"]:
+                        best = {
+                            "rank": rank,
+                            "severity": severity,
+                            "confidence": confidence,
+                            "destination": dest,
+                            "destination_type": dtype,
+                            "destination_host": host,
+                            "tool_name": tc.tool_name,
+                            "tool_step": tc.step_index,
+                            "arg_path": path,
+                            "taint": taint,
+                            "args_snippet": tc.args[:200],
+                            "args_truncated": bool(
+                                tc.args_length is not None and tc.args_length > len(tc.args)
+                            ),
+                        }
+                if candidate_count > self.MAX_CANDIDATES_PER_RUN:
+                    break
+            if candidate_count > self.MAX_CANDIDATES_PER_RUN:
+                break
+
+        if best is None:
+            return None
+
+        return FailureSignal(
+            failure_type=FailureType.UNGROUNDED_DESTINATION,
+            severity=best["severity"],
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=best["tool_step"],
+            confidence=best["confidence"],
+            evidence={
+                "destination": best["destination"],
+                "destination_type": best["destination_type"],
+                "destination_host": best["destination_host"],
+                "tool_name": best["tool_name"],
+                "tool_step": best["tool_step"],
+                "arg_path": best["arg_path"],
+                "grounding_verdict": "ungrounded",
+                "grounded_surfaces": surfaces_used,
+                "output_visibility": "complete" if visibility_complete else "partial",
+                "taint_source": best["taint"],
+                "detection_mode": "provenance",
+                "baseline_size": None,
+                "baseline_runs": None,
+                "candidate_count": candidate_count,
+                "ungrounded_count": ungrounded_count,
+                "candidates_truncated": truncated,
+                "args_truncated": best["args_truncated"],
+                "args_snippet": best["args_snippet"],
+            },
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TIER1_DETECTORS: List[BaseDetector] = [
@@ -3026,6 +3918,20 @@ TIER1_DETECTORS: List[BaseDetector] = [
     RunawayIterationDetector(),
     ModelFallbackDriftDetector(),
     MemoryPoisonedDetector(),
+    # In-path instance, deliberately NOT the class defaults. Benchmarking against
+    # realistic payloads (100KB+ tool outputs, 8-level nesting, 400 candidates in
+    # one arg) put unscoped scanning 6–9x over MAX_COST_NS, and the cost is
+    # surface-side — case-folding and marker-scanning captured tool output —
+    # so limiting which TOOLS are scanned barely moves it. What bounds it is
+    # bounding the INPUTS, plus a hard abort. All three fail open: the run is
+    # skipped, the server-side instance (class defaults, no caps) still catches
+    # it, and the user's agent never pays more than the budget.
+    UngroundedDestinationDetector(
+        MAX_SCAN_NS=1_000_000,  # == BaseDetector.MAX_COST_NS
+        MAX_SURFACE_CHARS=30_000,
+        MAX_ARGS_CHARS=4_000,
+        TOOL_NAME_SCOPE=UngroundedDestinationDetector.SEND_TOOL_PATTERNS,
+    ),
     # PromptInjectionDetector and HandoffContextLossDetector are handled
     # separately — the former needs raw input, the latter needs a second
     # run's data, which no detector in this list ever gets (see their
@@ -3216,7 +4122,7 @@ def run_detectors(
         try:
             signal = detector.on_run_completion(state)
         except Exception:
-            # One detector must not cost the run its other 28. Failure isolation
+            # One detector must not cost the run its other 30. Failure isolation
             # was already applied at plugin *construction*
             # (detector_svc/detectors.py::_build_plugin_detectors), which made
             # this gap easy to miss: a registered plugin or pack detector that

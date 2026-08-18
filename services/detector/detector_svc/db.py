@@ -294,6 +294,35 @@ CREATE TABLE IF NOT EXISTS run_processing_failures (
 ALTER TABLE processed_runs ADD COLUMN IF NOT EXISTS processing_error TEXT;
 """
 
+# Learned per-agent destination set for UNGROUNDED_DESTINATION's opt-in novelty
+# mode. Detector-owned (nothing else reads it), so it lives here rather than in
+# migrations — same rule run_state_metrics follows.
+#
+# It exists because every other baseline in this service is a scalar P75 that a
+# bounded query can compute on demand; a destination baseline is a SET, and
+# deriving it at detection time would mean re-parsing every tool call's args
+# across 50 historical runs, per run. Materialising it turns that into one
+# indexed lookup.
+#
+# Only GROUNDED destinations are ever written here (see the worker). Seeding it
+# with ungrounded ones would teach the baseline that the first successful
+# exfiltration is normal — the detector would disarm itself on exactly the
+# traffic it exists to catch.
+_DESTINATION_BASELINE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_destination_baseline (
+    org_id            TEXT        NOT NULL,
+    agent_id          TEXT        NOT NULL,
+    destination       TEXT        NOT NULL,
+    destination_type  TEXT        NOT NULL,
+    first_seen_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    run_count         INTEGER     NOT NULL DEFAULT 1,
+    PRIMARY KEY (org_id, agent_id, destination)
+);
+CREATE INDEX IF NOT EXISTS idx_adb_agent_seen
+    ON agent_destination_baseline(org_id, agent_id, last_seen_at DESC);
+"""
+
 _WATERMARK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS detector_watermarks (
     shard_index  INT         NOT NULL,
@@ -303,6 +332,31 @@ CREATE TABLE IF NOT EXISTS detector_watermarks (
     PRIMARY KEY (shard_count, shard_index)
 );
 ALTER TABLE detector_watermarks ADD COLUMN IF NOT EXISTS shard_count INT NOT NULL DEFAULT 1;
+
+-- Repair the PRIMARY KEY on a table created before the key became composite.
+-- CREATE TABLE IF NOT EXISTS is a no-op on an existing table and the ALTER above
+-- only adds the COLUMN, so such a deployment kept a single-column pkey on
+-- shard_index while advance_watermark() upserts ON CONFLICT (shard_count,
+-- shard_index) — which raises InvalidColumnReferenceError on every poll tick and
+-- crash-loops the worker. Guarded on the current key being single-column, so it
+-- no-ops on a fresh install. Safe to run: with the old key, shard_index is
+-- already unique and shard_count defaults to 1, so the composite key cannot
+-- collide on existing rows.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        WHERE c.relname = 'detector_watermarks'
+          AND i.indisprimary
+          AND i.indnatts = 1
+    ) THEN
+        ALTER TABLE detector_watermarks DROP CONSTRAINT detector_watermarks_pkey;
+        ALTER TABLE detector_watermarks
+            ADD CONSTRAINT detector_watermarks_pkey PRIMARY KEY (shard_count, shard_index);
+    END IF;
+END $$;
 """
 
 
@@ -424,6 +478,7 @@ LIVE_DETECTORS: set[str] = {
     "MODEL_FALLBACK_DRIFT",
     "MEMORY_POISONING",
     "DELEGATION_LOOP",
+    "UNGROUNDED_DESTINATION",
 }
 
 
@@ -449,6 +504,7 @@ async def ensure_detector_schema() -> None:
         await conn.execute(_PACKS_SCHEMA)
         await _seed_packs(conn)
         await conn.execute(_RUN_STATE_METRICS_SCHEMA)
+        await conn.execute(_DESTINATION_BASELINE_SCHEMA)
         await conn.execute(_WATERMARK_SCHEMA)
         await conn.execute(_RUN_FAILURE_SCHEMA)
     logger.info("Detector schema ready")
@@ -1153,6 +1209,149 @@ async def fetch_run_lineage(run_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def fetch_memory_writes(
+    org_id: str,
+    agent_id: str,
+    keys: list[str],
+    exclude_run_id: str,
+    lookback_days: int = 30,
+    limit: int = 100,
+) -> list[dict]:
+    """Prior `memory.written` events for this agent, restricted to `keys`.
+
+    Feeds UNGROUNDED_DESTINATION's cross-run taint check (T6). A destination
+    planted in run N's memory and read back in run N+2 is ungrounded in N+2 but
+    has no in-run taint source: `memory.read` carries only a key, because the SDK
+    never sees the value that comes back (run_context.py::memory_read). Without
+    this the flagship scenario — poisoned memory, innocent later run, send to the
+    planted address — tops out at HIGH.
+
+    Deliberately reads EVENTS, not signals. Ancestor *signals* are derived and
+    may not exist yet when a sibling run is processed, which would make severity
+    depend on poll ordering; an ingested event row is already durable. Reading
+    another run's events is also the precedent _handoff_signal_from_events set.
+
+    Bounded three ways: the keys this run actually read, a lookback window (which
+    also prunes `events` partitions), and LIMIT. Rides
+    idx_events_org_agent(org_id, agent_id, received_at DESC).
+    """
+    if not _pool or not keys:
+        return []
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT run_id, step_index, timestamp, payload
+            FROM events
+            WHERE org_id      = $1
+              AND agent_id    = $2
+              AND event_type  = 'memory.written'
+              AND run_id     <> $3
+              AND received_at >= NOW() - ($4 || ' days')::interval
+              AND payload->>'key' = ANY($5::text[])
+            ORDER BY received_at DESC
+            LIMIT $6
+            """,
+            org_id,
+            agent_id,
+            exclude_run_id,
+            str(int(lookback_days)),
+            list(keys),
+            int(limit),
+        )
+
+    out: list[dict] = []
+    for r in rows:
+        payload = r["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        out.append(
+            {
+                "run_id": r["run_id"],
+                "step_index": r["step_index"],
+                "key": payload.get("key"),
+                "value": payload.get("value"),
+                "source": payload.get("source"),
+            }
+        )
+    return out
+
+
+async def fetch_destination_baseline(
+    org_id: str, agent_id: str, destinations: list[str]
+) -> set[str]:
+    """Which of `destinations` this agent has already been seen sending to.
+
+    Probing only the run's own candidates keeps this an index lookup over a
+    handful of keys rather than a full baseline load.
+    """
+    if not _pool or not destinations:
+        return set()
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT destination
+            FROM agent_destination_baseline
+            WHERE org_id = $1 AND agent_id = $2 AND destination = ANY($3::text[])
+            """,
+            org_id,
+            agent_id,
+            list(destinations),
+        )
+    return {r["destination"] for r in rows}
+
+
+async def count_agent_runs_capped(org_id: str, agent_id: str, cap: int) -> int:
+    """Processed-run count for this agent, counted no further than `cap`.
+
+    Novelty mode only needs to know whether the baseline has matured past
+    MIN_BASELINE_RUNS, so the count stops at the threshold. An uncapped
+    COUNT(*) over processed_runs would grow without bound as an agent ages.
+    """
+    if not _pool:
+        return 0
+    async with _pool.acquire() as conn:
+        return int(
+            await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT 1 FROM processed_runs
+                    WHERE org_id = $1 AND agent_id = $2
+                    LIMIT $3
+                ) t
+                """,
+                org_id,
+                agent_id,
+                int(cap),
+            )
+            or 0
+        )
+
+
+async def upsert_destination_baseline(
+    org_id: str, agent_id: str, destinations: list[tuple[str, str]]
+) -> None:
+    """Record GROUNDED destinations as normal for this agent.
+
+    Callers must pass only destinations that passed the grounding check — see
+    the table's schema comment for why ungrounded ones must never land here.
+    """
+    if not _pool or not destinations:
+        return
+    async with _pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO agent_destination_baseline
+                (org_id, agent_id, destination, destination_type)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (org_id, agent_id, destination) DO UPDATE
+               SET last_seen_at = NOW(),
+                   run_count    = agent_destination_baseline.run_count + 1
+            """,
+            [(org_id, agent_id, d, t) for d, t in destinations],
+        )
+
+
 async def fetch_run_events(run_id: str) -> list[dict]:
     """All events for a run, ordered by step_index then timestamp."""
     async with _pool.acquire() as conn:
@@ -1277,7 +1476,13 @@ async def mark_run_processed(
                 (run_id, agent_id, agent_version, trigger, signal_count, org_id,
                  event_count, processing_error)
             VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''))
-            ON CONFLICT (run_id) DO UPDATE
+            -- (org_id, run_id), not run_id: migration 2 (composite_run_key) made the
+            -- key composite because run_id is caller-supplied and collides across
+            -- tenants. A bare run_id target has no matching unique constraint, so
+            -- this raised on EVERY call and the run was never marked processed —
+            -- leaving it to be re-detected on every poll, writing duplicate
+            -- signals and re-alerting them.
+            ON CONFLICT (org_id, run_id) DO UPDATE
                 SET signal_count     = processed_runs.signal_count + EXCLUDED.signal_count,
                     event_count      = EXCLUDED.event_count,
                     processing_error = EXCLUDED.processing_error,
@@ -1359,7 +1564,10 @@ async def upsert_run_and_conversation(
             """
             INSERT INTO runs (run_id, org_id, agent_id, agent_version, conversation_id, started_at)
             VALUES ($1, $2, $3, $4, $5, to_timestamp($6))
-            ON CONFLICT (run_id) DO NOTHING
+            -- (org_id, run_id) — see mark_run_processed for why. A bare run_id
+            -- target raised here too, so the runs registry stopped being written
+            -- and GET /v1/runs/{id} reported "no signals" for runs that had them.
+            ON CONFLICT (org_id, run_id) DO NOTHING
             """,
             run_id,
             org_id,

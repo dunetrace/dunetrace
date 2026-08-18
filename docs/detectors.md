@@ -1,16 +1,16 @@
 # Detectors
 
-Dunetrace runs 30 structural detectors against every completed agent run. All of
+Dunetrace runs 31 structural detectors against every completed agent run. All of
 them are listed in the table below; the nine newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
 
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
-> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **27**
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **28**
 > detectors the SDK can also run *client-side, in-path*; the three that can't
 > (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`) need raw
-> input or a second run's data. The detector worker runs all 30 regardless — see
+> input or a second run's data. The detector worker runs all 31 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -51,6 +51,7 @@ Semantic findings never trigger a policy — see
 | `COST_SPIKE` | Total token consumption exceeds 3× P75 baseline ¹ or static fallback (>50,000 tokens) | MEDIUM |
 | `SESSION_LATENCY` | Total wall-clock run duration exceeds 3× P75 baseline ¹ or static fallback (>5 min) | MEDIUM |
 | `OVERSIZED_TOOL_ARGUMENTS` | Tool call arguments exceed maximum character limit (default 10,000) | MEDIUM |
+| `UNGROUNDED_DESTINATION` | A tool call sends to an email/URL/domain that appears nowhere in the run's trusted inputs | HIGH/CRITICAL |
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
@@ -139,7 +140,7 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`). However, new detectors like `OVERSIZED_TOOL_ARGUMENTS` remain shadowed by default until their precision is checked against real traffic. A new built-in detector should be added to `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in `services/detector/detector_svc/db.py` once validated; leaving it out of `LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
+Most built-in detectors are live (`shadow = false`). One is not: `OVERSIZED_TOOL_ARGUMENTS` remains shadowed by default until its precision is checked against real traffic. A new built-in detector should be added to `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in `services/detector/detector_svc/db.py` once validated; leaving it out of `LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
 
 User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
 
@@ -1088,7 +1089,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 29 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 31 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`
@@ -1098,3 +1099,97 @@ Detection adds zero latency to the agent — it runs entirely after the run comp
 **Self-correction suppression** — `RETRY_STORM` checks whether the tool that hit the failure streak subsequently succeeded in the same run. If it did, the agent recovered on its own and no signal is emitted.
 
 **REASONING_STALL severity** — fires MEDIUM when the run finished with a `final_answer` (CoT-heavy but converged) and HIGH when the run stalled without ever converging (the ratio is likely the reason for failure).
+
+### `UNGROUNDED_DESTINATION`
+
+A tool call sends data to a destination — an email address, a URL host, a bare
+domain — that appears nowhere in the run's own trusted input surface. This is the
+actuation step of agent data exfiltration: after a successful injection, the
+agent emails an address the legitimate task never mentioned.
+
+**Provenance-based, not novelty-based.** Open-destination agents (a support agent
+emailing a different customer every run) make per-destination history useless —
+every legitimate run contains an address never seen before. So the default mode
+never asks *"have I seen this destination before"*; it asks *"did this run's own
+trusted inputs contain this string"*. A support agent whose CRM lookup returned
+the customer's address is silent by construction, forever.
+
+**The grounded surface**, and why each entry is trusted:
+
+| Source | Rationale |
+|---|---|
+| `run.started.input_text` | The task the principal actually asked for — this *is* intent |
+| `run.started.system_prompt` | Operator-authored config (fixed archive addresses, etc.) |
+| `tool.responded.output` | A value the *system* returned. The entry that keeps open-destination agents silent |
+| `retrieval.responded.content` | Same argument: corpus data the system supplied |
+| `memory.written.value` (trusted `source`) | Stored earlier from a channel the attacker can't reach |
+
+Deliberately **excluded**: `llm.responded` output text and the agent's own earlier
+tool arguments. Grounding on model output is circular — an injected model would
+emit the destination and thereby ground it. That exclusion is the detector's
+central trust boundary.
+
+**Conditional demotion.** Tool output and retrieval content are simultaneously the
+legitimate way a destination enters a run and the attacker's primary injection
+channel. A content block matching an injection marker is therefore *removed* from
+the grounded surface and *moved* to the taint surface; clean blocks ground
+normally. The same rule applies to `input_text` when the run carries a
+`PROMPT_INJECTION_SIGNAL`. One rule, three channels.
+
+**Severity**: HIGH when ungrounded. CRITICAL when ungrounded *and* the destination
+also appears in attacker-controllable content — an untrusted-source memory value
+(including one written by an *earlier* run and read back in this one), or a
+content block carrying an injection marker.
+
+**Cross-run taint.** `memory.read` carries only a key — the SDK never sees the
+value that comes back — so a destination planted in run N's memory and read back
+in run N+2 is ungrounded in N+2 with no in-run taint source. The detector worker
+closes this by querying prior `memory.written` events for the keys this run read
+(`fetch_memory_writes`). It reads *events*, not signals: ancestor signals are
+derived and may not exist when a sibling run is processed, which would make
+severity depend on poll ordering. Note also that sequential runs sharing a memory
+store are siblings, not a `parent_run_id` chain, so an ancestor walk would not
+reach run N at all.
+
+**Novelty mode** (`mode: provenance+novelty`) is a per-agent opt-in for
+*closed*-destination agents (billing, internal reporting) where history genuinely
+defines normal. It evaluates only destinations that already *passed* grounding,
+so it can never double-fire with the provenance verdict, and it stays silent
+below `min_baseline_runs` (default 20). The baseline is materialised in
+`agent_destination_baseline` and only ever records **grounded** destinations —
+seeding it with ungrounded ones would teach it that the first successful
+exfiltration is normal.
+
+**In-path use.** The detector is in `TIER1_DETECTORS`, so a `trigger="signal"`
+policy can stop a send *before* it executes (`RunContext.tool_called` evaluates
+policies before the tool body runs). Because scanning captured tool output is
+expensive, the in-path instance runs with `max_surface_chars`, `max_args_chars`,
+`max_scan_ns` and a send-tool `tool_name_scope`. All of them **fail open**: the
+run is skipped and the server-side instance still catches it. Degradation is
+prevent → detect, never detect → nothing.
+
+**Known limits.**
+
+1. Taint matching is verbatim-string. A destination the agent *assembles* from
+   fragments ("email the user at the domain in field X") never appears whole in
+   any taint source, so it stays HIGH rather than escalating to CRITICAL. The
+   grounding check still fires. Out of scope — that is what approval policies on
+   send-class tools are for.
+2. Encoded destinations (base64, percent-encoding) are the same class.
+3. OTLP-ingested runs truncate tool args at `OTLP_MAX_ATTR_CHARS` (8192), so a
+   destination past that offset is invisible; surfaced as `args_truncated: true`.
+   The in-path SDK copy sees pre-truncation args, so the two paths can legitimately
+   disagree on a very large argument — in-path may detect what server-side cannot.
+4. `bare_domain` extraction is **off by default**: without a scheme or an `@` to
+   anchor on, `report.pdf` and `v1.2.3` are domain-shaped too.
+
+**Live** — listed in `LIVE_DETECTORS`, so its signals alert rather than being
+stored silently. If it proves noisy on your traffic, reach for
+`allowlisted_domains` (your own domains) before removing it from
+`LIVE_DETECTORS`: the commonest false positive is an address that arrived
+through a channel this run didn't instrument, and an allowlist entry fixes that
+class without disarming the detector.
+
+**Tunable**: `mode`, `min_baseline_runs`, `candidate_types`, `allowlisted_domains`,
+`max_candidates_per_run`, `max_surface_chars`, `max_args_chars`, `max_scan_ns`,
+`tool_name_scope`, `send_tool_patterns`, `demotion_phrases`, `case_sensitive`.

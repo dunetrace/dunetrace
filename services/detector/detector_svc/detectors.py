@@ -52,6 +52,7 @@ from dunetrace.detectors import (
     ToolLoopDetector,
     ToolThrashingDetector,
     UnreadToolErrorDetector,
+    UngroundedDestinationDetector,
 )
 from detector_svc.config_loader import load_detector_kwargs
 
@@ -89,6 +90,7 @@ _DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
     "model_fallback_drift": ModelFallbackDriftDetector,
     "memory_poisoning": MemoryPoisonedDetector,
     "delegation_loop": DelegationLoopDetector,
+    "ungrounded_destination": UngroundedDestinationDetector,
 }
 
 # Load config once at import time. Passing the detector key set makes the loader

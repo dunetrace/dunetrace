@@ -14,3 +14,7 @@ anthropic>=0.40
 # from there. Shipped in the image for the same reason anthropic is, so
 # switching provider is an env change rather than an image rebuild.
 mistralai>=2.0
+# Required by dunetrace_schemas (apply_migrations -> dunetrace_schemas/__init__ -> events.py).
+# This service does not use pydantic directly, but importing the shared migration
+# runner pulls the package __init__, so the image cannot boot without it.
+pydantic==2.10.4

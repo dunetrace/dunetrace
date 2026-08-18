@@ -8,3 +8,7 @@ opentelemetry-api>=1.28.0
 opentelemetry-sdk>=1.28.0
 opentelemetry-exporter-otlp-proto-grpc>=1.28.0
 opentelemetry-exporter-otlp-proto-http>=1.28.0
+# Required by dunetrace_schemas (apply_migrations -> dunetrace_schemas/__init__ -> events.py).
+# This service does not use pydantic directly, but importing the shared migration
+# runner pulls the package __init__, so the image cannot boot without it.
+pydantic==2.10.4

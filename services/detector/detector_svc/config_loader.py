@@ -123,6 +123,22 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
         "min_loop_runs": "MIN_LOOP_RUNS",
         "critical_loop_runs": "CRITICAL_LOOP_RUNS",
     },
+    "ungrounded_destination": {
+        "candidate_types": "CANDIDATE_TYPES",
+        "allowlisted_domains": "ALLOWLISTED_DOMAINS",
+        "mode": "MODE",
+        "min_baseline_runs": "MIN_BASELINE_RUNS",
+        "max_candidates_per_run": "MAX_CANDIDATES_PER_RUN",
+        "max_depth": "MAX_DEPTH",
+        "max_nodes": "MAX_NODES",
+        "max_scan_ns": "MAX_SCAN_NS",
+        "max_surface_chars": "MAX_SURFACE_CHARS",
+        "max_args_chars": "MAX_ARGS_CHARS",
+        "tool_name_scope": "TOOL_NAME_SCOPE",
+        "send_tool_patterns": "SEND_TOOL_PATTERNS",
+        "demotion_phrases": "DEMOTION_PHRASES",
+        "case_sensitive": "CASE_SENSITIVE",
+    },
 }
 
 

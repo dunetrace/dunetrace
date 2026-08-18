@@ -327,6 +327,55 @@ default:
       threshold: 1
       window_runs: 1
 
+  ungrounded_destination:
+    mode: provenance          # provenance | provenance+novelty
+                              # provenance (default) asks only "did THIS run's own
+                              # trusted inputs contain this destination" — so an
+                              # open-destination agent (support emailing a new
+                              # customer every run) is silent by construction.
+                              # provenance+novelty adds a learned per-agent
+                              # destination baseline; opt in ONLY for closed-
+                              # destination agents (billing, internal reporting)
+                              # where history genuinely defines normal.
+    min_baseline_runs: 20     # novelty never fires below this many processed runs
+                              # for the agent — an immature baseline makes every
+                              # destination look novel. Matches _MIN_BASELINE_RUNS.
+    candidate_types: [email, url]
+                              # + bare_domain to also extract hostname-shaped bare
+                              # tokens. OFF by default: without a URL scheme or an
+                              # @ to anchor on, "report.pdf" and "v1.2.3" are
+                              # domain-shaped too.
+    allowlisted_domains: []   # never fire for these, matched label-aware, so
+                              # corp.com covers mail.corp.com but NOT evilcorp.com.
+                              # Set your own domains here first — an agent replying
+                              # to a user at an address that arrived through
+                              # uninstrumented auth context is the commonest FP.
+    max_candidates_per_run: 50
+    # In-path cost controls. These apply to the SDK's client-side copy (the
+    # detector is in TIER1_DETECTORS so a trigger="signal" policy can stop a send
+    # BEFORE it executes); the server-side worker runs with far larger limits.
+    # All three fail OPEN — the run is skipped and the server-side pass still
+    # catches it. Degradation is prevent -> detect, never detect -> nothing.
+    #   max_surface_chars  aborts rather than scanning a TRUNCATED trusted corpus,
+    #                      because a short corpus makes grounded destinations read
+    #                      as ungrounded — a false positive, which in-path can
+    #                      block a legitimate send.
+    #   max_args_chars     truncates instead of aborting: a missed destination is
+    #                      a missed detection, never a false alarm.
+    # max_scan_ns: 1000000
+    # max_surface_chars: 30000
+    # max_args_chars: 4000
+    # tool_name_scope: [send, email, mail, message, post, upload, webhook, http]
+    #
+    # LIVE (listed in LIVE_DETECTORS) — signals alert rather than being stored
+    # silently. Reverse by removing it from LIVE_DETECTORS in
+    # services/detector/detector_svc/db.py; allowlisted_domains is the first
+    # knob to reach for if it is noisier than expected on your traffic.
+    alert_policy:
+      mode: immediate   # a security signal — always alert on first occurrence
+      threshold: 1
+      window_runs: 1
+
   delegation_loop:
     min_loop_runs: 5          # fire when >=N runs in the parent_run_id chain are
                               # caught in a mutual-delegation cycle (A->B->A->B).

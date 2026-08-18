@@ -12,6 +12,7 @@ from dunetrace.detectors import (
     CUSTOM_DETECTOR_REGISTRY,
     DelegationLoopDetector,
     HandoffContextLossDetector,
+    UngroundedDestinationDetector,
     run_detectors,
 )
 from dunetrace.models import FailureSignal, FailureType, Severity
@@ -29,8 +30,11 @@ from detector_svc.db import (
     ensure_detector_schema,
     fetch_completed_runs,
     fetch_custom_detectors,
+    count_agent_runs_capped,
+    fetch_destination_baseline,
     fetch_duration_baseline,
     fetch_latency_baseline,
+    fetch_memory_writes,
     fetch_llm_tool_ratio_baseline,
     fetch_run_events,
     fetch_run_lineage,
@@ -51,6 +55,7 @@ from detector_svc.db import (
     write_signals,
     upsert_fired_issues,
     advance_clean_runs,
+    upsert_destination_baseline,
     upsert_run_and_conversation,
     write_run_state_metrics,
 )
@@ -223,6 +228,94 @@ async def _delegation_signal_from_chain(
     )
 
 
+async def _apply_ungrounded_destination_cross_run(
+    signals: list,
+    state,
+    detector,
+    org_id: str,
+    run_id: str,
+    agent_id: str,
+) -> None:
+    """Cross-run enrichment for UNGROUNDED_DESTINATION (T6) plus novelty mode.
+
+    Three things the in-run detector cannot do because it has no database:
+
+    1. Escalate HIGH -> CRITICAL when the destination came from a PRIOR run's
+       poisoned memory write for a key this run read back. `memory.read` carries
+       only a key, so the value that re-entered the agent's context is simply not
+       present in this run's events — without this step the flagship scenario
+       (poisoned memory in run N, send in run N+2) tops out at HIGH.
+    2. Fire novelty mode against the learned baseline, for closed-destination
+       agents that opted in.
+    3. Record this run's GROUNDED destinations as normal.
+
+    Best-effort throughout: any failure here leaves the in-run verdict standing
+    rather than losing the signal. Caller runs inside process_run's try block, so
+    a raise would cost the whole run's detection.
+    """
+    if detector is None:
+        return
+
+    existing = next(
+        (s for s in signals if s.failure_type == FailureType.UNGROUNDED_DESTINATION), None
+    )
+
+    # 1. Cross-run memory taint. Only worth a query when the in-run verdict found
+    #    no taint — a CRITICAL signal needs no escalation.
+    if existing is not None and existing.evidence.get("taint_source") is None:
+        keys = sorted({m.key for m in state.memory_events if m.op == "read" and m.key})
+        if keys:
+            prior = await fetch_memory_writes(org_id, agent_id, keys, run_id)
+            taint = detector.evaluate_cross_run_memory_taint(
+                existing.evidence.get("destination", ""), prior
+            )
+            if taint:
+                existing.severity = Severity.CRITICAL
+                existing.confidence = 0.92
+                existing.evidence["taint_source"] = taint
+
+    novelty_on = "novelty" in (getattr(detector, "MODE", "") or "")
+    if not novelty_on:
+        return
+
+    grounded, _ungrounded = detector.collect_destinations(state)
+
+    # 2. Novelty — only against destinations that PASSED grounding, so it can
+    #    never double-fire with the provenance verdict above.
+    if existing is None and grounded:
+        probe = [d for d, _t, _h in grounded]
+        baseline = await fetch_destination_baseline(org_id, agent_id, probe)
+        baseline_runs = await count_agent_runs_capped(org_id, agent_id, detector.MIN_BASELINE_RUNS)
+        hit = detector.evaluate_novelty(grounded, baseline, baseline_runs)
+        if hit:
+            signals.append(
+                FailureSignal(
+                    failure_type=FailureType.UNGROUNDED_DESTINATION,
+                    severity=Severity.MEDIUM,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    agent_version=state.agent_version,
+                    step_index=0,
+                    confidence=0.55,
+                    evidence={
+                        "destination": hit["destination"],
+                        "destination_type": hit["destination_type"],
+                        "grounding_verdict": "grounded_but_novel",
+                        "detection_mode": "novelty",
+                        "baseline_size": len(baseline),
+                        "baseline_runs": baseline_runs,
+                        "taint_source": None,
+                        "novelty_key": hit["novelty_key"],
+                    },
+                )
+            )
+
+    # 3. Baseline write — grounded destinations only. Writing ungrounded ones
+    #    would teach the baseline that the first exfiltration is normal.
+    if grounded:
+        await upsert_destination_baseline(org_id, agent_id, [(d, t) for d, t, _h in grounded])
+
+
 def _emit_otel_findings(
     run_id: str,
     org_id: str,
@@ -330,6 +423,23 @@ async def process_run(
                 )
                 if delegation:
                     signals.append(delegation)
+
+        ungrounded_detector = next(
+            (d for d in detectors if isinstance(d, UngroundedDestinationDetector)), None
+        )
+        if ungrounded_detector is not None:
+            try:
+                await _apply_ungrounded_destination_cross_run(
+                    signals, state, ungrounded_detector, org_id, run_id, agent_id
+                )
+            except Exception as exc:
+                # Enrichment only. A failure here must leave the in-run HIGH
+                # verdict standing, never cost the run its detection.
+                logger.warning(
+                    "UNGROUNDED_DESTINATION cross-run enrichment failed for run_id=%s: %s",
+                    run_id,
+                    exc,
+                )
 
         risk = RiskEngine().evaluate(signals, state)
         logger.debug(
