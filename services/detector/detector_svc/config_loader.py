@@ -38,6 +38,10 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
     "oversized_tool_arguments": {"max_arg_length": "MAX_ARG_LENGTH"},
     "tool_loop": {"threshold": "THRESHOLD", "window": "WINDOW"},
     "tool_thrashing": {"window": "WINDOW"},
+    "scattershot_tool_use": {
+        "max_distinct_tools": "MAX_DISTINCT_TOOLS",
+        "min_total_calls": "MIN_TOTAL_CALLS",
+    },
     "tool_avoidance": {"min_llm_calls": "MIN_LLM_CALLS"},
     "goal_abandonment": {"stall_steps": "STALL_STEPS"},
     "rag_empty_retrieval": {"min_score": "MIN_SCORE", "min_results": "MIN_RESULTS"},

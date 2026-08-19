@@ -54,6 +54,22 @@ default:
         finally:
             os.unlink(path)
 
+    def test_scattershot_thresholds_parsed(self):
+        path = _write_yaml("""
+default:
+  scattershot_tool_use:
+    max_distinct_tools: 7
+    min_total_calls: 10
+""")
+        try:
+            result = load_detector_kwargs(path)
+            self.assertEqual(
+                result["default"]["scattershot_tool_use"],
+                {"MAX_DISTINCT_TOOLS": 7, "MIN_TOTAL_CALLS": 10},
+            )
+        finally:
+            os.unlink(path)
+
     def test_unknown_param_key_ignored(self):
         path = _write_yaml("""
 default:

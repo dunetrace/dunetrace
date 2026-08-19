@@ -1,16 +1,16 @@
 # Detectors
 
-Dunetrace runs 31 structural detectors against every completed agent run. All of
-them are listed in the table below; the nine newest get a full write-up in
+Dunetrace runs 32 structural detectors against every completed agent run. All of
+them are listed in the table below; the eleven newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
 
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
-> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **28**
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **29**
 > detectors the SDK can also run *client-side, in-path*; the three that can't
 > (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`) need raw
-> input or a second run's data. The detector worker runs all 31 regardless — see
+> input or a second run's data. The detector worker runs all 32 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -54,6 +54,7 @@ Semantic findings never trigger a policy — see
 | `UNGROUNDED_DESTINATION` | A tool call sends to an email/URL/domain that appears nowhere in the run's trusted inputs | HIGH/CRITICAL |
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
+| `SCATTERSHOT_TOOL_USE` | Run uses ≥6 distinct tools across ≥8 total calls, indicating a broad failure to converge | MEDIUM |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
 | `SILENT_TRUNCATION` | A single response was truncated (`finish_reason=length`/`max_tokens`) and the agent used it without retrying | MEDIUM/HIGH |
 | `MODEL_FALLBACK_DRIFT` | The run's LLM model silently switched to a less capable one (e.g. `gpt-4o`→`gpt-4o-mini`), often under rate limiting | MEDIUM |
@@ -140,7 +141,12 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`). One is not: `OVERSIZED_TOOL_ARGUMENTS` remains shadowed by default until its precision is checked against real traffic. A new built-in detector should be added to `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in `services/detector/detector_svc/db.py` once validated; leaving it out of `LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
+Most built-in detectors are live (`shadow = false`). Two are not:
+`OVERSIZED_TOOL_ARGUMENTS` and `SCATTERSHOT_TOOL_USE` remain shadowed by default
+until their precision is checked against real traffic. A new built-in detector
+should be added to `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
+`services/detector/detector_svc/db.py` once validated; leaving it out of
+`LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
 
 User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
 
@@ -378,6 +384,28 @@ Drop the file in the directory `detector_svc` scans at startup — `DUNETRACE_CU
 ## Additional detectors
 
 Silent failures — an agent that fails quietly and reports success anyway — are the dominant failure mode in production agent deployments, ahead of loud crashes and infinite loops. The detectors below target that structurally: no LLM calls, no external ML models, no semantic classification. Every signal is derived from regex, string matching, and arithmetic on structural fields, same as every Tier 1 detector above. Live/shadow status is called out per detector below, since new additions to this set aren't assumed live by default.
+
+### SCATTERSHOT_TOOL_USE
+
+**Signal**: `SCATTERSHOT_TOOL_USE` · **Severity**: MEDIUM · **Shadow by default**
+
+Fires when a run uses at least 6 distinct tool names across at least 8 total
+tool calls. The two thresholds work together: distinct-tool count catches an
+agent trying unrelated approaches, while minimum total calls avoids flagging a
+legitimate fixed workflow that simply uses several tools once each.
+
+Evidence includes `distinct_tool_count`, the sorted `tools` list, `total_calls`,
+and both thresholds. This is distinct from `TOOL_LOOP` (one tool repeated) and
+`TOOL_THRASHING` (an alternating two-tool pattern); all three can describe
+different forms of failure to converge.
+
+Tune `max_distinct_tools` and `min_total_calls` under `scattershot_tool_use` in
+`detectors.yml`. The default pair was selected by
+[`calibrate_scattershot_tool_use.py`](../scripts/calibrate_scattershot_tool_use.py)
+against a labeled corpus containing legitimate research, coding, automation,
+and communication pipelines. Keep the detector shadowed while measuring it on
+real traffic because broad multi-tool agents are the principal false-positive
+class.
 
 ### PREMATURE_TERMINATION
 
@@ -1089,7 +1117,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 31 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 32 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`
