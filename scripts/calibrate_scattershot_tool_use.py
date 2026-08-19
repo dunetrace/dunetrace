@@ -94,6 +94,7 @@ _NEGATIVES = [
 
 
 def _fires(names: list[str], max_distinct_tools: int, min_total_calls: int) -> bool:
+    """Return whether one labeled tool sequence fires for the supplied thresholds."""
     from dunetrace.detectors import ScattershotToolUseDetector
     from dunetrace.models import RunState, ToolCall
 
@@ -111,6 +112,7 @@ def _fires(names: list[str], max_distinct_tools: int, min_total_calls: int) -> b
 
 
 def main() -> None:
+    """Sweep threshold pairs, print their scores, and optionally cache the results."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args()

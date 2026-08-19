@@ -352,6 +352,21 @@ class ScattershotToolUseDetector(BaseDetector):
     MAX_DISTINCT_TOOLS = 6
     MIN_TOTAL_CALLS = 8
 
+    def __init__(self, **overrides: object) -> None:
+        super().__init__(**overrides)
+        if (
+            not isinstance(self.MAX_DISTINCT_TOOLS, int)
+            or isinstance(self.MAX_DISTINCT_TOOLS, bool)
+            or self.MAX_DISTINCT_TOOLS <= 0
+        ):
+            raise ValueError("MAX_DISTINCT_TOOLS must be a positive integer")
+        if (
+            not isinstance(self.MIN_TOTAL_CALLS, int)
+            or isinstance(self.MIN_TOTAL_CALLS, bool)
+            or self.MIN_TOTAL_CALLS <= 0
+        ):
+            raise ValueError("MIN_TOTAL_CALLS must be a positive integer")
+
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         total_calls = len(state.tool_calls)
         if total_calls < self.MIN_TOTAL_CALLS:

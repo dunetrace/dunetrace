@@ -49,7 +49,8 @@ Dunetrace covers the full agent reliability lifecycle, not just one slice of it:
 | 4 | **Runtime Prevention** | Policies that stop, redirect, or downgrade a run *while it's happening* — the differentiator no tracer offers → [docs/policies.md](docs/policies.md) |
 | 5 | **Root Cause & Fix** | Native root-cause analysis, auto-applied policy fixes, or a one-click draft PR → [Diagnose & fix](#diagnose--fix) |
 
-¹ Per instrumentation hook (`tool_called`, `llm_responded`, …) — benchmarked in
+¹ Per instrumentation hook (`tool_called`, `llm_responded`, …), including the
+scoped detector path enabled by a `trigger="signal"` policy — benchmarked in
 `packages/sdk-py/tests/test_benchmark.py`. The one exception is the prompt-injection
 scan at run start, which is bounded rather than sub-millisecond: it scans up to 32K
 characters of input, ~10ms worst case against an LLM call of 500ms+. See

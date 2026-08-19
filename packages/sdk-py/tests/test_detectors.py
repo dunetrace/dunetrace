@@ -247,6 +247,16 @@ class TestScattershotToolUseDetector(unittest.TestCase):
         assert signal.evidence["distinct_tool_count"] == 4
         assert signal.evidence["total_calls"] == 5
 
+    def test_rejects_invalid_thresholds(self):
+        invalid_values = (0, -1, True, 1.5, "6")
+        for name in ("MAX_DISTINCT_TOOLS", "MIN_TOTAL_CALLS"):
+            for value in invalid_values:
+                with self.subTest(name=name, value=value):
+                    with self.assertRaisesRegex(
+                        ValueError, f"{name} must be a positive integer"
+                    ):
+                        ScattershotToolUseDetector(**{name: value})
+
 
 # ── AgentHandoffFailureDetector ──────────────────────────────────────────────
 

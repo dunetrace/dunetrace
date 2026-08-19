@@ -17,7 +17,9 @@ There are three kinds of detector in Dunetrace; packs are the middle one:
 
 - **Built-in detectors** — the always-on battery (32 of them) that runs for
   every org on every completed run. Packs never change these; they always run.
-  All 29 are live. See [detectors.md](../detectors.md).
+  Twenty-nine can also run client-side in-path. Thirty are live for customer
+  alerts; `OVERSIZED_TOOL_ARGUMENTS` and `SCATTERSHOT_TOOL_USE` remain in shadow
+  mode. See [detectors.md](../detectors.md).
 - **Pack detectors** — first-party, Dunetrace-owned, activated per org as a
   whole. This page.
 - **Custom detectors** — *your* detector logic, either written in plain
