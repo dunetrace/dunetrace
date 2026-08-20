@@ -16,6 +16,7 @@ from ingest_svc.auth import is_trusted
 from ingest_svc.db import (
     get_event_store,
     insert_deploy_event,
+    scrub_old_signal_evidence,
     verify_api_key,
     create_api_key,
     fetch_policies,
@@ -195,7 +196,10 @@ async def create_key(body: KeyCreateRequest) -> KeyCreateResponse:
 @router.post(
     "/admin/prune-events",
     response_model=PruneEventsResponse,
-    summary="Manually run a retention pass (drop event partitions older than retention_days)",
+    summary=(
+        "Manually run a retention pass (drop event partitions and scrub signal "
+        "evidence older than retention_days)"
+    ),
     include_in_schema=False,
 )
 async def prune_events(body: PruneEventsRequest) -> PruneEventsResponse:
@@ -212,8 +216,21 @@ async def prune_events(body: PruneEventsRequest) -> PruneEventsResponse:
         body.retention_days if body.retention_days is not None else settings.EVENT_RETENTION_DAYS
     )
     dropped = await get_event_store().prune_old_events(retention_days)
-    logger.info("Manual retention pass (via /admin/prune-events): %d partition(s) dropped", dropped)
-    return PruneEventsResponse(partitions_dropped=dropped, retention_days=retention_days)
+    # Not routed through EventStore: that interface covers this service's own
+    # `events` write path, and signal evidence is neither an event nor written
+    # here. See scrub_old_signal_evidence's docstring.
+    scrubbed = await scrub_old_signal_evidence(retention_days)
+    logger.info(
+        "Manual retention pass (via /admin/prune-events): %d partition(s) dropped, "
+        "%d signal(s) scrubbed",
+        dropped,
+        scrubbed,
+    )
+    return PruneEventsResponse(
+        partitions_dropped=dropped,
+        signals_scrubbed=scrubbed,
+        retention_days=retention_days,
+    )
 
 
 @router.get(

@@ -879,6 +879,92 @@ def explain_retry_storm(signal: FailureSignal) -> Explanation:
 # EMPTY_LLM_RESPONSE
 
 
+def explain_instrumentation_degraded(signal: FailureSignal) -> Explanation:
+    """The only template here that is not about the agent.
+
+    Every other explanation answers "what did your agent do wrong". This one
+    answers "why can we not tell you", and the difference has to survive into
+    the text — an operator who reads this as an agent fault will go looking in
+    the wrong codebase, which is exactly what happened during the incident that
+    prompted this detector.
+    """
+    ev = signal.evidence
+    shapes = ev.get("unreadable_shapes") or []
+    shape_txt = ", ".join(f"`{s}`" for s in shapes) if shapes else "an unrecognised shape"
+    providers = ", ".join(ev.get("providers") or []) or "the LLM provider"
+    affected = ev.get("affected_calls", 0)
+    total = ev.get("total_llm_calls", 0)
+    suppressed = ev.get("suppressed_detectors") or []
+    reason = ev.get("reason", "unreadable_response_shape")
+
+    if reason == "all_calls_structurally_blank":
+        what = (
+            f"All {total} LLM call(s) in this run recorded zero output, zero "
+            f"completion tokens and non-zero latency — calls that measurably "
+            f"took time and measurably produced nothing. A model does not "
+            f"behave this way across an entire run; a broken telemetry path does."
+        )
+    else:
+        what = (
+            f"Dunetrace could not read the response object returned by "
+            f"{providers} on {affected} of {total} LLM call(s). The shape it "
+            f"saw was {shape_txt}. Rather than substitute a plausible-looking "
+            f"default, the SDK recorded these calls as unmeasurable."
+        )
+
+    return Explanation(
+        **_base(signal),
+        title="Instrumentation could not measure this run",
+        what=what,
+        why_it_matters=(
+            "This is a fault in the telemetry, not in your agent — nothing here "
+            "says the agent misbehaved. It matters because the following "
+            "detectors depend on completion text or finish_reason and therefore "
+            "could not run at all on this run: "
+            + (", ".join(suppressed) if suppressed else "several text-based detectors")
+            + ". Their silence is not a clean bill of health. Equally, any "
+            "EMPTY_LLM_RESPONSE you might have expected here is deliberately "
+            "suppressed: an unreadable response is not an empty one, and "
+            "reporting it as one turns an instrumentation bug into a "
+            "HIGH-severity behavioural alert on every run."
+        ),
+        evidence_summary=(
+            f"{affected} of {total} LLM call(s) unmeasurable ({shape_txt}). "
+            f"Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description=(
+                    "Unwrap raw-response envelopes before Dunetrace sees them. "
+                    "The common cause is a wrapper calling "
+                    "with_raw_response.create(), which returns a LegacyAPIResponse "
+                    "rather than a parsed ChatCompletion."
+                ),
+                language="python",
+                code=(
+                    "# If you control the call site, use the parsed response:\n"
+                    "raw = client.chat.completions.with_raw_response.create(**payload)\n"
+                    "completion = raw.parse()  # -> ChatCompletion, the shape we read\n"
+                    "\n"
+                    "# If a framework owns the call site, check its version — and\n"
+                    "# check the run.started event's `sdk_version` / `instrumented`\n"
+                    "# fields, which record exactly which library versions were\n"
+                    "# patched when this run executed."
+                ),
+            ),
+            CodeFix(
+                description=(
+                    "Check whether this is fleet-wide rather than a one-off. See "
+                    "docs/operations.md's instrumentation-health query: above ~30% "
+                    "blank calls for an agent, the telemetry is broken, not the agent."
+                ),
+                language="text",
+                code="blank_response_rate_sql('postgres')  # api_svc/instrumentation_health.py",
+            ),
+        ],
+    )
+
+
 def explain_empty_llm_response(signal: FailureSignal) -> Explanation:
     ev = signal.evidence
     occurrences = ev.get("occurrences", 1)
@@ -2804,6 +2890,7 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.CONTEXT_BLOAT: explain_context_bloat,
     FailureType.RETRY_STORM: explain_retry_storm,
     FailureType.EMPTY_LLM_RESPONSE: explain_empty_llm_response,
+    FailureType.INSTRUMENTATION_DEGRADED: explain_instrumentation_degraded,
     FailureType.STEP_COUNT_INFLATION: explain_step_count_inflation,
     FailureType.CASCADING_TOOL_FAILURE: explain_cascading_tool_failure,
     FailureType.FIRST_STEP_FAILURE: explain_first_step_failure,

@@ -29,6 +29,7 @@ from ingest_svc.db import (
     get_pool,
     init_pool,
     retention_looks_stale,
+    scrub_old_signal_evidence,
     verify_api_key,
 )
 from ingest_svc.rate_limiter import _HEARTBEAT_INTERVAL, get_limiter
@@ -105,16 +106,48 @@ async def _run_prune_once() -> int:
         return 0
 
 
+async def _run_scrub_once() -> int:
+    """One evidence-scrub pass. Same best-effort contract as _run_prune_once.
+
+    Kept separate from the prune pass rather than folded into it: they operate
+    on different tables with different mechanics (partition drop vs batched
+    UPDATE), and a failure in one must not skip the other — the scrub is the
+    only thing expiring raw content out of failure_signals.evidence, so losing
+    it silently to an unrelated partition error is exactly the failure mode
+    worth avoiding. Returns rows scrubbed (0 on failure).
+    """
+    t0 = time.monotonic()
+    try:
+        scrubbed = await scrub_old_signal_evidence(settings.EVENT_RETENTION_DAYS)
+        if scrubbed:
+            logger.info(
+                "Evidence scrub took %.2fs, scrubbed %d signal(s)",
+                time.monotonic() - t0,
+                scrubbed,
+            )
+        return scrubbed
+    except Exception as exc:
+        logger.warning("scrub_old_signal_evidence failed: %s", exc)
+        return 0
+
+
 async def _prune_loop() -> None:
-    """Drop event partitions older than EVENT_RETENTION_DAYS once a day.
+    """Expire aged data once a day: drop event partitions older than
+    EVENT_RETENTION_DAYS, then strip content-bearing keys out of signal evidence
+    past the same horizon.
 
     prune_old_events() existed and was tested but was never actually called
     from anywhere — partitions were created forever and never reclaimed.
     Runs once immediately at startup (in case the service was down long
     enough for retention to matter right away), then every _PRUNE_INTERVAL.
+
+    Both passes share EVENT_RETENTION_DAYS deliberately, so raw content leaves
+    `events` and `failure_signals.evidence` at the same moment — one content
+    horizon to state and audit, rather than two that can drift apart.
     """
     while True:
         await _run_prune_once()
+        await _run_scrub_once()
         await asyncio.sleep(_PRUNE_INTERVAL)
 
 

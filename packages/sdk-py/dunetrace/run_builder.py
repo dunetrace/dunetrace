@@ -101,6 +101,10 @@ def build_run_state(events: list[dict]) -> RunState:
                     # the field existed.
                     provider=payload.get("provider"),
                     call_id=call_id,
+                    # Absent means "not an estimate" — the wire omits the key
+                    # rather than sending False, so a manual caller's exact
+                    # count rebuilds as exact. See run_context.llm_called.
+                    prompt_tokens_estimated=bool(payload.get("prompt_tokens_estimated")),
                 )
             )
             _pending_order.append(new_index)
@@ -135,6 +139,7 @@ def build_run_state(events: list[dict]) -> RunState:
                         output_text=payload.get("output") or None,
                         step_index=step_index,
                         timestamp=raw.get("timestamp", 0.0),
+                        instrumentation_degraded=payload.get("instrumentation_degraded"),
                     )
                 )
             else:
@@ -154,6 +159,13 @@ def build_run_state(events: list[dict]) -> RunState:
                 # overriding llm_called's estimate.
                 if payload.get("prompt_tokens"):
                     call.prompt_tokens = payload.get("prompt_tokens")
+                    # An exact count from the provider supersedes llm.called's
+                    # estimate, mirroring run_context.llm_responded.
+                    call.prompt_tokens_estimated = False
+                # Server-side rebuild is what production detection runs on — an
+                # in-process-only fix would never reach a real signal.
+                if payload.get("instrumentation_degraded"):
+                    call.instrumentation_degraded = payload["instrumentation_degraded"]
 
         # tool.called - append to tool_calls list
         elif event_type == "tool.called":

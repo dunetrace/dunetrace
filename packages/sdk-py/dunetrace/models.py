@@ -107,6 +107,10 @@ class FailureType(str, Enum):
     DELEGATION_LOOP = "DELEGATION_LOOP"
     OVERSIZED_TOOL_ARGUMENTS = "OVERSIZED_TOOL_ARGUMENTS"
     UNGROUNDED_DESTINATION = "UNGROUNDED_DESTINATION"
+    # Not an agent failure: the SDK could not measure the run. Kept in the same
+    # enum so it travels the existing signal pipeline, but it describes the
+    # telemetry, not the agent.
+    INSTRUMENTATION_DEGRADED = "INSTRUMENTATION_DEGRADED"
     CUSTOM = "CUSTOM"  # sentinel for user-defined custom detectors
 
 
@@ -205,6 +209,19 @@ class LlmCall:
     # and for events recorded before this field existed; the builders fall back
     # to positional pairing then.
     call_id: Optional[int] = None
+    # True when prompt_tokens is the SDK's own chars//4 estimate rather than a
+    # figure the provider reported. The SDK has always known which it wrote
+    # (auto.py's llm_called passes an estimate; _emit_*_response overrides with
+    # usage) and threw the distinction away, so nothing downstream could tell an
+    # approximate token count from an exact one.
+    prompt_tokens_estimated: bool = False
+    # Set when the response object could not be read. The value names the shape
+    # that defeated extraction, e.g. "openai_response_shape:LegacyAPIResponse".
+    # None means extraction succeeded — NOT that it was never attempted, which
+    # is why the extractors return None on failure instead of a plausible
+    # default: a fabricated ("", "stop") pair is indistinguishable from a real
+    # empty response and fires EMPTY_LLM_RESPONSE on every run.
+    instrumentation_degraded: Optional[str] = None
 
 
 @dataclass

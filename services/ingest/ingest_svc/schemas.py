@@ -79,6 +79,7 @@ class PruneEventsRequest(BaseModel):
 
 class PruneEventsResponse(BaseModel):
     partitions_dropped: int
+    signals_scrubbed: int = 0
     retention_days: int
 
 
