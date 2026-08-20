@@ -52,6 +52,18 @@
 
 default:
 
+  instrumentation_degraded:
+    min_calls: 2      # runs with fewer LLM calls are left to EMPTY_LLM_RESPONSE
+    # Not an agent failure — this reports that the SDK could not measure the
+    # run, so the detectors keyed on completion text could not run at all.
+    # Shadow by default (not in LIVE_DETECTORS) per the new-detector
+    # convention; the immediate operator-facing signal on day one is the
+    # rate-limited logger.warning the SDK emits in-process, not this.
+    alert_policy:
+      mode: immediate   # broken telemetry is worth knowing about at once
+      threshold: 1
+      window_runs: 1
+
   oversized_tool_arguments:
     max_arg_length: 10000
     alert_policy:
@@ -274,10 +286,11 @@ default:
     # names count as handoffs (defaults: _agent / delegate_ / handoff_ /
     # transfer_to_, minus the user_agent collision) — see docs/detectors.md.
     # Calibrated at 100% recall / 0% FP (scripts/calibration/
-    # agent_handoff_failure_calibration.md). Shadow by default (not in
-    # LIVE_DETECTORS) pending real-traffic validation. Fires within a single run
-    # when a handoff-named tool fails or returns an empty/terse payload; distinct
-    # from handoff_context_loss (cross-run context comparison).
+    # agent_handoff_failure_calibration.md). Live (see LIVE_DETECTORS in
+    # services/detector/detector_svc/db.py) — promoted out of shadow after
+    # real-traffic validation held the calibrated FP rate. Fires within a single
+    # run when a handoff-named tool fails or returns an empty/terse payload;
+    # distinct from handoff_context_loss (cross-run context comparison).
     alert_policy:
       mode: immediate
       threshold: 1
@@ -319,9 +332,60 @@ default:
     # poison_phrases: list, override only to add/remove entries — see
     # docs/detectors.md for the defaults. Reads memory.written events (the
     # memory channel — see docs/memory.md); a run that never writes memory gives
-    # this detector nothing to check. Shadow by default (not in LIVE_DETECTORS)
-    # pending real-traffic validation — see scripts/calibration/
-    # memory_poisoning_calibration.md.
+    # this detector nothing to check. Live (see LIVE_DETECTORS in
+    # services/detector/detector_svc/db.py) — promoted out of shadow after
+    # real-traffic validation; require_untrusted_source above is the first knob
+    # to reach for if it is noisier than expected. Calibration:
+    # scripts/calibration/memory_poisoning_calibration.md.
+    alert_policy:
+      mode: immediate   # a security signal — always alert on first occurrence
+      threshold: 1
+      window_runs: 1
+
+  ungrounded_destination:
+    mode: provenance          # provenance | provenance+novelty
+                              # provenance (default) asks only "did THIS run's own
+                              # trusted inputs contain this destination" — so an
+                              # open-destination agent (support emailing a new
+                              # customer every run) is silent by construction.
+                              # provenance+novelty adds a learned per-agent
+                              # destination baseline; opt in ONLY for closed-
+                              # destination agents (billing, internal reporting)
+                              # where history genuinely defines normal.
+    min_baseline_runs: 20     # novelty never fires below this many processed runs
+                              # for the agent — an immature baseline makes every
+                              # destination look novel. Matches _MIN_BASELINE_RUNS.
+    candidate_types: [email, url]
+                              # + bare_domain to also extract hostname-shaped bare
+                              # tokens. OFF by default: without a URL scheme or an
+                              # @ to anchor on, "report.pdf" and "v1.2.3" are
+                              # domain-shaped too.
+    allowlisted_domains: []   # never fire for these, matched label-aware, so
+                              # corp.com covers mail.corp.com but NOT evilcorp.com.
+                              # Set your own domains here first — an agent replying
+                              # to a user at an address that arrived through
+                              # uninstrumented auth context is the commonest FP.
+    max_candidates_per_run: 50
+    # In-path cost controls. These apply to the SDK's client-side copy (the
+    # detector is in TIER1_DETECTORS so a trigger="signal" policy can stop a send
+    # BEFORE it executes); the server-side worker runs with far larger limits.
+    # All three fail OPEN — the run is skipped and the server-side pass still
+    # catches it. Degradation is prevent -> detect, never detect -> nothing.
+    #   max_surface_chars  aborts rather than scanning a TRUNCATED trusted corpus,
+    #                      because a short corpus makes grounded destinations read
+    #                      as ungrounded — a false positive, which in-path can
+    #                      block a legitimate send.
+    #   max_args_chars     truncates instead of aborting: a missed destination is
+    #                      a missed detection, never a false alarm.
+    # max_scan_ns: 1000000
+    # max_surface_chars: 30000
+    # max_args_chars: 4000
+    # tool_name_scope: [send, email, mail, message, post, upload, webhook, http]
+    #
+    # LIVE (listed in LIVE_DETECTORS) — signals alert rather than being stored
+    # silently. Reverse by removing it from LIVE_DETECTORS in
+    # services/detector/detector_svc/db.py; allowlisted_domains is the first
+    # knob to reach for if it is noisier than expected on your traffic.
     alert_policy:
       mode: immediate   # a security signal — always alert on first occurrence
       threshold: 1
@@ -337,8 +401,10 @@ default:
     # Multi-agent detector. Evaluated at the worker level (not the per-run
     # detector loop — like handoff_context_loss), walking the parent_run_id
     # graph. Only fires when parent_run_id is set along the chain — auto-threaded
-    # for nested dt.run() calls (see docs/multi-agent.md). Shadow by default
-    # (not in LIVE_DETECTORS) pending real-traffic validation — see
+    # for nested dt.run() calls (see docs/multi-agent.md). Live (see
+    # LIVE_DETECTORS in services/detector/detector_svc/db.py) — promoted out of
+    # shadow after real-traffic validation; min_loop_runs above is the first knob
+    # to reach for if it is noisier than expected. Calibration:
     # scripts/calibration/delegation_loop_calibration.md.
     alert_policy:
       mode: immediate   # a non-terminating loop burns tokens now — alert at once

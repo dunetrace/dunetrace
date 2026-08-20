@@ -436,6 +436,19 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
 .graph-svg-wrap{overflow-x:auto;padding:8px 0}
 svg.run-graph{display:block}
 
+/* ── DELEGATION GRAPH ── */
+/* Cross-run multi-agent view, shown in the run-detail Analysis tab only when a
+   DELEGATION_LOOP signal fired. Surface, radius and spacing deliberately match
+   .graph-wrap above so the two graphs read as one family. The agent-colour
+   legend reuses .graph-legend / .gl-item / .gl-dot rather than restating them. */
+.deleg-wrap{background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem;margin-bottom:1.25rem}
+.deleg-title{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);letter-spacing:1.5px;text-transform:uppercase}
+.deleg-head{font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--chalk2);line-height:1.7;margin:.5rem 0 1rem;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.deleg-cycle{color:var(--red)}
+.deleg-svg-wrap{overflow-x:auto;padding:8px 0}
+svg.deleg-graph{display:block}
+.deleg-note{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4);line-height:1.6;margin-top:.75rem}
+
 /* ── EVENT LOG ── */
 .event-log{background:var(--s1);border:1px solid var(--wire);border-radius:8px;overflow:hidden;margin-bottom:1.25rem}
 .event-log-header{
@@ -1081,6 +1094,18 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="signals-grid" id="detail-signals-grid">
       <div class="loading" style="grid-column:1/-1">loading…</div>
     </div>
+    <!-- Delegation graph. Rendered by renderDelegationGraph() only when this run
+         carries a DELEGATION_LOOP signal; hidden (and empty) for every other
+         run, so nothing here costs anything on the common path. -->
+    <div class="deleg-wrap" id="detail-delegation" style="display:none">
+      <span class="deleg-title">Delegation graph</span>
+      <div class="deleg-head" id="deleg-header-line"></div>
+      <div class="graph-legend" id="deleg-legend"></div>
+      <div class="deleg-svg-wrap">
+        <svg class="deleg-graph" id="deleg-graph-svg" width="900" height="124" viewBox="0 0 900 124"></svg>
+      </div>
+      <div class="deleg-note" id="deleg-note"></div>
+    </div>
     <!-- ElevenLabs correlated generations (Phase 5.1). Populated only when this
          run has correlated TTS; empty and invisible otherwise. -->
     <div id="detail-elevenlabs" style="margin-bottom:1.25rem"></div>
@@ -1340,7 +1365,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       Detector thresholds are set in <code style="color:var(--chalk2)">detectors.yml</code> and loaded
       by the detector worker at startup — restart it to apply a change.
       <div style="color:var(--chalk4);margin-top:.75rem">
-        This page previously showed sliders for 3 of the 29 detectors. They persisted nowhere and the
+        This page previously showed sliders for 3 of the 31 detectors. They persisted nowhere and the
         preview beneath them never read their values, so it implied you were tuning detection when you
         were not. Removed rather than left decorative. Per-agent overrides
         (<code>confidence_floor</code>, <code>silenced</code>, <code>snoozed_until</code>) exist in
@@ -2666,6 +2691,7 @@ async function showDetail(runId, agentId) {
   if (graphWrap) graphWrap.scrollLeft = 0;
   const stepCount = document.getElementById('graph-step-count');
   if (stepCount) stepCount.textContent = '';
+  renderDelegationGraph([]);   // hide the previous run's graph while this one loads
 
   // Show loading state
   document.getElementById('detail-run-id').textContent = 'loading ' + shortId(runId) + '…';
@@ -2767,6 +2793,7 @@ function renderRunDetail(run, events, signals) {
 
   // Signal score cards
   renderSignalCards(signals);
+  renderDelegationGraph(signals);
   loadRunVerdicts(signals);
 
   // ElevenLabs generations correlated to this run (Phase 5.1). Separate fetch so
@@ -3499,6 +3526,250 @@ window.addEventListener('resize', () => {
     svg.innerHTML = '';
     delete svg.dataset.drawn;
     drawGraph();
+  }, 200);
+});
+
+// ── Delegation Graph (SVG) ────────────────────────────────────────────────────
+// Cross-run, multi-agent view for DELEGATION_LOOP. Every number and name drawn
+// here comes from the signal's own evidence dict (delegation_chain / cycle /
+// cycle_agents / cycle_length / loop_run_count). The detector already walked the
+// parent_run_id chain server-side, so there is nothing to re-derive client-side
+// and no extra request to make — same rule as the rest of this dashboard: don't
+// recompute what the API already computed.
+
+// Distinct agents cycle through the existing palette tokens, so the same agent
+// keeps one colour everywhere it appears and the A→B→A alternation is legible
+// at a glance. Palette only — no new colours.
+const DELEG_AGENT_COLORS = [
+  'var(--blue)', 'var(--green)', 'var(--purple)',
+  'var(--orange)', 'var(--amber)', 'var(--chalk3)',
+];
+
+function delegAgentColor(agent, order) {
+  const i = order.indexOf(agent);
+  return DELEG_AGENT_COLORS[(i < 0 ? 0 : i) % DELEG_AGENT_COLORS.length];
+}
+
+function delegTruncate(s, n) {
+  const t = String(s ?? '');
+  return t.length > n ? t.slice(0, n - 1) + '…' : t;
+}
+
+// Chooses the DELEGATION_LOOP signal to visualise, fills the header/legend, and
+// hands off to drawDelegationGraph(). Shadow and live signals are both eligible:
+// this detector runs in shadow on deployments that haven't graduated it, and a
+// shadow signal's evidence is exactly as complete as a live one's.
+function renderDelegationGraph(signals) {
+  const wrap = document.getElementById('detail-delegation');
+  const svg  = document.getElementById('deleg-graph-svg');
+  if (!wrap || !svg) return;
+
+  const hide = () => {
+    wrap.style.display = 'none';
+    svg.innerHTML = '';
+    delete svg.dataset.drawn;
+    svg._evidence = null;
+  };
+
+  const cands = (signals || []).filter(s => s && s.failure_type === 'DELEGATION_LOOP');
+  if (!cands.length) return hide();
+
+  // Highest confidence wins if a run somehow carries more than one.
+  const sig   = cands.slice().sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0];
+  const ev    = sig.evidence || {};
+  const chain = Array.isArray(ev.delegation_chain) ? ev.delegation_chain : [];
+  // Degrade silently: a chain of 0 or 1 has no edge to draw, and an empty box is
+  // worse than no box.
+  if (chain.length < 2) return hide();
+
+  const cycle    = Array.isArray(ev.cycle) ? ev.cycle : [];
+  const cycleLen = ev.cycle_length != null ? ev.cycle_length : new Set(cycle).size;
+  const runs     = ev.loop_run_count != null ? ev.loop_run_count : 0;
+
+  const headEl = document.getElementById('deleg-header-line');
+  if (headEl) {
+    const cycleTxt = cycle.map(a => esc(a)).join(' → ');
+    headEl.innerHTML =
+      `<span>${esc(String(runs))} run${runs === 1 ? '' : 's'} caught in a `
+      + `${esc(String(cycleLen))}-agent delegation cycle`
+      + (cycleTxt ? `: <span class="deleg-cycle">${cycleTxt}</span>` : '')
+      + '</span>'
+      + (sig.shadow ? '<span class="shadow-badge">SHADOW</span>' : '');
+  }
+
+  const order = [];
+  chain.forEach(a => { if (!order.includes(a)) order.push(a); });
+
+  const legend = document.getElementById('deleg-legend');
+  if (legend) {
+    legend.innerHTML = order.map(a => {
+      const c = delegAgentColor(a, order);
+      return `<span class="gl-item"><span class="gl-dot" style="background:${c};border-color:${c};opacity:.55"></span>${esc(a)}</span>`;
+    }).join('')
+    + '<span class="gl-item"><span class="gl-dot" style="background:var(--red-d);border-color:var(--red)"></span>cycle edge</span>';
+  }
+
+  wrap.style.display = '';
+  svg.innerHTML = '';
+  delete svg.dataset.drawn;
+  drawDelegationGraph(ev);
+}
+
+function drawDelegationGraph(evidence) {
+  const svg = document.getElementById('deleg-graph-svg');
+  if (!svg) return;
+  if (svg.dataset.drawn) return;
+
+  const ev    = evidence || svg._evidence || {};
+  const chain = Array.isArray(ev.delegation_chain) ? ev.delegation_chain : [];
+  if (chain.length < 2) return;          // nothing to draw, nothing to throw
+  svg.dataset.drawn = '1';
+  svg._evidence = ev;
+
+  const ns = 'http://www.w3.org/2000/svg';
+
+  function el(tag, attrs, text) {
+    const e = document.createElementNS(ns, tag);
+    Object.entries(attrs).forEach(([k, v]) => e.setAttribute(k, v));
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  const cycleAgents = new Set(Array.isArray(ev.cycle_agents) ? ev.cycle_agents : []);
+
+  // First-seen order drives colour assignment.
+  const order = [];
+  chain.forEach(a => { if (!order.includes(a)) order.push(a); });
+
+  // Nodes carry an agent_id, not a two-letter step label, so they're wide pills
+  // rather than the run graph's circles. Spacing is deliberately generous —
+  // these get projected in incident reviews.
+  const NODE_W = 116, NODE_H = 40, GAP = 52;
+  const SPACING = NODE_W + GAP;
+  const ROW_H = 104, ROW_PAD = 62;
+
+  const wrapEl = document.querySelector('.deleg-svg-wrap');
+  const W = Math.max(900, Math.min(1600, Math.floor(wrapEl?.clientWidth || 900)));
+  const startX = 30 + NODE_W / 2;        // centre of the first node
+  const perRow = Math.max(1, Math.floor((W - startX - NODE_W / 2 - 20) / SPACING) + 1);
+  const wrapped = chain.length > perRow;
+  const rows = wrapped ? Math.ceil(chain.length / perRow) : 1;
+  const H = ROW_PAD * 2 + (rows - 1) * ROW_H;
+
+  svg.setAttribute('width', W);
+  svg.setAttribute('height', H);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  // Serpentine, same convention as drawGraph(): odd rows run right-to-left so
+  // the wrap edge stays short.
+  function nodePos(i) {
+    const row = Math.floor(i / perRow);
+    const raw = i % perRow;
+    const col = row % 2 === 0 ? raw : perRow - 1 - raw;
+    return { x: startX + col * SPACING, y: ROW_PAD + row * ROW_H };
+  }
+
+  const nodes = chain.map((agent, i) => {
+    const p = nodePos(i);
+    return { i, agent, x: p.x, y: p.y, color: delegAgentColor(agent, order), inCycle: cycleAgents.has(agent) };
+  });
+
+  // Own marker ids — the run graph's arr-* markers live in the same document.
+  const defs = el('defs', {});
+  [['norm', 'var(--wire2)'], ['cycle', 'var(--red)']].forEach(([k, col]) => {
+    const m = el('marker', { id: 'dg-arr-' + k, markerWidth: '8', markerHeight: '8', refX: '6', refY: '3', orient: 'auto' });
+    const head = el('path', { d: 'M0,0 L0,6 L8,3 z' });
+    head.style.fill = col;               // inline style so var() resolves
+    m.appendChild(head);
+    defs.appendChild(m);
+  });
+  svg.appendChild(defs);
+
+  // Edges: parent → the agent it delegated to. An edge is part of the cycle when
+  // both of its endpoints are cycle agents.
+  for (let i = 0; i < nodes.length - 1; i++) {
+    const a = nodes[i], b = nodes[i + 1];
+    const isCycleEdge = a.inCycle && b.inCycle;
+    let d;
+    if (a.y === b.y) {
+      const dir = b.x > a.x ? 1 : -1;
+      d = `M${a.x + dir * (NODE_W / 2)},${a.y} L${b.x - dir * (NODE_W / 2)},${b.y}`;
+    } else {
+      // Row wrap. Serpentine keeps the pair in the same column, so a straight
+      // drop would run right through the chain-position label under the node —
+      // bow it into the interior of the row instead (left off an even row,
+      // right off an odd one, so it never leaves the canvas).
+      const y1 = a.y + NODE_H / 2, y2 = b.y - NODE_H / 2;
+      const bow = Math.floor(a.i / perRow) % 2 === 0 ? -44 : 44;
+      d = a.x === b.x
+        ? `M${a.x},${y1} C${a.x + bow},${y1 + 22} ${b.x + bow},${y2 - 22} ${b.x},${y2}`
+        : `M${a.x},${y1} C${a.x},${y1 + 24} ${b.x},${y2 - 24} ${b.x},${y2}`;
+    }
+    const p = el('path', {
+      d, fill: 'none',
+      'stroke-width': isCycleEdge ? '2' : '1.25',
+      'marker-end': `url(#dg-arr-${isCycleEdge ? 'cycle' : 'norm'})`,
+    });
+    p.style.stroke = isCycleEdge ? 'var(--red)' : 'var(--wire2)';
+    svg.appendChild(p);
+  }
+
+  nodes.forEach(n => {
+    const g = el('g', { transform: `translate(${n.x},${n.y})` });
+    g.appendChild(el('title', {}, n.agent));   // full agent_id on hover
+    const rect = el('rect', {
+      x: String(-NODE_W / 2), y: String(-NODE_H / 2),
+      width: String(NODE_W), height: String(NODE_H),
+      rx: '8', 'stroke-width': '1.5', 'fill-opacity': '0.12',
+    });
+    rect.style.fill = n.color;
+    rect.style.stroke = n.color;
+    g.appendChild(rect);
+
+    const label = el('text', {
+      x: '0', y: '0', 'text-anchor': 'middle', 'dominant-baseline': 'middle',
+      'font-family': "'IBM Plex Mono',monospace", 'font-size': '12', 'font-weight': '600',
+    }, delegTruncate(n.agent, 13));
+    label.style.fill = n.color;
+    g.appendChild(label);
+
+    // Position in the chain — the only way to keep your place across rows.
+    const idx = el('text', {
+      x: '0', y: String(NODE_H / 2 + 16), 'text-anchor': 'middle',
+      'font-family': "'IBM Plex Mono',monospace", 'font-size': '12',
+    }, String(n.i + 1));
+    idx.style.fill = 'var(--chalk4)';
+    g.appendChild(idx);
+
+    svg.appendChild(g);
+  });
+
+  const note = document.getElementById('deleg-note');
+  if (note) {
+    note.textContent =
+      'Each node is one run in the delegation chain, root first. Arrows point from the delegating '
+      + 'agent to the agent it handed off to; red edges are the repeating cycle.'
+      + (wrapped
+          ? ' The chain is too long for one line, so it snakes across rows — left to right, then'
+            + ' right to left on the next row. The number under each node is its position in the chain.'
+          : '');
+  }
+}
+
+// Row width comes from the container, so a resize needs a redraw to reflow.
+let _delegResizeT = null;
+window.addEventListener('resize', () => {
+  const svg  = document.getElementById('deleg-graph-svg');
+  const wrap = document.getElementById('detail-delegation');
+  if (!svg || !svg.dataset.drawn) return;
+  if (!wrap || wrap.style.display === 'none') return;
+  if (!document.getElementById('dtab-analysis')?.classList.contains('active')) return;
+  clearTimeout(_delegResizeT);
+  _delegResizeT = setTimeout(() => {
+    const ev = svg._evidence;
+    svg.innerHTML = '';
+    delete svg.dataset.drawn;
+    drawDelegationGraph(ev);
   }, 200);
 });
 

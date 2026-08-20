@@ -183,7 +183,11 @@ class RunContext:
     # ── LLM hooks ─────────────────────────────────────────────────────────────
 
     def llm_called(
-        self, model: str, prompt_tokens: int = 0, provider: Optional[str] = None
+        self,
+        model: str,
+        prompt_tokens: int = 0,
+        provider: Optional[str] = None,
+        prompt_tokens_estimated: bool = False,
     ) -> None:
         # Index of this call within the run, which is exactly the correlation id
         # the response needs — see LlmCall.call_id.
@@ -198,6 +202,7 @@ class RunContext:
                 timestamp=time.time(),
                 provider=provider,
                 call_id=call_id,
+                prompt_tokens_estimated=prompt_tokens_estimated,
             )
         )
         payload: dict = {
@@ -209,6 +214,12 @@ class RunContext:
         # byte-identical to before for every manual caller.
         if provider:
             payload["provider"] = provider
+        # Same discipline: only present when True. A manual caller passing an
+        # exact count emits exactly the bytes it always did, and absence reads
+        # as "not an estimate", which is the correct default for hand-written
+        # instrumentation supplying a real figure.
+        if prompt_tokens_estimated:
+            payload["prompt_tokens_estimated"] = True
         self._emit(EventType.LLM_CALLED, payload)
 
     def llm_responded(
@@ -216,12 +227,13 @@ class RunContext:
         completion_tokens: int = 0,
         reasoning_tokens: int = 0,
         latency_ms: int = 0,
-        finish_reason: str = "stop",
-        output: str = "",
+        finish_reason: Optional[str] = "stop",
+        output: Optional[str] = "",
         output_length: int = 0,
         prompt_tokens: int = 0,
         error: Optional[str] = None,
         call_index: Optional[int] = None,
+        instrumentation_degraded: Optional[str] = None,
     ) -> None:
         # Back-fill the LlmCall this response belongs to with response data.
         # prompt_tokens is optional — pass it when the count is only known after
@@ -257,17 +269,36 @@ class RunContext:
             lc.output_text = output or None
             if prompt_tokens:
                 lc.prompt_tokens = prompt_tokens
+                # An exact figure from the provider's usage block supersedes the
+                # chars//4 estimate llm_called wrote, so the call is no longer
+                # estimated. Only flipped on a truthy value — a response without
+                # usage leaves both the estimate and this flag standing.
+                lc.prompt_tokens_estimated = False
+            if instrumentation_degraded:
+                lc.instrumentation_degraded = instrumentation_degraded
             self._cost_usd += compute_run_cost([lc])
         payload: dict = {
             "completion_tokens": completion_tokens,
             "latency_ms": latency_ms,
-            "finish_reason": finish_reason,
             "output_length": output_length,
         }
+        # finish_reason is OMITTED, not nulled, when the response shape could not
+        # be read — the same discipline the provider/prompt_tokens fields already
+        # follow, and the reason `null` is never on this wire. Absence reads as
+        # "we do not know", which is exactly the claim being made; sending "stop"
+        # instead was the bug (a fabricated ("", "stop") pair is EMPTY_LLM_RESPONSE's
+        # literal trigger). Every consumer reads this with .get(), so absence and
+        # explicit null are equivalent to all of them — verified across
+        # run_builder, replay, the OTel exporter and the framework integrations.
+        if finish_reason is not None:
+            payload["finish_reason"] = finish_reason
         # Transmit the output text by default; omit it (bandwidth) when
         # DUNETRACE_OMIT_LLM_OUTPUT_TEXT is set. output_length is always sent, so
-        # size-based detectors work either way.
-        if not _omit_llm_output_text():
+        # size-based detectors work either way. Also omitted when None, which
+        # means unreadable rather than empty — distinguishable downstream because
+        # a degraded call additionally carries instrumentation_degraded, while an
+        # env-var omission does not.
+        if output is not None and not _omit_llm_output_text():
             payload["output"] = output
         # Echoed so the server-side builders can pair this response with its call
         # by identity rather than by arrival order. Omitted (not null) when there
@@ -280,6 +311,10 @@ class RunContext:
             payload["reasoning_tokens"] = reasoning_tokens
         if error:
             payload["error"] = error
+        # Additive, and absent on every healthy call — so a correctly
+        # instrumented run's events are byte-identical to before.
+        if instrumentation_degraded:
+            payload["instrumentation_degraded"] = instrumentation_degraded
         self._emit(EventType.LLM_RESPONDED, payload, advance=False)
 
     # ── Tool hooks ────────────────────────────────────────────────────────────

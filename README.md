@@ -44,7 +44,7 @@ Dunetrace covers the full agent reliability lifecycle, not just one slice of it:
 | | Pillar | What it does |
 |---|---|---|
 | 1 | **Sessions & Events** | Every run, every tool call, every LLM exchange — the raw data everything else is built on |
-| 2 | **Structural Detection** | 29 zero-LLM detectors, in-path, sub-500μs per hook ¹ — the always-on first line |
+| 2 | **Structural Detection** | 31 zero-LLM detectors (28 of them in-path, sub-500μs per hook ¹) — the always-on first line |
 | 3 | **Semantic Evaluation** | LLM-based judgment (hallucination, task completion, cross-turn frustration) — post-hoc, sampling-based, opt-in → [docs/semantic-evaluation.md](docs/semantic-evaluation.md) |
 | 4 | **Runtime Prevention** | Policies that stop, redirect, or downgrade a run *while it's happening* — the differentiator no tracer offers → [docs/policies.md](docs/policies.md) |
 | 5 | **Root Cause & Fix** | Native root-cause analysis, auto-applied policy fixes, or a one-click draft PR → [Diagnose & fix](#diagnose--fix) |
@@ -154,7 +154,7 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ## Detectors
 
-29 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
+31 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Signal | What it catches |
 |---|---|
@@ -170,7 +170,7 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 Each alert includes: what fired, why it matters, a concrete fix, and a rate context line (first occurrence / recurring / systemic).
 
-→ [docs/detectors.md](docs/detectors.md) for the full list of 29 detectors
+→ [docs/detectors.md](docs/detectors.md) for the full list of 31 detectors
 
 **Multi-agent systems** — instrument each agent as its own `dt.run()` and Dunetrace auto-links them into a delegation graph (`parent_run_id` is threaded automatically for nested runs). Two detectors read that graph: `DELEGATION_LOOP` (agents cycling without converging) and `HANDOFF_CONTEXT_LOSS` (a handoff dropping the parent's context). → [docs/multi-agent.md](docs/multi-agent.md)
 
@@ -331,7 +331,7 @@ pip install dunetrace-mcp
 Agent Code
   └─► Dunetrace SDK        (raw content → ingest events)
         └─► Ingest API      (POST /v1/ingest → Postgres)
-                ├─► Detector          (poll → 29 detectors → signals)
+                ├─► Detector          (poll → 31 detectors → signals)
                 ├─► Semantic Worker   (optional — poll → DeepEval → signals)
                 ├─► Integrations      (optional — pull Langfuse/LangSmith/Braintrust)
                 ├─► Alerts            (poll → explain → Slack / webhook)

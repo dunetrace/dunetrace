@@ -84,6 +84,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
 import importlib
 import json
 import logging
@@ -101,6 +102,30 @@ logger = logging.getLogger("dunetrace.auto")
 
 # Tracks which frameworks have already been patched (prevents double-wrapping).
 _PATCHED: set[str] = set()
+# Package -> installed version, for every provider actually patched this process.
+# Emitted on run.started so a bad run can be correlated with the exact SDK and
+# provider-library versions that produced it. The SDK version previously existed
+# only in a User-Agent header that is never stored alongside events, so neither
+# side could answer "which build emitted this?" after the fact.
+_INSTRUMENTED_VERSIONS: dict[str, str] = {}
+
+
+def _record_instrumented(pkg: str) -> None:
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        _INSTRUMENTED_VERSIONS[pkg] = _pkg_version(pkg)
+    except Exception:
+        # Version lookup must never break instrumentation. "unknown" still tells
+        # a reader the package was patched, which is the load-bearing half.
+        _INSTRUMENTED_VERSIONS[pkg] = "unknown"
+
+
+def instrumentation_fingerprint() -> dict:
+    """{sdk_version, instrumented: {pkg: version}} for the current process."""
+    from dunetrace import __version__
+
+    return {"sdk_version": __version__, "instrumented": dict(_INSTRUMENTED_VERSIONS)}
 
 
 def _safe_emit(action, *, swallow_control_flow: bool = False) -> None:
@@ -128,6 +153,40 @@ def _safe_emit(action, *, swallow_control_flow: bool = False) -> None:
         raise
     except Exception:
         logger.debug("dunetrace instrumentation emit failed", exc_info=True)
+
+
+# Response shapes already reported this process. One warning per shape, not per
+# call: a broken extractor fires on every LLM call in every run, and a per-call
+# warning would be throttled away as noise by any log aggregator.
+_WARNED_SHAPES: set[str] = set()
+
+
+def _degraded_marker(vendor: str, resp: object) -> str:
+    """Name the shape that defeated extraction, and warn once per process.
+
+    WARNING, not DEBUG, deliberately. The incident this exists for ran at
+    DEBUG-equivalent silence for its entire duration: a LangGraph agent whose
+    `with_raw_response.create()` returned a LegacyAPIResponse instead of a
+    ChatCompletion produced a fabricated ("", "stop") pair on 100% of runs,
+    which is byte-for-byte EMPTY_LLM_RESPONSE's trigger condition. Nothing
+    logged. Discovery took a human noticing a HIGH-severity detector firing
+    16/16 including the control run.
+    """
+    marker = f"{vendor}_response_shape:{type(resp).__name__}"
+    if marker not in _WARNED_SHAPES:
+        _WARNED_SHAPES.add(marker)
+        logger.warning(
+            "dunetrace: cannot read %s response of type %r — recording this call as "
+            "unmeasurable rather than guessing. Detectors that key on completion "
+            "text or finish_reason are suppressed for affected runs and an "
+            "INSTRUMENTATION_DEGRADED signal is emitted instead. This usually means "
+            "a wrapper returned a raw/streaming envelope (e.g. "
+            "with_raw_response.create() -> LegacyAPIResponse) rather than the "
+            "parsed model. Reported once per process per shape.",
+            vendor,
+            type(resp).__name__,
+        )
+    return marker
 
 
 @contextlib.contextmanager
@@ -188,6 +247,19 @@ def _emit_stream_response(run, acc: dict, t0: float, call_index: Optional[int] =
         # Mistral and Anthropic both report real usage on a stream by default,
         # so this fallback only ever fires for OpenAI.
         completion = max(1, billable_chars // 4)
+
+    observed_anything = bool(text) or bool(acc["tool_arg_chars"]) or bool(acc["error"])
+    finish_reason = acc["finish_reason"] or ("stop" if observed_anything else None)
+    degraded = (
+        None if finish_reason is not None else "stream_yielded_nothing:no_chunks_no_finish_reason"
+    )
+    if degraded is not None and degraded not in _WARNED_SHAPES:
+        _WARNED_SHAPES.add(degraded)
+        logger.warning(
+            "dunetrace: a streamed LLM call ended with no chunks, no finish_reason "
+            "and no error — recording it as unmeasurable rather than as an empty "
+            "'stop' response. Reported once per process."
+        )
     run.llm_responded(
         completion_tokens=completion,
         prompt_tokens=acc["prompt_tokens"],
@@ -196,10 +268,19 @@ def _emit_stream_response(run, acc: dict, t0: float, call_index: Optional[int] =
         # EmptyLlmResponseDetector keys on finish_reason == "stop" with zero
         # output length, so a failure before the first token would otherwise be
         # misclassified as an empty response rather than counted as an error.
-        finish_reason=acc["finish_reason"] or "stop",
+        #
+        # The remaining fallback is narrower than it looks. A stream that carried
+        # content but no terminal finish_reason demonstrably ran to completion,
+        # so "stop" is an inference from observed behaviour rather than a guess
+        # about an unread object. A stream that yielded NOTHING — no text, no
+        # tool-call arguments, no finish_reason, no error — was not measured at
+        # all, and calling that "stop" reproduces the exact ("", "stop") pair
+        # this whole change exists to stop fabricating.
+        finish_reason=finish_reason,
         output=text,
         output_length=len(text),
         error=acc["error"],
+        instrumentation_degraded=degraded,
         call_index=call_index,
     )
 
@@ -439,6 +520,92 @@ class _StreamProxy:
 
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
+#
+# Response-shape normalisation.
+#
+# openai's helper clients do not return the parsed model. They return a wrapper
+# holding the raw HTTP response, and the parsed object is behind .parse():
+#
+#   client.chat.completions.create(...)                        -> ChatCompletion
+#   ....with_raw_response.create(...)                          -> LegacyAPIResponse
+#   ....with_streaming_response.create(...)                    -> APIResponse
+#   ....with_streaming_response.create(...)  [async client]    -> AsyncAPIResponse
+#
+# This matters because langchain_openai calls with_raw_response.create() — 12
+# call sites in chat_models/base.py — so EVERY non-streamed LangChain call
+# handed our patch a LegacyAPIResponse. It has no .choices and no .usage, so the
+# extractors read nothing and the run recorded zero tokens and empty output for
+# a model that had answered normally.
+#
+# Keyed on SHAPE, not on class name. Wrapper classes live in private modules
+# (openai._legacy_response, openai._response), get renamed across versions, and
+# a name check would silently stop working on an upgrade — reintroducing exactly
+# this bug. "Lacks .choices but has a callable .parse" identifies all three
+# families and cannot match a real ChatCompletion, which has .choices.
+
+
+def _is_response_wrapper(resp: object) -> bool:
+    """True for a raw/streaming envelope that hides the parsed model behind
+    .parse(). Deliberately narrow: a real ChatCompletion has .choices and so can
+    never match, and an object with neither attribute passes straight through."""
+    try:
+        return not hasattr(resp, "choices") and callable(getattr(resp, "parse", None))
+    except Exception:
+        # A property that raises is not a shape we understand. Leave it alone.
+        return False
+
+
+def _unwrap_response(resp: object) -> object:
+    """Parsed model behind a wrapper, or `resp` unchanged.
+
+    Never raises. A failure here must degrade to the previous behaviour (the
+    extractors read what they can off the wrapper) rather than break the host's
+    call — instrumentation is strictly additive.
+    """
+    if not _is_response_wrapper(resp):
+        return resp
+    try:
+        parsed = resp.parse()  # type: ignore[attr-defined]
+    except Exception:
+        logger.debug("dunetrace: openai response unwrap failed", exc_info=True)
+        return resp
+    if inspect.isawaitable(parsed):
+        # A coroutine reached the SYNC path. Only possible on an async client
+        # whose parse() is async — AsyncAPIResponse today, and LegacyAPIResponse
+        # on the async client from openai v2 (its own docstring says so). We
+        # cannot await here, so close it to avoid leaking an un-awaited
+        # coroutine warning into the host's logs, and fall back.
+        closer = getattr(parsed, "close", None)
+        if callable(closer):
+            with contextlib.suppress(Exception):
+                closer()
+        logger.debug("dunetrace: awaitable parse() on the sync path — not unwrapped")
+        return resp
+    return parsed if parsed is not None else resp
+
+
+async def _unwrap_response_async(resp: object) -> object:
+    """Async counterpart. Awaits parse() when it returns an awaitable.
+
+    Awaitability is detected at RUNTIME rather than branched on the openai
+    version. LegacyAPIResponse.parse is sync on both clients today, and openai's
+    own docstring (_legacy_response.py) states it becomes a coroutine on the
+    async client in the next major version. A naive `resp.parse()` here is
+    correct today and, on that upgrade, would silently hand a coroutine object
+    to the extractors — reproducing this exact bug with an un-awaited-coroutine
+    warning on top. AsyncAPIResponse.parse is ALREADY a coroutine function, so
+    this path is live now, not merely forward-looking.
+    """
+    if not _is_response_wrapper(resp):
+        return resp
+    try:
+        parsed = resp.parse()  # type: ignore[attr-defined]
+        if inspect.isawaitable(parsed):
+            parsed = await parsed
+    except Exception:
+        logger.debug("dunetrace: openai async response unwrap failed", exc_info=True)
+        return resp
+    return parsed if parsed is not None else resp
 
 
 def _patch_openai(
@@ -462,7 +629,10 @@ def _patch_openai(
         if run:
             _safe_emit(
                 lambda: run.llm_called(
-                    model, prompt_tokens=_estimate_tokens(messages), provider="openai"
+                    model,
+                    prompt_tokens=_estimate_tokens(messages),
+                    provider="openai",
+                    prompt_tokens_estimated=True,
                 )
             )
         try:
@@ -481,7 +651,15 @@ def _patch_openai(
         if run:
             if kwargs.get("stream"):
                 return _StreamProxy(resp, run, t0, _openai_stream_collector)
-            _safe_emit(lambda: _emit_openai_response(run, resp, t0))
+            # Unwrap BEFORE _emit_openai_response, which is where the
+            # instrumentation_degraded marker is decided — a response we
+            # successfully parsed must never be reported as unreadable.
+            plain = _unwrap_response(resp)
+            _safe_emit(lambda: _emit_openai_response(run, plain, t0))
+        # ALWAYS the object _orig_create produced, never the unwrapped one.
+        # LangChain reads response headers off the wrapper (that is why it asked
+        # for a raw response at all); handing back a bare ChatCompletion breaks
+        # it. The caller must not be able to tell instrumentation is installed.
         return resp
 
     _mod.Completions.create = _patched_create
@@ -497,7 +675,10 @@ def _patch_openai(
             if run:
                 _safe_emit(
                     lambda: run.llm_called(
-                        model, prompt_tokens=_estimate_tokens(messages), provider="openai"
+                        model,
+                        prompt_tokens=_estimate_tokens(messages),
+                        provider="openai",
+                        prompt_tokens_estimated=True,
                     )
                 )
             try:
@@ -516,7 +697,15 @@ def _patch_openai(
             if run:
                 if kwargs.get("stream"):
                     return _StreamProxy(resp, run, t0, _openai_stream_collector)
-                _safe_emit(lambda: _emit_openai_response(run, resp, t0))
+                # The unwrap has to happen HERE, not inside the _safe_emit
+                # lambda: that lambda is synchronous, so an unwrap needing
+                # `await` cannot live in it. Await first, then hand
+                # _emit_openai_response an already-plain object — which keeps
+                # that function synchronous and shape-agnostic, identical to the
+                # sync path.
+                plain = await _unwrap_response_async(resp)
+                _safe_emit(lambda: _emit_openai_response(run, plain, t0))
+            # The original wrapper, as in the sync patch. See there for why.
             return resp
 
         _mod.AsyncCompletions.create = _patched_acreate
@@ -524,6 +713,7 @@ def _patch_openai(
         pass  # older openai version without async client
 
     _PATCHED.add("openai")
+    _record_instrumented("openai")
     logger.debug("openai auto-instrumented")
 
 
@@ -538,6 +728,10 @@ def _emit_openai_response(run, resp, t0: float) -> None:
     latency_ms = int((time.monotonic() - t0) * 1000)
     finish = _openai_finish_reason(resp)
     text = _openai_content(resp)
+    # Both extractors failing means we did not read the response at all — a raw
+    # envelope, a mock, a version skew. Either one alone is enough to make the
+    # run unmeasurable for the text/finish_reason detectors.
+    degraded = _degraded_marker("openai", resp) if (finish is None or text is None) else None
     run.llm_responded(
         completion_tokens=comp_toks,
         prompt_tokens=prompt_toks,
@@ -546,21 +740,38 @@ def _emit_openai_response(run, resp, t0: float) -> None:
         finish_reason=finish,
         output=text,
         output_length=len(text) if text else 0,
+        instrumentation_degraded=degraded,
     )
 
 
-def _openai_finish_reason(resp) -> str:
+def _openai_finish_reason(resp) -> Optional[str]:
+    """The response's finish_reason, or None if the shape could not be read.
+
+    Returns None rather than "stop" on failure. "stop" is a *claim about the
+    model's behaviour*; we have no basis for it when the object is unreadable,
+    and asserting it fabricated the exact input EMPTY_LLM_RESPONSE fires on.
+    A real ChatCompletion always carries a truthy finish_reason, so a falsy one
+    means the shape is not what we think it is either.
+    """
     try:
-        return resp.choices[0].finish_reason or "stop"
-    except (AttributeError, IndexError):
-        return "stop"
+        return resp.choices[0].finish_reason or None
+    except (AttributeError, IndexError, TypeError):
+        return None
 
 
-def _openai_content(resp) -> str:
+def _openai_content(resp) -> Optional[str]:
+    """Assistant text, "" for a legitimately text-free turn, None if unreadable.
+
+    The two cases are deliberately distinct. `message.content` is None on a
+    tool-call-only turn — the shape was read fine and the model genuinely
+    produced no text, so that is "". An exception means the object is not a
+    ChatCompletion at all, which is None.
+    """
     try:
-        return resp.choices[0].message.content or ""
-    except (AttributeError, IndexError):
-        return ""
+        content = resp.choices[0].message.content
+    except (AttributeError, IndexError, TypeError):
+        return None
+    return content or ""
 
 
 def _openai_stream_collector(acc: dict, chunk) -> None:
@@ -631,7 +842,10 @@ def _patch_anthropic(
         if run:
             _safe_emit(
                 lambda: run.llm_called(
-                    model, prompt_tokens=_estimate_tokens(messages), provider="anthropic"
+                    model,
+                    prompt_tokens=_estimate_tokens(messages),
+                    provider="anthropic",
+                    prompt_tokens_estimated=True,
                 )
             )
         try:
@@ -670,7 +884,10 @@ def _patch_anthropic(
             if run:
                 _safe_emit(
                     lambda: run.llm_called(
-                        model, prompt_tokens=_estimate_tokens(messages), provider="anthropic"
+                        model,
+                        prompt_tokens=_estimate_tokens(messages),
+                        provider="anthropic",
+                        prompt_tokens_estimated=True,
                     )
                 )
             try:
@@ -724,6 +941,7 @@ def _patch_anthropic(
                             model,
                             prompt_tokens=_estimate_tokens(messages),
                             provider="anthropic",
+                            prompt_tokens_estimated=True,
                         )
                     )
                 try:
@@ -759,6 +977,7 @@ def _patch_anthropic(
         _cls.stream = _make_stream_patch(_orig_stream, _mgr_kind == "async")
 
     _PATCHED.add("anthropic")
+    _record_instrumented("anthropic")
     logger.debug("anthropic auto-instrumented")
 
 
@@ -770,8 +989,12 @@ def _emit_anthropic_response(run, resp, t0: float) -> None:
     # a falsy value, so a response without usage keeps the estimate.
     prompt_toks = getattr(usage, "input_tokens", 0) or 0
     latency_ms = int((time.monotonic() - t0) * 1000)
-    finish = getattr(resp, "stop_reason", "end_turn") or "end_turn"
+    # Same rule as OpenAI: a missing stop_reason is an unreadable shape, not an
+    # "end_turn". Sentinel-free getattr so an absent attribute is distinguishable
+    # from a present-but-falsy one.
+    finish = getattr(resp, "stop_reason", None) or None
     text = _anthropic_content(resp)
+    degraded = _degraded_marker("anthropic", resp) if (finish is None or text is None) else None
     run.llm_responded(
         completion_tokens=comp_toks,
         prompt_tokens=prompt_toks,
@@ -779,15 +1002,18 @@ def _emit_anthropic_response(run, resp, t0: float) -> None:
         finish_reason=finish,
         output=text,
         output_length=len(text) if text else 0,
+        instrumentation_degraded=degraded,
     )
 
 
-def _anthropic_content(resp) -> str:
+def _anthropic_content(resp) -> Optional[str]:
+    """Text of the first content block, "" for a text-free block, None if the
+    response shape could not be read at all. See _openai_content."""
     try:
         block = resp.content[0]
-        return getattr(block, "text", "") or ""
-    except (AttributeError, IndexError):
-        return ""
+    except (AttributeError, IndexError, TypeError):
+        return None
+    return getattr(block, "text", "") or ""
 
 
 def _anthropic_stream_collector(acc: dict, event) -> None:
@@ -924,6 +1150,7 @@ def _mistral_call_start(sub_sdk, model: str, kwargs: dict):
                 model,
                 prompt_tokens=_estimate_tokens(kwargs.get("messages")),
                 provider="mistral",
+                prompt_tokens_estimated=True,
             )
         )
         if logger.isEnabledFor(logging.DEBUG):
@@ -1115,6 +1342,7 @@ def _patch_mistral(
                 setattr(_cls, _name, _factory(_orig))
 
     _PATCHED.add("mistral")
+    _record_instrumented("mistralai")
     logger.debug("mistral auto-instrumented")
 
 
@@ -1129,6 +1357,7 @@ def _emit_mistral_response(run, resp, t0: float) -> None:
     latency_ms = int((time.monotonic() - t0) * 1000)
     finish = _mistral_finish_reason(resp)
     text = _mistral_content(resp)
+    degraded = _degraded_marker("mistral", resp) if (finish is None or text is None) else None
     run.llm_responded(
         completion_tokens=comp_toks,
         prompt_tokens=prompt_toks,
@@ -1136,17 +1365,20 @@ def _emit_mistral_response(run, resp, t0: float) -> None:
         finish_reason=finish,
         output=text,
         output_length=len(text) if text else 0,
+        instrumentation_degraded=degraded,
     )
 
 
-def _mistral_finish_reason(resp) -> str:
+def _mistral_finish_reason(resp) -> Optional[str]:
+    """See _openai_finish_reason — None on an unreadable shape, never "stop"."""
     try:
-        return str(resp.choices[0].finish_reason or "stop")
-    except (AttributeError, IndexError):
-        return "stop"
+        reason = resp.choices[0].finish_reason
+    except (AttributeError, IndexError, TypeError):
+        return None
+    return str(reason) if reason else None
 
 
-def _mistral_content(resp) -> str:
+def _mistral_content(resp) -> Optional[str]:
     """Text of the first choice.
 
     Mistral assistant content is either a plain string or a list of content
@@ -1155,8 +1387,8 @@ def _mistral_content(resp) -> str:
     """
     try:
         content = resp.choices[0].message.content
-    except (AttributeError, IndexError):
-        return ""
+    except (AttributeError, IndexError, TypeError):
+        return None
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -1220,29 +1452,37 @@ def _bedrock_header_tokens(resp: dict) -> tuple[int, int]:
         return 0, 0
 
 
-def _bedrock_converse_text(resp: dict) -> str:
-    """Concatenated text blocks of the assistant message. Tool-use blocks carry
-    no "text" key and contribute nothing, which keeps a tool-only turn at length
-    0 rather than raising."""
+def _bedrock_converse_text(resp: dict) -> Optional[str]:
+    """Concatenated text blocks of the assistant message.
+
+    "" for a tool-only turn (the shape was read, there was simply no text);
+    None when the envelope is not a Converse response at all. See
+    _openai_content for why the two are kept apart.
+    """
     try:
         content = resp["output"]["message"]["content"]
     except (KeyError, TypeError):
-        return ""
+        return None
     if not isinstance(content, list):
-        return ""
+        return None
     return "".join(str(b.get("text", "") or "") for b in content if isinstance(b, dict))
 
 
 def _emit_bedrock_converse(run, resp: dict, t0: float) -> None:
     usage = resp.get("usage") or {}
     text = _bedrock_converse_text(resp)
+    # stopReason absent means this isn't a Converse envelope; don't invent "stop".
+    raw_stop = resp.get("stopReason") if isinstance(resp, dict) else None
+    finish = str(raw_stop) if raw_stop else None
+    degraded = _degraded_marker("bedrock", resp) if (finish is None or text is None) else None
     run.llm_responded(
         completion_tokens=int(usage.get("outputTokens", 0) or 0),
         prompt_tokens=int(usage.get("inputTokens", 0) or 0),
         latency_ms=int((time.monotonic() - t0) * 1000),
-        finish_reason=str(resp.get("stopReason") or "stop"),
+        finish_reason=finish,
         output=text,
-        output_length=len(text),
+        output_length=len(text) if text else 0,
+        instrumentation_degraded=degraded,
     )
 
 
@@ -1334,6 +1574,7 @@ def _patch_botocore(
                 lambda: run.llm_called(
                     model,
                     prompt_tokens=_bedrock_prompt_estimate(api_params),
+                    prompt_tokens_estimated=True,
                     # The vendor is in the model id (anthropic.*, mistral.*,
                     # meta.*); what served the call is Bedrock.
                     provider="bedrock",
@@ -1376,6 +1617,7 @@ def _patch_botocore(
 
     BaseClient._make_api_call = _patched_make_api_call
     _PATCHED.add("botocore")
+    _record_instrumented("botocore")
     logger.debug("botocore (bedrock-runtime) auto-instrumented")
 
 
@@ -1454,6 +1696,7 @@ def _patch_httpx(
     httpx.AsyncClient.send = _patched_asend
 
     _PATCHED.add("httpx")
+    _record_instrumented("httpx")
     logger.debug("httpx auto-instrumented")
 
 
@@ -1519,6 +1762,7 @@ def _patch_requests(
     requests.Session.send = _patched_send
 
     _PATCHED.add("requests")
+    _record_instrumented("requests")
     logger.debug("requests auto-instrumented")
 
 
@@ -1780,6 +2024,7 @@ def _patch_langchain(
     BaseTool.arun = _patched_arun
 
     _PATCHED.add("langchain")
+    _record_instrumented("langchain")
     logger.debug("langchain auto-instrumented")
 
 
@@ -1927,6 +2172,7 @@ def _patch_crewai(
         Agent.kickoff_async = _patched_agent_kickoff_async
 
     _PATCHED.add("crewai")
+    _record_instrumented("crewai")
     logger.debug("crewai auto-instrumented")
 
 

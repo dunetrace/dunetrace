@@ -14,3 +14,14 @@ anthropic>=0.40
 # from there. Shipped in the image for the same reason anthropic is, so
 # switching provider is an env change rather than an image rebuild.
 mistralai>=2.0
+# Required by dunetrace_schemas (apply_migrations -> dunetrace_schemas/__init__ ->
+# events.py). This service does not use pydantic directly, but importing the
+# shared migration runner pulls the package __init__.
+#
+# NOT ==2.10.4 like ingest/api/detector/alerts: deepeval 4.0.9 requires
+# pydantic>=2.11.7, so an exact 2.10.4 pin is unsatisfiable here and the image
+# cannot build — the same trap python-dotenv fell into above. deepeval already
+# installs a compatible pydantic transitively; this line records that the
+# dependency is also DIRECT (via dunetrace_schemas), so removing deepeval would
+# not silently break the migration import.
+pydantic>=2.11.7,<3.0.0

@@ -294,6 +294,71 @@ CREATE TABLE IF NOT EXISTS run_processing_failures (
 ALTER TABLE processed_runs ADD COLUMN IF NOT EXISTS processing_error TEXT;
 """
 
+# Learned per-agent destination set for UNGROUNDED_DESTINATION's opt-in novelty
+# mode. Detector-owned (nothing else reads it), so it lives here rather than in
+# migrations — same rule run_state_metrics follows.
+#
+# It exists because every other baseline in this service is a scalar P75 that a
+# bounded query can compute on demand; a destination baseline is a SET, and
+# deriving it at detection time would mean re-parsing every tool call's args
+# across 50 historical runs, per run. Materialising it turns that into one
+# indexed lookup.
+#
+# Only GROUNDED destinations are ever written here (see the worker). Seeding it
+# with ungrounded ones would teach the baseline that the first successful
+# exfiltration is normal — the detector would disarm itself on exactly the
+# traffic it exists to catch.
+_DESTINATION_BASELINE_SCHEMA = """
+-- Durable per-run scalars for the P75 baselines. See baseline_metrics.py for
+-- why these are stored rather than re-derived: `events` is pruned at
+-- EVENT_RETENTION_DAYS, so a low-traffic agent could never mature a baseline
+-- from raw events, and the SQL that re-derived them had drifted from the
+-- detectors it fed. One narrow row per run outlives the events it came from.
+--
+-- Deliberately NOT folded into processed_runs, which is pruned as soon as a
+-- run's events are gone (that ordering is a correctness invariant, see
+-- prune_processed_runs) and is the anti-join target in the hottest query in
+-- the service — growing it is exactly what its own prune exists to prevent.
+--
+-- NULL in a metric column means "this run does not qualify for that baseline"
+-- (it failed the corresponding detector's guard), and the aggregate skips it —
+-- so one run can feed the token baseline while sitting out the growth one.
+CREATE TABLE IF NOT EXISTS run_baseline_metrics (
+    org_id          TEXT             NOT NULL,
+    run_id          TEXT             NOT NULL,
+    agent_id        TEXT             NOT NULL,
+    agent_version   TEXT             NOT NULL,
+    clean           BOOLEAN          NOT NULL,
+    step_count      DOUBLE PRECISION,
+    gap_p75_tool_ms DOUBLE PRECISION,
+    gap_p75_llm_ms  DOUBLE PRECISION,
+    token_growth    DOUBLE PRECISION,
+    llm_tool_ratio  DOUBLE PRECISION,
+    total_tokens    DOUBLE PRECISION,
+    duration_s      DOUBLE PRECISION,
+    recorded_at     TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (org_id, run_id)
+);
+-- Partial on `clean`: every baseline read filters to clean runs, so the dirty
+-- ones are dead weight in the index.
+CREATE INDEX IF NOT EXISTS idx_rbm_agent_clean
+    ON run_baseline_metrics(org_id, agent_id, agent_version, recorded_at DESC)
+    WHERE clean;
+
+CREATE TABLE IF NOT EXISTS agent_destination_baseline (
+    org_id            TEXT        NOT NULL,
+    agent_id          TEXT        NOT NULL,
+    destination       TEXT        NOT NULL,
+    destination_type  TEXT        NOT NULL,
+    first_seen_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    run_count         INTEGER     NOT NULL DEFAULT 1,
+    PRIMARY KEY (org_id, agent_id, destination)
+);
+CREATE INDEX IF NOT EXISTS idx_adb_agent_seen
+    ON agent_destination_baseline(org_id, agent_id, last_seen_at DESC);
+"""
+
 _WATERMARK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS detector_watermarks (
     shard_index  INT         NOT NULL,
@@ -303,6 +368,31 @@ CREATE TABLE IF NOT EXISTS detector_watermarks (
     PRIMARY KEY (shard_count, shard_index)
 );
 ALTER TABLE detector_watermarks ADD COLUMN IF NOT EXISTS shard_count INT NOT NULL DEFAULT 1;
+
+-- Repair the PRIMARY KEY on a table created before the key became composite.
+-- CREATE TABLE IF NOT EXISTS is a no-op on an existing table and the ALTER above
+-- only adds the COLUMN, so such a deployment kept a single-column pkey on
+-- shard_index while advance_watermark() upserts ON CONFLICT (shard_count,
+-- shard_index) — which raises InvalidColumnReferenceError on every poll tick and
+-- crash-loops the worker. Guarded on the current key being single-column, so it
+-- no-ops on a fresh install. Safe to run: with the old key, shard_index is
+-- already unique and shard_count defaults to 1, so the composite key cannot
+-- collide on existing rows.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        WHERE c.relname = 'detector_watermarks'
+          AND i.indisprimary
+          AND i.indnatts = 1
+    ) THEN
+        ALTER TABLE detector_watermarks DROP CONSTRAINT detector_watermarks_pkey;
+        ALTER TABLE detector_watermarks
+            ADD CONSTRAINT detector_watermarks_pkey PRIMARY KEY (shard_count, shard_index);
+    END IF;
+END $$;
 """
 
 
@@ -424,6 +514,7 @@ LIVE_DETECTORS: set[str] = {
     "MODEL_FALLBACK_DRIFT",
     "MEMORY_POISONING",
     "DELEGATION_LOOP",
+    "UNGROUNDED_DESTINATION",
 }
 
 
@@ -449,6 +540,7 @@ async def ensure_detector_schema() -> None:
         await conn.execute(_PACKS_SCHEMA)
         await _seed_packs(conn)
         await conn.execute(_RUN_STATE_METRICS_SCHEMA)
+        await conn.execute(_DESTINATION_BASELINE_SCHEMA)
         await conn.execute(_WATERMARK_SCHEMA)
         await conn.execute(_RUN_FAILURE_SCHEMA)
     logger.info("Detector schema ready")
@@ -489,8 +581,186 @@ async def _seed_packs(conn) -> None:
 # single-run outliers to be useful — 20 gives a stable enough percentile estimate.
 _MIN_BASELINE_RUNS = 20
 
+# The run-selection CTE every P75 baseline shares. Kept in one place because it
+# was copy-pasted into six queries, and a predicate that has to be fixed six
+# times gets fixed five times.
+#
+# Placeholders are positional and fixed by contract: $1 org_id, $2 agent_id,
+# $3 agent_version, $4 run_id to exclude, $5 lookback. A query needing more
+# binds them from $6 up (see fetch_latency_baseline).
+#
+# Two filters decide what counts as a reference for "normal":
+#
+#   completed  — errored runs are excluded because an early exit at step 1-2
+#                drags P75 down and makes STEP_COUNT_INFLATION fire on runs
+#                that took a perfectly ordinary number of steps.
+#
+# Both probes into `events` carry org_id, and so does every downstream join in
+# the queries that use this CTE. run_id is caller-supplied (the SDK exposes
+# run_id=, the OTLP path derives it from a caller-supplied trace id), so a join
+# on run_id alone reads across tenants — the same class of bug that made
+# (org_id, run_id) the composite key on `runs` and `processed_runs`. Unscoped,
+# another tenant's run.completed could mark THIS tenant's errored run as
+# completed, and their events could contribute steps and tokens to this
+# tenant's baseline. An event with a NULL org_id is unattributable and belongs
+# to no tenant, so excluding it is correct rather than a lost sample.
+#
+#   clean      — a run that fired a LIVE signal records the agent misbehaving,
+#                so it cannot also define what normal looks like. Without this
+#                a chronically looping agent raises its own step and token
+#                baselines until the loop reads as typical and the detector
+#                goes quiet — the failure mode learns its way out of detection.
+#
+# Shadow signals are deliberately NOT disqualifying. A shadow detector is
+# unvalidated by definition (see LIVE_DETECTORS), and letting one shrink the
+# baseline population would mean enabling a noisy detector for evaluation
+# silently retuned six unrelated live ones.
+_RECENT_CLEAN_RUNS_CTE = """
+            WITH recent AS (
+                SELECT pr.run_id
+                FROM processed_runs pr
+                WHERE pr.org_id        = $1
+                  AND pr.agent_id      = $2
+                  AND pr.agent_version = $3
+                  AND pr.run_id       != $4
+                  AND EXISTS (
+                      SELECT 1 FROM events e
+                      WHERE e.org_id = pr.org_id
+                        AND e.run_id = pr.run_id
+                        AND e.event_type = 'run.completed'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM failure_signals fs
+                      WHERE fs.org_id = pr.org_id
+                        AND fs.run_id = pr.run_id
+                        AND fs.shadow = FALSE
+                  )
+                ORDER BY pr.processed_at DESC
+                LIMIT $5
+            )"""
 
-async def fetch_step_count_baseline(
+
+# Columns fetch_metric_baseline may aggregate. A closed set, not a formatting
+# convenience: the column name is interpolated into SQL (asyncpg cannot bind an
+# identifier), so anything outside this tuple must never reach that f-string.
+_BASELINE_COLUMNS = (
+    "step_count",
+    "gap_p75_tool_ms",
+    "gap_p75_llm_ms",
+    "token_growth",
+    "llm_tool_ratio",
+    "total_tokens",
+    "duration_s",
+)
+
+
+async def write_baseline_metrics(
+    org_id: str,
+    run_id: str,
+    agent_id: str,
+    agent_version: str,
+    clean: bool,
+    metrics: dict,
+) -> None:
+    """Record this run's baseline scalars. Idempotent on (org_id, run_id).
+
+    ON CONFLICT UPDATE rather than DO NOTHING because a re-detection (late
+    events arriving, see audit Finding 15) produces a longer run whose metrics
+    supersede the earlier partial ones — and can flip `clean` to FALSE once the
+    new events reveal a signal.
+    """
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO run_baseline_metrics
+                (org_id, run_id, agent_id, agent_version, clean, step_count,
+                 gap_p75_tool_ms, gap_p75_llm_ms, token_growth, llm_tool_ratio,
+                 total_tokens, duration_s)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            ON CONFLICT (org_id, run_id) DO UPDATE SET
+                clean           = EXCLUDED.clean,
+                step_count      = EXCLUDED.step_count,
+                gap_p75_tool_ms = EXCLUDED.gap_p75_tool_ms,
+                gap_p75_llm_ms  = EXCLUDED.gap_p75_llm_ms,
+                token_growth    = EXCLUDED.token_growth,
+                llm_tool_ratio  = EXCLUDED.llm_tool_ratio,
+                total_tokens    = EXCLUDED.total_tokens,
+                duration_s      = EXCLUDED.duration_s,
+                recorded_at     = NOW()
+            """,
+            org_id,
+            run_id,
+            agent_id,
+            agent_version,
+            clean,
+            metrics.get("step_count"),
+            metrics.get("gap_p75_tool_ms"),
+            metrics.get("gap_p75_llm_ms"),
+            metrics.get("token_growth"),
+            metrics.get("llm_tool_ratio"),
+            metrics.get("total_tokens"),
+            metrics.get("duration_s"),
+        )
+
+
+async def fetch_metric_baseline(
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    column: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """P75 of `column` over the last `lookback` clean runs that carry it.
+
+    Reads run_baseline_metrics, which outlives `events` — this is what lets a
+    low-traffic agent accumulate a baseline across more than one retention
+    window. Returns None below `min_runs`, which is the signal for the caller
+    to fall back to the legacy events-derived query.
+
+    Note the LIMIT applies to runs that HAVE the metric, where the legacy query
+    took the last 50 runs and then discarded the ones that didn't qualify. This
+    yields up to `lookback` usable samples instead of however many of the last
+    `lookback` runs happened to qualify.
+    """
+    if not _pool or column not in _BASELINE_COLUMNS:
+        return None
+
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"""
+            WITH recent AS (
+                SELECT {column} AS v
+                FROM run_baseline_metrics
+                WHERE org_id        = $1
+                  AND agent_id      = $2
+                  AND agent_version = $3
+                  AND run_id       != $4
+                  AND clean
+                  AND {column} IS NOT NULL
+                ORDER BY recorded_at DESC
+                LIMIT $5
+            )
+            SELECT COUNT(*)                                          AS sample_size,
+                   PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY v)   AS p75
+            FROM recent
+            """,
+            org_id,
+            agent_id,
+            agent_version,
+            exclude_run_id,
+            lookback,
+        )
+
+    if not row or (row["sample_size"] or 0) < min_runs:
+        return None
+    return float(row["p75"]) if row["p75"] is not None else None
+
+
+async def _legacy_step_count_baseline(
     org_id: str,
     agent_id: str,
     agent_version: str,
@@ -514,28 +784,12 @@ async def fetch_step_count_baseline(
 
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
-            WITH recent AS (
-                -- Only include runs that completed with a final_answer,
-                -- not runs that errored out at step 1-2.
-                SELECT pr.run_id
-                FROM processed_runs pr
-                WHERE pr.org_id        = $1
-                  AND pr.agent_id      = $2
-                  AND pr.agent_version = $3
-                  AND pr.run_id       != $4
-                  AND EXISTS (
-                      SELECT 1 FROM events e
-                      WHERE e.run_id = pr.run_id
-                        AND e.event_type = 'run.completed'
-                  )
-                ORDER BY pr.processed_at DESC
-                LIMIT $5
-            ),
+            f"""
+{_RECENT_CLEAN_RUNS_CTE},
             step_counts AS (
                 SELECT MAX(e.step_index) AS step_count
                 FROM recent r
-                JOIN events e ON e.run_id = r.run_id
+                JOIN events e ON e.run_id = r.run_id AND e.org_id = $1
                 GROUP BY r.run_id
             )
             SELECT
@@ -555,7 +809,7 @@ async def fetch_step_count_baseline(
     return float(row["p75"]) if row["p75"] is not None else None
 
 
-async def fetch_latency_baseline(
+async def _legacy_latency_baseline(
     org_id: str,
     agent_id: str,
     agent_version: str,
@@ -578,22 +832,8 @@ async def fetch_latency_baseline(
 
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
-            WITH recent AS (
-                SELECT pr.run_id
-                FROM processed_runs pr
-                WHERE pr.org_id        = $1
-                  AND pr.agent_id      = $2
-                  AND pr.agent_version = $3
-                  AND pr.run_id       != $4
-                  AND EXISTS (
-                      SELECT 1 FROM events e
-                      WHERE e.run_id = pr.run_id
-                        AND e.event_type = 'run.completed'
-                  )
-                ORDER BY pr.processed_at DESC
-                LIMIT $5
-            ),
+            f"""
+{_RECENT_CLEAN_RUNS_CTE},
             event_gaps AS (
                 SELECT
                     e.run_id,
@@ -602,7 +842,8 @@ async def fetch_latency_baseline(
                         ORDER BY e.step_index, e.timestamp
                     ) - e.timestamp) * 1000.0 AS gap_ms
                 FROM events e
-                WHERE e.run_id IN (SELECT run_id FROM recent)
+                WHERE e.org_id = $1
+                  AND e.run_id IN (SELECT run_id FROM recent)
                   AND e.event_type = $6
             )
             SELECT
@@ -698,7 +939,7 @@ async def fetch_per_tool_latency_baselines(
     return {r["tool_name"]: float(r["p75"]) for r in rows if r["p75"] is not None}
 
 
-async def fetch_token_growth_baseline(
+async def _legacy_token_growth_baseline(
     org_id: str,
     agent_id: str,
     agent_version: str,
@@ -719,43 +960,54 @@ async def fetch_token_growth_baseline(
 
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
-            WITH recent AS (
-                SELECT pr.run_id
-                FROM processed_runs pr
-                WHERE pr.org_id        = $1
-                  AND pr.agent_id      = $2
-                  AND pr.agent_version = $3
-                  AND pr.run_id       != $4
-                  AND EXISTS (
-                      SELECT 1 FROM events e
-                      WHERE e.run_id = pr.run_id
-                        AND e.event_type = 'run.completed'
-                  )
-                ORDER BY pr.processed_at DESC
-                LIMIT $5
-            ),
+            f"""
+{_RECENT_CLEAN_RUNS_CTE},
+            -- One row per LLM call, carrying the SAME prompt_tokens value the
+            -- detector sees. Two things this has to match, both of which it
+            -- previously got wrong:
+            --
+            --   1. run_builder takes prompt_tokens from llm.called and then
+            --      OVERRIDES it from llm.responded when that carries one (a
+            --      streamed call reports an estimate at call time and the exact
+            --      count on completion; LangChain only ever reports it on
+            --      responded). Reading llm.called alone meant the baseline was
+            --      built from estimates while the detector compared exacts.
+            --      DISTINCT ON keeps one row per call, preferring responded.
+            --
+            --   2. llm.responded is emitted with advance=False, so it shares its
+            --      llm.called's step_index — ordering by step_index therefore
+            --      reproduces the detector's call order exactly.
             token_data AS (
-                SELECT
+                SELECT DISTINCT ON (e.run_id, COALESCE((e.payload->>'call_id')::int, e.step_index))
                     e.run_id,
+                    e.step_index,
                     (e.payload->>'prompt_tokens')::integer AS prompt_tokens
                 FROM events e
-                WHERE e.run_id IN (SELECT run_id FROM recent)
-                  AND e.event_type = 'llm.called'
+                WHERE e.org_id = $1
+                  AND e.run_id IN (SELECT run_id FROM recent)
+                  AND e.event_type IN ('llm.called', 'llm.responded')
                   AND e.payload->>'prompt_tokens' IS NOT NULL
                   AND (e.payload->>'prompt_tokens')::integer > 0
+                ORDER BY
+                    e.run_id,
+                    COALESCE((e.payload->>'call_id')::int, e.step_index),
+                    (e.event_type = 'llm.responded') DESC
             ),
+            -- FIRST and LAST by call order, not MIN and MAX. The detector
+            -- computes calls_with_tokens[-1] / calls_with_tokens[0]; MIN/MAX
+            -- only agrees with that when context grows monotonically, and is
+            -- strictly larger whenever a run compacts or summarises mid-way.
+            -- That biased the baseline high and made CONTEXT_BLOAT quieter than
+            -- its configured threshold on exactly the runs that manage context.
             run_growth AS (
                 SELECT
                     run_id,
-                    MIN(prompt_tokens) AS first_tokens,
-                    MAX(prompt_tokens) AS last_tokens,
-                    COUNT(*)           AS call_count
+                    (ARRAY_AGG(prompt_tokens ORDER BY step_index))[1]      AS first_tokens,
+                    (ARRAY_AGG(prompt_tokens ORDER BY step_index DESC))[1] AS last_tokens,
+                    COUNT(*)                                               AS call_count
                 FROM token_data
                 GROUP BY run_id
-                HAVING COUNT(*)           >= 3
-                   AND MIN(prompt_tokens) >= 10
-                   AND MAX(prompt_tokens) >= 2000
+                HAVING COUNT(*) >= 3
             )
             SELECT
                 COUNT(*)                                                                    AS sample_size,
@@ -763,6 +1015,11 @@ async def fetch_token_growth_baseline(
                     ORDER BY last_tokens::float / first_tokens::float
                 )                                                                           AS p75
             FROM run_growth
+            -- Applied after first/last are resolved, mirroring the detector's
+            -- own guards (first_tokens < 10 and last_tokens < MIN_LAST_TOKENS
+            -- both return None there).
+            WHERE first_tokens >= 10
+              AND last_tokens  >= 2000
             """,
             org_id,
             agent_id,
@@ -776,7 +1033,7 @@ async def fetch_token_growth_baseline(
     return float(row["p75"]) if row["p75"] is not None else None
 
 
-async def fetch_llm_tool_ratio_baseline(
+async def _legacy_llm_tool_ratio_baseline(
     org_id: str,
     agent_id: str,
     agent_version: str,
@@ -796,29 +1053,16 @@ async def fetch_llm_tool_ratio_baseline(
 
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
-            WITH recent AS (
-                SELECT pr.run_id
-                FROM processed_runs pr
-                WHERE pr.org_id        = $1
-                  AND pr.agent_id      = $2
-                  AND pr.agent_version = $3
-                  AND pr.run_id       != $4
-                  AND EXISTS (
-                      SELECT 1 FROM events e
-                      WHERE e.run_id = pr.run_id
-                        AND e.event_type = 'run.completed'
-                  )
-                ORDER BY pr.processed_at DESC
-                LIMIT $5
-            ),
+            f"""
+{_RECENT_CLEAN_RUNS_CTE},
             run_counts AS (
                 SELECT
                     e.run_id,
                     COUNT(*) FILTER (WHERE e.event_type = 'llm.called')  AS llm_count,
                     COUNT(*) FILTER (WHERE e.event_type = 'tool.called') AS tool_count
                 FROM events e
-                WHERE e.run_id IN (SELECT run_id FROM recent)
+                WHERE e.org_id = $1
+                  AND e.run_id IN (SELECT run_id FROM recent)
                 GROUP BY e.run_id
                 HAVING COUNT(*) FILTER (WHERE e.event_type = 'llm.called') >= 5
             )
@@ -841,7 +1085,7 @@ async def fetch_llm_tool_ratio_baseline(
     return float(row["p75"]) if row["p75"] is not None else None
 
 
-async def fetch_total_tokens_baseline(
+async def _legacy_total_tokens_baseline(
     org_id: str,
     agent_id: str,
     agent_version: str,
@@ -861,22 +1105,8 @@ async def fetch_total_tokens_baseline(
 
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
-            WITH recent AS (
-                SELECT pr.run_id
-                FROM processed_runs pr
-                WHERE pr.org_id        = $1
-                  AND pr.agent_id      = $2
-                  AND pr.agent_version = $3
-                  AND pr.run_id       != $4
-                  AND EXISTS (
-                      SELECT 1 FROM events e
-                      WHERE e.run_id = pr.run_id
-                        AND e.event_type = 'run.completed'
-                  )
-                ORDER BY pr.processed_at DESC
-                LIMIT $5
-            ),
+            f"""
+{_RECENT_CLEAN_RUNS_CTE},
             run_tokens AS (
                 -- prompt_tokens may be in llm.called (direct SDK) or llm.responded (LangChain);
                 -- completion_tokens are always in llm.responded. Sum both event types to cover all paths.
@@ -887,7 +1117,8 @@ async def fetch_total_tokens_baseline(
                         COALESCE((e.payload->>'completion_tokens')::integer, 0)
                     ) AS total_tokens
                 FROM events e
-                WHERE e.run_id IN (SELECT run_id FROM recent)
+                WHERE e.org_id = $1
+                  AND e.run_id IN (SELECT run_id FROM recent)
                   AND e.event_type IN ('llm.called', 'llm.responded')
                 GROUP BY e.run_id
                 HAVING SUM(COALESCE((e.payload->>'prompt_tokens')::integer, 0)) > 0
@@ -909,7 +1140,7 @@ async def fetch_total_tokens_baseline(
     return float(row["p75"]) if row["p75"] is not None else None
 
 
-async def fetch_duration_baseline(
+async def _legacy_duration_baseline(
     org_id: str,
     agent_id: str,
     agent_version: str,
@@ -929,28 +1160,15 @@ async def fetch_duration_baseline(
 
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
-            WITH recent AS (
-                SELECT pr.run_id
-                FROM processed_runs pr
-                WHERE pr.org_id        = $1
-                  AND pr.agent_id      = $2
-                  AND pr.agent_version = $3
-                  AND pr.run_id       != $4
-                  AND EXISTS (
-                      SELECT 1 FROM events e
-                      WHERE e.run_id = pr.run_id
-                        AND e.event_type = 'run.completed'
-                  )
-                ORDER BY pr.processed_at DESC
-                LIMIT $5
-            ),
+            f"""
+{_RECENT_CLEAN_RUNS_CTE},
             run_durations AS (
                 SELECT
                     e.run_id,
                     (MAX(e.timestamp) - MIN(e.timestamp)) AS duration_s
                 FROM events e
-                WHERE e.run_id IN (SELECT run_id FROM recent)
+                WHERE e.org_id = $1
+                  AND e.run_id IN (SELECT run_id FROM recent)
                 GROUP BY e.run_id
                 HAVING (MAX(e.timestamp) - MIN(e.timestamp)) > 0
             )
@@ -969,6 +1187,185 @@ async def fetch_duration_baseline(
     if not row or (row["sample_size"] or 0) < min_runs:
         return None
     return float(row["p75"]) if row["p75"] is not None else None
+
+
+# ── Public baseline API ───────────────────────────────────────────────────────
+#
+# Each reads run_baseline_metrics first and falls back to the legacy
+# events-derived query when that table has fewer than `min_runs` samples for the
+# agent. The fallback is transitional: it exists so an existing deployment keeps
+# its baselines on the deploy that introduces the table, instead of dropping
+# every agent back to static thresholds until 20 fresh runs accumulate. Once a
+# deployment has been running longer than EVENT_RETENTION_DAYS the legacy path
+# can no longer contribute anything the table doesn't already have, and the
+# _legacy_* functions can be deleted.
+
+
+async def fetch_step_count_baseline(
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """P75 step count over recent clean runs. See fetch_metric_baseline."""
+    stored = await fetch_metric_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, "step_count", min_runs, lookback
+    )
+    if stored is not None:
+        return stored
+    return await _legacy_step_count_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, min_runs, lookback
+    )
+
+
+async def fetch_latency_baseline(
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    event_type: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """P75 step latency (ms) for `event_type` over recent clean runs.
+
+    NOTE — this one changes statistic when served from the stored table. The
+    legacy query pooled every step gap from 50 runs into a single percentile;
+    a one-row-per-run store cannot preserve that, so the stored path takes the
+    P75 of each run's own P75 gap. The stored form is more robust (a single
+    500-step run can no longer dominate the sample) but it is NOT the same
+    number, and SLOW_STEP's effective threshold shifts accordingly on agents
+    with high within-run latency variance.
+    """
+    column = "gap_p75_tool_ms" if event_type == "tool.called" else "gap_p75_llm_ms"
+    stored = await fetch_metric_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, column, min_runs, lookback
+    )
+    if stored is not None:
+        return stored
+    return await _legacy_latency_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, event_type, min_runs, lookback
+    )
+
+
+async def fetch_token_growth_baseline(
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """P75 context growth factor (last/first prompt tokens) over recent clean runs."""
+    stored = await fetch_metric_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, "token_growth", min_runs, lookback
+    )
+    if stored is not None:
+        return stored
+    return await _legacy_token_growth_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, min_runs, lookback
+    )
+
+
+async def fetch_llm_tool_ratio_baseline(
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """P75 LLM:tool call ratio over recent clean runs."""
+    stored = await fetch_metric_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, "llm_tool_ratio", min_runs, lookback
+    )
+    if stored is not None:
+        return stored
+    return await _legacy_llm_tool_ratio_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, min_runs, lookback
+    )
+
+
+async def fetch_total_tokens_baseline(
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """P75 total tokens (prompt+completion+reasoning) over recent clean runs."""
+    stored = await fetch_metric_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, "total_tokens", min_runs, lookback
+    )
+    if stored is not None:
+        return stored
+    return await _legacy_total_tokens_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, min_runs, lookback
+    )
+
+
+async def fetch_duration_baseline(
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    exclude_run_id: str,
+    min_runs: int = _MIN_BASELINE_RUNS,
+    lookback: int = 50,
+) -> "Optional[float]":
+    """P75 wall-clock run duration (seconds) over recent clean runs."""
+    stored = await fetch_metric_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, "duration_s", min_runs, lookback
+    )
+    if stored is not None:
+        return stored
+    return await _legacy_duration_baseline(
+        org_id, agent_id, agent_version, exclude_run_id, min_runs, lookback
+    )
+
+
+# How many rows per (org, agent, agent_version) the metrics table keeps. The
+# baselines only ever read the newest `lookback` (50), so this is that with a
+# wide margin — enough that raising `lookback` doesn't immediately starve, and
+# small enough that the table is bounded by agent count rather than by traffic.
+_BASELINE_METRICS_KEEP_PER_AGENT = 200
+
+
+async def prune_baseline_metrics(keep_per_agent: int = _BASELINE_METRICS_KEEP_PER_AGENT) -> int:
+    """Trim run_baseline_metrics to the newest `keep_per_agent` rows per
+    (org_id, agent_id, agent_version). Returns rows deleted.
+
+    Bounded by rank, not by age. An age bound would reintroduce exactly the
+    problem this table was built to solve: a low-traffic agent's history would
+    expire before it accumulated enough runs to form a baseline. Rank keeps the
+    newest N however long they took to arrive, so an agent doing four runs a
+    month still reaches the minimum — it just takes months, which is correct.
+
+    This table is deliberately NOT tied to EVENT_RETENTION_DAYS. Its whole
+    purpose is to outlive the events its rows were derived from.
+    """
+    if not _pool:
+        return 0
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            DELETE FROM run_baseline_metrics rbm
+             USING (
+                 SELECT ctid,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY org_id, agent_id, agent_version
+                            ORDER BY recorded_at DESC
+                        ) AS rn
+                   FROM run_baseline_metrics
+             ) ranked
+             WHERE ranked.ctid = rbm.ctid
+               AND ranked.rn   > $1
+            """,
+            keep_per_agent,
+        )
+    return int(result.split()[-1]) if result.startswith("DELETE") else 0
 
 
 async def prune_processed_runs(batch_size: int = 10_000) -> int:
@@ -1226,6 +1623,149 @@ async def fetch_run_lineage(run_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def fetch_memory_writes(
+    org_id: str,
+    agent_id: str,
+    keys: list[str],
+    exclude_run_id: str,
+    lookback_days: int = 30,
+    limit: int = 100,
+) -> list[dict]:
+    """Prior `memory.written` events for this agent, restricted to `keys`.
+
+    Feeds UNGROUNDED_DESTINATION's cross-run taint check (T6). A destination
+    planted in run N's memory and read back in run N+2 is ungrounded in N+2 but
+    has no in-run taint source: `memory.read` carries only a key, because the SDK
+    never sees the value that comes back (run_context.py::memory_read). Without
+    this the flagship scenario — poisoned memory, innocent later run, send to the
+    planted address — tops out at HIGH.
+
+    Deliberately reads EVENTS, not signals. Ancestor *signals* are derived and
+    may not exist yet when a sibling run is processed, which would make severity
+    depend on poll ordering; an ingested event row is already durable. Reading
+    another run's events is also the precedent _handoff_signal_from_events set.
+
+    Bounded three ways: the keys this run actually read, a lookback window (which
+    also prunes `events` partitions), and LIMIT. Rides
+    idx_events_org_agent(org_id, agent_id, received_at DESC).
+    """
+    if not _pool or not keys:
+        return []
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT run_id, step_index, timestamp, payload
+            FROM events
+            WHERE org_id      = $1
+              AND agent_id    = $2
+              AND event_type  = 'memory.written'
+              AND run_id     <> $3
+              AND received_at >= NOW() - ($4 || ' days')::interval
+              AND payload->>'key' = ANY($5::text[])
+            ORDER BY received_at DESC
+            LIMIT $6
+            """,
+            org_id,
+            agent_id,
+            exclude_run_id,
+            str(int(lookback_days)),
+            list(keys),
+            int(limit),
+        )
+
+    out: list[dict] = []
+    for r in rows:
+        payload = r["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        out.append(
+            {
+                "run_id": r["run_id"],
+                "step_index": r["step_index"],
+                "key": payload.get("key"),
+                "value": payload.get("value"),
+                "source": payload.get("source"),
+            }
+        )
+    return out
+
+
+async def fetch_destination_baseline(
+    org_id: str, agent_id: str, destinations: list[str]
+) -> set[str]:
+    """Which of `destinations` this agent has already been seen sending to.
+
+    Probing only the run's own candidates keeps this an index lookup over a
+    handful of keys rather than a full baseline load.
+    """
+    if not _pool or not destinations:
+        return set()
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT destination
+            FROM agent_destination_baseline
+            WHERE org_id = $1 AND agent_id = $2 AND destination = ANY($3::text[])
+            """,
+            org_id,
+            agent_id,
+            list(destinations),
+        )
+    return {r["destination"] for r in rows}
+
+
+async def count_agent_runs_capped(org_id: str, agent_id: str, cap: int) -> int:
+    """Processed-run count for this agent, counted no further than `cap`.
+
+    Novelty mode only needs to know whether the baseline has matured past
+    MIN_BASELINE_RUNS, so the count stops at the threshold. An uncapped
+    COUNT(*) over processed_runs would grow without bound as an agent ages.
+    """
+    if not _pool:
+        return 0
+    async with _pool.acquire() as conn:
+        return int(
+            await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT 1 FROM processed_runs
+                    WHERE org_id = $1 AND agent_id = $2
+                    LIMIT $3
+                ) t
+                """,
+                org_id,
+                agent_id,
+                int(cap),
+            )
+            or 0
+        )
+
+
+async def upsert_destination_baseline(
+    org_id: str, agent_id: str, destinations: list[tuple[str, str]]
+) -> None:
+    """Record GROUNDED destinations as normal for this agent.
+
+    Callers must pass only destinations that passed the grounding check — see
+    the table's schema comment for why ungrounded ones must never land here.
+    """
+    if not _pool or not destinations:
+        return
+    async with _pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO agent_destination_baseline
+                (org_id, agent_id, destination, destination_type)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (org_id, agent_id, destination) DO UPDATE
+               SET last_seen_at = NOW(),
+                   run_count    = agent_destination_baseline.run_count + 1
+            """,
+            [(org_id, agent_id, d, t) for d, t in destinations],
+        )
+
+
 async def fetch_run_events(run_id: str) -> list[dict]:
     """All events for a run, ordered by step_index then timestamp."""
     async with _pool.acquire() as conn:
@@ -1350,7 +1890,13 @@ async def mark_run_processed(
                 (run_id, agent_id, agent_version, trigger, signal_count, org_id,
                  event_count, processing_error)
             VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''))
-            ON CONFLICT (run_id) DO UPDATE
+            -- (org_id, run_id), not run_id: migration 2 (composite_run_key) made the
+            -- key composite because run_id is caller-supplied and collides across
+            -- tenants. A bare run_id target has no matching unique constraint, so
+            -- this raised on EVERY call and the run was never marked processed —
+            -- leaving it to be re-detected on every poll, writing duplicate
+            -- signals and re-alerting them.
+            ON CONFLICT (org_id, run_id) DO UPDATE
                 SET signal_count     = processed_runs.signal_count + EXCLUDED.signal_count,
                     event_count      = EXCLUDED.event_count,
                     processing_error = EXCLUDED.processing_error,
@@ -1432,7 +1978,10 @@ async def upsert_run_and_conversation(
             """
             INSERT INTO runs (run_id, org_id, agent_id, agent_version, conversation_id, started_at)
             VALUES ($1, $2, $3, $4, $5, to_timestamp($6))
-            ON CONFLICT (run_id) DO NOTHING
+            -- (org_id, run_id) — see mark_run_processed for why. A bare run_id
+            -- target raised here too, so the runs registry stopped being written
+            -- and GET /v1/runs/{id} reported "no signals" for runs that had them.
+            ON CONFLICT (org_id, run_id) DO NOTHING
             """,
             run_id,
             org_id,

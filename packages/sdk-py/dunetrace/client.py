@@ -428,6 +428,19 @@ class Dunetrace:
         }
         if _injection_evidence:
             payload["injection_signal"] = _injection_evidence
+        # Which SDK build, and which provider libraries it patched. Additive and
+        # always present for the SDK version; `instrumented` is omitted entirely
+        # when nothing was auto-patched, keeping manual callers' run.started
+        # byte-identical apart from the one new key.
+        try:
+            from dunetrace.auto import instrumentation_fingerprint
+
+            _fp = instrumentation_fingerprint()
+            payload["sdk_version"] = _fp["sdk_version"]
+            if _fp["instrumented"]:
+                payload["instrumented"] = _fp["instrumented"]
+        except Exception:
+            logger.debug("Dunetrace: instrumentation fingerprint failed", exc_info=True)
         _source_file = _capture_caller_source_file()
         if _source_file:
             payload["source_file"] = _source_file

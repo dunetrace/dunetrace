@@ -23,6 +23,7 @@ from dunetrace.detectors import (
     CUSTOM_DETECTOR_REGISTRY,
     AgentHandoffFailureDetector,
     BaseDetector,
+    InstrumentationDegradedDetector,
     OversizedToolArgumentsDetector,
     CascadingToolFailureDetector,
     ContextBloatDetector,
@@ -52,6 +53,7 @@ from dunetrace.detectors import (
     ToolLoopDetector,
     ToolThrashingDetector,
     UnreadToolErrorDetector,
+    UngroundedDestinationDetector,
 )
 from detector_svc.config_loader import load_detector_kwargs
 
@@ -59,6 +61,7 @@ logger = logging.getLogger("dunetrace.detector.detectors")
 
 # Maps YAML section key → detector class
 _DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
+    "instrumentation_degraded": InstrumentationDegradedDetector,
     "oversized_tool_arguments": OversizedToolArgumentsDetector,
     "tool_loop": ToolLoopDetector,
     "tool_thrashing": ToolThrashingDetector,
@@ -89,6 +92,7 @@ _DETECTOR_CLASSES: dict[str, type[BaseDetector]] = {
     "model_fallback_drift": ModelFallbackDriftDetector,
     "memory_poisoning": MemoryPoisonedDetector,
     "delegation_loop": DelegationLoopDetector,
+    "ungrounded_destination": UngroundedDestinationDetector,
 }
 
 # Load config once at import time. Passing the detector key set makes the loader

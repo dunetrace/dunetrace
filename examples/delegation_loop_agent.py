@@ -14,8 +14,8 @@ Run it against a local stack:
     docker compose up -d
     python examples/delegation_loop_agent.py
 
-The signal shows up on the dashboard (shadow by default — enable "Show shadow
-signals" on the run, or promote DELEGATION_LOOP in detector_svc's LIVE_DETECTORS).
+The signal shows up on the dashboard as a live alert (DELEGATION_LOOP is in
+detector_svc's LIVE_DETECTORS).
 """
 
 from __future__ import annotations

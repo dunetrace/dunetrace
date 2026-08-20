@@ -879,6 +879,92 @@ def explain_retry_storm(signal: FailureSignal) -> Explanation:
 # EMPTY_LLM_RESPONSE
 
 
+def explain_instrumentation_degraded(signal: FailureSignal) -> Explanation:
+    """The only template here that is not about the agent.
+
+    Every other explanation answers "what did your agent do wrong". This one
+    answers "why can we not tell you", and the difference has to survive into
+    the text — an operator who reads this as an agent fault will go looking in
+    the wrong codebase, which is exactly what happened during the incident that
+    prompted this detector.
+    """
+    ev = signal.evidence
+    shapes = ev.get("unreadable_shapes") or []
+    shape_txt = ", ".join(f"`{s}`" for s in shapes) if shapes else "an unrecognised shape"
+    providers = ", ".join(ev.get("providers") or []) or "the LLM provider"
+    affected = ev.get("affected_calls", 0)
+    total = ev.get("total_llm_calls", 0)
+    suppressed = ev.get("suppressed_detectors") or []
+    reason = ev.get("reason", "unreadable_response_shape")
+
+    if reason == "all_calls_structurally_blank":
+        what = (
+            f"All {total} LLM call(s) in this run recorded zero output, zero "
+            f"completion tokens and non-zero latency — calls that measurably "
+            f"took time and measurably produced nothing. A model does not "
+            f"behave this way across an entire run; a broken telemetry path does."
+        )
+    else:
+        what = (
+            f"Dunetrace could not read the response object returned by "
+            f"{providers} on {affected} of {total} LLM call(s). The shape it "
+            f"saw was {shape_txt}. Rather than substitute a plausible-looking "
+            f"default, the SDK recorded these calls as unmeasurable."
+        )
+
+    return Explanation(
+        **_base(signal),
+        title="Instrumentation could not measure this run",
+        what=what,
+        why_it_matters=(
+            "This is a fault in the telemetry, not in your agent — nothing here "
+            "says the agent misbehaved. It matters because the following "
+            "detectors depend on completion text or finish_reason and therefore "
+            "could not run at all on this run: "
+            + (", ".join(suppressed) if suppressed else "several text-based detectors")
+            + ". Their silence is not a clean bill of health. Equally, any "
+            "EMPTY_LLM_RESPONSE you might have expected here is deliberately "
+            "suppressed: an unreadable response is not an empty one, and "
+            "reporting it as one turns an instrumentation bug into a "
+            "HIGH-severity behavioural alert on every run."
+        ),
+        evidence_summary=(
+            f"{affected} of {total} LLM call(s) unmeasurable ({shape_txt}). "
+            f"Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description=(
+                    "Unwrap raw-response envelopes before Dunetrace sees them. "
+                    "The common cause is a wrapper calling "
+                    "with_raw_response.create(), which returns a LegacyAPIResponse "
+                    "rather than a parsed ChatCompletion."
+                ),
+                language="python",
+                code=(
+                    "# If you control the call site, use the parsed response:\n"
+                    "raw = client.chat.completions.with_raw_response.create(**payload)\n"
+                    "completion = raw.parse()  # -> ChatCompletion, the shape we read\n"
+                    "\n"
+                    "# If a framework owns the call site, check its version — and\n"
+                    "# check the run.started event's `sdk_version` / `instrumented`\n"
+                    "# fields, which record exactly which library versions were\n"
+                    "# patched when this run executed."
+                ),
+            ),
+            CodeFix(
+                description=(
+                    "Check whether this is fleet-wide rather than a one-off. See "
+                    "docs/operations.md's instrumentation-health query: above ~30% "
+                    "blank calls for an agent, the telemetry is broken, not the agent."
+                ),
+                language="text",
+                code="blank_response_rate_sql('postgres')  # api_svc/instrumentation_health.py",
+            ),
+        ],
+    )
+
+
 def explain_empty_llm_response(signal: FailureSignal) -> Explanation:
     ev = signal.evidence
     occurrences = ev.get("occurrences", 1)
@@ -2473,6 +2559,154 @@ def explain_model_fallback_drift(signal: FailureSignal) -> Explanation:
     )
 
 
+# UNGROUNDED_DESTINATION
+
+
+def explain_ungrounded_destination(signal: FailureSignal) -> Explanation:
+    ev = signal.evidence
+    dest = ev.get("destination", "a destination")
+    dtype = ev.get("destination_type", "destination")
+    tool = ev.get("tool_name", "a tool")
+    step = ev.get("tool_step", signal.step_index)
+    arg_path = ev.get("arg_path")
+    taint = ev.get("taint_source") or {}
+    mode = ev.get("detection_mode", "provenance")
+    visibility = ev.get("output_visibility")
+    novel = ev.get("grounding_verdict") == "grounded_but_novel"
+
+    taint_kind = taint.get("kind")
+    taint_key = taint.get("memory_key")
+    cross_run = taint.get("cross_run")
+    origin_run = taint.get("origin_run_id")
+
+    if novel:
+        title = f"Destination not seen before for this agent: `{dest}`"
+    else:
+        title = f"Unverified destination: `{dest}` passed to `{tool}`"
+
+    if novel:
+        what = (
+            f"At step {step} the agent sent to {dtype} `{dest}` via `{tool}`. The "
+            f"destination is present in this run's own inputs, so it is not "
+            f"unexplained — but this agent has never sent to it before across "
+            f"{ev.get('baseline_runs', 'its')} observed runs, and it is configured as a "
+            f"closed-destination agent."
+        )
+    else:
+        what = (
+            f"At step {step} the agent passed {dtype} `{dest}` to `{tool}`"
+            + (f" (argument `{arg_path}`)" if arg_path else "")
+            + ". That value does not appear anywhere in this run's trusted inputs — "
+            "not the task input, not the system prompt, and not any tool or "
+            "retrieval result the run recorded."
+        )
+        if taint_kind == "memory_write":
+            what += (
+                f" It does appear in agent memory under `{taint_key}`, written from "
+                f"{taint.get('memory_source', 'an untrusted channel')}"
+                + (f" during an earlier run ({origin_run})" if cross_run and origin_run else "")
+                + ", and that entry was read back before the send."
+            )
+        elif taint_kind in ("retrieval", "tool_output"):
+            what += (
+                f" It does appear in {taint_kind.replace('_', ' ')} content that also "
+                f"carries an injection marker (`{taint.get('matched_marker')}`)."
+            )
+        elif taint_kind == "user_input":
+            what += " It does appear in the run's own input, which carries an injection marker."
+
+    if taint_kind:
+        why = (
+            "The destination came from content an attacker can control, and the agent "
+            "acted on it. This is the actuation step of a data-exfiltration chain: the "
+            "injection itself is upstream, and what makes it costly is a tool call that "
+            "sends real data somewhere the task never named. Treat the destination as "
+            "attacker-chosen until you have confirmed otherwise."
+        )
+    elif novel:
+        why = (
+            "This agent's destinations are normally a closed set, so a first-time "
+            "destination is worth a look even when the run explains where it came from. "
+            "On an agent that legitimately writes to new destinations, novelty mode "
+            "should be turned off rather than tuned."
+        )
+    else:
+        why = (
+            "The agent could not have gotten this destination from anything the run "
+            "recorded, which usually means one of two things: it was invented, or it "
+            "arrived through a channel that isn't instrumented. The first is a "
+            "reliability problem and possibly a security one; the second is a gap in "
+            "your instrumentation that hides exactly this class of failure. Both are "
+            "worth resolving, and they are distinguishable by looking at the run."
+        )
+
+    summary_parts = [f"Destination: `{dest}` ({dtype}) via `{tool}` at step {step}."]
+    if arg_path:
+        summary_parts.append(f"Argument: `{arg_path}`.")
+    summary_parts.append(f"Grounding: {ev.get('grounding_verdict', 'ungrounded')}.")
+    if taint_kind:
+        summary_parts.append(
+            f"Taint: {taint_kind}"
+            + (f" (`{taint_key}`)" if taint_key else "")
+            + (", cross-run" if cross_run else "")
+            + "."
+        )
+    if mode == "novelty":
+        summary_parts.append(
+            f"Novelty mode: baseline {ev.get('baseline_size')} destinations over "
+            f"{ev.get('baseline_runs')} runs."
+        )
+    if visibility == "partial":
+        summary_parts.append(
+            "Tool output was not fully instrumented on this run, so the trusted "
+            "surface is incomplete — confidence reduced accordingly."
+        )
+    summary_parts.append(f"Confidence: {int(signal.confidence * 100)}%.")
+
+    return Explanation(
+        **_base(signal),
+        title=title,
+        what=what,
+        why_it_matters=why,
+        evidence_summary=" ".join(summary_parts),
+        suggested_fixes=[
+            CodeFix(
+                description=(
+                    "Verify this destination. If it is unexpected, check this run for "
+                    "injection or memory-poisoning signals and quarantine the agent's "
+                    "memory store"
+                ),
+                language="text",
+                code=(
+                    "1. Confirm whether the destination is one this task should reach.\n"
+                    "2. If it is expected but Dunetrace could not see where it came from,\n"
+                    "   instrument the tool response that supplies it (pass output= to\n"
+                    "   tool_responded) — that alone makes this run silent next time.\n"
+                    "3. If it is NOT expected: look at this run's other signals\n"
+                    "   (PROMPT_INJECTION_SIGNAL, RETRIEVED_CONTENT_INJECTION,\n"
+                    "   MEMORY_POISONING), clear the implicated memory key, and review\n"
+                    "   what the agent sent.\n"
+                    "4. Add known-good domains to allowlisted_domains in detectors.yml."
+                ),
+            ),
+            CodeFix(
+                description="Gate send-class tools behind approval for unverified destinations",
+                language="python",
+                code=(
+                    "dt.add_policy(\n"
+                    "    name='approve-external-sends',\n"
+                    "    condition={'trigger': 'signal', 'operator': 'contains',\n"
+                    "               'value': 'UNGROUNDED_DESTINATION'},\n"
+                    "    action={'type': 'require_approval', 'params': {'timeout_s': 300}},\n"
+                    ")\n"
+                    "# Structural detectors run in-process before the run finishes, so this\n"
+                    "# gate is evaluated before the send-class tool body executes."
+                ),
+            ),
+        ],
+    )
+
+
 # MEMORY_POISONING
 
 
@@ -2656,6 +2890,7 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.CONTEXT_BLOAT: explain_context_bloat,
     FailureType.RETRY_STORM: explain_retry_storm,
     FailureType.EMPTY_LLM_RESPONSE: explain_empty_llm_response,
+    FailureType.INSTRUMENTATION_DEGRADED: explain_instrumentation_degraded,
     FailureType.STEP_COUNT_INFLATION: explain_step_count_inflation,
     FailureType.CASCADING_TOOL_FAILURE: explain_cascading_tool_failure,
     FailureType.FIRST_STEP_FAILURE: explain_first_step_failure,
@@ -2676,4 +2911,5 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.MODEL_FALLBACK_DRIFT: explain_model_fallback_drift,
     FailureType.MEMORY_POISONING: explain_memory_poisoning,
     FailureType.DELEGATION_LOOP: explain_delegation_loop,
+    FailureType.UNGROUNDED_DESTINATION: explain_ungrounded_destination,
 }

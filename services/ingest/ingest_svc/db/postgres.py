@@ -657,6 +657,96 @@ async def prune_old_events(retention_days: int = 90) -> int:
         return dropped
 
 
+# Evidence keys that carry raw agent content rather than detector metadata.
+#
+# `events` has a retention policy; `failure_signals` deliberately does not — the
+# dashboard's 30-day-vs-90-day regression comparison (api_svc's
+# get_fix_verification_stats) reads signals well past the event horizon, so
+# deleting the rows would break the fix-status verdicts. But a signal's evidence
+# dict embeds excerpts of the same raw content the event retention pass exists to
+# expire, which left content outliving its horizon in a table nothing pruned.
+#
+# Stripping just these keys resolves that without touching the analytics: every
+# SQL consumer of `evidence` reads metadata (`tool`, `count`,
+# `consecutive_fails`, `args_identical`, `growth_factor`, `conversation_id`) and
+# none reads a key below. Keys deliberately NOT listed, because they are detector
+# output rather than agent content: `matched_marker` / `matched_patterns` (our own
+# pattern names), `grounded_surfaces` (surface names like "input_text"),
+# `failure_source` ("declared" | "output_text"), `stall_event_sequence` (event
+# type names), `destination_type` ("email" | "url"), and every *_length integer.
+CONTENT_EVIDENCE_KEYS: tuple[str, ...] = (
+    "args",  # TOOL_LOOP — untruncated args of every call in the loop
+    "args_snippet",  # TOOL_ARGUMENT_FABRICATION, UNGROUNDED_DESTINATION
+    "content_snippet",  # RETRIEVED_CONTENT_INJECTION — retrieved text
+    "value_snippet",  # MEMORY_POISONING — memory value
+    "fabricated_entity",  # TOOL_ARGUMENT_FABRICATION — the entity itself
+    "taint_source",  # UNGROUNDED_DESTINATION — objects carrying untruncated .text
+    "destination",  # UNGROUNDED_DESTINATION — an email address or URL
+    "destination_host",  # UNGROUNDED_DESTINATION
+    "memory_key",  # MEMORY_POISONING, UNGROUNDED_DESTINATION — caller-chosen key
+    "output_snippet",  # PREMATURE_TERMINATION — LLM output excerpt
+    "missing_entities",  # HANDOFF_CONTEXT_LOSS — entities lifted from parent context
+    "tool_error",  # PREMATURE_TERMINATION, UNREAD_TOOL_ERROR — raw error text
+)
+
+_SCRUB_BATCH = 10_000
+
+
+async def scrub_old_signal_evidence(retention_days: int = 90) -> int:
+    """Strip content-bearing keys from failure_signals.evidence past the retention
+    horizon, leaving the rows themselves intact.
+
+    Deliberately a free function rather than a method on EventStore: that
+    interface covers ingest_svc's `events` write path, and signal evidence is
+    neither an event nor written by this service. It lives here because this is
+    where the retention pass already runs, not because ingest owns the table.
+
+    Idempotent — the `?|` guard means a row already scrubbed is not rewritten, so
+    repeat passes cost a scan and no writes. Batched by ctid like the DELETE
+    fallback above, so one pass over a large backlog doesn't hold a single
+    long transaction.
+
+    Returns the number of rows scrubbed.
+    """
+    from datetime import date, timedelta
+
+    if not _pool:
+        return 0
+
+    keys = list(CONTENT_EVIDENCE_KEYS)
+    cutoff = date.today() - timedelta(days=retention_days)
+    scrubbed_total = 0
+    async with _pool.acquire() as conn:
+        while True:
+            result = await conn.execute(
+                """
+                UPDATE failure_signals
+                   SET evidence = evidence - $2::text[]
+                 WHERE ctid IN (
+                     SELECT ctid FROM failure_signals
+                      WHERE detected_at < $1
+                        AND evidence ?| $2::text[]
+                      LIMIT $3
+                 )
+                """,
+                cutoff,
+                keys,
+                _SCRUB_BATCH,
+            )
+            n = int(result.split()[-1]) if result.startswith("UPDATE") else 0
+            scrubbed_total += n
+            if n < _SCRUB_BATCH:
+                break
+
+    if scrubbed_total:
+        logger.info(
+            "Evidence scrub complete: %d signal(s) stripped of content keys (detected before %s)",
+            scrubbed_total,
+            cutoff,
+        )
+    return scrubbed_total
+
+
 async def ensure_schema() -> None:
     """Create this service's base tables, then bring the SHARED schema up to
     date. Idempotent — safe to call on every startup.

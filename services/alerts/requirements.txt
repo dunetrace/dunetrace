@@ -6,3 +6,7 @@ PyYAML>=6.0
 # per-org Slack/Linear creds, but it was missing here — clean builds crash-looped
 # with ModuleNotFoundError. Matches services/api/requirements.txt.
 cryptography>=42
+# Required by dunetrace_schemas (apply_migrations -> dunetrace_schemas/__init__ -> events.py).
+# This service does not use pydantic directly, but importing the shared migration
+# runner pulls the package __init__, so the image cannot boot without it.
+pydantic==2.10.4

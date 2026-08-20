@@ -58,6 +58,13 @@ _ALLOWLIST = {
     "POLICY_SIGNING_SECRET",
     "DUNETRACE_MCP_READONLY",
     "SEMANTIC_QUOTA_EXCEEDED",  # operational signal, not a structural detector
+    "OTLP_MAX_ATTR_CHARS",  # ingest-side arg truncation cap, not a detector
+    # Env vars named in docs/detectors.md's INSTRUMENTATION_DEGRADED note:
+    # the output-text transmission opt-out (why absent text is not a fault) and
+    # the event retention window (why a baseline can expire). Neither is a
+    # detector.
+    "DUNETRACE_OMIT_LLM_OUTPUT_TEXT",
+    "EVENT_RETENTION_DAYS",
     "SHADOW_BY_DEFAULT",
     "LIVE_DETECTORS",  # the shadow/live gating set in detector_svc, not a detector
     "MIN_MESSAGE_LENGTH",
@@ -65,7 +72,7 @@ _ALLOWLIST = {
     "SHADOW",
     # SDK constants that name *collections of* detectors, or detector tunables —
     # all defined in packages/sdk-py/dunetrace/detectors.py.
-    "TIER1_DETECTORS",  # the 26-detector in-path battery, not a detector itself
+    "TIER1_DETECTORS",  # the 29-detector in-path battery, not a detector itself
     "SCAN_HEAD_CHARS",  # injection scan window bound
     "SCAN_TAIL_CHARS",  # injection scan window bound
     # Custom-detector translator vocabulary (detector_svc/custom_detector.py and
