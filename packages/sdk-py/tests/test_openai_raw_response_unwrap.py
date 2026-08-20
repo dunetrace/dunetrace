@@ -17,6 +17,9 @@ Tests construct the wrappers directly — no network, no API key.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import sys
+import types
 import unittest
 
 from dunetrace import Dunetrace
@@ -87,6 +90,74 @@ class _MemoisingWrapper(_SyncWrapper):
             self.body_reads += 1
             self._cache = self._parsed
         return self._cache
+
+
+def _openai_installed() -> bool:
+    """Whether the REAL openai package is importable.
+
+    CI installs the SDK without provider libraries (the core SDK is
+    zero-dependency), so anything asserting a fact about openai's own classes
+    has to be conditional. Tests of OUR patching logic must not be — see
+    _fake_openai_module.
+    """
+    try:
+        import openai  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+@contextlib.contextmanager
+def _openai_completions_module():
+    """Yield `openai.resources.chat.completions`, faking it when openai is absent.
+
+    The patcher is what these tests exercise, not openai — so they must run in
+    CI, where openai is not installed. When the real package IS present we use
+    it (a stronger test); otherwise a minimal stand-in with the two classes
+    _patch_openai reaches for.
+
+    sys.modules is restored EXACTLY on exit: entries that existed are put back,
+    entries we created are removed. tests/test_auto_instrument.py's equivalent
+    deletes unconditionally, which leaves the process able to hold two distinct
+    module objects for the same package — the failure mode that forces this
+    file's LangChain test to skip in the full suite.
+    """
+    if _openai_installed():
+        import openai.resources.chat.completions as real
+
+        yield real
+        return
+
+    names = (
+        "openai",
+        "openai.resources",
+        "openai.resources.chat",
+        "openai.resources.chat.completions",
+    )
+    saved = {n: sys.modules.get(n) for n in names}
+    mods = {n: types.ModuleType(n) for n in names}
+    completions = mods["openai.resources.chat.completions"]
+
+    class Completions:
+        def create(self, *, messages=None, model="unknown", **kwargs):
+            raise AssertionError("test must install its own create()")
+
+    class AsyncCompletions:
+        async def create(self, *, messages=None, model="unknown", **kwargs):
+            raise AssertionError("test must install its own create()")
+
+    completions.Completions = Completions
+    completions.AsyncCompletions = AsyncCompletions
+    sys.modules.update(mods)
+    try:
+        yield completions
+    finally:
+        for n, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = prev
 
 
 def _client():
@@ -185,8 +256,14 @@ class TestCoroutineParse(unittest.TestCase):
             out = _unwrap_response(wrapper)
         self.assertIs(out, wrapper, "sync path must fall back, not return a coroutine")
 
+    @unittest.skipUnless(_openai_installed(), "openai not installed")
     def test_real_async_api_response_parse_is_already_a_coroutine(self):
-        """Not merely forward-compat: this is true in the installed openai."""
+        """Not merely forward-compat: this is true in the installed openai.
+
+        Conditional because it asserts a property of openai itself, which CI
+        does not install. It guards against an upstream change, so it only has
+        meaning where the real package exists.
+        """
         import inspect
 
         from openai._response import AsyncAPIResponse
@@ -206,29 +283,25 @@ class TestCallerTransparency(unittest.TestCase):
     """
 
     def test_sync_patch_returns_the_original_object(self):
-        import openai.resources.chat.completions as _mod
-
+        from dunetrace import auto
         from dunetrace.auto import _patch_openai
 
         completion = _chat_completion()
         sentinel = _SyncWrapper(completion)
-        orig = _mod.Completions.create
-        _mod.Completions.create = lambda self, **kw: sentinel
-        try:
-            from dunetrace import auto
-
-            auto._PATCHED.discard("openai")
-            _patch_openai()
-            c = _client()
-            with c.run("a") as run:
-                returned = _mod.Completions.create(None, messages=[], model="gpt-4o")
-                payload = _llm_responded(run).payload
-            c.shutdown(timeout=1)
-        finally:
-            _mod.Completions.create = orig
-            from dunetrace import auto
-
-            auto._PATCHED.discard("openai")
+        with _openai_completions_module() as _mod:
+            orig = _mod.Completions.create
+            _mod.Completions.create = lambda self, **kw: sentinel
+            try:
+                auto._PATCHED.discard("openai")
+                _patch_openai()
+                c = _client()
+                with c.run("a") as run:
+                    returned = _mod.Completions.create(None, messages=[], model="gpt-4o")
+                    payload = _llm_responded(run).payload
+                c.shutdown(timeout=1)
+            finally:
+                _mod.Completions.create = orig
+                auto._PATCHED.discard("openai")
 
         self.assertIs(returned, sentinel, "caller got the unwrapped object")
         self.assertEqual(returned.headers["x-request-id"], "req_123")
@@ -237,8 +310,6 @@ class TestCallerTransparency(unittest.TestCase):
         self.assertEqual(payload["completion_tokens"], 8)
 
     def test_async_patch_returns_the_original_object(self):
-        import openai.resources.chat.completions as _mod
-
         from dunetrace import auto
         from dunetrace.auto import _patch_openai
 
@@ -247,21 +318,22 @@ class TestCallerTransparency(unittest.TestCase):
         async def _fake(self, **kw):
             return sentinel
 
-        orig = _mod.AsyncCompletions.create
-        _mod.AsyncCompletions.create = _fake
-        try:
-            auto._PATCHED.discard("openai")
-            _patch_openai()
-            c = _client()
-            with c.run("a") as run:
-                returned = asyncio.run(
-                    _mod.AsyncCompletions.create(None, messages=[], model="gpt-4o")
-                )
-                payload = _llm_responded(run).payload
-            c.shutdown(timeout=1)
-        finally:
-            _mod.AsyncCompletions.create = orig
-            auto._PATCHED.discard("openai")
+        with _openai_completions_module() as _mod:
+            orig = _mod.AsyncCompletions.create
+            _mod.AsyncCompletions.create = _fake
+            try:
+                auto._PATCHED.discard("openai")
+                _patch_openai()
+                c = _client()
+                with c.run("a") as run:
+                    returned = asyncio.run(
+                        _mod.AsyncCompletions.create(None, messages=[], model="gpt-4o")
+                    )
+                    payload = _llm_responded(run).payload
+                c.shutdown(timeout=1)
+            finally:
+                _mod.AsyncCompletions.create = orig
+                auto._PATCHED.discard("openai")
 
         self.assertIs(returned, sentinel)
         self.assertEqual(payload["output"], "The capital of France is Paris.")
@@ -339,9 +411,13 @@ class TestNoDoubleRead(unittest.TestCase):
         self.assertEqual(wrapper.parse_calls, 2)
         self.assertEqual(wrapper.body_reads, 1, "body was read twice")
 
+    @unittest.skipUnless(_openai_installed(), "openai not installed")
     def test_real_openai_memoisation_attribute_still_exists(self):
         """If openai drops _parsed_by_type, our extra parse() could start
-        costing a second body read — fail loudly rather than silently."""
+        costing a second body read — fail loudly rather than silently.
+
+        Conditional for the same reason as the AsyncAPIResponse check: it is an
+        assertion about openai, not about us."""
         import inspect
 
         from openai._legacy_response import LegacyAPIResponse
@@ -361,31 +437,29 @@ class TestEndToEndRegression(unittest.TestCase):
     """
 
     def test_langchain_shaped_call_records_real_output_and_does_not_fire_empty(self):
-        import openai.resources.chat.completions as _mod
-
         from dunetrace import auto
         from dunetrace.auto import _patch_openai
-        from dunetrace.detectors import EmptyLlmResponseDetector
+        from dunetrace.detectors import EmptyLlmResponseDetector, run_detectors
         from dunetrace.models import FailureType
-        from dunetrace.detectors import run_detectors
 
         # What langchain_openai receives from with_raw_response.create()
         wrapper = _SyncWrapper(_chat_completion(text="Paris is the capital.", completion_tokens=6))
-        orig = _mod.Completions.create
-        _mod.Completions.create = lambda self, **kw: wrapper
-        try:
-            auto._PATCHED.discard("openai")
-            _patch_openai()
-            c = _client()
-            with c.run("langgraph-agent") as run:
-                for _ in range(3):
-                    _mod.Completions.create(None, messages=[{"content": "hi"}], model="gpt-4o")
-                payload = _llm_responded(run).payload
-                state = run.state
-            c.shutdown(timeout=1)
-        finally:
-            _mod.Completions.create = orig
-            auto._PATCHED.discard("openai")
+        with _openai_completions_module() as _mod:
+            orig = _mod.Completions.create
+            _mod.Completions.create = lambda self, **kw: wrapper
+            try:
+                auto._PATCHED.discard("openai")
+                _patch_openai()
+                c = _client()
+                with c.run("langgraph-agent") as run:
+                    for _ in range(3):
+                        _mod.Completions.create(None, messages=[{"content": "hi"}], model="gpt-4o")
+                    payload = _llm_responded(run).payload
+                    state = run.state
+                c.shutdown(timeout=1)
+            finally:
+                _mod.Completions.create = orig
+                auto._PATCHED.discard("openai")
 
         self.assertEqual(payload["output"], "Paris is the capital.")
         self.assertGreater(payload["output_length"], 0)
