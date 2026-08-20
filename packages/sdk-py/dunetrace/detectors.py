@@ -36,6 +36,7 @@ from dunetrace.models import (
     EventType,
     FailureSignal,
     FailureType,
+    LlmCall,
     RunState,
     Severity,
     ToolCall,
@@ -53,6 +54,33 @@ def _scale_confidence(ratio: float) -> float:
     Applied to count/ratio detectors; binary detectors keep their static values.
     """
     return min(1.0, 0.5 + (ratio - 1.0) * 0.4)
+
+
+def _is_unmeasurable(call: "LlmCall") -> bool:
+    """True when this call's response object could not be read at all.
+
+    `instrumentation_degraded` is set by the auto-instrumentation extractors
+    (auto.py) when a response is not the shape they expect — a raw/streaming
+    envelope, a version skew, a wrapper like with_raw_response.create(). Such a
+    call carries no trustworthy finish_reason and no trustworthy output text, so
+    every detector that keys on either must exclude it rather than read the
+    fabricated defaults that used to be substituted.
+    """
+    return getattr(call, "instrumentation_degraded", None) is not None
+
+
+# The shape a call takes when instrumentation is silently broken: nothing was
+# read, but the call demonstrably happened (latency was measured). Kept here as
+# one definition because InstrumentationDegradedDetector and the vendor-side
+# fleet query (services/api/api_svc/instrumentation_health.py) must agree on it
+# — they are the in-run and cross-run views of the same condition.
+def _matches_degraded_fingerprint(call: "LlmCall") -> bool:
+    return (
+        (call.output_length or 0) == 0
+        and (call.completion_tokens or 0) == 0
+        and (call.latency_ms or 0) > 0
+        and (call.finish_reason is None or call.finish_reason == "stop")
+    )
 
 
 # ── Base ──────────────────────────────────────────────────────────────────────
@@ -681,7 +709,14 @@ class LlmTruncationLoopDetector(BaseDetector):
         if len(state.llm_calls) < self.THRESHOLD:
             return None
 
-        truncated = [c for c in state.llm_calls if c.finish_reason == "length"]
+        # None (unreadable response) is deliberately not "length": we cannot
+        # claim a truncation we never observed. This detector keys solely on
+        # finish_reason with no corroborating evidence, so an unreadable call
+        # contributes nothing here and is reported by
+        # INSTRUMENTATION_DEGRADED instead.
+        truncated = [
+            c for c in state.llm_calls if c.finish_reason == "length" and not _is_unmeasurable(c)
+        ]
 
         if len(truncated) < self.THRESHOLD:
             return None
@@ -752,7 +787,15 @@ class SilentTruncationDetector(BaseDetector):
         if not llm_calls:
             return None
 
-        all_truncated = [c for c in llm_calls if c.finish_reason in self.TRUNCATION_REASONS]
+        # `None in TRUNCATION_REASONS` is False, which is the correct branch —
+        # made explicit here so it reads as a decision rather than an accident.
+        # Same reasoning as LLM_TRUNCATION_LOOP: finish_reason is this
+        # detector's only evidence, so an unreadable one is not evidence.
+        all_truncated = [
+            c
+            for c in llm_calls
+            if c.finish_reason in self.TRUNCATION_REASONS and not _is_unmeasurable(c)
+        ]
         if not all_truncated:
             return None
         # Repeated truncation is LLM_TRUNCATION_LOOP's job — don't double-fire.
@@ -1148,10 +1191,20 @@ class EmptyLlmResponseDetector(BaseDetector):
     SEVERITY = Severity.HIGH
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        # `finish_reason is None` means the response was never read (see
+        # _is_unmeasurable) and must NOT be treated as a "stop". This is the
+        # exact false positive that motivated provenance: a LangGraph agent
+        # whose with_raw_response.create() returned a LegacyAPIResponse produced
+        # a fabricated ("", "stop") pair on 100% of runs, which is byte-for-byte
+        # this detector's trigger. The `== "stop"` comparison already excludes
+        # None; the explicit degraded check below covers the partial case where
+        # finish_reason was readable but the content was not.
         empty = [
             c
             for c in state.llm_calls
-            if c.finish_reason == "stop" and getattr(c, "output_length", None) == 0
+            if c.finish_reason == "stop"
+            and getattr(c, "output_length", None) == 0
+            and not _is_unmeasurable(c)
         ]
         if not empty:
             return None
@@ -1308,12 +1361,15 @@ class FirstStepFailureDetector(BaseDetector):
                 },
             )
 
+        # Same ("", "stop") fabrication risk as EMPTY_LLM_RESPONSE, and the
+        # same resolution: an unreadable response is not an empty one.
         early_empty = [
             c
             for c in state.llm_calls
             if c.step_index <= self.MAX_STEP
             and getattr(c, "output_length", None) == 0
             and c.finish_reason == "stop"
+            and not _is_unmeasurable(c)
         ]
         if early_empty:
             return FailureSignal(
@@ -1696,12 +1752,33 @@ class PrematureTerminationDetector(BaseDetector):
         if not problem_calls:
             return None
 
+        # Absence of output text has three distinct causes and only one of them
+        # is "the agent said nothing":
+        #
+        #   1. instrumentation_degraded present -> the response was never read.
+        #      INSTRUMENTATION_DEGRADED owns this run; returning None here is
+        #      correct but its silence is explained by that signal rather than
+        #      being mistaken for a clean verdict.
+        #   2. output_length > 0 with no text -> DUNETRACE_OMIT_LLM_OUTPUT_TEXT.
+        #      A deliberate operator choice, not a fault. Nothing to report.
+        #   3. genuinely empty responses -> EMPTY_LLM_RESPONSE's job.
+        #
+        # All three end in `return None` here, but they are not the same None,
+        # and conflating them is what let a broken pipeline read as a healthy
+        # agent for the entire duration of the incident this comment documents.
         llm_responses = [
             e
             for e in state.events
             if e.event_type == EventType.LLM_RESPONDED and e.payload.get("output")
         ]
         if not llm_responses:
+            if any(_is_unmeasurable(c) for c in state.llm_calls):
+                logger.debug(
+                    "%s: no readable completion text on run %s — instrumentation "
+                    "degraded, see INSTRUMENTATION_DEGRADED",
+                    self.name,
+                    state.run_id,
+                )
             return None
         last_llm_step = max(e.step_index for e in llm_responses)
 
@@ -2562,8 +2639,14 @@ class RunawayIterationDetector(BaseDetector):
     regardless of step count or cost. Absent that, it falls back to scanning
     the last LOOKBACK_MESSAGES llm.responded outputs for completion language
     (final answer markers, "task complete", etc.) — the same kind of raw-text
-    scan PREMATURE_TERMINATION/UNREAD_TOOL_ERROR already do, always available
-    since llm.responded's output text is not optional.
+    scan PREMATURE_TERMINATION/UNREAD_TOOL_ERROR already do — but that text is
+    OPTIONAL, not guaranteed. It is absent when the caller sets
+    DUNETRACE_OMIT_LLM_OUTPUT_TEXT (a deliberate bandwidth/privacy choice) and
+    when instrumentation could not read the response at all. Absence therefore
+    means "no completion signal was observable", never "no completion signal was
+    given" — reading it the latter way makes this detector fire on runs it
+    cannot actually assess, which is why an unmeasurable run raises
+    INSTRUMENTATION_DEGRADED instead.
 
     Fires HIGH when either the step or cost ceiling is crossed with no
     completion signal; CRITICAL when both are crossed simultaneously.
@@ -2615,6 +2698,31 @@ class RunawayIterationDetector(BaseDetector):
             for e in state.events
             if e.event_type == EventType.LLM_RESPONDED and e.payload.get("output")
         ]
+
+        # This detector fails in the OPPOSITE direction from EMPTY_LLM_RESPONSE:
+        # it fires on the ABSENCE of completion language, so unreadable text
+        # produces a false positive rather than a false negative. A run whose
+        # text we never had is a run whose completion signal we cannot assess,
+        # and "could not assess" must not be reported as "no completion signal
+        # was given" — that is the false docstring this class used to carry.
+        #
+        # Two ways the text can be missing without the agent doing anything
+        # wrong: instrumentation could not read the response, or the operator
+        # set DUNETRACE_OMIT_LLM_OUTPUT_TEXT. Both leave llm.responded events
+        # present but output-free, so both are caught here.
+        responded = [e for e in state.events if e.event_type == EventType.LLM_RESPONDED]
+        if responded and not llm_outputs:
+            logger.debug(
+                "%s: %d llm.responded event(s) on run %s carry no output text — "
+                "cannot assess completion language, so not firing. Either "
+                "DUNETRACE_OMIT_LLM_OUTPUT_TEXT is set or instrumentation is "
+                "degraded (see INSTRUMENTATION_DEGRADED).",
+                self.name,
+                len(responded),
+                state.run_id,
+            )
+            return None
+
         recent = llm_outputs[-self.LOOKBACK_MESSAGES :]
         if any(self._contains_completion_pattern(e.payload["output"]) for e in recent):
             return None  # a completion signal exists — not runaway
@@ -3888,9 +3996,115 @@ class UngroundedDestinationDetector(BaseDetector):
         )
 
 
+# ── INSTRUMENTATION_DEGRADED ──────────────────────────────────────────────────
+
+# Detectors whose only evidence is completion text or finish_reason. When a run
+# is unmeasurable these do not fire, and their silence must not be read as a
+# clean verdict — naming them in the signal is what turns "no findings" into
+# "these specific checks could not run".
+_TEXT_DEPENDENT_DETECTORS = (
+    "EMPTY_LLM_RESPONSE",
+    "PREMATURE_TERMINATION",
+    "UNREAD_TOOL_ERROR",
+    "LLM_TRUNCATION_LOOP",
+    "SILENT_TRUNCATION",
+    "RUNAWAY_ITERATION",
+    "FIRST_STEP_FAILURE",
+)
+
+
+class InstrumentationDegradedDetector(BaseDetector):
+    """The SDK could not measure this run's LLM calls.
+
+    This is not a statement about the agent. It is a statement about the
+    telemetry, and it exists because the detector layer previously could not
+    distinguish "I looked and found nothing wrong" from "I could not look".
+    Those two produce identical output — no signal — and the second one silently
+    disables a third of the battery.
+
+    Fires on either of two conditions:
+
+    1. Any call carries an ``instrumentation_degraded`` marker, meaning an
+       extractor in auto.py could not read the provider's response object and
+       said so instead of substituting a plausible default.
+
+    2. Every call matches the degraded fingerprint — zero output, zero
+       completion tokens, non-zero latency. A call that measurably took time and
+       measurably produced nothing, repeated across an entire run, is a broken
+       pipeline rather than a model that answered nothing every single turn.
+       Requires MIN_CALLS so a one-call run with a genuinely empty response is
+       left to EMPTY_LLM_RESPONSE, which is the right detector for that.
+
+    Deliberately does NOT fire on a run whose text is merely absent because
+    DUNETRACE_OMIT_LLM_OUTPUT_TEXT is set: that omission is a deliberate
+    operator choice, output_length is still transmitted, and calling it
+    degraded would report every privacy-conscious deployment as broken.
+
+    Tunable: MIN_CALLS (default 2).
+    """
+
+    name = "INSTRUMENTATION_DEGRADED"
+    SEVERITY = Severity.MEDIUM
+    MIN_CALLS = 2
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        calls = state.llm_calls
+        if not calls:
+            return None
+
+        marked = [c for c in calls if _is_unmeasurable(c)]
+        # The `is not None` filter is redundant at runtime — _is_unmeasurable
+        # already guarantees it — but it is what narrows Optional[str] to str
+        # for the type checker, which cannot see through that helper.
+        shapes = sorted(
+            {c.instrumentation_degraded for c in marked if c.instrumentation_degraded is not None}
+        )
+
+        if marked:
+            reason = "unreadable_response_shape"
+            affected = marked
+        elif len(calls) >= self.MIN_CALLS and all(_matches_degraded_fingerprint(c) for c in calls):
+            # No marker, but every call is structurally blank. This catches a
+            # break upstream of our extractors — a framework that hands us an
+            # already-emptied response — where nothing had a chance to mark it.
+            reason = "all_calls_structurally_blank"
+            affected = list(calls)
+        else:
+            return None
+
+        return FailureSignal(
+            failure_type=FailureType.INSTRUMENTATION_DEGRADED,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=affected[0].step_index,
+            confidence=0.95 if marked else 0.8,
+            evidence={
+                "reason": reason,
+                # The shape that defeated extraction, e.g.
+                # "openai_response_shape:LegacyAPIResponse". Empty for the
+                # fingerprint path, where nothing identified itself.
+                "unreadable_shapes": shapes,
+                "affected_calls": len(affected),
+                "total_llm_calls": len(calls),
+                "providers": sorted({c.provider for c in affected if c.provider}),
+                "models": sorted({c.model for c in affected if c.model}),
+                "first_step": affected[0].step_index,
+                # What this run's silence does NOT mean.
+                "suppressed_detectors": list(_TEXT_DEPENDENT_DETECTORS),
+                "unmeasurable": [
+                    "llm.responded.output",
+                    "llm.responded.finish_reason",
+                ],
+            },
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TIER1_DETECTORS: List[BaseDetector] = [
+    InstrumentationDegradedDetector(),
     OversizedToolArgumentsDetector(),
     ToolLoopDetector(),
     ToolThrashingDetector(),

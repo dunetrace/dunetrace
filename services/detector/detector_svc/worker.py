@@ -23,6 +23,7 @@ from detector_svc.config import settings
 from detector_svc.config_loader import load_custom_detector_budget
 from detector_svc.custom_detector import evaluate_custom_detector
 from detector_svc.custom_python_detectors import load_custom_detector_plugins
+from detector_svc.baseline_metrics import build_baseline_metrics
 from detector_svc.db import (
     LIVE_DETECTORS,
     advance_watermark,
@@ -44,6 +45,7 @@ from detector_svc.db import (
     fetch_token_growth_baseline,
     fetch_total_tokens_baseline,
     get_watermark,
+    prune_baseline_metrics,
     prune_processed_runs,
     init_pool,
     MAX_PROCESSING_ATTEMPTS,
@@ -57,6 +59,7 @@ from detector_svc.db import (
     advance_clean_runs,
     upsert_destination_baseline,
     upsert_run_and_conversation,
+    write_baseline_metrics,
     write_run_state_metrics,
 )
 from detector_svc.state_metrics import summarize_states
@@ -618,6 +621,30 @@ async def process_run(
     except Exception as exc:
         logger.warning("Custom detector processing failed for run_id=%s: %s", run_id, exc)
 
+    # Baseline metrics: store this run's scalars so the P75 baselines can be
+    # computed from them later instead of re-derived from raw events, which are
+    # pruned at EVENT_RETENTION_DAYS (see baseline_metrics.py). Written from the
+    # same RunState the detectors just consumed, so a stored metric cannot drift
+    # from the metric it will be compared against.
+    #
+    # `clean` mirrors the baseline's own definition: a run that fired a LIVE
+    # signal is not a reference for normal. fired_types is already filtered to
+    # LIVE_DETECTORS, and on a reprocess it holds only newly-fired types — so
+    # `existing_types` is consulted too, or a re-detected run that had already
+    # signalled would be recorded as clean.
+    try:
+        had_live_signal = bool(fired_types) or any(ft in LIVE_DETECTORS for ft in existing_types)
+        await write_baseline_metrics(
+            org_id,
+            run_id,
+            agent_id,
+            agent_version,
+            not had_live_signal,
+            build_baseline_metrics(state),
+        )
+    except Exception as exc:
+        logger.warning("Baseline metrics failed for run_id=%s: %s", run_id, exc)
+
     # State metrics (Capability 3, Phase 3.3): precompute per-state time totals
     # for this run so api_svc can build cross-run analytics without re-reading
     # raw events. Own try/except — a bug here never blocks detection.
@@ -721,6 +748,19 @@ async def _prune_loop() -> None:
                         "aged out of retention.",
                         total,
                     )
+                # Bounded by rank per agent, not by age — see
+                # prune_baseline_metrics. Separate try/except so a failure here
+                # can't stop processed_runs from being reclaimed.
+                try:
+                    trimmed = await prune_baseline_metrics()
+                    if trimmed:
+                        logger.info(
+                            "Trimmed %d run_baseline_metrics row(s) beyond the "
+                            "per-agent retention rank.",
+                            trimmed,
+                        )
+                except Exception:
+                    logger.exception("run_baseline_metrics prune failed")
         except Exception:
             logger.exception("processed_runs prune failed")
         await asyncio.sleep(_PRUNE_INTERVAL)

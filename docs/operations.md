@@ -92,7 +92,7 @@ curl -s -X POST "http://localhost:8001/admin/prune-events" \
   -d '{"admin_key": "<ADMIN_API_KEY>"}'
 
 # Response:
-{"partitions_dropped": 1, "retention_days": 90}
+{"partitions_dropped": 1, "signals_scrubbed": 412, "retention_days": 90}
 ```
 
 Pass `retention_days` explicitly to override the configured default for this one invocation:
@@ -104,6 +104,86 @@ curl -s -X POST "http://localhost:8001/admin/prune-events" \
 ```
 
 `ADMIN_API_KEY` must be set in the environment — an unset or empty value rejects every request (closed by default), same as the key-creation endpoint.
+
+Unlike the daily loop, a scrub failure here is **not** swallowed — the call returns a 500. The loop can afford to log and retry on the next tick; a manual invocation has no next tick, and reporting `signals_scrubbed: 0` for a pass that actually errored is indistinguishable from "there was nothing to scrub".
+
+---
+
+## Instrumentation health
+
+`INSTRUMENTATION_DEGRADED` (see [detectors.md](detectors.md)) answers *"was this
+run measurable?"*. This query answers *"is this agent's telemetry broken?"*,
+which is only visible in aggregate: one blank LLM call is unremarkable, the same
+call on 100% of an agent's traffic is a broken pipeline.
+
+The fingerprint is a call that measurably took time and measurably produced
+nothing:
+
+```
+output_length = 0 AND finish_reason = 'stop' AND completion_tokens = 0 AND latency_ms > 0
+```
+
+`latency_ms > 0` is what separates a real round-trip from a call that never
+happened. A genuinely empty model response has this shape too — that is the
+point. One such call is a finding; **above ~30% of an agent's calls it is not a
+model answering nothing 30% of the time, it is an extractor reading the wrong
+object.**
+
+The canonical SQL lives in `services/api/api_svc/instrumentation_health.py` as a
+single template rendered for both Postgres and SQLite, so the query documented
+here and the one the test exercises cannot drift. Render it with
+`blank_response_rate_sql("postgres")`.
+
+`provider` comes from `llm.called`, not `llm.responded`, so the query joins the
+two on `(org_id, run_id, step_index)` — `llm.responded` is emitted with
+`advance=False` and therefore shares its `llm.called`'s `step_index`, which makes
+that key work even for events predating `call_id`.
+
+Both `finish_reason = 'stop'` and `finish_reason IS NULL` count. A current SDK
+omits `finish_reason` when it could not read one, but events already stored — and
+every agent still running a pre-provenance SDK — carry the fabricated `'stop'`.
+
+**Worked example.** The incident this comes from: `langchain_openai` calls
+`client.with_raw_response.create()`, so `Completions.create` returned a
+`LegacyAPIResponse` rather than a `ChatCompletion`. The extractors hit their
+fallback branches, substituted `("", "stop")`, and produced this fingerprint on
+100% of calls — firing `EMPTY_LLM_RESPONSE` on every run including the control.
+This query would have shown `blank_fraction = 1.0` for that agent on day one.
+
+---
+
+## Signal evidence scrub
+
+`failure_signals` has no retention policy and deliberately keeps its rows: the dashboard compares the last 30 days of signals against a days-30-to-90 baseline to decide whether a fix worked (`verified` / `likely_fixed` / `still_occurring`), so deleting aged signals would permanently truncate the baseline arm of that comparison. The table is also not partitioned, so expiry would mean a batched `DELETE` with vacuum pressure rather than an instant partition drop, and five tables carry a bare `signal_id` with no foreign key (`fixes`, `signal_feedback`, `signal_group_members`, `linear_issue_signals`) — deleting would silently orphan them.
+
+But a signal's `evidence` dict embeds excerpts of the same raw agent content the event retention pass exists to expire — in two cases untruncated:
+
+| Evidence key | Detector | Content |
+|---|---|---|
+| `args` | `TOOL_LOOP` | Full raw arguments of **every** call in the loop |
+| `taint_source` | `UNGROUNDED_DESTINATION` | Objects carrying untruncated `input_text` / tool output / retrieval content / memory values |
+| `destination`, `destination_host` | `UNGROUNDED_DESTINATION` | An email address or URL |
+| `tool_error` | `PREMATURE_TERMINATION`, `UNREAD_TOOL_ERROR` | Raw tool error text |
+| `output_snippet` | `PREMATURE_TERMINATION` | LLM output excerpt |
+| `args_snippet` | `TOOL_ARGUMENT_FABRICATION`, `UNGROUNDED_DESTINATION` | Tool argument excerpt |
+| `content_snippet` | `RETRIEVED_CONTENT_INJECTION` | Retrieved text excerpt |
+| `value_snippet` | `MEMORY_POISONING` | Memory value excerpt |
+| `fabricated_entity` | `TOOL_ARGUMENT_FABRICATION` | The fabricated value itself |
+| `missing_entities` | `HANDOFF_CONTEXT_LOSS` | Entities lifted from the parent's context |
+| `memory_key` | `MEMORY_POISONING`, `UNGROUNDED_DESTINATION` | Caller-chosen memory key |
+
+So the rows stay and those keys are stripped, on the same `EVENT_RETENTION_DAYS` window as the event prune — **one content horizon**, so raw content leaves `events` and `failure_signals.evidence` at the same moment rather than on two schedules that can drift apart.
+
+This costs no analytics. Every SQL consumer of `evidence` reads metadata (`tool`, `count`, `consecutive_fails`, `args_identical`, `growth_factor`, `conversation_id`); none reads a key in the table above. Detector-owned labels are deliberately kept — `matched_marker` and `matched_patterns` name which of Dunetrace's own constants matched, `grounded_surfaces` names surfaces (`"input_text"`), `failure_source` is a `"declared"`/`"output_text"` literal, and every `*_length` field is an integer. The explainer's display templates already null-guard the content keys, so a scrubbed signal renders without them rather than erroring.
+
+The scrub runs as a second pass in the same daily loop (`main.py::_run_scrub_once`), kept separate from the prune so a partition-drop error can't skip it. It is idempotent: a `WHERE evidence ?| ARRAY[...]` guard means an already-scrubbed row is never rewritten, so repeat passes cost a scan and no writes. Work is batched by `ctid` (10,000 rows) so a large backlog doesn't hold one long transaction.
+
+```
+Evidence scrub complete: 412 signal(s) stripped of content keys (detected before 2026-05-21)
+Evidence scrub took 0.31s, scrubbed 412 signal(s)
+```
+
+**Adding a detector**: if it puts a content excerpt in `evidence`, add the key to `CONTENT_EVIDENCE_KEYS` in `services/ingest/ingest_svc/db/postgres.py`. `TestContentEvidenceKeyCoverage` in `services/ingest/tests/test_ingest.py` walks the detector source and fails the build if a content-derived key isn't listed — it is what catches the "new detector quietly stores content that outlives the horizon forever" case, which a count assertion cannot.
 
 ---
 

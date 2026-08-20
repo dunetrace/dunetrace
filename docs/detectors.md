@@ -1,16 +1,16 @@
 # Detectors
 
-Dunetrace runs 31 structural detectors against every completed agent run. All of
+Dunetrace runs 32 structural detectors against every completed agent run. All of
 them are listed in the table below; the nine newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
 
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
-> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **28**
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **29**
 > detectors the SDK can also run *client-side, in-path*; the three that can't
 > (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`) need raw
-> input or a second run's data. The detector worker runs all 31 regardless — see
+> input or a second run's data. The detector worker runs all 32 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -70,8 +70,48 @@ Semantic findings never trigger a policy — see
 | `RUNAWAY_ITERATION` | Step or cost ceiling crossed with no completion signal | HIGH/CRITICAL |
 | `MEMORY_POISONING` | An injection/override directive was written into the agent's own memory, where it re-steers the agent when read back | HIGH/CRITICAL |
 | `DELEGATION_LOOP` | Two or more agents delegate to each other in a cycle that keeps going around instead of converging | HIGH/CRITICAL |
+| `INSTRUMENTATION_DEGRADED` | The SDK could not measure the run's LLM calls — a telemetry fault, not an agent fault ³ | MEDIUM |
 
-¹ **Six detectors use per-agent learned baselines.** `STEP_COUNT_INFLATION`, `SLOW_STEP`, `CONTEXT_BLOAT`, `REASONING_STALL`, `COST_SPIKE`, and `SESSION_LATENCY` compute a P75 from the last 50 successfully completed runs (errored runs excluded) for the same `agent_id` + `agent_version` pair. The threshold fires at **2× that baseline** (3× for COST_SPIKE and SESSION_LATENCY). Each detector falls back to its static threshold until at least **20** historical runs exist — below that the P75 estimate is too sensitive to individual outliers to be useful — then switches to the adaptive baseline automatically. Tune the multiplier per agent category with `inflation_factor` in `detectors.yml`.
+¹ **Six detectors use per-agent learned baselines.** `STEP_COUNT_INFLATION`, `SLOW_STEP`, `CONTEXT_BLOAT`, `REASONING_STALL`, `COST_SPIKE`, and `SESSION_LATENCY` compute a P75 from the last 50 **clean, successfully completed** runs for the same `agent_id` + `agent_version` pair.
+
+A run qualifies only if it (a) reached `run.completed` — errored runs exit at step 1-2 and drag P75 down, causing false `STEP_COUNT_INFLATION` — and (b) produced **no live signal**. A run that fired a live detector records the agent misbehaving, so it cannot also define what normal looks like; without that filter a chronically looping agent raises its own step and token baselines until the loop reads as typical and the detector goes quiet. Shadow signals are deliberately *not* disqualifying — a shadow detector is unvalidated by definition, and letting one shrink the baseline population would mean enabling it for evaluation silently retuned six unrelated live detectors.
+
+**Baselines are computed from stored per-run scalars, not from raw events.** Each run's metrics are written to `run_baseline_metrics` at detection time by `detector_svc/baseline_metrics.py::build_baseline_metrics(state)`, from the same `RunState` the detectors just consumed. Two reasons:
+
+- **Events expire; baselines shouldn't.** `events` is pruned at `EVENT_RETENTION_DAYS` (90 by default). Re-deriving baselines from events meant an agent doing fewer than 20 completed runs inside that window could never mature one — precisely the low-traffic agent an adaptive threshold helps most. The metrics table is bounded by *rank* (newest 200 per `agent_id`+`agent_version`), never by age, so an agent doing four runs a month still reaches the minimum; it just takes months, which is correct.
+- **One implementation can't drift from itself.** The old SQL re-derived each metric independently of the detector, and had drifted: `CONTEXT_BLOAT`'s baseline computed `MAX/MIN` prompt tokens where the detector computed positional `last/first`, and read only `llm.called` where the detector honours `llm.responded`'s override. The effective threshold was not the configured one. A metric computed once, from `RunState`, cannot disagree with the detector reading the same `RunState`.
+
+A `NULL` metric means the run failed that detector's guard (too few LLM calls, context too small) and is skipped by the aggregate — so a run can feed the token baseline while sitting out the growth one.
+
+> **`SLOW_STEP`'s statistic changed.** The old query pooled every step gap from 50 runs into one percentile. A one-row-per-run store can't preserve that, so the stored path takes the P75 of each run's *own* P75 gap. It's more robust — a single 500-step run can no longer dominate the sample — but it is not the same number, and the effective threshold shifts on agents with high within-run latency variance. The other five metrics are unchanged.
+
+Deployments upgrading into this keep their baselines: each read falls back to the legacy events-derived query while `run_baseline_metrics` holds fewer than 20 samples for the agent, so nothing drops to static thresholds during the transition.
+
+**A consequence worth planning for:** an agent that fires a live signal on most runs will not reach 20 clean runs and stays on static thresholds indefinitely. That is the intended behaviour — an unhealthy agent should not learn its own failure as normal — but if a *legitimately* heavy agent trips a static threshold every run (say a research agent that always exceeds 50,000 tokens), it can never accumulate the clean history that would teach `COST_SPIKE` its real baseline. Raise that detector's static threshold for the agent's category in `detectors.yml` to break the deadlock. The threshold fires at **2× that baseline** (3× for COST_SPIKE and SESSION_LATENCY). Each detector falls back to its static threshold until at least **20** historical runs exist — below that the P75 estimate is too sensitive to individual outliers to be useful — then switches to the adaptive baseline automatically. Tune the multiplier per agent category with `inflation_factor` in `detectors.yml`.
+
+³ **`INSTRUMENTATION_DEGRADED` is not a statement about your agent.** It reports
+that Dunetrace could not read the provider's response objects, so the detectors
+keying on completion text or `finish_reason` could not run at all. It exists
+because the detector layer could not previously distinguish *"I looked and found
+nothing wrong"* from *"I could not look"* — both produce no signal, and the
+second silently disables about a third of the battery.
+
+It fires when any LLM call carries an `instrumentation_degraded` marker (an
+extractor could not read the response and said so instead of substituting a
+default), or when every call in a multi-call run is structurally blank — zero
+output, zero completion tokens, non-zero latency. Its evidence names the
+unreadable shape, the affected providers and models, and the detectors whose
+silence must therefore not be read as a clean verdict. It deliberately does
+*not* fire when text is absent only because `DUNETRACE_OMIT_LLM_OUTPUT_TEXT` is
+set — that is an operator choice, not a fault.
+
+**Extraction failures are never given a plausible value.** The extractors return
+`None` rather than `"stop"`/`""`, and the SDK omits `finish_reason` from the wire
+rather than sending null. A fabricated `("", "stop")` pair is byte-for-byte
+`EMPTY_LLM_RESPONSE`'s trigger condition, so a shape mismatch in instrumentation
+used to surface as a HIGH-severity behavioural alert on 100% of runs with nothing
+logged at any level. See [operations.md](operations.md#instrumentation-health)
+for the fleet-wide query.
 
 ² **The injection scan is bounded.** `PROMPT_INJECTION_SIGNAL` is the only
 detector that runs **in-path** — the SDK evaluates it inside `dt.run()`, before
@@ -1035,8 +1075,7 @@ payload.
   `transfer_`, plus an `excluded_tool_names` stop-list) so `transfer_funds` and
   `user_agent` no longer misfire — calibration is 100% recall / 0% FP
   (`scripts/calibration/agent_handoff_failure_calibration.md`). It still relies
-  on naming conventions, so a handoff tool named outside them won't be seen; ships
-  shadow by default pending real-traffic validation.
+  on naming conventions, so a handoff tool named outside them won't be seen.
 
 #### Related detectors
 
@@ -1089,7 +1128,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 31 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 32 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`

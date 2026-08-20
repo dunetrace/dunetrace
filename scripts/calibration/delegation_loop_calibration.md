@@ -80,6 +80,9 @@ CRITICAL — a runaway that is clearly not self-terminating.
 
 ## Ship status
 
-Shadow by default (not in `LIVE_DETECTORS`), matching the SILENT_TRUNCATION /
-MODEL_FALLBACK_DRIFT / MEMORY_POISONING precedent — promote to live once real
-multi-agent traffic confirms the FP rate holds outside the calibration corpus.
+**Live** — listed in `LIVE_DETECTORS`
+(`services/detector/detector_svc/db.py`). Shipped shadow first, matching the
+SILENT_TRUNCATION / MODEL_FALLBACK_DRIFT precedent, and promoted once real
+multi-agent traffic confirmed the FP rate held outside the calibration corpus.
+To reverse, remove it from `LIVE_DETECTORS`; `min_loop_runs` in `detectors.yml`
+is the first knob to reach for if it is noisier than expected.
