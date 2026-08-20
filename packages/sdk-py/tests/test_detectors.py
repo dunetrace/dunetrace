@@ -252,9 +252,7 @@ class TestScattershotToolUseDetector(unittest.TestCase):
         for name in ("MAX_DISTINCT_TOOLS", "MIN_TOTAL_CALLS"):
             for value in invalid_values:
                 with self.subTest(name=name, value=value):
-                    with self.assertRaisesRegex(
-                        ValueError, f"{name} must be a positive integer"
-                    ):
+                    with self.assertRaisesRegex(ValueError, f"{name} must be a positive integer"):
                         ScattershotToolUseDetector(**{name: value})
 
 

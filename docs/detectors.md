@@ -1,16 +1,17 @@
 # Detectors
 
-Dunetrace runs 32 structural detectors against every completed agent run. All of
+Dunetrace runs 33 structural detectors against every completed agent run. All of
 them are listed in the table below; the eleven newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
 
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
-> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **29**
-> detectors the SDK can also run *client-side, in-path*; the three that can't
-> (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`) need raw
-> input or a second run's data. The detector worker runs all 32 regardless — see
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **30**
+> detectors the SDK can evaluate during runtime event collection. The other
+> three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
+> need raw input or a second run's data and are handled separately. The detector
+> worker runs all 33 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -181,10 +182,11 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`). Two are not:
-`OVERSIZED_TOOL_ARGUMENTS` and `SCATTERSHOT_TOOL_USE` remain shadowed by default
-until their precision is checked against real traffic. A new built-in detector
-should be added to `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
+Most built-in detectors are live (`shadow = false`). Three are not:
+`INSTRUMENTATION_DEGRADED`, `OVERSIZED_TOOL_ARGUMENTS`, and
+`SCATTERSHOT_TOOL_USE` remain shadowed by default until their precision is
+checked against real traffic. A new built-in detector should be added to
+`_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
 `services/detector/detector_svc/db.py` once validated; leaving it out of
 `LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
 
