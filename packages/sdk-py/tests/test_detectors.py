@@ -14,6 +14,7 @@ from dunetrace.detectors import (
     AgentHandoffFailureDetector,
     ExcessiveRetrievalDetector,
     OversizedToolArgumentsDetector,
+    ScattershotToolUseDetector,
     ToolLoopDetector,
     ToolThrashingDetector,
     ToolAvoidanceDetector,
@@ -198,6 +199,61 @@ class TestToolThrashingDetector(unittest.TestCase):
         state.current_step = 6
         # This is TOOL_LOOP not thrashing
         assert self.detector.on_run_completion(state) is None
+
+
+# ── ScattershotToolUseDetector ────────────────────────────────────────────────
+
+
+class TestScattershotToolUseDetector(unittest.TestCase):
+    detector = ScattershotToolUseDetector()
+
+    @staticmethod
+    def _state(names: list[str]) -> RunState:
+        state = make_state()
+        state.tool_calls = [make_tool_call(name, step=i + 1) for i, name in enumerate(names)]
+        state.current_step = len(names)
+        return state
+
+    def test_fires_at_both_thresholds(self):
+        state = self._state(["a", "b", "c", "d", "e", "f", "a", "b"])
+        signal = self.detector.on_run_completion(state)
+
+        assert signal is not None
+        assert signal.failure_type == FailureType.SCATTERSHOT_TOOL_USE
+        assert signal.severity.value == "MEDIUM"
+        assert signal.step_index == 8
+        assert signal.evidence == {
+            "distinct_tool_count": 6,
+            "tools": ["a", "b", "c", "d", "e", "f"],
+            "total_calls": 8,
+            "max_distinct_tools": 6,
+            "min_total_calls": 8,
+        }
+
+    def test_no_signal_below_distinct_tool_threshold(self):
+        state = self._state(["a", "b", "c", "d", "e"] * 3)
+        assert self.detector.on_run_completion(state) is None
+
+    def test_no_signal_below_total_call_threshold(self):
+        state = self._state(["a", "b", "c", "d", "e", "f"])
+        assert self.detector.on_run_completion(state) is None
+
+    def test_tunable_thresholds_are_respected(self):
+        detector = ScattershotToolUseDetector(MAX_DISTINCT_TOOLS=4, MIN_TOTAL_CALLS=5)
+        state = self._state(["a", "b", "c", "d", "a"])
+        signal = detector.on_run_completion(state)
+
+        assert signal is not None
+        assert signal.evidence["distinct_tool_count"] == 4
+        assert signal.evidence["total_calls"] == 5
+
+    def test_rejects_invalid_thresholds(self):
+        invalid_values = (0, -1, True, 1.5, "6")
+        for name in ("MAX_DISTINCT_TOOLS", "MIN_TOTAL_CALLS"):
+            for value in invalid_values:
+                with self.subTest(name=name, value=value):
+                    with self.assertRaisesRegex(ValueError, f"{name} must be a positive integer"):
+                        ScattershotToolUseDetector(**{name: value})
 
 
 # ── AgentHandoffFailureDetector ──────────────────────────────────────────────

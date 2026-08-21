@@ -54,6 +54,13 @@ NO_TEMPLATE_EXPECTED = {
 
 # Evidence as emitted by each detector.
 REAL_EVIDENCE = {
+    FailureType.SCATTERSHOT_TOOL_USE: {
+        "distinct_tool_count": 6,
+        "tools": ["calculator", "docs_search", "web_search", "database", "email", "calendar"],
+        "total_calls": 8,
+        "max_distinct_tools": 6,
+        "min_total_calls": 8,
+    },
     FailureType.OVERSIZED_TOOL_ARGUMENTS: {
         "step_index": 4,
         "tool_name": "summarise_document",
@@ -214,6 +221,7 @@ class TestTemplatesRunOnRealEvidence(unittest.TestCase):
         """A template that ignores its evidence renders generic prose that reads
         fine but tells the on-call engineer nothing."""
         expectations = {
+            FailureType.SCATTERSHOT_TOOL_USE: "web_search",
             FailureType.PREMATURE_TERMINATION: "charge_card",
             FailureType.UNREAD_TOOL_ERROR: "fetch_invoice",
             FailureType.TOOL_ARGUMENT_FABRICATION: "acct_99213",

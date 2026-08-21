@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 import unittest
+import warnings
 
 from dunetrace.client import DunetraceClient
 from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
@@ -23,9 +24,9 @@ ITERATIONS = 5_000
 WARMUP = 200
 
 
-def _time_hook(fn, iterations: int = ITERATIONS) -> float:
+def _time_hook(fn, iterations: int = ITERATIONS, warmup: int = WARMUP) -> float:
     """Mean wall-clock cost per call, in microseconds."""
-    for _ in range(WARMUP):
+    for _ in range(warmup):
         fn()
     t0 = time.perf_counter()
     for _ in range(iterations):
@@ -116,6 +117,54 @@ class TestSdkOverhead(unittest.TestCase):
             f"\n  Full run ({n_events} events): {us_per_run:6.1f}µs/run  ({us_per_event:5.1f}µs/event)"
         )
         self.assertLess(us_per_event, MAX_OVERHEAD_US)
+
+
+class TestSignalPolicyOverhead(unittest.TestCase):
+    """Benchmark the detector path enabled by a signal-trigger policy."""
+
+    def setUp(self) -> None:
+        self.client = DunetraceClient(api_key="dt_bench")
+        self.client._ship = lambda batch: None
+        self.client.add_policy(
+            name="bench-scattershot",
+            condition={
+                "trigger": "signal",
+                "operator": "contains",
+                "value": "SCATTERSHOT_TOOL_USE",
+            },
+            action={"type": "log"},
+        )
+
+    def tearDown(self) -> None:
+        self.client.shutdown(timeout=1)
+
+    def _tool_called_us(self, names: tuple[str, ...]) -> float:
+        """Mean per-hook cost for one bounded run with the supplied tool sequence."""
+
+        def once() -> None:
+            with self.client.run("bench-agent") as run:
+                for name in names:
+                    run.tool_called(name, {"query": "benchmark"})
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"datetime\.datetime\.utcfromtimestamp\(\) is deprecated",
+                category=DeprecationWarning,
+            )
+            us_per_run = _time_hook(once, iterations=200, warmup=20)
+        return us_per_run / len(names)
+
+    def test_scattershot_signal_policy_overhead(self) -> None:
+        cases = {
+            "six-distinct-at-threshold": ("a", "b", "c", "d", "e", "f", "a", "b"),
+            "one-tool-repeated": ("search",) * 32,
+        }
+        for label, names in cases.items():
+            with self.subTest(label=label):
+                us = self._tool_called_us(names)
+                print(f"\n  scattershot signal ({label}): {us:6.1f}µs/hook")
+                self.assertLess(us, MAX_OVERHEAD_US)
 
 
 class TestRunStartOverheadWithInput(unittest.TestCase):

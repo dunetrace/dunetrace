@@ -362,6 +362,67 @@ class ToolThrashingDetector(BaseDetector):
         return None
 
 
+# ── SCATTERSHOT_TOOL_USE ──────────────────────────────────────────────────────
+
+
+class ScattershotToolUseDetector(BaseDetector):
+    """
+    Agent calls many distinct tools in one run, often indicating that it is
+    trying unrelated approaches instead of converging on one.
+
+    Tunable: MAX_DISTINCT_TOOLS (default 6) — distinct tool names needed to
+    fire. MIN_TOTAL_CALLS (default 8) — minimum total calls, which keeps a
+    legitimate workflow that uses several tools once each below the fire line.
+    """
+
+    name = "SCATTERSHOT_TOOL_USE"
+    SEVERITY = Severity.MEDIUM
+    MAX_DISTINCT_TOOLS = 6
+    MIN_TOTAL_CALLS = 8
+
+    def __init__(self, **overrides: object) -> None:
+        super().__init__(**overrides)
+        if (
+            not isinstance(self.MAX_DISTINCT_TOOLS, int)
+            or isinstance(self.MAX_DISTINCT_TOOLS, bool)
+            or self.MAX_DISTINCT_TOOLS <= 0
+        ):
+            raise ValueError("MAX_DISTINCT_TOOLS must be a positive integer")
+        if (
+            not isinstance(self.MIN_TOTAL_CALLS, int)
+            or isinstance(self.MIN_TOTAL_CALLS, bool)
+            or self.MIN_TOTAL_CALLS <= 0
+        ):
+            raise ValueError("MIN_TOTAL_CALLS must be a positive integer")
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        total_calls = len(state.tool_calls)
+        if total_calls < self.MIN_TOTAL_CALLS:
+            return None
+
+        tools = sorted({tc.tool_name for tc in state.tool_calls})
+        distinct_tool_count = len(tools)
+        if distinct_tool_count < self.MAX_DISTINCT_TOOLS:
+            return None
+
+        return FailureSignal(
+            failure_type=FailureType.SCATTERSHOT_TOOL_USE,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=state.tool_calls[-1].step_index,
+            confidence=_scale_confidence(distinct_tool_count / self.MAX_DISTINCT_TOOLS),
+            evidence={
+                "distinct_tool_count": distinct_tool_count,
+                "tools": tools,
+                "total_calls": total_calls,
+                "max_distinct_tools": self.MAX_DISTINCT_TOOLS,
+                "min_total_calls": self.MIN_TOTAL_CALLS,
+            },
+        )
+
+
 # ── TOOL_AVOIDANCE ─────────────────────────────────────────────────────────────
 
 
@@ -4108,6 +4169,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     OversizedToolArgumentsDetector(),
     ToolLoopDetector(),
     ToolThrashingDetector(),
+    ScattershotToolUseDetector(),
     ToolAvoidanceDetector(),
     GoalAbandonmentDetector(),
     RagEmptyRetrievalDetector(),

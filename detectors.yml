@@ -87,6 +87,15 @@ default:
       threshold: 2
       window_runs: 10
 
+  scattershot_tool_use:
+    max_distinct_tools: 6  # distinct tool names needed to fire
+    min_total_calls: 8     # avoids flagging one-pass multi-tool workflows
+    # Shadow by default (not in LIVE_DETECTORS) pending real-traffic validation.
+    alert_policy:
+      mode: consecutive
+      threshold: 2
+      window_runs: 10
+
   tool_avoidance:
     min_llm_calls: 2  # ignore runs with fewer LLM calls (too short to judge)
     alert_policy:

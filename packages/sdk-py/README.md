@@ -60,7 +60,7 @@ LangChain/LangGraph and CrewAI agents need zero manual callback wiring — see [
 
 ## What it detects
 
-31 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
+32 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Detector                  | What it catches                                            | Severity    |
 | ------------------------- | ---------------------------------------------------------- | ----------- |
@@ -71,7 +71,7 @@ LangChain/LangGraph and CrewAI agents need zero manual callback wiring — see [
 | `PREMATURE_TERMINATION`   | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
 | `RUNAWAY_ITERATION`       | Step or cost ceiling crossed with no completion signal      | HIGH/CRITICAL |
 
-→ [docs/detectors.md](../../docs/detectors.md) for the full list of 31 detectors
+→ [docs/detectors.md](../../docs/detectors.md) for the full list of 32 detectors
 
 
 ## Output modes
@@ -204,4 +204,3 @@ SDK: 620 tests · MCP server: 154 tests — both run fully offline.
 - [All integration guides](../../docs/)
 - [GitHub](https://github.com/dunetrace/dunetrace)
 - [Issues](https://github.com/dunetrace/dunetrace/issues)
-

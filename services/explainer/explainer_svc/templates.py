@@ -274,6 +274,85 @@ def explain_tool_thrashing(signal: FailureSignal) -> Explanation:
     )
 
 
+# SCATTERSHOT_TOOL_USE
+
+
+def explain_scattershot_tool_use(signal: FailureSignal) -> Explanation:
+    ev = signal.evidence
+    tools = [str(tool) for tool in (ev.get("tools") or []) if tool is not None]
+    tools_str = ", ".join(f"`{tool}`" for tool in tools) if tools else "unknown tools"
+
+    distinct_tool_count = ev.get("distinct_tool_count")
+    if distinct_tool_count is None:
+        distinct_tool_count = len(tools) if tools else "?"
+    total_calls = ev.get("total_calls")
+    if total_calls is None:
+        total_calls = "?"
+    max_distinct_tools = ev.get("max_distinct_tools")
+    if max_distinct_tools is None:
+        max_distinct_tools = "?"
+    min_total_calls = ev.get("min_total_calls")
+    if min_total_calls is None:
+        min_total_calls = "?"
+
+    return Explanation(
+        **_base(signal),
+        title=(
+            f"Scattershot tool use: {distinct_tool_count} distinct tools across {total_calls} calls"
+        ),
+        what=(
+            f"The agent called {distinct_tool_count} distinct tools across {total_calls} "
+            f"total calls: {tools_str}. That crossed both configured thresholds "
+            f"({max_distinct_tools} distinct tools and {min_total_calls} total calls), "
+            "which suggests it kept widening its search instead of converging on the "
+            "smallest tool set needed to finish the task."
+        ),
+        why_it_matters=(
+            "Broad, unplanned tool exploration increases latency, cost, and the amount "
+            "of conflicting intermediate context the agent must reconcile. It also makes "
+            "the run harder to debug because each additional tool introduces another "
+            "possible source of stale, partial, or incompatible results."
+        ),
+        evidence_summary=(
+            f"Observed {distinct_tool_count} distinct tools ({tools_str}) across "
+            f"{total_calls} calls by step {signal.step_index}. Thresholds: "
+            f"distinct tools >= {max_distinct_tools}, total calls >= {min_total_calls}. "
+            f"Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description="Require a bounded tool-selection plan before execution",
+                language="text",
+                code=(
+                    "Add to the system prompt:\n\n"
+                    '"Before calling a tool, choose the smallest set of tools needed to '
+                    "complete the task and explain each choice in your internal plan. "
+                    "Do not add a new tool unless the current plan cannot answer a "
+                    'specific remaining question. Reuse existing results when possible."'
+                ),
+            ),
+            CodeFix(
+                description="Enforce a distinct-tool budget at the call boundary",
+                language="python",
+                code=(
+                    "MAX_DISTINCT_TOOLS = 5\n"
+                    "used_tools: set[str] = set()\n\n"
+                    "def before_tool_call(tool_name: str) -> None:\n"
+                    "    if (\n"
+                    "        tool_name not in used_tools\n"
+                    "        and len(used_tools) >= MAX_DISTINCT_TOOLS\n"
+                    "    ):\n"
+                    "        raise RuntimeError(\n"
+                    "            'Distinct-tool budget exhausted; synthesise current results '\n"
+                    "            'or revise the plan before adding another tool.'\n"
+                    "        )\n"
+                    "    used_tools.add(tool_name)"
+                ),
+            ),
+        ],
+    )
+
+
 # TOOL_AVOIDANCE
 
 
@@ -2882,6 +2961,7 @@ def explain_delegation_loop(signal: FailureSignal) -> Explanation:
 TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.TOOL_LOOP: explain_tool_loop,
     FailureType.TOOL_THRASHING: explain_tool_thrashing,
+    FailureType.SCATTERSHOT_TOOL_USE: explain_scattershot_tool_use,
     FailureType.TOOL_AVOIDANCE: explain_tool_avoidance,
     FailureType.GOAL_ABANDONMENT: explain_goal_abandonment,
     FailureType.PROMPT_INJECTION_SIGNAL: explain_prompt_injection,
