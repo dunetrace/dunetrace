@@ -444,7 +444,24 @@ async def process_run(
                     exc,
                 )
 
-        risk = RiskEngine().evaluate(signals, state)
+        # Shadow signals must not influence LIVE ones. A detector is in shadow
+        # precisely because its precision is unvalidated, so letting it change
+        # another signal's confidence, severity or co_signal_count means an
+        # unvalidated detector is already affecting production output — which
+        # is the one thing shadow mode exists to prevent. The shadow flag is
+        # applied at WRITE time (LIVE_DETECTORS in db.py), which is far too late
+        # for the three calls below; they run on the full list.
+        #
+        # Custom detectors are excluded here too: a plugin signal carries
+        # FailureType.CUSTOM and its own shadow decision, so it is not
+        # LIVE_DETECTORS-gated and cannot be assumed live.
+        live_signals = [
+            s
+            for s in signals
+            if s.failure_type != FailureType.CUSTOM and s.failure_type.value in LIVE_DETECTORS
+        ]
+
+        risk = RiskEngine().evaluate(live_signals, state)
         logger.debug(
             "RiskEngine. run_id=%s confidence=%.2f active=%d severity=%s scores=%s",
             run_id,
@@ -453,8 +470,8 @@ async def process_run(
             risk.severity or "normal",
             risk.scores,
         )
-        _apply_hard_override(signals, risk)
-        _apply_cooccurrence_boost(signals)
+        _apply_hard_override(live_signals, risk)
+        _apply_cooccurrence_boost(live_signals)
     except Exception as exc:
         logger.exception("Run processing failed. run_id=%s", run_id)
         # Deliberately NOT marked processed on the first failures. This block is

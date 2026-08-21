@@ -1248,7 +1248,9 @@ class Dunetrace:
         Fields: ts (RFC3339), level ("info"), logger ("dunetrace"), event_type and agent_id
         as Loki stream labels, run_id/step_index/payload as structured fields.
         """
-        ts = datetime.datetime.utcfromtimestamp(event.timestamp).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        ts = datetime.datetime.fromtimestamp(event.timestamp, datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
         line = {
             "ts": ts,
             "level": "info",

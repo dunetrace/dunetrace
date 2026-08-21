@@ -88,8 +88,15 @@ default:
       window_runs: 10
 
   scattershot_tool_use:
-    max_distinct_tools: 6  # distinct tool names needed to fire
-    min_total_calls: 8     # avoids flagging one-pass multi-tool workflows
+    min_distinct_tools: 6   # distinct tool names needed to fire (>=)
+    min_total_calls: 8      # ignore short runs
+    min_repeat_ratio: 1.5   # total/distinct — THIS is what excludes a one-pass
+                            # multi-tool workflow. min_total_calls cannot: since
+                            # distinct <= total always holds, a total floor of 8
+                            # with a distinct floor of 6 admits a run with two
+                            # repeats, and with zero repeats once distinct >= 8.
+    scan_limit: 250         # most-recent tool calls inspected; bounds the in-path
+                            # per-step cost a trigger="signal" policy pays
     # Shadow by default (not in LIVE_DETECTORS) pending real-traffic validation.
     alert_policy:
       mode: consecutive

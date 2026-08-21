@@ -10,6 +10,9 @@ from typing import Dict
 # Maps each failure type to the (first_step_key, last_step_key) it stores in evidence.
 # Detectors not listed here have no step range — fall back to signal.step_index for both.
 _STEP_RANGE_FIELDS: Dict[str, tuple] = {
+    # Whole-run breadth pattern: without a range the UI highlights only the
+    # last tool call of something that spans the run.
+    "SCATTERSHOT_TOOL_USE": ("first_step", "last_step"),
     "TOOL_LOOP": ("first_step", "last_step"),
     "EMPTY_LLM_RESPONSE": ("first_step", "first_step"),
     "LLM_TRUNCATION_LOOP": ("first_truncation_step", "last_truncation_step"),

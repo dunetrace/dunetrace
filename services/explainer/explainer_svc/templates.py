@@ -288,7 +288,7 @@ def explain_scattershot_tool_use(signal: FailureSignal) -> Explanation:
     total_calls = ev.get("total_calls")
     if total_calls is None:
         total_calls = "?"
-    max_distinct_tools = ev.get("max_distinct_tools")
+    max_distinct_tools = ev.get("min_distinct_tools")
     if max_distinct_tools is None:
         max_distinct_tools = "?"
     min_total_calls = ev.get("min_total_calls")

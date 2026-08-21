@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import time
 import unittest
-import warnings
 
 from dunetrace.client import DunetraceClient
 from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
@@ -139,26 +138,35 @@ class TestSignalPolicyOverhead(unittest.TestCase):
         self.client.shutdown(timeout=1)
 
     def _tool_called_us(self, names: tuple[str, ...]) -> float:
-        """Mean per-hook cost for one bounded run with the supplied tool sequence."""
+        """Cost of ONE tool_called hook on a run already holding `names`.
 
-        def once() -> None:
-            with self.client.run("bench-agent") as run:
-                for name in names:
-                    run.tool_called(name, {"query": "benchmark"})
-
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r"datetime\.datetime\.utcfromtimestamp\(\) is deprecated",
-                category=DeprecationWarning,
+        Times the hook directly, like every other benchmark in this file. The
+        previous version timed a whole run and divided by len(names), which
+        amortises the fixed run-start/run-completion cost across the tool calls
+        — so the larger the case, the more per-hook regression it could hide
+        (at 32 names, ~16ms of run-level overhead still passed a 500µs
+        assertion). It also meant the assertion got weaker precisely as the
+        case got more demanding.
+        """
+        with self.client.run("bench-agent") as run:
+            for name in names:
+                run.tool_called(name, {"query": "benchmark"})
+            return _time_hook(
+                lambda: run.tool_called("probe", {"query": "benchmark"}),
+                iterations=200,
+                warmup=20,
             )
-            us_per_run = _time_hook(once, iterations=200, warmup=20)
-        return us_per_run / len(names)
 
     def test_scattershot_signal_policy_overhead(self) -> None:
         cases = {
             "six-distinct-at-threshold": ("a", "b", "c", "d", "e", "f", "a", "b"),
             "one-tool-repeated": ("search",) * 32,
+            # The worst case for SCATTERSHOT_TOOL_USE specifically: many distinct
+            # names AND a long tool_calls list, which is what its per-call set
+            # build scales with. Neither case above exercises it — one has 8
+            # calls, the other a single distinct name — so the O(n) scan that
+            # blew MAX_COST_NS in review went unmeasured.
+            "wide-and-long": tuple(f"tool_{i % 40}" for i in range(512)),
         }
         for label, names in cases.items():
             with self.subTest(label=label):

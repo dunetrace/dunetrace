@@ -367,58 +367,117 @@ class ToolThrashingDetector(BaseDetector):
 
 class ScattershotToolUseDetector(BaseDetector):
     """
-    Agent calls many distinct tools in one run, often indicating that it is
-    trying unrelated approaches instead of converging on one.
+    An agent that reached for many different tools and kept reaching, without
+    converging on an answer — trying unrelated approaches rather than executing
+    a plan.
 
-    Tunable: MAX_DISTINCT_TOOLS (default 6) — distinct tool names needed to
-    fire. MIN_TOTAL_CALLS (default 8) — minimum total calls, which keeps a
-    legitimate workflow that uses several tools once each below the fire line.
+    Three conditions, all required. Breadth alone is not the signal: a data
+    pipeline that calls ingest/validate/transform/enrich/persist/index/notify/
+    audit exactly once each is eight distinct tools and is working perfectly.
+
+      1. Breadth      — at least MIN_DISTINCT_TOOLS distinct tool names.
+      2. Volume       — at least MIN_TOTAL_CALLS calls, so short runs are out.
+      3. Repetition   — total/distinct at or above MIN_REPEAT_RATIO. This is
+                        what separates flailing from a one-pass workflow, and
+                        it is the condition MIN_TOTAL_CALLS was mistakenly
+                        expected to provide: because distinct <= total always
+                        holds, a total-call floor of 8 with a distinct floor of
+                        6 admits any run with two repeats, and admits a run
+                        with ZERO repeats once distinct reaches 8. The
+                        legitimate pipeline above scored 1.0 and fired.
+
+    Plus one veto: a run whose agent explicitly declared itself finished
+    (exit_reason == "final_answer") converged by definition, so it is never
+    scattershot however many tools it touched. Same veto RUNAWAY_ITERATION
+    applies, for the same reason.
+
+    Tunable: MIN_DISTINCT_TOOLS (default 6), MIN_TOTAL_CALLS (default 8),
+    MIN_REPEAT_RATIO (default 1.5), SCAN_LIMIT (default 250).
     """
 
     name = "SCATTERSHOT_TOOL_USE"
     SEVERITY = Severity.MEDIUM
-    MAX_DISTINCT_TOOLS = 6
+    # Named MIN_, compared with >=. The previous name was MAX_DISTINCT_TOOLS
+    # while the comparison was `>=`, so `max_distinct_tools: 6` fired AT six —
+    # an operator tuning it got the opposite of what the name promised, and the
+    # class paired it with a genuine MIN_TOTAL_CALLS, which made the two read as
+    # a range when they are both floors.
+    MIN_DISTINCT_TOOLS = 6
     MIN_TOTAL_CALLS = 8
+    MIN_REPEAT_RATIO = 1.5
+    # Cap on how many of the most recent tool calls are inspected. This detector
+    # is in TIER1_DETECTORS, so a trigger="signal" policy re-runs it once per
+    # step; an unbounded set build over the whole list makes that O(n^2) across
+    # a run and the cost is paid synchronously inside the agent. Bounding the
+    # scan keeps it flat. A run with more calls than this has long since crossed
+    # every threshold here, so the verdict is unchanged in practice — only the
+    # exact distinct_tool_count is capped, and evidence records when that
+    # happened.
+    SCAN_LIMIT = 250
 
     def __init__(self, **overrides: object) -> None:
         super().__init__(**overrides)
-        if (
-            not isinstance(self.MAX_DISTINCT_TOOLS, int)
-            or isinstance(self.MAX_DISTINCT_TOOLS, bool)
-            or self.MAX_DISTINCT_TOOLS <= 0
-        ):
-            raise ValueError("MAX_DISTINCT_TOOLS must be a positive integer")
-        if (
-            not isinstance(self.MIN_TOTAL_CALLS, int)
-            or isinstance(self.MIN_TOTAL_CALLS, bool)
-            or self.MIN_TOTAL_CALLS <= 0
-        ):
-            raise ValueError("MIN_TOTAL_CALLS must be a positive integer")
+        for attr in ("MIN_DISTINCT_TOOLS", "MIN_TOTAL_CALLS", "SCAN_LIMIT"):
+            value = getattr(self, attr)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{attr} must be a positive integer")
+        if not isinstance(self.MIN_REPEAT_RATIO, (int, float)) or self.MIN_REPEAT_RATIO < 1:
+            raise ValueError("MIN_REPEAT_RATIO must be a number >= 1")
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        # Cheapest checks first — this runs per-step under a signal policy.
         total_calls = len(state.tool_calls)
         if total_calls < self.MIN_TOTAL_CALLS:
             return None
 
-        tools = sorted({tc.tool_name for tc in state.tool_calls})
-        distinct_tool_count = len(tools)
-        if distinct_tool_count < self.MAX_DISTINCT_TOOLS:
+        # The agent said it was done. Converged, whatever route it took.
+        if state.exit_reason == "final_answer":
             return None
 
+        scanned = state.tool_calls[-self.SCAN_LIMIT :]
+        # `or "unknown"` because run_builder does payload.get("tool_name",
+        # "unknown"), which yields None when the key is present with a JSON null
+        # — reachable through the OTLP path. A None in this set makes the
+        # sorted() below raise TypeError, which run_detectors catches per
+        # detector, silently disabling this one for exactly those runs.
+        names = {tc.tool_name or "unknown" for tc in scanned}
+        distinct_tool_count = len(names)
+        if distinct_tool_count < self.MIN_DISTINCT_TOOLS:
+            return None
+
+        scanned_calls = len(scanned)
+        repeat_ratio = scanned_calls / distinct_tool_count
+        if repeat_ratio < self.MIN_REPEAT_RATIO:
+            return None
+
+        # Sorted only on the firing path — the list is read nowhere but the
+        # evidence dict, and the non-firing path is the overwhelmingly common one.
+        tools = sorted(names)
+        first_step = scanned[0].step_index
+        last_step = scanned[-1].step_index
         return FailureSignal(
             failure_type=FailureType.SCATTERSHOT_TOOL_USE,
             severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
-            step_index=state.tool_calls[-1].step_index,
-            confidence=_scale_confidence(distinct_tool_count / self.MAX_DISTINCT_TOOLS),
+            step_index=last_step,
+            confidence=_scale_confidence(repeat_ratio / self.MIN_REPEAT_RATIO),
             evidence={
                 "distinct_tool_count": distinct_tool_count,
                 "tools": tools,
                 "total_calls": total_calls,
-                "max_distinct_tools": self.MAX_DISTINCT_TOOLS,
+                "repeat_ratio": round(repeat_ratio, 2),
+                "min_distinct_tools": self.MIN_DISTINCT_TOOLS,
                 "min_total_calls": self.MIN_TOTAL_CALLS,
+                "min_repeat_ratio": self.MIN_REPEAT_RATIO,
+                # A whole-run breadth finding needs a range, not a point: without
+                # these, _get_step_range() falls back to signal.step_index and
+                # the dashboard highlights the last tool call of a pattern that
+                # spans the run.
+                "first_step": first_step,
+                "last_step": last_step,
+                "scan_truncated": total_calls > self.SCAN_LIMIT,
             },
         )
 

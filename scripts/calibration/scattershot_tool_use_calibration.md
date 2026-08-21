@@ -52,11 +52,37 @@ PYTHONPATH=packages/sdk-py python scripts/calibrate_scattershot_tool_use.py
 
 ## Recommendation
 
-Ship `MAX_DISTINCT_TOOLS = 6` and `MIN_TOTAL_CALLS = 8`. This is the
-highest-recall threshold pair under the `<15%` false-positive target after
-preferring the lower false-positive rate among equal-recall pairs. It produced
-0/20 false positives and detected 14/16 positives (87.5% recall) on this corpus.
+**Superseded — do not rely on the sweep above.** The "0/20 false positives,
+87.5% recall" headline was an artifact of how the corpus was built, not a
+measurement of the boundary:
 
-This synthetic calibration cannot represent every specialized orchestration
-pipeline. `SCATTERSHOT_TOOL_USE` therefore remains outside `LIVE_DETECTORS` and
-ships shadowed until its precision is validated on real traffic.
+- Only 2 of the 20 negatives reached 6+ distinct tools, and both had **zero**
+  repeated calls. They were excluded solely by being one or two calls short of
+  `MIN_TOTAL_CALLS`, not by any structural property.
+- Every positive had exactly 8 or 9 calls, which is why recall collapsed
+  88% → 19% when the total threshold moved 8 → 9.
+
+The two classes were separated by a single integer at exactly the threshold
+being recommended, so the sweep was scoring its own construction. The ETL
+negative `[trigger, lookup, validate, transform, persist, notify, audit]` fires
+the moment that pipeline gains one more stage or one retry.
+
+The harness has been rebuilt: negatives now clear both floors outright (broad
+8–12-tool pipelines, with and without retries), positives span 8–16 calls, and
+the sweep adds a repeat-ratio axis. The `ship?` gate now requires recall ≥ 50%
+as well as FP < 15%, because a gate on false positives alone will happily
+recommend a configuration that never fires.
+
+**Current result: no threshold triple clears both bars.** Repeat ratio does not
+separate the classes — positives span 1.00–2.33, negatives 1.00–3.00, and the
+negative median (1.40) is higher than the positive median (1.33). The best
+precise configuration is 0% FP at 20% recall.
+
+This is a conclusion about the heuristic, not the thresholds. Tool breadth plus
+repetition does not identify scattershot behaviour. The promising axis is
+non-convergence — a run that fanned out *and* never produced a final answer —
+which this corpus cannot score, since it carries tool-name sequences only with
+no `exit_reason` or per-call success data. Extending the corpus to carry those
+is the next step.
+
+`SCATTERSHOT_TOOL_USE` stays outside `LIVE_DETECTORS`.

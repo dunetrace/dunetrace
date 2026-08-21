@@ -1655,3 +1655,97 @@ class TestUngroundedDestinationCrossRun(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ── Shadow isolation (review of PR #71, finding 4) ────────────────────────────
+
+
+class TestShadowSignalsDoNotInfluenceLiveOnes(unittest.IsolatedAsyncioTestCase):
+    """A shadow detector must not change a live signal's confidence or severity.
+
+    The shadow flag is applied at WRITE time via LIVE_DETECTORS in db.py, but
+    RiskEngine.evaluate, _apply_hard_override and _apply_cooccurrence_boost all
+    ran on the full signal list before that — so an unvalidated detector firing
+    was already altering production output, which is the one thing shadow mode
+    exists to prevent.
+    """
+
+    @staticmethod
+    def _sig(failure_type, confidence=0.6):
+        from dunetrace.models import FailureSignal, Severity
+
+        return FailureSignal(
+            failure_type=failure_type,
+            severity=Severity.MEDIUM,
+            run_id="r1",
+            agent_id="a1",
+            agent_version="v1",
+            step_index=1,
+            confidence=confidence,
+            evidence={},
+        )
+
+    def test_cooccurrence_boost_counts_live_signals_only(self):
+        from dunetrace.models import FailureType
+        from detector_svc.db import LIVE_DETECTORS
+        from detector_svc.worker import _apply_cooccurrence_boost
+
+        self.assertIn("TOOL_LOOP", LIVE_DETECTORS)
+        self.assertNotIn("SCATTERSHOT_TOOL_USE", LIVE_DETECTORS)
+
+        live = [self._sig(FailureType.TOOL_LOOP), self._sig(FailureType.RETRY_STORM)]
+        _apply_cooccurrence_boost(live)
+        two_live = [s.confidence for s in live]
+        self.assertTrue(all(s.co_signal_count == 2 for s in live))
+
+        # Same two live signals, plus a shadow one. Must be indistinguishable.
+        live2 = [self._sig(FailureType.TOOL_LOOP), self._sig(FailureType.RETRY_STORM)]
+        shadow = self._sig(FailureType.SCATTERSHOT_TOOL_USE)
+        filtered = [
+            s
+            for s in live2 + [shadow]
+            if s.failure_type != FailureType.CUSTOM and s.failure_type.value in LIVE_DETECTORS
+        ]
+        _apply_cooccurrence_boost(filtered)
+        self.assertEqual([s.confidence for s in live2], two_live)
+        self.assertTrue(all(s.co_signal_count == 2 for s in live2))
+
+
+# ── Detector construction isolation (review of PR #71, finding 3) ─────────────
+
+
+class TestBadDetectorConfigDoesNotKillDetection(unittest.TestCase):
+    """One unusable value in detectors.yml must not stop the fleet detecting.
+
+    A detector that validates its tunables in __init__ raises; unguarded, that
+    propagated out of get_detectors() into process_run's guarded block, failing
+    EVERY run for EVERY org (the config is global), each retried
+    MAX_PROCESSING_ATTEMPTS times and then recorded with processing_error.
+    """
+
+    def test_unusable_value_falls_back_to_class_defaults(self):
+        import logging
+
+        import detector_svc.detectors as det
+
+        original = det._CONFIG
+        try:
+            for bad in (
+                {"MIN_DISTINCT_TOOLS": 6.0},
+                {"MIN_DISTINCT_TOOLS": 0},
+                {"MIN_REPEAT_RATIO": 0.5},
+                {"SCAN_LIMIT": -1},
+            ):
+                with self.subTest(bad=bad):
+                    det._CONFIG = {"default": {"scattershot_tool_use": bad}}
+                    logging.disable(logging.CRITICAL)
+                    try:
+                        built = det._build_detectors("default")
+                    finally:
+                        logging.disable(logging.NOTSET)
+                    names = {d.name for d in built}
+                    self.assertGreaterEqual(len(built), len(det._DETECTOR_CLASSES))
+                    self.assertIn("SCATTERSHOT_TOOL_USE", names)
+                    self.assertIn("TOOL_LOOP", names)
+        finally:
+            det._CONFIG = original

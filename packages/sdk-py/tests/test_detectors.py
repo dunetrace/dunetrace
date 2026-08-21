@@ -208,27 +208,51 @@ class TestScattershotToolUseDetector(unittest.TestCase):
     detector = ScattershotToolUseDetector()
 
     @staticmethod
-    def _state(names: list[str]) -> RunState:
+    def _state(names: list, exit_reason: str = "completed") -> RunState:
         state = make_state()
         state.tool_calls = [make_tool_call(name, step=i + 1) for i, name in enumerate(names)]
         state.current_step = len(names)
+        state.exit_reason = exit_reason
         return state
 
-    def test_fires_at_both_thresholds(self):
-        state = self._state(["a", "b", "c", "d", "e", "f", "a", "b"])
+    def test_fires_on_breadth_with_repetition(self):
+        state = self._state(["a", "b", "c", "d", "e", "f"] * 2)
         signal = self.detector.on_run_completion(state)
 
         assert signal is not None
         assert signal.failure_type == FailureType.SCATTERSHOT_TOOL_USE
         assert signal.severity.value == "MEDIUM"
-        assert signal.step_index == 8
-        assert signal.evidence == {
-            "distinct_tool_count": 6,
-            "tools": ["a", "b", "c", "d", "e", "f"],
-            "total_calls": 8,
-            "max_distinct_tools": 6,
-            "min_total_calls": 8,
-        }
+        assert signal.evidence["distinct_tool_count"] == 6
+        assert signal.evidence["total_calls"] == 12
+        assert signal.evidence["repeat_ratio"] == 2.0
+        # A whole-run pattern reports a range, not just its last step.
+        assert signal.evidence["first_step"] == 1
+        assert signal.evidence["last_step"] == 12
+
+    def test_one_pass_multi_tool_pipeline_does_not_fire(self):
+        """The regression this detector's thresholds were rewritten for.
+
+        Eight distinct tools, each used exactly once, run completed — a data
+        pipeline doing its job. It cleared the old distinct>=6 and total>=8
+        floors because distinct <= total always holds, so a total-call floor
+        cannot exclude a one-pass workflow however high it is set.
+        """
+        state = self._state(
+            ["ingest", "validate", "transform", "enrich", "persist", "index", "notify", "audit"]
+        )
+        assert self.detector.on_run_completion(state) is None
+
+    def test_repeat_ratio_is_the_discriminator(self):
+        below = self._state(["a", "b", "c", "d", "e", "f", "g", "a"])  # 7 distinct/8 = 1.14
+        above = self._state(["a", "b", "c", "d", "e", "f", "a", "b", "c"])  # 6/9 = 1.5
+        assert self.detector.on_run_completion(below) is None
+        assert self.detector.on_run_completion(above) is not None
+
+    def test_final_answer_vetoes_the_signal(self):
+        """An agent that declared itself done converged, however wide it went."""
+        names = ["a", "b", "c", "d", "e", "f"] * 2
+        assert self.detector.on_run_completion(self._state(names)) is not None
+        assert self.detector.on_run_completion(self._state(names, "final_answer")) is None
 
     def test_no_signal_below_distinct_tool_threshold(self):
         state = self._state(["a", "b", "c", "d", "e"] * 3)
@@ -238,8 +262,30 @@ class TestScattershotToolUseDetector(unittest.TestCase):
         state = self._state(["a", "b", "c", "d", "e", "f"])
         assert self.detector.on_run_completion(state) is None
 
+    def test_none_tool_name_does_not_raise(self):
+        """run_builder yields None for tool_name when the OTLP payload carries a
+        JSON null. sorted() on a set containing None raises TypeError, which
+        run_detectors swallows per-detector — silently disabling this detector
+        for exactly those runs rather than failing loudly."""
+        state = self._state([None, "b", "c", "d", "e", "f"] * 2)
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert "unknown" in signal.evidence["tools"]
+
+    def test_scan_is_bounded(self):
+        """In-path under a signal policy this runs once per step, so an
+        unbounded scan is O(n^2) across a run."""
+        detector = ScattershotToolUseDetector(SCAN_LIMIT=10)
+        state = self._state(["a", "b", "c", "d", "e", "f"] * 100)
+        signal = detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["scan_truncated"] is True
+        assert signal.evidence["total_calls"] == 600
+
     def test_tunable_thresholds_are_respected(self):
-        detector = ScattershotToolUseDetector(MAX_DISTINCT_TOOLS=4, MIN_TOTAL_CALLS=5)
+        detector = ScattershotToolUseDetector(
+            MIN_DISTINCT_TOOLS=4, MIN_TOTAL_CALLS=5, MIN_REPEAT_RATIO=1.0
+        )
         state = self._state(["a", "b", "c", "d", "a"])
         signal = detector.on_run_completion(state)
 
@@ -249,11 +295,15 @@ class TestScattershotToolUseDetector(unittest.TestCase):
 
     def test_rejects_invalid_thresholds(self):
         invalid_values = (0, -1, True, 1.5, "6")
-        for name in ("MAX_DISTINCT_TOOLS", "MIN_TOTAL_CALLS"):
+        for name in ("MIN_DISTINCT_TOOLS", "MIN_TOTAL_CALLS", "SCAN_LIMIT"):
             for value in invalid_values:
                 with self.subTest(name=name, value=value):
                     with self.assertRaisesRegex(ValueError, f"{name} must be a positive integer"):
                         ScattershotToolUseDetector(**{name: value})
+        for value in (0.5, "1.5", None):
+            with self.subTest(name="MIN_REPEAT_RATIO", value=value):
+                with self.assertRaisesRegex(ValueError, "MIN_REPEAT_RATIO must be a number"):
+                    ScattershotToolUseDetector(MIN_REPEAT_RATIO=value)
 
 
 # ── AgentHandoffFailureDetector ──────────────────────────────────────────────

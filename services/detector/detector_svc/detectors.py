@@ -18,6 +18,7 @@ restart to notice a brand-new file.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from dunetrace.detectors import (
     CUSTOM_DETECTOR_REGISTRY,
@@ -126,12 +127,49 @@ def _build_plugin_detectors() -> list[BaseDetector]:
     return detectors
 
 
+def _instantiate(key: str, cls: type[BaseDetector], kwargs: dict) -> "Optional[BaseDetector]":
+    """Build one built-in detector, or None if its config is unusable.
+
+    A detector may validate its tunables in __init__ and raise. Unguarded, that
+    single raise propagates out of get_detectors() into process_run's guarded
+    block, which fails the run — for EVERY run and every org, since the config
+    is global. Each is then retried MAX_PROCESSING_ATTEMPTS times and recorded
+    with processing_error, so one malformed value in detectors.yml (e.g.
+    `min_distinct_tools: 6.0`, which YAML parses as a float) silently stops the
+    whole fleet producing signals.
+
+    Falling back to class defaults matches what config_loader already does for a
+    bad value — warn and ignore — and mirrors the per-detector isolation
+    _build_plugin_detectors and _build_pack_detectors have always had. Losing
+    one detector's TUNING is recoverable; losing all detection is not.
+    """
+    try:
+        return cls(**kwargs)
+    except Exception:
+        logger.exception(
+            "detectors.yml: section %r has an unusable value %r — falling back to "
+            "this detector's class defaults. Detection continues; the override "
+            "does not apply until the value is corrected.",
+            key,
+            kwargs,
+        )
+        try:
+            return cls()
+        except Exception:
+            logger.exception(
+                "Detector %s could not be built even with defaults — skipping it.",
+                cls.__name__,
+            )
+            return None
+
+
 def _build_detectors(category: str) -> list[BaseDetector]:
     category_cfg = _CONFIG.get(category, {})
     detectors = []
     for key, cls in _DETECTOR_CLASSES.items():
-        kwargs = category_cfg.get(key, {})
-        detectors.append(cls(**kwargs))
+        built = _instantiate(key, cls, category_cfg.get(key, {}))
+        if built is not None:
+            detectors.append(built)
     detectors.extend(_build_plugin_detectors())
     return detectors
 
@@ -185,7 +223,9 @@ async def get_detectors(agent_category: str, org_id: str) -> list[BaseDetector]:
         detectors = []
         for key, cls in _DETECTOR_CLASSES.items():
             kwargs = {**default_cfg.get(key, {}), **category_cfg.get(key, {})}
-            detectors.append(cls(**kwargs))
+            built = _instantiate(key, cls, kwargs)
+            if built is not None:
+                detectors.append(built)
         detectors.extend(_build_plugin_detectors())
         detectors.extend(_build_pack_detectors(enabled_packs))
         return detectors

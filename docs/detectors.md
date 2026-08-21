@@ -55,7 +55,7 @@ Semantic findings never trigger a policy — see
 | `UNGROUNDED_DESTINATION` | A tool call sends to an email/URL/domain that appears nowhere in the run's trusted inputs | HIGH/CRITICAL |
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
-| `SCATTERSHOT_TOOL_USE` | Run uses ≥6 distinct tools across ≥8 total calls, indicating a broad failure to converge | MEDIUM |
+| `SCATTERSHOT_TOOL_USE` | Run fans out across ≥6 distinct tools, repeats them (≥1.5 calls per tool), and never declares a final answer ⁴ | MEDIUM |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
 | `SILENT_TRUNCATION` | A single response was truncated (`finish_reason=length`/`max_tokens`) and the agent used it without retrying | MEDIUM/HIGH |
 | `MODEL_FALLBACK_DRIFT` | The run's LLM model silently switched to a less capable one (e.g. `gpt-4o`→`gpt-4o-mini`), often under rate limiting | MEDIUM |
@@ -431,23 +431,43 @@ Silent failures — an agent that fails quietly and reports success anyway — a
 
 **Signal**: `SCATTERSHOT_TOOL_USE` · **Severity**: MEDIUM · **Shadow by default**
 
-Fires when a run uses at least 6 distinct tool names across at least 8 total
-tool calls. The two thresholds work together: distinct-tool count catches an
-agent trying unrelated approaches, while minimum total calls avoids flagging a
-legitimate fixed workflow that simply uses several tools once each.
+Three conditions, all required, plus one veto:
+
+| Condition | Default | Why |
+|---|---|---|
+| Breadth | ≥ 6 distinct tool names | the fan-out itself |
+| Volume | ≥ 8 total tool calls | short runs are not judgeable |
+| Repetition | total ÷ distinct ≥ 1.5 | separates flailing from a one-pass pipeline |
+| **Veto** | `exit_reason != "final_answer"` | an agent that declared itself done converged |
+
+**Breadth alone is not the signal.** A data pipeline calling
+ingest/validate/transform/enrich/persist/index/notify/audit exactly once each is
+eight distinct tools and is working perfectly. The repetition ratio is what
+excludes it — and it is the condition a total-call floor cannot provide, because
+`distinct ≤ total` always holds, so a floor of 8 total with 6 distinct admits any
+run with two repeats, and admits a run with *zero* repeats once distinct reaches
+8. That pipeline fired under the original thresholds.
 
 Evidence includes `distinct_tool_count`, the sorted `tools` list, `total_calls`,
-and both thresholds. This is distinct from `TOOL_LOOP` (one tool repeated) and
-`TOOL_THRASHING` (an alternating two-tool pattern); all three can describe
-different forms of failure to converge.
+`repeat_ratio`, all three thresholds, `first_step`/`last_step`, and
+`scan_truncated`. Distinct from `TOOL_LOOP` (one tool repeated) and
+`TOOL_THRASHING` (an alternating two-tool pattern).
 
-Tune `max_distinct_tools` and `min_total_calls` under `scattershot_tool_use` in
-`detectors.yml`. The default pair was selected by
-[`calibrate_scattershot_tool_use.py`](../scripts/calibrate_scattershot_tool_use.py)
-against a labeled corpus containing legitimate research, coding, automation,
-and communication pipelines. Keep the detector shadowed while measuring it on
-real traffic because broad multi-tool agents are the principal false-positive
-class.
+Only the most recent `scan_limit` (250) tool calls are inspected. This detector
+is in `TIER1_DETECTORS`, so a `trigger="signal"` policy re-runs it once per step;
+an unbounded scan makes that O(n²) across a run, paid synchronously inside the
+agent.
+
+⁴ **The calibration does not currently support shipping this live.** Against a
+corpus whose negatives genuinely clear the breadth and volume floors — broad
+pipelines of 8–12 distinct tools, with and without retries — repeat ratio does
+not separate the two classes: the distributions overlap almost entirely and the
+negative median sits *above* the positive median. Precision is reachable only by
+setting the ratio high enough that the detector rarely fires (0% FP at 20%
+recall). That is a finding about the heuristic, not the thresholds. The more
+promising axis is non-convergence, which the current corpus cannot score because
+it carries tool-name sequences only. `SCATTERSHOT_TOOL_USE` stays out of
+`LIVE_DETECTORS` until that is resolved.
 
 ### PREMATURE_TERMINATION
 
@@ -1158,7 +1178,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 32 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 33 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`

@@ -50,11 +50,22 @@ Dunetrace covers the full agent reliability lifecycle, not just one slice of it:
 | 5 | **Root Cause & Fix** | Native root-cause analysis, auto-applied policy fixes, or a one-click draft PR → [Diagnose & fix](#diagnose--fix) |
 
 ¹ Per instrumentation hook (`tool_called`, `llm_responded`, …), including the
-scoped detector path enabled by a `trigger="signal"` policy — benchmarked in
-`packages/sdk-py/tests/test_benchmark.py`. The one exception is the prompt-injection
-scan at run start, which is bounded rather than sub-millisecond: it scans up to 32K
-characters of input, ~10ms worst case against an LLM call of 500ms+. See
-[docs/detectors.md](docs/detectors.md) footnote 2.
+**scoped** detector path a `trigger="signal"` policy enables — benchmarked in
+`packages/sdk-py/tests/test_benchmark.py`. Scoped means only the detectors the
+active policies actually name; that is the normal case and it stays flat with run
+length.
+
+Two paths are outside the budget, both bounded rather than sub-millisecond:
+
+- **The prompt-injection scan at run start** — up to 32K characters of input,
+  ~10ms worst case against an LLM call of 500ms+. See
+  [docs/detectors.md](docs/detectors.md) footnote 2.
+- **A signal policy whose `value` cannot be resolved statically** (not a plain
+  string or list). The SDK then cannot narrow the battery and runs all of it
+  (`_needed_signal_types = None`, `run_context.py`), so cost scales with the
+  length of the run: ~110µs/hook at 8 tool calls, ~210µs at 32, ~610µs at 128.
+  Prefer a literal `value` on a `trigger="signal"` policy if a long-running
+  agent is latency-sensitive.
 
 **Where tracers fit in:** if you already run Langfuse, LangSmith, or Braintrust,
 Dunetrace pulls their evaluation results in alongside its own (pillar 3) rather
@@ -155,7 +166,7 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ## Detectors
 
-32 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
+33 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Signal | What it catches |
 |---|---|
@@ -171,7 +182,7 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 Each alert includes: what fired, why it matters, a concrete fix, and a rate context line (first occurrence / recurring / systemic).
 
-→ [docs/detectors.md](docs/detectors.md) for the full list of 32 detectors
+→ [docs/detectors.md](docs/detectors.md) for the full list of 33 detectors
 
 **Multi-agent systems** — instrument each agent as its own `dt.run()` and Dunetrace auto-links them into a delegation graph (`parent_run_id` is threaded automatically for nested runs). Two detectors read that graph: `DELEGATION_LOOP` (agents cycling without converging) and `HANDOFF_CONTEXT_LOSS` (a handoff dropping the parent's context). → [docs/multi-agent.md](docs/multi-agent.md)
 
@@ -332,7 +343,7 @@ pip install dunetrace-mcp
 Agent Code
   └─► Dunetrace SDK        (raw content → ingest events)
         └─► Ingest API      (POST /v1/ingest → Postgres)
-                ├─► Detector          (poll → 32 detectors → signals)
+                ├─► Detector          (poll → 33 detectors → signals)
                 ├─► Semantic Worker   (optional — poll → DeepEval → signals)
                 ├─► Integrations      (optional — pull Langfuse/LangSmith/Braintrust)
                 ├─► Alerts            (poll → explain → Slack / webhook)

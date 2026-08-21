@@ -791,7 +791,9 @@ class RunContext:
         now = time.time()
         event_ns = dict(event or {})
         event_ns.setdefault("timestamp", now)
-        event_ns.setdefault("hour", datetime.datetime.utcfromtimestamp(now).hour)
+        event_ns.setdefault(
+            "hour", datetime.datetime.fromtimestamp(now, datetime.timezone.utc).hour
+        )
         return EvaluationContext(
             args=args if isinstance(args, dict) else {},
             run=run_meta,
