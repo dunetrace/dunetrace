@@ -4,7 +4,7 @@ Validation for the open set of `failure_signals.failure_type` values.
 The column is TEXT, and the set of values is genuinely open — six independent
 producers write into it:
 
-  * the 31 built-in structural detectors     (FailureType enum)
+  * the 34 built-in structural detectors     (FailureType enum)
   * detector packs                           (VOICE_*, from PACK_REGISTRY)
   * JSON-config custom detectors             (CUSTOM_*)
   * Python-class custom detector plugins     (arbitrary, registered at runtime)

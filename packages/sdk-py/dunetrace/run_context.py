@@ -685,23 +685,58 @@ class RunContext:
         )
         return approval_id
 
-    def _finish_approval(self, tool_name: str, approval_id: int, status: str) -> None:
+    @staticmethod
+    def _approval_note(row: Optional[Dict[str, Any]]) -> tuple:
+        """(note, decided_by) from an approval row, read defensively.
+
+        The row is whatever the Customer API returned — a plain JSON dict, not a
+        typed model — and this runs inside the user's agent process on the path
+        that is already raising. A missing key, a null, or an empty string all
+        mean "no note"; none of them may become a KeyError that replaces
+        ApprovalDenied with an AttributeError at the catch site.
+        """
+        if not isinstance(row, dict):
+            return None, None
+        note = row.get("note")
+        decided_by = row.get("decided_by")
+        note = note.strip() or None if isinstance(note, str) else None
+        decided_by = decided_by.strip() or None if isinstance(decided_by, str) else None
+        return note, decided_by
+
+    def _finish_approval(
+        self,
+        tool_name: str,
+        approval_id: int,
+        status: str,
+        row: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Emit the terminal event and either return (granted) or raise
-        (denied/timeout, fail-closed)."""
+        (denied/timeout, fail-closed).
+
+        `row` is the approval as the API last returned it. It is the ONLY way the
+        human's note reaches the agent: the poll loops used to read
+        `row["status"]` and drop the rest, so everything the human wrote died one
+        line above the raise. Optional so a caller that genuinely has no row
+        (nothing in-tree today) degrades to a note-less decision rather than
+        breaking.
+        """
+        note, decided_by = self._approval_note(row)
+        # The note goes in the EVENT too, not only the exception. The exception
+        # is ephemeral — caught, logged, maybe swallowed — while the event stream
+        # is the run's audit trail, and it is what the server-side trust surfaces
+        # read to treat the correction as human-authored input.
+        payload: Dict[str, Any] = {"approval_id": approval_id, "tool_name": tool_name}
+        if note:
+            payload["note"] = note
+        if decided_by:
+            payload["decided_by"] = decided_by
+
         if status == "granted":
-            self._emit(
-                EventType.APPROVAL_GRANTED,
-                {"approval_id": approval_id, "tool_name": tool_name},
-                advance=False,
-            )
+            self._emit(EventType.APPROVAL_GRANTED, payload, advance=False)
             return
         event = EventType.APPROVAL_TIMEOUT if status == "timeout" else EventType.APPROVAL_DENIED
-        self._emit(
-            event,
-            {"approval_id": approval_id, "tool_name": tool_name},
-            advance=False,
-        )
-        raise ApprovalDenied(tool_name, status, approval_id)
+        self._emit(event, payload, advance=False)
+        raise ApprovalDenied(tool_name, status, approval_id, note=note, decided_by=decided_by)
 
     def _resolve_timeout(self, tool_name: str, approval_id: int) -> None:
         """The SDK's deadline passed while still pending. Mark the approval
@@ -710,10 +745,16 @@ class RunContext:
         and honor the real decision instead of forcing a timeout over it."""
         updated = self._client._decide_approval(approval_id, "timeout")
         if updated is None:
-            status = str(self._client._get_approval(approval_id)["status"])
-            self._finish_approval(tool_name, approval_id, status)
+            # A human decision won the race. Re-read and honor it *with its
+            # note* — the winning decision's note is the one that matters, and
+            # the losing timeout write never stored one because the
+            # status='pending' guard rejected the whole row.
+            row = self._client._get_approval(approval_id)
+            self._finish_approval(tool_name, approval_id, str(row["status"]), row)
         else:
-            self._finish_approval(tool_name, approval_id, "timeout")
+            # Our own timeout won. Nobody decided, so there is no note by
+            # construction — pass the row we got back rather than inventing one.
+            self._finish_approval(tool_name, approval_id, "timeout", updated)
 
     def request_approval(
         self,
@@ -729,9 +770,10 @@ class RunContext:
         approval_id = self._begin_approval(tool_name, args, timeout_s)
         deadline = time.monotonic() + timeout_s
         while True:
-            status = str(self._client._get_approval(approval_id)["status"])
+            row = self._client._get_approval(approval_id)
+            status = str(row["status"])
             if status != "pending":
-                self._finish_approval(tool_name, approval_id, status)
+                self._finish_approval(tool_name, approval_id, status, row)
                 return
             if time.monotonic() >= deadline:
                 self._resolve_timeout(tool_name, approval_id)
@@ -752,9 +794,10 @@ class RunContext:
         approval_id = self._begin_approval(tool_name, args, timeout_s)
         deadline = time.monotonic() + timeout_s
         while True:
-            status = str(self._client._get_approval(approval_id)["status"])
+            row = self._client._get_approval(approval_id)
+            status = str(row["status"])
             if status != "pending":
-                self._finish_approval(tool_name, approval_id, status)
+                self._finish_approval(tool_name, approval_id, status, row)
                 return
             if time.monotonic() >= deadline:
                 self._resolve_timeout(tool_name, approval_id)

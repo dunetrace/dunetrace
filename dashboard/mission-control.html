@@ -1365,7 +1365,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       Detector thresholds are set in <code style="color:var(--chalk2)">detectors.yml</code> and loaded
       by the detector worker at startup — restart it to apply a change.
       <div style="color:var(--chalk4);margin-top:.75rem">
-        This page previously showed sliders for 3 of the 32 detectors. They persisted nowhere and the
+        This page previously showed sliders for 3 of the 34 detectors. They persisted nowhere and the
         preview beneath them never read their values, so it implied you were tuning detection when you
         were not. Removed rather than left decorative. Per-agent overrides
         (<code>confidence_floor</code>, <code>silenced</code>, <code>snoozed_until</code>) exist in
@@ -3880,6 +3880,7 @@ const FT_DESCRIPTIONS = {
   RAG_EMPTY_RETRIEVAL:'Retrieval returned no results — knowledge base gap',
   STEP_COUNT_INFLATION:'Far more steps than baseline — inefficiency or runaway loop',
   FIRST_STEP_FAILURE:'Failed on the very first step — likely config or setup issue',
+  UNRESOLVED_AMBIGUITY:'Irreversible action on 1 of N lookup candidates the request never distinguished — fires on a correct guess too',
 };
 
 function ftLabel(ft) {
@@ -6328,17 +6329,38 @@ function renderApprovalCard(a) {
           <button class="act-btn act-secondary" data-aid="${a.id}" onclick="decideApproval(this.dataset.aid,'denied')" style="font-size:11px">Deny</button>
         </div>
       </div>
+      <!-- Shown for BOTH decisions, not just deny. "approved, but watch X"
+           belongs in the audit trail exactly as much as a refusal does, and a
+           note that only appears once you've chosen Deny teaches the operator
+           it is a deny-only field. -->
+      <textarea id="approval-note-${esc(a.id)}" rows="2" maxlength="2000"
+        placeholder="Optional note — travels back to the agent"
+        style="width:100%;margin-top:.75rem;background:var(--s0);color:var(--chalk2);border:1px solid var(--wire);border-radius:4px;padding:.5rem;font-family:'IBM Plex Mono',monospace;font-size:11px;resize:vertical"></textarea>
     </div>`;
 }
 
 async function decideApproval(approvalId, decision) {
+  const box = document.getElementById('approval-note-' + approvalId);
+  const note = box && box.value ? box.value.trim() : '';
+  // maxlength on the textarea is a convenience, not the enforcement: the API
+  // rejects >2000 with a 422 and does NOT apply the decision. Surface that
+  // rather than silently refreshing, or the operator sees the approval still
+  // pending with no idea why.
+  if (note.length > 2000) {
+    alert('Note is ' + note.length + ' characters; the limit is 2000. '
+        + 'Shorten it and decide again — nothing has been recorded.');
+    return;
+  }
+  const body = { decision: decision, decided_by: 'dashboard', decision_channel: 'dashboard' };
+  if (note) body.note = note;
   try {
-    await apiPost('/v1/approvals/' + encodeURIComponent(approvalId) + '/decision',
-      { decision: decision, decided_by: 'dashboard', decision_channel: 'dashboard' });
+    await apiPost('/v1/approvals/' + encodeURIComponent(approvalId) + '/decision', body);
     await loadApprovals();
   } catch(e) {
     // A 409 means it was already decided (raced the SDK's timeout or a Slack click) —
     // refresh so the list reflects reality rather than surfacing a scary error.
+    // The note goes with the losing decision, by design: it rides the decision
+    // write and there is no note-update path.
     await loadApprovals();
   }
 }

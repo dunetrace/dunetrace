@@ -427,6 +427,45 @@ default:
       threshold: 1
       window_runs: 1
 
+  unresolved_ambiguity:
+    min_candidates: 2         # a set of one is not a choice; nothing to warrant.
+    irreversible_tools: []    # DECLARED by the operator, never inferred from
+                              # tool-name prefixes. Empty = inert.
+                              # Only the operator knows what is irreversible:
+                              # delete_draft and delete_customer are the same
+                              # string pattern and only one of them matters.
+    warrant_surfaces: [user_turns]
+                              # all user-authored turns — run.started's
+                              # input_text plus any later user reply the run
+                              # recorded. NOT system_prompt: it is byte-identical
+                              # on every run, so it cannot explain why THIS run
+                              # chose THIS candidate. NOT tool output either —
+                              # the candidate records ARE tool output, so
+                              # admitting it would silence the detector entirely.
+                              # Also accepts [first_user_turn] (input_text only).
+    min_token_len: 3          # tokens must be LONGER than this. Drops "the",
+                              # "big", "ali" — shared surnames and filler words
+                              # that discriminate nothing.
+    max_candidates_per_run: 50
+    # Cost controls fail OPEN like ungrounded_destination: on abort the run is
+    # skipped and nothing fires. Aborting is preferred to scanning a TRUNCATED
+    # candidate set, which makes shared tokens look unique and so invents
+    # discriminators that do not exist. Values shown are the in-path SDK
+    # instance's; the server-side worker runs with the far larger class defaults.
+    # max_scan_ns: 1000000
+    # max_output_chars: 20000
+    #
+    # SHADOW (absent from LIVE_DETECTORS in
+    # services/detector/detector_svc/db.py) — signals are stored and visible in
+    # the dashboard but never alert. STRONG is promotable on mechanism-
+    # correctness alone; WEAK stays dashboard-only until its rate on real
+    # traffic is understood, because WEAK's correct actuation is an approval
+    # gate, not an alert.
+    alert_policy:
+      mode: immediate
+      threshold: 1
+      window_runs: 1
+
 
 # ── Per-agent-category overrides ─────────────────────────────────────────────
 #

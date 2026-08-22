@@ -291,15 +291,45 @@ class ApprovalDenied(RuntimeError):
     """Raised when a human-in-the-loop approval (Capability 2) resolves to
     anything other than 'granted' — an explicit deny, or a timeout (which is
     fail-closed: no human decided in time, so the guarded tool is blocked).
-    `reason` is the terminal approval status ('denied' or 'timeout')."""
 
-    def __init__(self, tool_name: str, reason: str, approval_id: int, message: str = "") -> None:
+    Attributes:
+      status      the terminal approval status: "denied" | "timeout"
+      note        what the deciding human wrote, or None. None on a timeout by
+                  construction — nobody decided, so nobody wrote anything.
+      decided_by  who decided, when the deciding surface attributed it.
+      tool_name / approval_id
+
+    `note` is the whole point of catching this: it is a human correction
+    delivered into the run with provenance ("wrong Chen — it's Sarah,
+    CUST_8834"). Feed it into the next planning step and retry *within the same
+    run*. Dunetrace does not auto-append it to the prompt — steering stays the
+    agent's job, consistent with every other advisory action.
+
+    Naming note for anyone reading a diff: this attribute was `reason` and held
+    the status. It is `status` now, and `note` is the human's text. One name per
+    concept, no alias — `reason` was the wrong word the moment grants started
+    carrying notes too.
+    """
+
+    def __init__(
+        self,
+        tool_name: str,
+        status: str,
+        approval_id: int,
+        message: str = "",
+        *,
+        note: Optional[str] = None,
+        decided_by: Optional[str] = None,
+    ) -> None:
         self.tool_name = tool_name
-        self.reason = reason  # "denied" | "timeout"
+        self.status = status  # "denied" | "timeout"
         self.approval_id = approval_id
-        super().__init__(
-            message or f"Approval for tool '{tool_name}' was not granted (reason: {reason})"
-        )
+        self.note = note
+        self.decided_by = decided_by
+        detail = f"status: {status}"
+        if note:
+            detail += f"; note: {note}"
+        super().__init__(message or f"Approval for tool '{tool_name}' was not granted ({detail})")
 
 
 @dataclass

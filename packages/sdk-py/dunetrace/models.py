@@ -107,6 +107,7 @@ class FailureType(str, Enum):
     DELEGATION_LOOP = "DELEGATION_LOOP"
     OVERSIZED_TOOL_ARGUMENTS = "OVERSIZED_TOOL_ARGUMENTS"
     UNGROUNDED_DESTINATION = "UNGROUNDED_DESTINATION"
+    UNRESOLVED_AMBIGUITY = "UNRESOLVED_AMBIGUITY"
     # Not an agent failure: the SDK could not measure the run. Kept in the same
     # enum so it travels the existing signal pipeline, but it describes the
     # telemetry, not the agent.

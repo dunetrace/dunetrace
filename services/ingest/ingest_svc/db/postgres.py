@@ -687,6 +687,15 @@ CONTENT_EVIDENCE_KEYS: tuple[str, ...] = (
     "output_snippet",  # PREMATURE_TERMINATION — LLM output excerpt
     "missing_entities",  # HANDOFF_CONTEXT_LOSS — entities lifted from parent context
     "tool_error",  # PREMATURE_TERMINATION, UNREAD_TOOL_ERROR — raw error text
+    # UNRESOLVED_AMBIGUITY. Every one of these is lifted verbatim out of a
+    # tool result: the identifiers name real records, and the discriminator
+    # tokens ARE that record's field values (a customer name, a plan, a
+    # business name) — the fact that they are single words rather than a
+    # snippet does not make them less content.
+    "selected_id",
+    "sibling_id",
+    "discriminators_unused",
+    "sibling_matched_in_request",
 )
 
 _SCRUB_BATCH = 10_000

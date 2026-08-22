@@ -72,7 +72,7 @@ _ALLOWLIST = {
     "SHADOW",
     # SDK constants that name *collections of* detectors, or detector tunables —
     # all defined in packages/sdk-py/dunetrace/detectors.py.
-    "TIER1_DETECTORS",  # the 29-detector in-path battery, not a detector itself
+    "TIER1_DETECTORS",  # the 31-detector in-path battery, not a detector itself
     "SCAN_HEAD_CHARS",  # injection scan window bound
     "SCAN_TAIL_CHARS",  # injection scan window bound
     # Custom-detector translator vocabulary (detector_svc/custom_detector.py and

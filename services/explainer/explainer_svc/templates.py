@@ -2958,6 +2958,200 @@ def explain_delegation_loop(signal: FailureSignal) -> Explanation:
     )
 
 
+# UNRESOLVED_AMBIGUITY
+
+
+def _ua_quote(tokens) -> str:
+    """`a`, `b` and `c` — or a plain fallback when evidence carries nothing."""
+    items = [str(t) for t in (tokens or []) if str(t)]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return f"`{items[0]}`"
+    return ", ".join(f"`{t}`" for t in items[:-1]) + f" and `{items[-1]}`"
+
+
+def explain_unresolved_ambiguity(signal: FailureSignal) -> Explanation:
+    """Outcome-blind by construction, and the wording has to stay that way.
+
+    This template must never say the agent acted on the WRONG record — the
+    detector has no ground truth and cannot know which candidate was intended.
+    STRONG is the one case where a mismatch is provable from the trace, and even
+    there the claim is about tokens ("the request identifies X, the agent picked
+    the record whose distinguishing tokens are Y"), not about outcome.
+    """
+    ev = signal.evidence
+    tier = ev.get("tier", "weak")
+    strong = tier == "strong"
+    tool = ev.get("tool_name", "an irreversible tool")
+    step = ev.get("tool_step", signal.step_index)
+    source_tool = ev.get("source_tool")
+    source_step = ev.get("source_step")
+    n = ev.get("candidate_count", "?")
+    selected_id = ev.get("selected_id")
+    unused = ev.get("discriminators_unused") or []
+    matched = ev.get("sibling_matched_in_request") or []
+    turns = ev.get("warrant_turn_count")
+
+    # ABSENT is not EMPTY, and conflating them makes this template lie. Every
+    # token key here is content lifted out of a tool result, so all of them are
+    # in CONTENT_EVIDENCE_KEYS and are stripped from the row once the run's
+    # events pass EVENT_RETENTION_DAYS (ingest_svc's scrub_old_signal_evidence).
+    # An empty `discriminators_unused` genuinely means the selected record had no
+    # token its siblings lacked; a MISSING one means the tokens existed and have
+    # since expired. Read as "empty", the WEAK branch asserts the first when the
+    # truth is the second, and the STRONG branch degrades into a bare
+    # record-level wrongness claim — exactly what this detector must never make.
+    tokens_expired = "discriminators_unused" not in ev
+    horizon = (
+        " The tokens themselves are past the content-retention horizon and are no "
+        "longer stored with this signal."
+    )
+
+    origin = (
+        f" — one of {n} records `{source_tool}` returned at step {source_step}"
+        if source_tool is not None and source_step is not None
+        else f" — one of {n} candidates from an earlier tool result"
+    )
+    opening = (
+        f"At step {step} the agent called `{tool}`"
+        + (f" on `{selected_id}`" if selected_id else "")
+        + origin
+        + "."
+    )
+
+    if strong:
+        if matched and unused:
+            what = (
+                opening
+                + f" The request identifies {_ua_quote(matched)}; the agent selected "
+                + f"the record whose distinguishing tokens are {_ua_quote(unused)}."
+            )
+        else:
+            # Degrade to the MECHANISM, never to a claim about records. What is
+            # still known without the tokens is only that a token unique to a
+            # sibling appeared in the request — not that the agent acted wrongly.
+            what = (
+                opening + " A token unique to one of the other candidates appeared in the "
+                "request, and no token unique to the record the agent selected did."
+                + (horizon if tokens_expired else "")
+            )
+        why = (
+            "Those two token sets belong to different records in the same candidate "
+            "set, and the request only ever named one of them. That mismatch is "
+            "readable from the trace alone — no knowledge of intent is needed. The "
+            "action cannot be undone, and every value-local check "
+            "passes on it: the identifier is well-formed, it exists, and it came "
+            "straight out of a prior tool result, so provenance detectors such as "
+            "`TOOL_ARGUMENT_FABRICATION` are correctly silent."
+        )
+    else:
+        what = (
+            opening + f" Acted irreversibly on 1 of {n} candidates with no distinguishing "
+            "token from the request."
+            + (
+                f" Tokens unique to the selected record — {_ua_quote(unused)} — appear "
+                "nowhere in what the user asked for."
+                if unused
+                else horizon
+                if tokens_expired
+                else " The selected record has no token that its siblings lack, so nothing"
+                " in the request could have singled it out."
+            )
+        )
+        why = (
+            "The request did not identify any one of these candidates, so the choice "
+            "was the agent's, not the principal's — and the action cannot be undone. "
+            "This fires whether or not the pick was correct: an agent that guesses "
+            "right still guessed, and there is no way to tell the two apart from the "
+            "trace. That is deliberate. The signal scores whether the choice was "
+            "warranted, never whether it was right."
+        )
+
+    evidence_bits = [f"tier {tier}", f"{n} candidates in the set"]
+    if selected_id:
+        evidence_bits.append(f"selected `{selected_id}`")
+    if unused:
+        evidence_bits.append(f"unused discriminators: {_ua_quote(unused)}")
+    if strong and matched:
+        evidence_bits.append(f"request matched sibling on {_ua_quote(matched)}")
+    if source_tool is not None:
+        evidence_bits.append(f"candidate set from `{source_tool}` at step {source_step}")
+    if turns:
+        evidence_bits.append(f"{turns} user-authored turn(s) checked")
+
+    fixes = [
+        CodeFix(
+            description=(
+                "Make the agent resolve the ambiguity before acting. When a lookup "
+                "returns more than one record and the request names none of them, the "
+                "correct move is to ask, not to pick — a reply from the user becomes "
+                "warrant for the next attempt and this signal stops firing."
+            ),
+            language="text",
+            code=(
+                "System prompt addition:\n"
+                "  Before calling any irreversible tool, check how many records the "
+                "lookup returned.\n"
+                "  If more than one matches and the user's request does not name a "
+                "field that is unique\n"
+                "  to exactly one of them, ask the user which one and wait. Never "
+                "choose on their behalf."
+            ),
+        ),
+        CodeFix(
+            description=(
+                "Declare which tools are irreversible. This detector is inert until "
+                "you do — irreversibility is never inferred from a tool name, because "
+                "`delete_draft` and `delete_customer` are the same string pattern."
+            ),
+            language="yaml",
+            code=(
+                "# detectors.yml\n"
+                "default:\n"
+                "  unresolved_ambiguity:\n"
+                "    irreversible_tools: [delete_customer, cancel_subscription, "
+                "issue_refund]"
+            ),
+        ),
+        CodeFix(
+            description=(
+                "Gate the action on a human once you trust the signal. A tier of "
+                "`weak` means nobody but the principal knows which candidate was "
+                "meant, so an approval prompt is the resolution — an alert is not."
+            ),
+            language="python",
+            code=(
+                "dt.add_policy(\n"
+                "    name='approve-ambiguous-destructive-actions',\n"
+                "    condition={'trigger': 'signal', 'operator': 'contains',\n"
+                "               'value': 'UNRESOLVED_AMBIGUITY'},\n"
+                "    action={'type': 'require_approval', 'params': {'timeout_s': 300}},\n"
+                ")\n"
+                "# Structural detectors run in-process before the run finishes, so the\n"
+                "# gate is evaluated before the irreversible tool body executes. The\n"
+                "# SDK-side detector needs irreversible_tools declared too."
+            ),
+        ),
+    ]
+
+    return Explanation(
+        **_base(signal),
+        title=(
+            f"Unresolved ambiguity: 1 of {n} candidates acted on by `{tool}`"
+            if not strong
+            else (
+                "Unresolved ambiguity: the request's distinguishing token matches a "
+                f"sibling of the record `{tool}` acted on"
+            )
+        ),
+        what=what,
+        why_it_matters=why,
+        evidence_summary="; ".join(evidence_bits) + ".",
+        suggested_fixes=fixes,
+    )
+
+
 TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.TOOL_LOOP: explain_tool_loop,
     FailureType.TOOL_THRASHING: explain_tool_thrashing,
@@ -2992,4 +3186,5 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.MEMORY_POISONING: explain_memory_poisoning,
     FailureType.DELEGATION_LOOP: explain_delegation_loop,
     FailureType.UNGROUNDED_DESTINATION: explain_ungrounded_destination,
+    FailureType.UNRESOLVED_AMBIGUITY: explain_unresolved_ambiguity,
 }

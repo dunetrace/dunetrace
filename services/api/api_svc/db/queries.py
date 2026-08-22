@@ -575,12 +575,19 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_at       TIMESTAMPTZ,
     decided_by       TEXT,
     decision_channel TEXT,
-    delivered_at     TIMESTAMPTZ
+    delivered_at     TIMESTAMPTZ,
+    note             TEXT
 );
 -- delivered_at: set once alerts_svc has notified a human (Phase 2.3). Added
 -- via ALTER too, so an approvals table created by an earlier build in this
 -- sprint (before delivery existed) gains the column without a manual migration.
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+-- note: the deciding human's free-text message, written ONLY as part of the
+-- terminal decision write below. It inherits the decision's immutability from
+-- the `status = 'pending'` guard in set_approval_decision — there is no
+-- note-update path, by design, so an audit trail entry can never be edited
+-- after the fact. Added via ALTER for the same reason delivered_at was.
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS note TEXT;
 CREATE INDEX IF NOT EXISTS idx_approvals_org_status ON approvals(org_id, status);
 CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_undelivered
@@ -3778,7 +3785,7 @@ async def create_approval(
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, org_id, run_id, agent_id, tool_name, tool_args,
                       status, requested_at, expires_at, decided_at, decided_by,
-                      decision_channel
+                      decision_channel, note
             """,
             org_id,
             run_id,
@@ -3799,7 +3806,8 @@ async def list_approvals(org_id: str, status: Optional[str] = None, limit: int =
         rows = await conn.fetch(
             """
             SELECT id, org_id, run_id, agent_id, tool_name, tool_args, status,
-                   requested_at, expires_at, decided_at, decided_by, decision_channel
+                   requested_at, expires_at, decided_at, decided_by, decision_channel,
+                   note
             FROM approvals
             WHERE org_id = $1 AND ($2::text IS NULL OR status = $2)
             ORDER BY requested_at DESC
@@ -3820,7 +3828,8 @@ async def get_approval(org_id: str, approval_id: int) -> Optional[dict]:
         row = await conn.fetchrow(
             """
             SELECT id, org_id, run_id, agent_id, tool_name, tool_args, status,
-                   requested_at, expires_at, decided_at, decided_by, decision_channel
+                   requested_at, expires_at, decided_at, decided_by, decision_channel,
+                   note
             FROM approvals
             WHERE org_id = $1 AND id = $2
             """,
@@ -3836,6 +3845,7 @@ async def set_approval_decision(
     new_status: str,
     decided_by: Optional[str],
     decision_channel: Optional[str],
+    note: Optional[str] = None,
 ) -> Optional[dict]:
     """Move a *pending* approval to a terminal status. The `status = 'pending'`
     guard in the WHERE clause makes this a no-op on an already-decided approval
@@ -3843,7 +3853,15 @@ async def set_approval_decision(
     the recorded outcome. Caller should treat None as 'already decided or not
     found' and re-read to see the actual state. Transition legality is enforced
     here structurally (only pending → terminal is reachable); the full rule set
-    lives in api_svc.approvals.is_valid_transition()."""
+    lives in api_svc.approvals.is_valid_transition().
+
+    `note` is the deciding human's message. It rides this write and only this
+    write, which is what makes it immutable: a decision that loses the terminal
+    race writes nothing, so its note is discarded along with it. There is
+    deliberately no note-update path — an audit trail you can edit afterwards is
+    not an audit trail. Keyword with a default so the Slack caller
+    (routers/slack.py) needs no change.
+    """
     if not _pool:
         return None
     async with _pool.acquire() as conn:
@@ -3853,16 +3871,19 @@ async def set_approval_decision(
             SET status = $3,
                 decided_at = NOW(),
                 decided_by = $4,
-                decision_channel = $5
+                decision_channel = $5,
+                note = $6
             WHERE org_id = $1 AND id = $2 AND status = 'pending'
             RETURNING id, org_id, run_id, agent_id, tool_name, tool_args, status,
-                      requested_at, expires_at, decided_at, decided_by, decision_channel
+                      requested_at, expires_at, decided_at, decided_by,
+                      decision_channel, note
             """,
             org_id,
             approval_id,
             new_status,
             decided_by,
             decision_channel,
+            note,
         )
     return dict(row) if row else None
 

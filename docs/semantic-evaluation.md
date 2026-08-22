@@ -19,7 +19,7 @@ for the full explanation.
 
 If you're looking for the structural detectors instead (Tool Loop, Retry
 Storm, Cost Spike, and the rest — the ones that can and do fire policies),
-see [docs/detectors.md](detectors.md). There are 29 of them; the 26 that can
+see [docs/detectors.md](detectors.md). There are 34 of them; the 31 that can
 be evaluated in-path are the ones `trigger="signal"` policies can match.
 
 ---
@@ -242,7 +242,7 @@ something no single-run evaluator can see. See
 
 - Not a replacement for structural detection — semantic evaluation
   *augments* it (100% of structurally-flagged runs also get semantic
-  context) and catches a different class of failure, but the 29 structural
+  context) and catches a different class of failure, but the 34 structural
   detectors remain the always-on, zero-cost, zero-LLM first line.
 - Not a runtime guardrail — see the policies cross-link above.
 - Not required — `SEMANTIC_WORKER_ENABLED` defaults to off; everything else

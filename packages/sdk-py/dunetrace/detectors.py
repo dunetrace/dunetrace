@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from collections import Counter, deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit as _urlsplit
@@ -3225,6 +3226,96 @@ class DelegationLoopDetector(BaseDetector):
         )
 
 
+# Human decision notes attached to an approval (Capability 2). A note is written
+# only by a caller holding the `approve` scope — a credential the agent process
+# deliberately does not have — so it is the highest-trust text in a run: neither
+# the model nor any tool can put words there.
+#
+# Harvested from state.events rather than a typed RunState field because approval
+# events have no typed view; build_run_state() puts every event in state.events,
+# so this is the one channel that works identically in-path and server-side.
+# Read defensively: payload is Dict[str, Any] with no per-type validation, and a
+# malformed approval event must never turn a detector into a raising detector.
+#
+# BOTH terminal events carry notes. A grant note grounds a value just as
+# legitimately as a deny note ("approved — use CUST_8834 going forward").
+_APPROVAL_NOTE_EVENTS = (EventType.APPROVAL_DENIED, EventType.APPROVAL_GRANTED)
+
+
+def _approval_blocked_calls(state: "RunState") -> set:
+    """Indices of tool calls an approval gate PREVENTED from running.
+
+    RunContext.tool_called appends the ToolCall and only then blocks on the
+    human, so a denied call is left in state.tool_calls with success=None and no
+    output — shaped exactly like a call whose response nobody instrumented. A
+    detector that cannot tell the two apart reports the agent doing the thing the
+    approval gate stopped it from doing. That is a false positive on the run
+    where the control WORKED, which is the most expensive kind there is.
+
+    Matching mirrors tool_responded's back-fill: walk terminal approval events in
+    order and claim, for each, the latest not-yet-claimed ToolCall with the same
+    name at or before that event's step and still lacking an outcome. Deliberately
+    not an arithmetic offset — the gate emits at the gated call's step + 1 today,
+    and pinning that number would make this quietly wrong the day emission moves.
+
+    Timeout blocks too: fail-closed means the tool did not run.
+    """
+    terminal = (EventType.APPROVAL_DENIED, EventType.APPROVAL_TIMEOUT)
+    blocked: set = set()
+    for ev in getattr(state, "events", None) or []:
+        if getattr(ev, "event_type", None) not in terminal:
+            continue
+        payload = getattr(ev, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        tool_name = payload.get("tool_name")
+        if not isinstance(tool_name, str):
+            continue
+        ev_step = getattr(ev, "step_index", 0) or 0
+        for i in range(len(state.tool_calls) - 1, -1, -1):
+            if i in blocked:
+                continue
+            tc = state.tool_calls[i]
+            # STRICTLY before the gate event, not <=. tool_called appends the
+            # ToolCall, then emits tool.called (which advances the step), then
+            # gates — so a gated call always sits at a lower step than its own
+            # terminal approval event. A retry issued from the except block
+            # lands at the SAME step as that event and matches everything else
+            # about the pattern (same tool name, success still None because
+            # tool_responded hasn't run yet), so <= claimed the retry instead of
+            # the call that was actually blocked — silently inverting the
+            # exclusion and leaving the real blocked call reported.
+            if tc.tool_name == tool_name and (tc.step_index or 0) < ev_step and tc.success is None:
+                blocked.add(i)
+                break
+    return blocked
+
+
+def _approval_notes(state: "RunState") -> List[Tuple[int, str]]:
+    """(step_index, note) for every human decision note in this run, in order.
+
+    RUN-SCOPED, and that is a real limitation rather than an implementation
+    detail: RunState.events holds only this run's events, so a note issued in run
+    N cannot ground or warrant anything in run N+1. The prescribed idiom is to
+    catch ApprovalDenied and retry inside the same run, which keeps the note in
+    scope. An agent that ends the run on denial and retries as a NEW run gets its
+    corrected behaviour flagged by these same detectors — see the cross-run
+    extension note in docs/approvals.md. Same shape as UNGROUNDED_DESTINATION's
+    cross-run memory taint, and it belongs with that work, not here.
+    """
+    out: List[Tuple[int, str]] = []
+    for ev in getattr(state, "events", None) or []:
+        if getattr(ev, "event_type", None) not in _APPROVAL_NOTE_EVENTS:
+            continue
+        payload = getattr(ev, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        note = payload.get("note")
+        if isinstance(note, str) and note.strip():
+            out.append((getattr(ev, "step_index", 0) or 0, note))
+    return out
+
+
 # ── UNGROUNDED_DESTINATION ────────────────────────────────────────────────────
 #
 # Shared extraction helpers. These deliberately do NOT replace
@@ -3749,6 +3840,9 @@ class UngroundedDestinationDetector(BaseDetector):
                          open-destination agents silent
           retrieval      same argument: corpus data the system supplied
           memory value   written earlier from a channel the attacker can't reach
+          approval note  what a human wrote when deciding an approval; the only
+                         text in a run that neither the model nor a tool can
+                         reach, so it is never demoted
 
         Excluded, deliberately:
           llm output     circular — an injected model would ground itself
@@ -3778,6 +3872,24 @@ class UngroundedDestinationDetector(BaseDetector):
         if state.system_prompt:
             grounded.append(state.system_prompt)
             used.append("system_prompt")
+
+        # Human decision notes. Highest-trust text in the run — written by a
+        # holder of the `approve` scope, which the agent process does not have —
+        # so they are NOT subject to conditional demotion, for the same reason
+        # system_prompt isn't: the injection channel this detector models is
+        # content the agent ingests, and a note arrives out-of-band from a
+        # credential no injected model can reach.
+        #
+        # Without this, the deny-note idiom fires our own detector on the fixed
+        # behaviour: a human corrects "wrong Chen — it's sarah.chen@example.com",
+        # the agent retries with exactly that address, and the retry is
+        # ungrounded because the correction lives in an approval event nothing
+        # was reading. That false positive lands on the run where the human was
+        # obeyed, which is the worst possible place to spend operator trust.
+        for _step, note in _approval_notes(state):
+            grounded.append(note)
+            if "approval_note" not in used:
+                used.append("approval_note")
 
         for tc in state.tool_calls:
             if not tc.output:
@@ -3986,8 +4098,14 @@ class UngroundedDestinationDetector(BaseDetector):
         ungrounded_count = 0
         truncated = False
         grounded_seen: List[Tuple[str, str, str]] = []
+        # A call an approval gate blocked never sent anything. Reporting an
+        # ungrounded destination for it means alerting on the run where the
+        # human-in-the-loop control did its job.
+        blocked = _approval_blocked_calls(state)
 
-        for tc in state.tool_calls:
+        for tc_index, tc in enumerate(state.tool_calls):
+            if tc_index in blocked:
+                continue
             if not self._in_scope(tc.tool_name):
                 continue
             if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
@@ -4113,6 +4231,702 @@ class UngroundedDestinationDetector(BaseDetector):
                 "args_truncated": best["args_truncated"],
                 "args_snippet": best["args_snippet"],
             },
+        )
+
+
+# ── UNRESOLVED_AMBIGUITY ──────────────────────────────────────────────────────
+#
+# WARRANT, not grounding. TOOL_ARGUMENT_FABRICATION and UNGROUNDED_DESTINATION
+# both ask "where did this value come from?" and go quiet the moment the value is
+# present somewhere in the run. That question has no answer to give here: the id
+# the agent deleted is well-formed, exists, and appears verbatim in a prior tool
+# result, so every provenance check passes. The question this detector asks is
+# the different one — "what justified choosing THIS record over its siblings?" —
+# and the surface that can answer it is much narrower than a grounding surface.
+
+# Unicode-aware word tokenisation. NOT [a-z]+: "Müller", "Jürgen" and "José" have
+# to tokenise as one token each, and casefold (not lower) so "Straße" and
+# "STRASSE" agree. `\w` also spans digits and the underscore, which is what makes
+# "CUST_1183" and "340k" single tokens — "delete CUST_1183" and "the €340k
+# account" are real discriminating requests and have to be read as one.
+_UA_WORD_RE = re.compile(r"\w+")
+
+# Keys whose value is the record's identifier. Used to decide WHICH argument of
+# an irreversible call names the record — see _ua_identifiers.
+_UA_ID_KEYS = frozenset({"id", "uuid", "guid", "key", "code", "ref", "identifier"})
+
+
+def _ua_tokens(text: object, min_token_len: int) -> set:
+    """Casefolded tokens of `text` longer than min_token_len.
+
+    NFKC first so a decomposed "u + combining diaeresis" and a precomposed "ü"
+    produce the same token — the two are indistinguishable on screen, and a
+    German name typed one way in the request and stored the other way in the
+    record would otherwise never match.
+
+    Possessives need no special case: ``\\w+`` already splits "Sarah's" into
+    ("Sarah", "s"), and "s" is below any sane min_token_len.
+    """
+    if text is None or isinstance(text, bool):
+        return set()
+    raw = text if isinstance(text, str) else str(text)
+    if not raw:
+        return set()
+    normalized = unicodedata.normalize("NFKC", raw)
+    return {
+        t for t in (m.casefold() for m in _UA_WORD_RE.findall(normalized)) if len(t) > min_token_len
+    }
+
+
+def _ua_scalars(value, max_depth: int, out: List[str], depth: int = 0) -> bool:
+    """Collect every scalar leaf of a parsed structure into `out`, values only.
+
+    Returns True if the walk hit `max_depth` and stopped early. The caller MUST
+    treat that as a reason to abort, not as a complete read: a token shared by
+    two records but nested too deep in one of them silently disappears from that
+    record's set and becomes a discriminator of the other — the detector would
+    then invent the very evidence it is supposed to be weighing, and could
+    manufacture a HIGH-severity STRONG verdict out of a depth limit.
+
+    Unlike _walk_arg_strings this keeps ints and floats: a record identifier is
+    routinely numeric (`{"id": 1183}`), and dropping numeric leaves would make
+    such a record unselectable and its whole candidate set invisible.
+    """
+    if depth > max_depth:
+        return True
+    truncated = False
+    if isinstance(value, dict):
+        for v in value.values():
+            truncated |= _ua_scalars(v, max_depth, out, depth + 1)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for v in value:
+            truncated |= _ua_scalars(v, max_depth, out, depth + 1)
+    elif isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        out.append(str(value))
+    return truncated
+
+
+def _ua_identifier_shaped(value: str) -> bool:
+    """Whether a whole field value can act as an identifier.
+
+    The same structural test TOOL_ARGUMENT_FABRICATION applies (an ID separator,
+    an embedded digit, or opaque length) and for the same reason: without it a
+    `plan` of "Standard" counts as an identifier and records get selected by
+    their pricing tier. Deliberately a separate copy — that detector is
+    calibrated and live, and re-pointing it at shared code is a regression risk
+    taken for style.
+    """
+    if len(value) < 3 or any(ch.isspace() for ch in value):
+        return False
+    if any(ch in "_-./:@#" for ch in value) or any(ch.isdigit() for ch in value):
+        return True
+    return len(value) >= 12
+
+
+def _ua_record_lists(parsed, max_depth: int) -> List[List[Any]]:
+    """Every plausible candidate set inside a parsed tool output, best first.
+
+    Returns a LIST of candidate sets rather than one, because a single result
+    routinely carries more than one list and picking by dict iteration order
+    picks by serializer whim: `{"results": [...records...], "facets": [...]}` and
+    the same payload with the keys emitted in the other order would anchor on
+    different data. The caller resolves the ambiguity with information this
+    function does not have — which set actually contains the identifier the
+    irreversible call used.
+
+    Order of preference: lists of dicts (in discovery order), then lists of
+    scalars, then the whole value as ONE record.
+
+    That last fallback is not a nicety. A narrowing lookup returns its single hit
+    as a bare object, not a one-element list — dunetrace-demos' own
+    `lookup_customer` returns `{"customers": [...]}` for a name match and a bare
+    record `dict` for an id/email match. Without it, the anchor scan walks
+    straight past the narrowed result to the older, wider one and reports
+    ambiguity for a run that had resolved it.
+    """
+    found: List[List[Any]] = []
+    scalars: List[List[Any]] = []
+
+    def walk(node, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if isinstance(node, (list, tuple)):
+            members = list(node)
+            if not members:
+                return
+            if all(isinstance(m, dict) for m in members):
+                found.append(members)
+            elif all(isinstance(m, (str, int, float)) and not isinstance(m, bool) for m in members):
+                scalars.append(members)
+            return
+        if isinstance(node, dict):
+            for v in node.values():
+                walk(v, depth + 1)
+
+    walk(parsed, 0)
+    out = found + scalars
+    if isinstance(parsed, dict) and parsed:
+        out.append([parsed])
+    return out
+
+
+def _ua_identifiers(record: Any, values: List[str]) -> List[str]:
+    """The values of `record` that name it, narrowest reading first.
+
+    A record is matched on its IDENTIFIER, not on any field that happens to look
+    like one. Without that distinction a second identifier-shaped argument — an
+    effective date, an amount, a reference — that coincides with some sibling's
+    field value makes the call look like it named two records, and the
+    "exactly one" test then discards a real finding. Observed with
+    `cancel_subscription(customer_id=..., effective_date="2024-03-15")`, where
+    the date equalled a sibling's `signup_date`.
+
+    Returns the id-keyed values when the record has any. The caller falls back to
+    the broad reading (every identifier-shaped value) only when the narrow one
+    matches nothing at all in the whole set, which keeps tools that act on an
+    email or an SKU working.
+    """
+    if not isinstance(record, dict):
+        return []
+    out = []
+    for key, value in record.items():
+        name = str(key).casefold()
+        if name in _UA_ID_KEYS or name.endswith("_id") or name.startswith("id_"):
+            text = value if isinstance(value, str) else str(value)
+            if _ua_identifier_shaped(text):
+                out.append(text)
+    return out
+
+
+def _ua_record_identifier(record: Any, values: List[str]) -> Optional[str]:
+    """The record's identifier, for the signal's evidence."""
+    narrow = _ua_identifiers(record, values)
+    if narrow:
+        return narrow[0]
+    for value in values:
+        if _ua_identifier_shaped(value):
+            return value
+    return values[0] if values else None
+
+
+def _ua_targeted(arg_values: List[str], id_sets: List[List[str]]) -> List[int]:
+    """Indices of the records an argument value identifies.
+
+    A value identifies a record when it EQUALS one of that record's identifying
+    values outright. Substring matching would let "CUST_11" select CUST_1183, and
+    would let any free-text argument select whichever record happened to contain
+    one of its words.
+    """
+    wanted = {v.casefold() for v in arg_values if _ua_identifier_shaped(v)}
+    if not wanted:
+        return []
+    return [i for i, ids in enumerate(id_sets) if any(v.casefold() in wanted for v in ids)]
+
+
+class UnresolvedAmbiguityDetector(BaseDetector):
+    """
+    An agent performed an IRREVERSIBLE action on one of N candidates returned by
+    an earlier tool, when nothing in the user's request distinguished that
+    candidate from its siblings.
+
+    Worked example. `lookup_customer("Chen")` returns Sarah Chen (CUST_8834,
+    Enterprise, €340k/yr) and Emily Chen (CUST_1183, Standard, €3k/yr). The
+    request was "close the account for the Chen family". The agent calls
+    `delete_customer("CUST_1183")`. Every value-local check passes — the id is
+    well-formed, it exists, and it appears verbatim in a prior tool result — so
+    TOOL_ARGUMENT_FABRICATION is correctly silent. Nothing else looks at the
+    *choice*.
+
+    OUTCOME-BLIND BY DESIGN. This detector cannot know which Chen was intended
+    and never claims to. It scores epistemic warrant, so it also fires when the
+    agent guessed RIGHT — an agent that guessed right still guessed. That is what
+    makes it evaluable without ground truth, and why the signal wording never
+    says "the wrong record".
+
+    Verdict, against the most recent prior tool result whose records contain the
+    identifier the call used:
+
+    - the SELECTED record has a discriminator present in the warrant surface
+      -> silent
+    - a SIBLING has a discriminator present in the warrant surface
+      -> STRONG: the request identified someone else, and the mismatch is
+      provable from the trace alone
+    - otherwise -> WEAK: genuine ambiguity, nothing in the request identified
+      anyone
+
+    A DISCRIMINATOR of a record is a token appearing in that record's field
+    values that no sibling's values contain. Shared surnames drop out among
+    Chens, so the more alike the records are the sharper the test gets.
+
+    Severity and confidence are part of the contract, not an implementation
+    detail:
+
+    - STRONG -> severity HIGH, confidence 0.9 (the mismatch is provable from the
+      trace)
+    - WEAK   -> severity MEDIUM, confidence 0.6 (genuine ambiguity;
+      correct-but-interrupting by design)
+
+    CANDIDATE-SET ANCHORING. The set evaluated is the MOST RECENT prior result
+    containing the selected identifier, never the widest one. An agent that ran a
+    narrowing lookup — `lookup_customer("sarah.chen@example.com")` returning one
+    record — and then acted is judged against that single-record set, so it is
+    silent. A narrowed result arrives as a bare OBJECT, not a one-element list
+    (dunetrace-demos' own lookup_customer returns `{"customers": [...]}` for a
+    name match and a bare record dict for an id/email match), so a lone object
+    counts as a one-record set. A result offering several lists is resolved by
+    which one holds the identifier, never by dict key order — `{"results": [...],
+    "facets": [...]}` and the same payload serialized the other way round have to
+    reach the same verdict.
+
+    A call is matched to a record by that record's IDENTIFIER, not by any field
+    that happens to look like one; the broad reading applies only where the
+    narrow one matches nothing in the set (see _ua_identifiers), so a collateral
+    argument — an effective date equal to a sibling's signup_date — cannot make
+    one call look like it named two records.
+
+    WARRANT PRECEDES THE ACTION. Only turns recorded at or before the acting
+    call's step count. A reply that arrives afterwards cannot justify a choice
+    already committed to, and reading a run's turns as one undifferentiated bag
+    silences act-first-ask-afterwards — the behaviour this exists to catch.
+
+    A call with `success is False` performed nothing, so there is no irreversible
+    action whose warrant is in question. `None` (unknown) still counts: most
+    instrumentation never sets it.
+
+    SUPPRESSION. Plural: if every candidate in the set is acted on by
+    irreversible calls within the run, no selection occurred ("close the accounts
+    for the Chen family", both Chens deleted) and nothing fires. Also silent for
+    a one-candidate set, for a consuming tool not in IRREVERSIBLE_TOOLS, and when
+    the identifier never appeared in any prior result — that last one is
+    TOOL_ARGUMENT_FABRICATION's finding and double-reporting it would be wrong.
+
+    DECLARED SCOPE. IRREVERSIBLE_TOOLS defaults to [] and the detector is then
+    fully inert. Irreversibility is never inferred from a tool-name prefix:
+    `delete_draft` and `delete_customer` are the same string pattern, and only
+    the operator knows which one cannot be undone.
+
+    Two things that will look like bugs and are not:
+
+    1. system_prompt is DELIBERATELY EXCLUDED from the warrant surface, and so is
+       tool output. A grounding surface rightly includes both; a warrant surface
+       cannot. The system prompt is byte-identical on every run, so it can never
+       explain why THIS run chose THIS candidate — demo1's system prompt happens
+       to contain CUST_8834 as an example, which made a lucky-correct guess read
+       as warranted. Tool output is worse: the candidate records ARE tool output,
+       so admitting it would make every discriminator trivially "present" and
+       silence the detector on every run it exists for. Grounding asks "where did
+       this value come from?"; warrant asks "what made you choose this one over
+       that one?" — and a constant, or the menu itself, never explains a choice.
+    2. Discrimination is TOKEN-LEVEL, not whole-value. Given {Sarah Chen, Emily
+       Chen}, "delete Sarah" unambiguously means Sarah, yet the whole value
+       "sarah chen" is not a substring of "delete Sarah". Whole-value matching
+       scored 3/5 on that case family; token-level scores 5/5.
+
+    Documented non-goal: a narrowing lookup whose QUERY was itself an unwarranted
+    guess launders the guess — warrant-checking lookup arguments recursively is
+    out of scope.
+
+    Instrumentation-dependent, like TOOL_ARGUMENT_FABRICATION: candidate sets are
+    read from `tool.responded`'s raw output, which only exists when the caller
+    passes `output=` (dt.tool() and the CrewAI integration do). A run with no
+    captured tool output has no candidate sets and is silent.
+
+    Cost controls fail OPEN, like UNGROUNDED_DESTINATION: on abort the run is
+    skipped and nothing fires. Aborting beats scanning a truncated candidate set,
+    which would make shared tokens look unique and thereby invent discriminators.
+    That applies to MAX_DEPTH too: a record read only to its depth limit is an
+    incomplete record, and the token it really shared with a sibling becomes that
+    sibling's discriminator — the detector would manufacture the evidence it is
+    weighing, up to a HIGH-severity STRONG. The scan budget is polled inside the
+    anchor walk, not only between irreversible calls: that walk parses every
+    prior output it passes, and one delete behind hundreds of chatty tool calls
+    does all of its work there.
+
+    Tunable: MIN_CANDIDATES, IRREVERSIBLE_TOOLS, WARRANT_SURFACES, MIN_TOKEN_LEN,
+    MAX_CANDIDATES_PER_RUN, MAX_SCAN_NS, MAX_OUTPUT_CHARS, MAX_DEPTH,
+    USER_TURN_SIGNALS, USER_TURN_TEXT_KEYS.
+    """
+
+    name = "UNRESOLVED_AMBIGUITY"
+    SEVERITY = None  # computed per-signal: HIGH (strong) | MEDIUM (weak)
+
+    MIN_CANDIDATES = 2
+    # DECLARED by the operator, never inferred. Empty = inert.
+    IRREVERSIBLE_TOOLS: List[str] = []
+    # "user_turns" = every user-authored turn in the run. "first_user_turn" =
+    # run.started's input_text only. There is deliberately no value for the
+    # system prompt or for tool output — see the docstring.
+    WARRANT_SURFACES = ["user_turns"]
+    MIN_TOKEN_LEN = 3
+    MAX_CANDIDATES_PER_RUN = 50
+    # Hard wall-clock abort, generous by default (server-side, off the agent's
+    # critical path); the TIER1 instance is constructed with the 1ms in-path
+    # budget. Exceeding it returns None.
+    MAX_SCAN_NS = 50_000_000
+    # Longest tool output parsed. Over it the run is skipped rather than parsed
+    # partially — see the fail-open note in the docstring.
+    MAX_OUTPUT_CHARS = 200_000
+    MAX_DEPTH = 6
+    # external_signal names carrying a user-authored turn. A run's later user
+    # messages have no dedicated event type — a "conversation" in this system is
+    # a sequence of runs, each with one input_text — so a mid-run reply reaches
+    # RunState through this channel.
+    USER_TURN_SIGNALS = [
+        "user_message",
+        "user_turn",
+        "user_reply",
+        "user_input",
+        "clarification",
+    ]
+    # Keys under such a signal's meta that hold the turn text.
+    USER_TURN_TEXT_KEYS = ["text", "content", "message", "reply", "value"]
+
+    # ── Warrant surface ──────────────────────────────────────────────────────
+
+    def _user_turns(self, state: RunState) -> List[Tuple[int, str]]:
+        """Every user-authored turn in the run as (step_index, text).
+
+        The step matters: a turn only warrants an action that came AFTER it. A
+        reply recorded later in the run cannot retroactively justify a choice the
+        agent had already committed to, and treating the run's turns as one
+        undifferentiated bag silences exactly the case this detector exists for
+        (act first, ask afterwards).
+
+        Human approval-decision notes count as user-authored turns and are
+        harvested here too — see _approval_notes for why they are the
+        highest-trust text in a run, and for the run-scoping limitation.
+
+        Reads the raw EXTERNAL_SIGNAL events as well as state.external_signals,
+        because the two are not equivalent on both sides of the wire:
+        build_run_state() — the server-side reconstruction every detector-worker
+        run goes through — never repopulates state.external_signals, so a
+        detector consulting only the typed view would silently lose every later
+        user turn on exactly the path that matters most.
+        """
+        turns: List[Tuple[int, str]] = []
+        if state.input_text:
+            turns.append((-1, state.input_text))  # run.started, before any step
+        if "user_turns" not in (self.WARRANT_SURFACES or ()):
+            return turns
+
+        wanted = {str(n).casefold() for n in (self.USER_TURN_SIGNALS or ())}
+        if not wanted:
+            return turns
+        seen = {t for _, t in turns}
+
+        def take(name: object, meta: object, step: int) -> None:
+            if str(name or "").casefold() not in wanted or not isinstance(meta, dict):
+                return
+            for key in self.USER_TURN_TEXT_KEYS:
+                text = meta.get(key)
+                if isinstance(text, str) and text.strip():
+                    if text not in seen:
+                        seen.add(text)
+                        turns.append((step, text))
+                    return
+
+        for sig in state.external_signals:
+            take(sig.signal_name, sig.meta, sig.step_index)
+        for ev in state.events:
+            if ev.event_type == EventType.EXTERNAL_SIGNAL:
+                payload = ev.payload or {}
+                take(payload.get("signal_name"), payload.get("meta"), ev.step_index)
+
+        # A human decision note is user-authored input of the strongest kind: it
+        # came from a person holding the `approve` scope, in response to this
+        # exact tool call. "wrong Chen — it's Sarah, CUST_8834" is the clearest
+        # warrant a retry could possibly have, and without this the corrected
+        # retry reads as unwarranted and this detector fires on the fix.
+        #
+        # Step-ordered like every other turn, so a note still cannot warrant an
+        # action that preceded it.
+        for step, note in _approval_notes(state):
+            if note not in seen:
+                seen.add(note)
+                turns.append((step, note))
+        turns.sort(key=lambda t: t[0])
+        return turns
+
+    # ── Evaluation ───────────────────────────────────────────────────────────
+
+    def _arg_values(self, args_text: str) -> List[str]:
+        """Scalar leaves of a tool call's args, values only.
+
+        Unparseable args yield nothing rather than falling back to a raw-text
+        scan. A raw scan cannot tell a dict KEY from a value, and a wrong anchor
+        here does not merely miss a signal — it evaluates the selection against a
+        candidate set the agent never chose from.
+        """
+        parsed = _parse_tool_args(args_text or "")
+        if parsed is None:
+            return []
+        out: List[str] = []
+        _ua_scalars(parsed, self.MAX_DEPTH, out)
+        return out
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        if not self.IRREVERSIBLE_TOOLS or not state.tool_calls:
+            return None
+
+        started_ns = time.perf_counter_ns()
+        irreversible = {str(t).casefold() for t in self.IRREVERSIBLE_TOOLS}
+        # success is False means the call was rejected and nothing happened —
+        # there is no irreversible action to have been warranted. None (unknown)
+        # is kept: most instrumentation never sets it, and treating unknown as
+        # failed would make the detector inert on the majority of real traffic.
+        #
+        # An approval-blocked call is the other way a call can not-happen, and it
+        # is invisible to the success check: the gate raises before
+        # tool_responded, so the ToolCall keeps success=None. Excluding it here
+        # also keeps it out of plural suppression, which iterates `acting` — a
+        # candidate the agent was STOPPED from acting on has not been acted on.
+        blocked = _approval_blocked_calls(state)
+        acting = [
+            tc
+            for i, tc in enumerate(state.tool_calls)
+            if tc.tool_name.casefold() in irreversible
+            and tc.success is not False
+            and i not in blocked
+        ]
+        if not acting:
+            return None
+
+        turns = self._user_turns(state)
+        warrant_cache: Dict[int, set] = {}
+
+        def warrant_at(step: int) -> set:
+            """Tokens from the turns that preceded `step`."""
+            if step not in warrant_cache:
+                tokens: set = set()
+                for turn_step, text in turns:
+                    if turn_step <= step:
+                        tokens |= _ua_tokens(text, self.MIN_TOKEN_LEN)
+                warrant_cache[step] = tokens
+            return warrant_cache[step]
+
+        # Structure is parsed once per producing call; a set's LEAVES are
+        # extracted only when that set is actually tried. A result offering two
+        # candidate sets used to cost both, and the fallback whole-payload set is
+        # never needed once the real records match — with a set at the
+        # documented 50-record cap that eager pass alone ran the in-path
+        # instance 8x over its 1ms budget.
+        record_lists_cache: Dict[int, List[List[Any]]] = {}
+        set_cache: Dict[Tuple[int, int], Optional[Tuple[List[List[str]], List[List[str]]]]] = {}
+        args_cache: Dict[int, List[str]] = {}
+        counted: set = set()
+
+        def record_lists_of(tc: ToolCall) -> List[List[Any]]:
+            if id(tc) not in record_lists_cache:
+                lists: List[List[Any]] = []
+                output = tc.output or ""
+                if output:
+                    parsed = _parse_tool_args(output)
+                    if parsed is not None:
+                        lists = _ua_record_lists(parsed, self.MAX_DEPTH)
+                record_lists_cache[id(tc)] = lists
+            return record_lists_cache[id(tc)]
+
+        def set_data(tc: ToolCall, set_i: int, members: List[Any]):
+            """(values, identifiers) for one candidate set, None if truncated."""
+            key = (id(tc), set_i)
+            if key not in set_cache:
+                values: List[List[str]] = []
+                truncated = False
+                for member in members:
+                    leaves: List[str] = []
+                    truncated |= _ua_scalars(member, self.MAX_DEPTH, leaves)
+                    values.append(leaves)
+                # Fail open. A partially-read record makes tokens it actually
+                # shares look unique — see _ua_scalars.
+                set_cache[key] = (
+                    None
+                    if truncated
+                    else (values, [_ua_identifiers(m, v) for m, v in zip(members, values)])
+                )
+            return set_cache[key]
+
+        def args_of(tc: ToolCall) -> List[str]:
+            if id(tc) not in args_cache:
+                args_cache[id(tc)] = self._arg_values(tc.args)
+            return args_cache[id(tc)]
+
+        def match(arg_values: List[str], values: List[List[str]], identifiers: List[List[str]]):
+            """Records this call names, narrow reading first.
+
+            The broad reading (any identifier-shaped field value) only applies
+            when the narrow one — the record's actual id field — matches nothing
+            in the set at all. See _ua_identifiers.
+            """
+            hits = _ua_targeted(arg_values, identifiers)
+            if hits or any(identifiers):
+                return hits
+            return _ua_targeted(arg_values, values)
+
+        candidates_scanned = 0
+        best: Optional[Dict[str, Any]] = None
+
+        for tc in acting:
+            if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                return None  # fail open — see the docstring
+            arg_values = args_of(tc)
+            if not arg_values:
+                continue
+
+            # Anchor: the most recent PRIOR result whose records contain the
+            # identifier this call used.
+            anchor = None
+            for prior in reversed(state.tool_calls):
+                if prior is tc or prior.step_index >= tc.step_index:
+                    continue
+                # Polled here, not only between irreversible calls: the reverse
+                # walk parses every prior output it passes, and a run with one
+                # delete behind hundreds of chatty tool calls does all of its
+                # work inside this loop.
+                if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                    return None
+                if prior.output is not None and len(prior.output) > self.MAX_OUTPUT_CHARS:
+                    # An output too large to parse might have BEEN the anchor,
+                    # and a more recent set silently skipped is a wider set
+                    # wrongly used. Abort rather than guess.
+                    return None
+                for set_i, members in enumerate(record_lists_of(prior)):
+                    if not members:
+                        continue
+                    if len(members) > self.MAX_CANDIDATES_PER_RUN:
+                        # Checked BEFORE the leaves are walked, so an enormous
+                        # set costs its length and nothing more.
+                        return None
+                    data = set_data(prior, set_i, members)
+                    if data is None:
+                        return None  # a record was truncated — see set_data
+                    values, identifiers = data
+                    hits = match(arg_values, values, identifiers)
+                    if hits:
+                        anchor = (prior, set_i, values, members, identifiers, hits)
+                        break
+                if anchor is not None:
+                    break
+
+            if anchor is None:
+                # The identifier appeared in no prior result. That is
+                # TOOL_ARGUMENT_FABRICATION's finding, not this one's.
+                continue
+
+            prior, set_i, values, members, identifiers, hits = anchor
+            # Counted once per distinct candidate set. Charging the same cached
+            # set again for every irreversible call would turn a documented
+            # per-RUN cap into a per-call one and silence runs well under it.
+            key = (id(prior), set_i)
+            if key not in counted:
+                counted.add(key)
+                candidates_scanned += len(values)
+            if candidates_scanned > self.MAX_CANDIDATES_PER_RUN:
+                # Aborting beats truncating: a clipped sibling set makes shared
+                # tokens look unique, inventing discriminators that do not exist.
+                return None
+            if len(values) < self.MIN_CANDIDATES or len(hits) != 1:
+                continue
+
+            # Plural suppression — no selection occurred if every candidate in
+            # this set is acted on by some irreversible call in the run.
+            targeted: set = set()
+            for other in acting:
+                targeted.update(match(args_of(other), values, identifiers))
+            if len(targeted) >= len(values):
+                continue
+
+            warrant = warrant_at(tc.step_index)
+            selected = hits[0]
+            # Polled here and inside the loop: tokenising the candidate set is
+            # the one piece of work that scales with candidate COUNT, and both
+            # earlier poll sites sit before it.
+            if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                return None
+            token_sets = []
+            for record_i, v in enumerate(values):
+                if (record_i & 7) == 0 and time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                    return None
+                token_sets.append(_ua_tokens(" ".join(v), self.MIN_TOKEN_LEN))
+            # A token discriminates exactly when it occurs in ONE record's set.
+            # Counting once is equivalent to differencing each set against all
+            # its siblings, and is linear rather than quadratic — with a
+            # 20-record set the quadratic form spent most of the in-path budget
+            # on set algebra alone.
+            occurrences: Counter = Counter()
+            for tokens in token_sets:
+                occurrences.update(tokens)
+            discriminators = [{t for t in tokens if occurrences[t] == 1} for tokens in token_sets]
+
+            if discriminators[selected] & warrant:
+                continue  # warranted — the request named this record
+
+            sibling = next(
+                (
+                    i
+                    for i, tokens in enumerate(discriminators)
+                    if i != selected and tokens & warrant
+                ),
+                None,
+            )
+            tier = "strong" if sibling is not None else "weak"
+            # Strong beats weak; among equals the earliest irreversible call
+            # wins, because that is the one the operator has to look at first.
+            rank = (1 if sibling is not None else 0, -tc.step_index)
+            if best is not None and rank <= best["rank"]:
+                continue
+
+            best = {
+                "rank": rank,
+                "tier": tier,
+                "tool_call": tc,
+                "source_tool": prior.tool_name,
+                "source_step": prior.step_index,
+                "candidate_count": len(values),
+                "selected_id": _ua_record_identifier(members[selected], values[selected]),
+                "sibling_id": (
+                    None
+                    if sibling is None
+                    else _ua_record_identifier(members[sibling], values[sibling])
+                ),
+                "sibling_matched": (
+                    [] if sibling is None else sorted(discriminators[sibling] & warrant)
+                ),
+                "discriminators_unused": sorted(discriminators[selected]),
+                "warrant_turn_count": sum(1 for s, _ in turns if s <= tc.step_index),
+            }
+
+        if best is None:
+            return None
+
+        strong = best["tier"] == "strong"
+        tc = best["tool_call"]
+        evidence: Dict[str, Any] = {
+            "tier": best["tier"],
+            "candidate_count": best["candidate_count"],
+            "selected_id": best["selected_id"],
+            "discriminators_unused": best["discriminators_unused"][:25],
+            "tool_name": tc.tool_name,
+            "tool_step": tc.step_index,
+            "source_tool": best["source_tool"],
+            "source_step": best["source_step"],
+            "warrant_surfaces": list(self.WARRANT_SURFACES or ()),
+            "warrant_turn_count": best["warrant_turn_count"],
+        }
+        if strong:
+            evidence["sibling_matched_in_request"] = best["sibling_matched"][:25]
+            evidence["sibling_id"] = best["sibling_id"]
+
+        return FailureSignal(
+            failure_type=FailureType.UNRESOLVED_AMBIGUITY,
+            severity=Severity.HIGH if strong else Severity.MEDIUM,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=tc.step_index,
+            confidence=0.9 if strong else 0.6,
+            evidence=evidence,
         )
 
 
@@ -4266,6 +5080,15 @@ TIER1_DETECTORS: List[BaseDetector] = [
         MAX_SURFACE_CHARS=30_000,
         MAX_ARGS_CHARS=4_000,
         TOOL_NAME_SCOPE=UngroundedDestinationDetector.SEND_TOOL_PATTERNS,
+    ),
+    # Inert until the operator declares which tools are irreversible
+    # (IRREVERSIBLE_TOOLS defaults to []), so its in-path cost on an unconfigured
+    # agent is one attribute check. The tighter scan budget matters only once a
+    # declaration exists; like UNGROUNDED_DESTINATION it fails open, and the
+    # server-side instance runs with the class defaults.
+    UnresolvedAmbiguityDetector(
+        MAX_SCAN_NS=1_000_000,  # == BaseDetector.MAX_COST_NS
+        MAX_OUTPUT_CHARS=20_000,
     ),
     # PromptInjectionDetector and HandoffContextLossDetector are handled
     # separately — the former needs raw input, the latter needs a second

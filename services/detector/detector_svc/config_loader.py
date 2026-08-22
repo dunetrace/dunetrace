@@ -143,6 +143,18 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
         "demotion_phrases": "DEMOTION_PHRASES",
         "case_sensitive": "CASE_SENSITIVE",
     },
+    "unresolved_ambiguity": {
+        "min_candidates": "MIN_CANDIDATES",
+        "irreversible_tools": "IRREVERSIBLE_TOOLS",
+        "warrant_surfaces": "WARRANT_SURFACES",
+        "min_token_len": "MIN_TOKEN_LEN",
+        "max_candidates_per_run": "MAX_CANDIDATES_PER_RUN",
+        "max_scan_ns": "MAX_SCAN_NS",
+        "max_output_chars": "MAX_OUTPUT_CHARS",
+        "max_depth": "MAX_DEPTH",
+        "user_turn_signals": "USER_TURN_SIGNALS",
+        "user_turn_text_keys": "USER_TURN_TEXT_KEYS",
+    },
 }
 
 
