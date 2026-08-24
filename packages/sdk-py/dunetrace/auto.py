@@ -1007,13 +1007,26 @@ def _emit_anthropic_response(run, resp, t0: float) -> None:
 
 
 def _anthropic_content(resp) -> Optional[str]:
-    """Text of the first content block, "" for a text-free block, None if the
-    response shape could not be read at all. See _openai_content."""
-    try:
-        block = resp.content[0]
-    except (AttributeError, IndexError, TypeError):
+    """Concatenated text of ALL content blocks, "" for a text-free turn, None if
+    the response shape could not be read at all. See _openai_content.
+
+    Anthropic replies are a LIST of blocks, and the text is not necessarily in
+    block 0. With extended thinking enabled block 0 is the thinking block, whose
+    `text` is empty — reading only the first block reported output_length 0 for
+    every response from a reasoning model. Any multi-block reply (text + tool_use,
+    or several text blocks) was likewise truncated to its first block. Same shape
+    as _bedrock_converse_text, which joins for exactly this reason.
+
+    Blocks are pydantic objects, not dicts, so text is read with getattr. A block
+    with no text attribute (thinking, tool_use, redacted_thinking) contributes
+    nothing, which keeps a tool-only turn at "" — the shape was read fine and the
+    model genuinely produced no text. Only an unreadable envelope is None: no
+    `content` attribute, or a `content` that is not a list.
+    """
+    content = getattr(resp, "content", None)
+    if not isinstance(content, list):
         return None
-    return getattr(block, "text", "") or ""
+    return "".join(str(getattr(b, "text", "") or "") for b in content)
 
 
 def _anthropic_stream_collector(acc: dict, event) -> None:

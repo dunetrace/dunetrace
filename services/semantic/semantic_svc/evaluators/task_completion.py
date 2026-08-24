@@ -50,14 +50,20 @@ class TaskCompletionEvaluator:
             actual_output=run.actual_output,
             tools_called=tools_called or None,
         )
+        # Completion is judged from the input vs. the response; tools are
+        # corroborating evidence but not required — a purely conversational turn
+        # completes its task with no tool calls at all. Only ask GEval to weigh
+        # TOOLS_CALLED when the run actually has tools: DeepEval's param check
+        # rejects a None value for any declared param, and tools_called is None
+        # here whenever the run called nothing, so passing that param with no
+        # tools raises MissingTestCaseParamsError before anything is scored.
+        params = [SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT]
+        if tools_called:
+            params.append(SingleTurnParams.TOOLS_CALLED)
         metric = GEval(
             name="TaskCompletion",
             criteria=_CRITERIA,
-            evaluation_params=[
-                SingleTurnParams.INPUT,
-                SingleTurnParams.ACTUAL_OUTPUT,
-                SingleTurnParams.TOOLS_CALLED,
-            ],
+            evaluation_params=params,
             model=self._model,
             threshold=self._threshold,
         )
