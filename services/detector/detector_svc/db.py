@@ -472,6 +472,15 @@ async def _backfill_org_id(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_processed_runs_org_agent_version "
         "ON processed_runs(org_id, agent_id, agent_version, processed_at DESC)"
     )
+    # Same leading columns minus agent_version, which sits between agent_id and
+    # processed_at above and so cannot serve an ORDER BY processed_at within an
+    # agent. The API's org-wide run listing ranks per agent
+    # (ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY processed_at DESC)); with
+    # only the index above the planner sorted all 32k rows on every page.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_processed_runs_org_agent_time "
+        "ON processed_runs(org_id, agent_id, processed_at DESC)"
+    )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_issues_org_agent ON issues(org_id, agent_id)"
     )

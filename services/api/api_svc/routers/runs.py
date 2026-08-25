@@ -25,21 +25,18 @@ def _ts(v):
     return v.timestamp() if hasattr(v, "timestamp") else float(v)
 
 
-@router.get(
-    "/v1/agents/{agent_id}/runs",
-    response_model=RunListResponse,
-    summary="List runs for an agent",
-)
-async def get_runs(
-    agent_id: str,
-    offset: int = Query(0, ge=0),
-    limit: int = Query(settings.PAGE_SIZE_DEFAULT, ge=1, le=settings.PAGE_SIZE_MAX),
-    has_signals: Optional[bool] = Query(
-        None, description="Filter to runs that do (true) or don't (false) have signals"
-    ),
-    org_id: str = Depends(require_org),
+async def _runs_response(
+    org_id: str,
+    agent_id: Optional[str],
+    offset: int,
+    limit: int,
+    has_signals: Optional[bool],
+    per_agent_limit: Optional[int] = None,
 ) -> RunListResponse:
-    rows, total = await list_runs(org_id, agent_id, offset, limit, has_signals)
+    """Shared body for the per-agent and org-wide list endpoints."""
+    rows, total = await list_runs(
+        org_id, agent_id, offset, limit, has_signals, per_agent_limit=per_agent_limit
+    )
 
     runs = [
         RunSummary(
@@ -61,6 +58,49 @@ async def get_runs(
         runs=runs,
         page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
     )
+
+
+@router.get(
+    "/v1/runs",
+    response_model=RunListResponse,
+    summary="List runs across every agent in the org",
+)
+async def get_all_runs(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(settings.PAGE_SIZE_DEFAULT, ge=1, le=settings.PAGE_SIZE_MAX),
+    agent_id: Optional[str] = Query(None, description="Optional: restrict to one agent"),
+    has_signals: Optional[bool] = Query(
+        None, description="Filter to runs that do (true) or don't (false) have signals"
+    ),
+    per_agent_limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description=(
+            "Return each agent's newest N runs instead of the newest N overall. "
+            "Required to replace a per-agent fan-out: a plain global window is "
+            "filled by the busiest agents and leaves the rest empty."
+        ),
+    ),
+    org_id: str = Depends(require_org),
+) -> RunListResponse:
+    return await _runs_response(org_id, agent_id, offset, limit, has_signals, per_agent_limit)
+
+
+@router.get(
+    "/v1/agents/{agent_id}/runs",
+    response_model=RunListResponse,
+    summary="List runs for an agent",
+)
+async def get_runs(
+    agent_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(settings.PAGE_SIZE_DEFAULT, ge=1, le=settings.PAGE_SIZE_MAX),
+    has_signals: Optional[bool] = Query(
+        None, description="Filter to runs that do (true) or don't (false) have signals"
+    ),
+    org_id: str = Depends(require_org),
+) -> RunListResponse:
+    return await _runs_response(org_id, agent_id, offset, limit, has_signals)
 
 
 @router.get(

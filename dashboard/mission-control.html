@@ -2195,6 +2195,47 @@ function toggleTokenRow(tr, agentId) {
   else document.addEventListener('DOMContentLoaded', setup);
 })();
 
+// The caps the old per-agent URLs imposed (limit=200 runs, limit=500 signals).
+// Kept identical, and now applied server-side by the API's per_agent_limit
+// (ROW_NUMBER partitioned by agent_id), so every downstream view sees exactly
+// the population it always did.
+const PER_AGENT_RUN_CAP    = 200;
+const PER_AGENT_SIGNAL_CAP = 500;
+const BULK_PAGE            = 500;  // = PAGE_SIZE_MAX on the API
+const BULK_CONCURRENCY     = 6;    // the browser's per-origin connection cap
+
+// Page through an org-wide list endpoint.
+//
+// Concurrency is capped at BULK_CONCURRENCY and the two callers run one after
+// the other on purpose. Overlapping them asks for 12 requests in flight: six
+// queue in the browser, and the extra load pushed the API from ~0.3s a page to
+// ~13.7s — past apiFetch's 10s abort, which fails the whole load. Sequential is
+// both faster here and the only form that stays under that timeout.
+async function bulkFetch(basePath, key) {
+  // Page 1 first: its `page.total` says how many more there are. The remainder
+  // then go out in batches rather than one after another (9.5s -> 2.5s).
+  const first = await apiFetch(`${basePath}limit=${BULK_PAGE}&offset=0`);
+  const rows  = first[key] || [];
+  const total = first.page?.total ?? rows.length;
+
+  const offsets = [];
+  for (let o = BULK_PAGE; o < total; o += BULK_PAGE) offsets.push(o);
+
+  for (let i = 0; i < offsets.length; i += BULK_CONCURRENCY) {
+    const pages = await Promise.all(
+      offsets.slice(i, i + BULK_CONCURRENCY).map(async o => {
+        try {
+          return (await apiFetch(`${basePath}limit=${BULK_PAGE}&offset=${o}`))[key] || [];
+        } catch (e) {
+          console.warn('[dunetrace] bulk page failed', key, o, e);
+          return [];   // one bad page must not empty the whole dashboard
+        }
+      }));
+    pages.forEach(pg => rows.push(...pg));
+  }
+  return rows;
+}
+
 async function loadAll() {
   _healthScoresLoaded = false;
   _tokenStatsLoaded   = false;
@@ -2208,30 +2249,32 @@ async function loadAll() {
     _agents = agentsData.agents || [];
     _agents.forEach(a => { a._runs = []; a._signals = []; a._shadowSignals = []; });
 
-    // The heavier per-agent runs/signals load (for the runs/analytics/heatmap
-    // detail views) is bounded by a safety cap so a very large org doesn't fire
-    // hundreds of requests on load. At typical sizes every agent still loads, so
-    // the detail views stay consistent with the headline. Most-active agents first.
-    const DETAIL_AGENT_CAP = 250;
-    const detailAgents = _agents.length <= DETAIL_AGENT_CAP
-      ? _agents
-      : [..._agents].sort((a, b) => (b.signal_count || 0) - (a.signal_count || 0)).slice(0, DETAIL_AGENT_CAP);
+    // Two org-wide reads replace one request pair PER AGENT. The old shape fired
+    // 1 + 2N requests and browsers allow only 6 per origin, so the rest queued:
+    // request COUNT was the cost, each carrying ~50ms of fixed overhead whatever
+    // its size. Measured on this dataset: 138 requests / 7.9s -> 32 / 3.8s.
+    //
+    // per_agent_limit is what lets one request stand in for one-per-agent. A
+    // plain global newest-N window cannot: the newest 8,000 runs came from 37 of
+    // 135 agents, so the rest would have loaded empty. Windowed per agent the
+    // rows are the set the fan-out fetched, with every agent present.
+    //
+    // explain=false drops the per-row explainer prose — ~75% of the signals
+    // payload, and only read when a human opens one signal (a 500-row page goes
+    // 357ms -> 105ms). renderExplain()/renderSignalCards() on the run-detail
+    // page get their prose from GET /v1/runs/{id}, which is untouched.
+    const runRows = await bulkFetch('/v1/runs?per_agent_limit=' + PER_AGENT_RUN_CAP + '&', 'runs');
+    const sigRows = await bulkFetch('/v1/signals?include_shadow=true&explain=false&per_agent_limit='
+                                    + PER_AGENT_SIGNAL_CAP + '&', 'signals');
 
-    // Health scores are deferred — loaded lazily on first visit to the Agents page.
-    await Promise.all(detailAgents.map(async a => {
-      try {
-        const [rd, sd] = await Promise.all([
-          apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/runs?limit=200'),
-          apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/signals?limit=500&include_shadow=true'),
-        ]);
-        a._runs          = rd.runs || [];
-        const allSigs    = sd.signals || [];
-        a._signals       = allSigs.filter(s => !s.shadow);
-        a._shadowSignals = allSigs.filter(s =>  s.shadow);
-      } catch(e) {
-        a._runs = []; a._signals = []; a._shadowSignals = [];
-      }
-    }));
+    // Regroup onto the agent objects the detail views already read from, so
+    // nothing downstream needs to know the load shape changed.
+    const byAgent = new Map(_agents.map(a => [a.agent_id, a]));
+    runRows.forEach(r => { const a = byAgent.get(r.agent_id); if (a) a._runs.push(r); });
+    sigRows.forEach(s => {
+      const a = byAgent.get(s.agent_id);
+      if (a) (s.shadow ? a._shadowSignals : a._signals).push(s);
+    });
 
     _allRuns       = _agents.flatMap(a => (a._runs || []).map(r => ({ ...r, _agentId: a.agent_id })));
     _allSigs       = _agents.flatMap(a => a._signals || []);
@@ -6770,6 +6813,15 @@ function setAgentTrendWindow(days) {
 function trendBarChart(points, valueFn, opts) {
   opts = opts || {};
   const vals = points.map(valueFn).filter(v => v !== null && v !== undefined);
+  // A series that is null/0 all the way across renders as a row of zero-height
+  // bars — a blank box indistinguishable from a chart that failed to load, which
+  // is exactly how the cost and latency charts read for any agent whose events
+  // carry no token counts or no latency_ms. Say which it is. Only charts that
+  // pass emptyNote opt in: an all-zero signal RATE is a real, good answer and
+  // must keep rendering as a flat line of empty bars.
+  if (opts.emptyNote && !vals.some(v => v > 0)) {
+    return `<div class="loading" style="height:60px;display:flex;align-items:center">${esc(opts.emptyNote)}</div>`;
+  }
   const maxVal = Math.max(...vals, opts.minMax || 0.0001);
   const bars = points.map(p => {
     const v = valueFn(p);
@@ -6843,11 +6895,11 @@ async function loadAgentTrends(agentId, windowDays) {
         </div>
         <div class="chart-card">
           <div class="chart-title mono">COST OVER TIME (EST. $)</div>
-          ${trendBarChart(points, p => p.cost_usd, {fmt: v => '$'+v.toFixed(3), color:'rgba(46,184,114,0.28)', border:'rgba(46,184,114,0.7)'})}
+          ${trendBarChart(points, p => p.cost_usd, {fmt: v => '$'+v.toFixed(3), color:'rgba(46,184,114,0.28)', border:'rgba(46,184,114,0.7)', emptyNote: 'No token usage recorded in this window — cost is estimated from the token counts on llm.called / llm.responded events.'})}
         </div>
         <div class="chart-card">
           <div class="chart-title mono">AVG LLM LATENCY (MS)</div>
-          ${trendBarChart(points, p => p.avg_latency_ms, {fmt: v => Math.round(v)+'ms', color:'rgba(74,158,222,0.28)', border:'rgba(74,158,222,0.7)'})}
+          ${trendBarChart(points, p => p.avg_latency_ms, {fmt: v => Math.round(v)+'ms', color:'rgba(74,158,222,0.28)', border:'rgba(74,158,222,0.7)', emptyNote: 'No LLM latency recorded in this window — needs latency_ms on llm.responded events.'})}
         </div>
       </div>
       <div class="sec-head"><span class="sec-title">Failure mode movers (this window vs the one before it)</span></div>
@@ -6916,7 +6968,10 @@ function computeIncidents() {
 
       const firstTs = Math.min(...g.thisSigs.map(s => s.detected_at));
       const latestSig = g.thisSigs.reduce((a, b) => a.detected_at > b.detected_at ? a : b);
-      const evSummary = latestSig.evidence_summary || latestSig.what || '';
+      // Prose is absent from the bulk load (explain=false). evidenceSummary()
+      // derives the same line from `evidence`, which is still returned — the
+      // path it already took for signals stored before those fields existed.
+      const evSummary = evidenceSummary(latestSig) || '';
 
       const urgency = (trend === 'spike' ? 4 : trend === 'new' ? 3 : trend === 'rising' ? 2 : trend === 'stable' ? 1 : 0)
                     * 1000 + thisN;

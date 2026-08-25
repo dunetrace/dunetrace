@@ -59,6 +59,102 @@ _VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 # froze at 17 entries and 422'd types that exist in the data. See that module.
 
 
+async def _signals_response(
+    org_id: str,
+    agent_id: Optional[str],
+    offset: int,
+    limit: int,
+    severity: Optional[str],
+    failure_type: Optional[str],
+    include_shadow: bool,
+    explain: bool,
+    per_agent_limit: Optional[int] = None,
+) -> SignalListResponse:
+    """Shared body for the per-agent and org-wide list endpoints."""
+    if severity and severity.upper() not in _VALID_SEVERITIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}",
+        )
+    if failure_type and not is_valid_failure_type(failure_type):
+        raise HTTPException(status_code=422, detail=invalid_failure_type_detail(failure_type))
+    rows, total = await list_signals(
+        org_id,
+        agent_id,
+        offset,
+        limit,
+        severity,
+        failure_type,
+        include_shadow,
+        explain_rows=explain,
+        per_agent_limit=per_agent_limit,
+    )
+
+    def _ts(v):
+        if v is None:
+            return None
+        return v.timestamp() if hasattr(v, "timestamp") else float(v)
+
+    signals = [SignalDetail(**{**r, "detected_at": _ts(r["detected_at"])}) for r in rows]
+    return SignalListResponse(
+        signals=signals,
+        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
+    )
+
+
+_EXPLAIN_Q = Query(
+    True,
+    description=(
+        "Include the long-form explainer prose (what / why_it_matters / "
+        "suggested_fixes) — 74% of the payload, and only read when a human opens "
+        "one signal. Pass false for aggregate views. `title` and "
+        "`evidence_summary` are returned either way; the omitted keys are still "
+        "present, empty."
+    ),
+)
+
+
+@router.get(
+    "/v1/signals",
+    response_model=SignalListResponse,
+    summary="List failure signals across every agent in the org",
+)
+async def get_all_signals(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(settings.PAGE_SIZE_DEFAULT, ge=1, le=settings.PAGE_SIZE_MAX),
+    agent_id: Optional[str] = Query(None, description="Optional: restrict to one agent"),
+    severity: Optional[str] = Query(
+        None, description="Filter by severity: LOW | MEDIUM | HIGH | CRITICAL"
+    ),
+    failure_type: Optional[str] = Query(None, description="Filter by failure type e.g. TOOL_LOOP"),
+    include_shadow: bool = Query(
+        False, description="Include shadow signals (stored but not alerted) in results"
+    ),
+    explain: bool = _EXPLAIN_Q,
+    per_agent_limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description=(
+            "Return each agent's newest N signals instead of the newest N overall. "
+            "This is what lets one request replace one-per-agent: a plain global "
+            "window starves quiet agents, so they would come back empty."
+        ),
+    ),
+    org_id: str = Depends(require_org),
+) -> SignalListResponse:
+    return await _signals_response(
+        org_id,
+        agent_id,
+        offset,
+        limit,
+        severity,
+        failure_type,
+        include_shadow,
+        explain,
+        per_agent_limit,
+    )
+
+
 @router.get(
     "/v1/agents/{agent_id}/signals",
     response_model=SignalListResponse,
@@ -75,31 +171,11 @@ async def get_signals(
     include_shadow: bool = Query(
         False, description="Include shadow signals (stored but not alerted) in results"
     ),
+    explain: bool = _EXPLAIN_Q,
     org_id: str = Depends(require_org),
 ) -> SignalListResponse:
-    if severity and severity.upper() not in _VALID_SEVERITIES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}",
-        )
-    if failure_type and not is_valid_failure_type(failure_type):
-        raise HTTPException(
-            status_code=422,
-            detail=invalid_failure_type_detail(failure_type),
-        )
-    rows, total = await list_signals(
-        org_id, agent_id, offset, limit, severity, failure_type, include_shadow
-    )
-
-    def _ts(v):
-        if v is None:
-            return None
-        return v.timestamp() if hasattr(v, "timestamp") else float(v)
-
-    signals = [SignalDetail(**{**r, "detected_at": _ts(r["detected_at"])}) for r in rows]
-    return SignalListResponse(
-        signals=signals,
-        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
+    return await _signals_response(
+        org_id, agent_id, offset, limit, severity, failure_type, include_shadow, explain
     )
 
 

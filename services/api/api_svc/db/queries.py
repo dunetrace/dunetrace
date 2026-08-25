@@ -793,20 +793,27 @@ async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
         return [], 0
 
     async with _pool.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(DISTINCT agent_id) FROM events WHERE org_id = $1",
-            org_id,
-        )
-
         rows = await conn.fetch(
             """
-            WITH event_agg AS (
-                SELECT
-                    agent_id,
-                    MAX(received_at)          AS last_seen,
-                    COUNT(DISTINCT run_id)    AS run_count
+            WITH run_agg AS (
+                -- Collapse to one row per (agent, run) FIRST, then count those.
+                -- `COUNT(DISTINCT run_id) GROUP BY agent_id` reads the same rows
+                -- but makes the planner sort all of them by (agent_id, run_id):
+                -- 149,907 rows, an external merge spilling 10MB to disk, 743ms.
+                -- Two hash aggregates over the same scan give the identical
+                -- numbers in 172ms with no spill (verified row-for-row across
+                -- all 136 agents).
+                SELECT agent_id, run_id, MAX(received_at) AS last_seen
                 FROM events
                 WHERE org_id = $1
+                GROUP BY agent_id, run_id
+            ),
+            event_agg AS (
+                SELECT
+                    agent_id,
+                    MAX(last_seen) AS last_seen,
+                    COUNT(*)       AS run_count
+                FROM run_agg
                 GROUP BY agent_id
             ),
             signal_agg AS (
@@ -825,7 +832,11 @@ async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
                 e.run_count,
                 COALESCE(s.signal_count, 0)   AS signal_count,
                 COALESCE(s.critical_count, 0) AS critical_count,
-                COALESCE(s.high_count, 0)     AS high_count
+                COALESCE(s.high_count, 0)     AS high_count,
+                -- The total is one row per agent in event_agg, so a window
+                -- function reads it off this scan. It used to be a second
+                -- COUNT(DISTINCT agent_id) query over the whole events table.
+                COUNT(*) OVER () AS _total
             FROM event_agg e
             LEFT JOIN signal_agg s ON s.agent_id = e.agent_id
             ORDER BY e.last_seen DESC
@@ -836,7 +847,22 @@ async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
             offset,
         )
 
-    return [dict(r) for r in rows], total or 0
+        # COUNT(*) OVER () is computed before LIMIT, so it is the full agent
+        # count even on a partial page. An empty page (offset past the end)
+        # carries no row to read it from — fall back to a direct count rather
+        # than reporting 0. Inside the `async with`: conn is back in the pool
+        # once it exits.
+        if rows:
+            total = int(rows[0]["_total"])
+        else:
+            total = (
+                await conn.fetchval(
+                    "SELECT COUNT(DISTINCT agent_id) FROM events WHERE org_id = $1", org_id
+                )
+                or 0
+            )
+
+    return [{k: v for k, v in dict(r).items() if k != "_total"} for r in rows], total
 
 
 # ── Failure type breakdown ────────────────────────────────────────────────────
@@ -917,42 +943,88 @@ async def agent_signal_sparklines(org_id: str) -> dict:
 
 async def list_runs(
     org_id: str,
-    agent_id: str,
+    agent_id: Optional[str],
     offset: int,
     limit: int,
     has_signals: Optional[bool] = None,
+    per_agent_limit: Optional[int] = None,
 ) -> tuple[list, int]:
-    """List runs for an agent within org_id. Optionally filter to only runs with signals."""
+    """List runs within org_id. Optionally filter to only runs with signals.
+
+    ``agent_id=None`` lists across the whole org, which is what the dashboard's
+    initial load actually wants — it was issuing one request per agent and then
+    flattening the results itself.
+
+    ``per_agent_limit=N`` bounds the result to each agent's newest N rather than
+    the newest N overall, which is the only form that can replace that fan-out:
+    on this dataset the newest 8,000 runs come from 37 of 135 agents, so a global
+    window would leave 98 agents with none. With N=200 this returns the same 7,794
+    rows the 136 per-agent requests did.
+    """
     if not _pool:
         return [], 0
 
     signal_filter = ""
+    # s.org_id = pr.org_id, not just s.run_id = pr.run_id: run_id is
+    # caller-supplied, so an unscoped correlation lets another tenant's signals
+    # decide whether this org's run is filtered in or out.
     if has_signals is True:
-        signal_filter = "AND EXISTS (SELECT 1 FROM failure_signals s WHERE s.run_id = pr.run_id AND s.shadow = FALSE)"
+        signal_filter = (
+            "AND EXISTS (SELECT 1 FROM failure_signals s "
+            "WHERE s.run_id = pr.run_id AND s.org_id = pr.org_id AND s.shadow = FALSE)"
+        )
     elif has_signals is False:
-        signal_filter = "AND NOT EXISTS (SELECT 1 FROM failure_signals s WHERE s.run_id = pr.run_id AND s.shadow = FALSE)"
+        signal_filter = (
+            "AND NOT EXISTS (SELECT 1 FROM failure_signals s "
+            "WHERE s.run_id = pr.run_id AND s.org_id = pr.org_id AND s.shadow = FALSE)"
+        )
+
+    # Built together so the placeholder numbering holds with or without the
+    # agent filter — see the same note in list_signals.
+    params: list = [org_id]
+    agent_filter = ""
+    if agent_id is not None:
+        params.append(agent_id)
+        agent_filter = f"AND pr.agent_id = ${len(params)}"
+    rank_filter = ""
+    if per_agent_limit is not None:
+        params.append(per_agent_limit)
+        rank_filter = f"WHERE _rn <= ${len(params)}"
+    limit_ph, offset_ph = f"${len(params) + 1}", f"${len(params) + 2}"
 
     async with _pool.acquire() as conn:
         total = await conn.fetchval(
             f"""
-            SELECT COUNT(*) FROM processed_runs pr
-            WHERE pr.org_id = $1 AND pr.agent_id = $2
-            {signal_filter}
+            SELECT COUNT(*) FROM (
+                SELECT ROW_NUMBER() OVER (
+                           PARTITION BY pr.agent_id ORDER BY pr.processed_at DESC
+                       ) AS _rn
+                FROM processed_runs pr
+                WHERE pr.org_id = $1 {agent_filter}
+                {signal_filter}
+            ) r {rank_filter}
             """,
-            org_id,
-            agent_id,
+            *params,
         )
 
         rows = await conn.fetch(
             f"""
-            WITH page AS (
+            WITH ranked AS (
                 SELECT pr.run_id, pr.agent_id, pr.agent_version,
-                       pr.trigger AS exit_reason, pr.processed_at
+                       pr.trigger AS exit_reason, pr.processed_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY pr.agent_id ORDER BY pr.processed_at DESC
+                       ) AS _rn
                 FROM processed_runs pr
-                WHERE pr.org_id = $1 AND pr.agent_id = $2
+                WHERE pr.org_id = $1 {agent_filter}
                 {signal_filter}
-                ORDER BY pr.processed_at DESC
-                LIMIT $3 OFFSET $4
+            ),
+            page AS (
+                SELECT run_id, agent_id, agent_version, exit_reason, processed_at
+                FROM ranked
+                {rank_filter}
+                ORDER BY processed_at DESC
+                LIMIT {limit_ph} OFFSET {offset_ph}
             ),
             run_events AS (
                 -- Single pass over events for just this page's runs, instead of
@@ -964,20 +1036,31 @@ async def list_runs(
                         WHERE e.event_type IN ('run.completed', 'run.errored')
                     )                                                            AS completed_at,
                     MAX(e.step_index)                                           AS step_count,
-                    SUM(
-                        -- llm.called carries a chars//4 ESTIMATE and llm.responded
-                        -- the exact count for the same call, so summing both
-                        -- double-counts. The canonical run builder overrides
-                        -- rather than adds (dunetrace/run_builder.py); this now
-                        -- matches. GREATEST per call_id would be exact, but the
-                        -- estimate is always <= the exact count in practice and
-                        -- this keeps the aggregate a single scan.
-                        CASE WHEN e.event_type = 'llm.responded'
-                                  AND (e.payload->>'prompt_tokens') IS NOT NULL
-                             THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
-                             WHEN e.event_type = 'llm.called'
-                             THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
-                             ELSE 0 END
+                    -- llm.called carries a chars//4 ESTIMATE and llm.responded the
+                    -- exact count for the SAME call, so the two must be overridden,
+                    -- not added (dunetrace/run_builder.py, and CLAUDE.md's note on
+                    -- the paired events).
+                    --
+                    -- The previous CASE did not do that: it picks a value per ROW
+                    -- and SUM then adds across rows, so a run with both events got
+                    -- estimate + exact anyway. Measured on run 00042bc0… that was
+                    -- 13 tokens for a call that used 12, and 152% over across
+                    -- agent "agent"'s 30-day history. Two nested aggregates give
+                    -- the real override in the same single scan: take the exact
+                    -- total when there is one, else fall back to the estimate
+                    -- (direct-SDK traces report tokens only on llm.called,
+                    -- LangChain-shaped ones only on llm.responded).
+                    COALESCE(
+                        NULLIF(SUM(
+                            CASE WHEN e.event_type = 'llm.responded'
+                                 THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
+                                 ELSE 0 END
+                        ), 0),
+                        SUM(
+                            CASE WHEN e.event_type = 'llm.called'
+                                 THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
+                                 ELSE 0 END
+                        )
                     )                                                            AS prompt_tokens,
                     SUM(
                         CASE WHEN e.event_type = 'llm.responded'
@@ -989,13 +1072,21 @@ async def list_runs(
                         FILTER (WHERE e.event_type = 'llm.called'
                                        AND e.payload->>'model' IS NOT NULL))[1]  AS model
                 FROM events e
-                WHERE e.run_id IN (SELECT run_id FROM page)
+                -- org_id is not redundant with the page CTE. `page` is
+                -- org-scoped, but joining events on run_id ALONE re-widens to
+                -- every tenant: run_id is caller-supplied, so two orgs can hold
+                -- the same one and this would fold their token counts and step
+                -- counts into ours. It also lets the planner prune partitions
+                -- instead of scanning all of them.
+                WHERE e.org_id = $1 AND e.run_id IN (SELECT run_id FROM page)
                 GROUP BY e.run_id
             ),
             run_signals AS (
                 SELECT s.run_id, COUNT(*) AS signal_count
                 FROM failure_signals s
-                WHERE s.run_id IN (SELECT run_id FROM page) AND s.shadow = FALSE
+                WHERE s.org_id = $1
+                  AND s.run_id IN (SELECT run_id FROM page)
+                  AND s.shadow = FALSE
                 GROUP BY s.run_id
             )
             SELECT
@@ -1010,8 +1101,7 @@ async def list_runs(
             LEFT JOIN run_signals rs ON rs.run_id = p.run_id
             ORDER BY p.processed_at DESC
             """,
-            org_id,
-            agent_id,
+            *params,
             limit,
             offset,
         )
@@ -1871,23 +1961,55 @@ async def get_signal_by_id(org_id: str, signal_id: int) -> Optional[dict]:
 
 async def list_signals(
     org_id: str,
-    agent_id: str,
+    agent_id: Optional[str],
     offset: int,
     limit: int,
     severity: Optional[str] = None,
     failure_type: Optional[str] = None,
     include_shadow: bool = False,
+    explain_rows: bool = True,
+    per_agent_limit: Optional[int] = None,
 ) -> tuple[list, int]:
-    """List signals for an agent with optional filters. By default only live (non-shadow) signals are returned; pass include_shadow=True to include shadow signals too."""
+    """List signals with optional filters. By default only live (non-shadow)
+    signals are returned; pass include_shadow=True to include shadow ones too.
+
+    ``agent_id=None`` lists across the whole org. The dashboard's initial load
+    needs every agent's signals at once, and fetching them per agent was 136
+    requests the browser could only run 6 at a time.
+
+    ``explain_rows=False`` drops the LONG-FORM prose — ``what``,
+    ``why_it_matters`` and ``suggested_fixes``, together 74% of this endpoint's
+    payload (``suggested_fixes`` alone is 49%), and only read when a human opens
+    one signal. ``title`` and ``evidence_summary`` are returned either way:
+    ``evidence_summary`` is the single line the aggregate views actually render,
+    and omitting it sent the dashboard's Incidents cards down a client-side
+    fallback that produced "confidence 90%" for 90% of signals (5,665 of 6,291)
+    instead of a description. The omitted keys stay present and empty, so the
+    response shape is unchanged for every caller, and the default stays True so
+    the MCP server and the per-agent views are unaffected.
+
+    ``per_agent_limit=N`` returns each agent's newest N rather than the newest N
+    overall. That distinction is the point: the dashboard needs a bounded slice
+    PER AGENT, and a global newest-N window does not give it one — measured on a
+    real dataset the newest 8,000 runs came from 37 of 135 agents, so 98 agents
+    would have loaded with nothing. Windowing here reproduces exactly what one
+    request per agent returned, in a single query.
+    """
     if not _pool:
         return [], 0
 
     import json
 
-    where = ["org_id = $1", "agent_id = $2"]
+    # where/params are built together so the placeholder numbering stays correct
+    # whether or not agent_id is bound — an org-wide call must not leave a $2 in
+    # the SQL with nothing to fill it.
+    where = ["org_id = $1"]
+    params: list = [org_id]
+    if agent_id is not None:
+        params.append(agent_id)
+        where.append(f"agent_id = ${len(params)}")
     if not include_shadow:
         where.append("shadow = FALSE")
-    params: list = [org_id, agent_id]
 
     if severity:
         params.append(severity.upper())
@@ -1898,20 +2020,37 @@ async def list_signals(
 
     where_clause = " AND ".join(where)
 
+    _cols = """id, failure_type, severity, run_id, agent_id, agent_version,
+               step_index, confidence, detected_at, evidence, alerted, shadow,
+               COALESCE(co_signal_count, 0) AS co_signal_count"""
+
+    if per_agent_limit is not None:
+        # Rank within each agent, then page over the union of those slices, so a
+        # busy agent cannot crowd a quiet one out of the result set.
+        params.append(per_agent_limit)
+        source = f"""(
+                SELECT {_cols},
+                       ROW_NUMBER() OVER (
+                           PARTITION BY agent_id ORDER BY detected_at DESC
+                       ) AS _rn
+                FROM failure_signals WHERE {where_clause}
+            ) w WHERE w._rn <= ${len(params)}"""
+        # co_signal_count is already unwrapped by the inner SELECT.
+        out_cols = """id, failure_type, severity, run_id, agent_id, agent_version,
+                      step_index, confidence, detected_at, evidence, alerted, shadow,
+                      co_signal_count"""
+    else:
+        source = f"failure_signals WHERE {where_clause}"
+        out_cols = _cols
+
     async with _pool.acquire() as conn:
-        total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM failure_signals WHERE {where_clause}",
-            *params,
-        )
+        total = await conn.fetchval(f"SELECT COUNT(*) FROM {source}", *params)
 
         params_paged = params + [limit, offset]
         rows = await conn.fetch(
             f"""
-            SELECT id, failure_type, severity, run_id, agent_id, agent_version,
-                   step_index, confidence, detected_at, evidence, alerted, shadow,
-                   COALESCE(co_signal_count, 0) AS co_signal_count
-            FROM failure_signals
-            WHERE {where_clause}
+            SELECT {out_cols}
+            FROM {source}
             ORDER BY detected_at DESC
             LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
             """,
@@ -1964,16 +2103,18 @@ async def list_signals(
                 "shadow": s["shadow"],
                 "co_signal_count": s["co_signal_count"],
                 "title": exp.title if exp else s["failure_type"],
-                "what": exp.what if exp else "",
-                "why_it_matters": exp.why_it_matters if exp else "",
+                # Always returned: the aggregate views render this line, and it
+                # is 7% of the payload against suggested_fixes' 49%.
                 "evidence_summary": exp.evidence_summary if exp else "",
+                "what": exp.what if (exp and explain_rows) else "",
+                "why_it_matters": exp.why_it_matters if (exp and explain_rows) else "",
                 "suggested_fixes": [
                     {
                         "description": f.description,
                         "language": f.language,
                         "code": f.code,
                     }
-                    for f in (exp.suggested_fixes if exp else [])
+                    for f in (exp.suggested_fixes if (exp and explain_rows) else [])
                 ],
             }
         )
@@ -4765,13 +4906,24 @@ async def agent_cost_stats(org_id: str, agent_id: str) -> dict:
     from explainer_svc.cost import estimate_cost
 
     async with _pool.acquire() as conn:
-        # Prompt tokens + model per run. prompt_tokens may be in llm.called (direct SDK)
-        # or llm.responded (LangChain) — sum both; model always comes from llm.called.
+        # Prompt tokens + model per run. prompt_tokens may be in llm.called (direct
+        # SDK) or llm.responded (LangChain) — take the exact llm.responded total
+        # when present and fall back to the llm.called estimate, never both. Summing
+        # them (which this did) counts one call twice whenever an integration emits
+        # both, and disagreed with the run-detail page for the same runs.
+        # model always comes from llm.called.
         prompt_rows = await conn.fetch(
             """
             SELECT run_id,
                    MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
-                   SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens
+                   COALESCE(
+                       NULLIF(SUM(CASE WHEN event_type = 'llm.responded'
+                                       THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                                       ELSE 0 END), 0),
+                       SUM(CASE WHEN event_type = 'llm.called'
+                                THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                                ELSE 0 END)
+                   ) AS prompt_tokens
             FROM events
             WHERE org_id = $1 AND agent_id = $2
               AND event_type IN ('llm.called', 'llm.responded')
@@ -4891,7 +5043,10 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
 
     async with _pool.acquire() as conn:
         # Per-run token totals + run timestamp.
-        # prompt_tokens: direct SDK → llm.called, LangChain → llm.responded.
+        # prompt_tokens: direct SDK → llm.called, LangChain → llm.responded. An
+        # integration that emits BOTH reports the same call twice (estimate, then
+        # exact), so override rather than sum — this page and the run-detail page
+        # must not disagree about the same run's tokens.
         # completion_tokens: always in llm.responded.
         token_rows = await conn.fetch(
             """
@@ -4899,7 +5054,14 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
                 run_id,
                 MAX(agent_version) AS agent_version,
                 MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
-                SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
+                COALESCE(
+                    NULLIF(SUM(CASE WHEN event_type = 'llm.responded'
+                                    THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                                    ELSE 0 END), 0),
+                    SUM(CASE WHEN event_type = 'llm.called'
+                             THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                             ELSE 0 END)
+                ) AS prompt_tokens,
                 SUM(CASE WHEN event_type = 'llm.responded'
                     THEN COALESCE((payload->>'completion_tokens')::int, 0) ELSE 0 END) AS completion_tokens,
                 SUM(CASE WHEN event_type = 'llm.responded'
@@ -5441,6 +5603,7 @@ async def agent_performance_trends(org_id: str, agent_id: str, window_days: int)
     from api_svc.performance_trends import (
         build_day_buckets,
         compute_baseline_comparisons,
+        compute_cost_by_day,
         compute_daily_points,
         compute_failure_mode_deltas,
     )
@@ -5493,7 +5656,18 @@ async def agent_performance_trends(org_id: str, agent_id: str, window_days: int)
             SELECT e.run_id,
                    DATE_TRUNC('day', pr.processed_at AT TIME ZONE 'UTC')::date AS day,
                    MAX(CASE WHEN e.event_type = 'llm.called' THEN e.payload->>'model' END) AS model,
-                   SUM(COALESCE((e.payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
+                   -- prompt_tokens is carried on BOTH event types for the same
+                   -- call — llm.called has a chars//4 estimate, llm.responded the
+                   -- exact count once the provider reports it. They are kept
+                   -- apart here and overridden (not added) below; summing them in
+                   -- one pass overstated this agent's tokens by 152% against the
+                   -- same runs' totals on the run-detail page.
+                   SUM(CASE WHEN e.event_type = 'llm.responded'
+                            THEN COALESCE((e.payload->>'prompt_tokens')::int, 0) ELSE 0 END)
+                       AS prompt_tokens_responded,
+                   SUM(CASE WHEN e.event_type = 'llm.called'
+                            THEN COALESCE((e.payload->>'prompt_tokens')::int, 0) ELSE 0 END)
+                       AS prompt_tokens_called,
                    SUM(CASE WHEN e.event_type = 'llm.responded'
                             THEN COALESCE((e.payload->>'completion_tokens')::int, 0) ELSE 0 END)
                        AS completion_tokens
@@ -5509,15 +5683,9 @@ async def agent_performance_trends(org_id: str, agent_id: str, window_days: int)
             agent_id,
             window_str,
         )
-        cost_by_day: dict = {}
-        for r in token_rows:
-            day = str(r["day"])
-            cost = estimate_cost(
-                r["model"] or "unknown",
-                int(r["prompt_tokens"] or 0),
-                int(r["completion_tokens"] or 0),
-            )
-            cost_by_day[day] = cost_by_day.get(day, 0.0) + cost
+        # Override-not-sum lives in the pure layer with the rest of the
+        # arithmetic, so it is unit-tested without a database.
+        cost_by_day = compute_cost_by_day(token_rows, estimate_cost)
 
         latency_rows = await conn.fetch(
             """

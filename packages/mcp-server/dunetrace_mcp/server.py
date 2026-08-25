@@ -1080,9 +1080,14 @@ def list_policies(agent_id: str = "") -> str:
             except Exception:
                 action = {}
 
-        metric = cond.get("metric", "—")[:12]
-        op = cond.get("operator", "—")[:4]
-        threshold = str(cond.get("threshold", "—"))[:10]
+        # The stored condition is {trigger, operator, value} (plus an optional
+        # `match` block). This read "metric"/"threshold", which no policy has
+        # ever carried, so every row rendered as "—".
+        metric = str(cond.get("trigger", "—"))[:12]
+        op = str(cond.get("operator", "—"))[:4]
+        threshold = str(cond.get("value", "—"))[:10]
+        if cond.get("match") and cond.get("trigger") == "expression":
+            threshold = "<expr>"
         act_type = action.get("type", "—")[:18]
         enabled = "enabled" if p.get("enabled", True) else "disabled"
         name = (p.get("name") or "—")[:25]
@@ -1098,22 +1103,28 @@ def list_policies(agent_id: str = "") -> str:
 @writing_tool()
 def create_policy(name: str, agent_id: str, condition: str, action: str) -> str:
     """
-    Create a runtime policy that triggers an action when a metric threshold is
-    crossed during a live agent run.
+    Create a runtime policy that fires mid-run when its condition is met.
 
     Args:
         name:      Policy name (human-readable label).
         agent_id:  Agent to apply the policy to (use '*' for all agents).
-        condition: JSON string with keys: metric, operator, threshold.
-                   Example: '{"metric": "cost_usd", "operator": "gt", "threshold": 5.0}'
-                   Metrics: cost_usd, tool_calls, llm_calls, retries, step_count,
-                            duration_s, prompt_tokens, completion_tokens
-                   Operators: gt, gte, lt, lte, eq
-        action:    JSON string with key 'type' and optional params.
+        condition: JSON string with keys: trigger, operator, value.
+                   Example: '{"trigger": "cost_usd", "operator": "gt", "value": 5.0}'
+                   Triggers: tool_call_count, step_count, cost_usd, error_count,
+                             finish_reason, llm_latency_ms, signal
+                   Operators: gt, gte, lt, lte, eq, neq, contains
+                              (spelled out — '>', '>=' and '==' are rejected)
+
+                   `signal` is a LIST of the failure types detected so far, so it
+                   takes `contains` and nothing else:
+                     '{"trigger": "signal", "operator": "contains", "value": "TOOL_LOOP"}'
+                   `eq` there can never match and `neq` matches on every run; both
+                   are rejected with a 422 naming the fix.
+        action:    JSON string with key 'type' and optional 'params'.
                    Examples:
                      '{"type": "stop"}'
-                     '{"type": "switch_model", "model": "gpt-4o-mini"}'
-                     '{"type": "inject_prompt", "text": "Stop looping."}'
+                     '{"type": "switch_model", "params": {"model": "gpt-4o-mini"}}'
+                     '{"type": "inject_prompt", "params": {"prompt": "Stop looping."}}'
                      '{"type": "log"}'
     """
     try:
