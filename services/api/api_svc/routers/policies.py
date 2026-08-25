@@ -5,6 +5,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from dunetrace.policies import (
+    PolicyConfigError,
+    VALID_OPERATORS,
+    VALID_TRIGGERS,
+    validate_condition,
+)
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -22,21 +28,13 @@ from api_svc.db.queries import (
 logger = logging.getLogger("dunetrace.api.policies")
 router = APIRouter(prefix="/v1/policies", tags=["Policies"])
 
-_VALID_TRIGGERS = {
-    "tool_call_count",
-    "step_count",
-    "cost_usd",
-    "error_count",
-    "finish_reason",
-    "llm_latency_ms",
-    "signal",
-    # Human-in-the-loop (Capability 2) — the tool about to be called.
-    "before_tool_call",
-    # Expression-only policy: the flat trigger is a no-op sentinel and the
-    # condition.match block carries the whole condition.
-    "expression",
-}
-_VALID_OPERATORS = {"gt", "gte", "lt", "lte", "eq", "neq", "contains"}
+# Imported from the SDK rather than restated here. These policies are enforced
+# by dunetrace.policies in the customer's process, so a trigger this service
+# accepts and that engine does not know is a row that stores cleanly, shows as
+# enabled in the dashboard, and never fires. VALID_OPERATORS is derived from the
+# engine's own operator table, so the two cannot disagree.
+_VALID_TRIGGERS = VALID_TRIGGERS
+_VALID_OPERATORS = VALID_OPERATORS
 _VALID_ACTIONS = {
     "stop",
     "switch_model",
@@ -114,6 +112,22 @@ def _validate(condition: ConditionModel, action: ActionModel, name: str = "") ->
                 422,
                 f"Invalid operator {condition.operator!r}. Valid: {sorted(_VALID_OPERATORS)}",
             )
+        # Operator/trigger compatibility, from the engine that will run this
+        # policy. Catches the combinations that store fine and then never fire
+        # (or always fire) — trigger 'signal' is list-valued, so only 'contains'
+        # means anything against it. Same "reject dead config rather than let it
+        # silently never fire" rule as the require_approval pairing check below.
+        try:
+            validate_condition(
+                {
+                    "trigger": condition.trigger,
+                    "operator": condition.operator,
+                    "value": condition.value,
+                },
+                policy_name=name,
+            )
+        except PolicyConfigError as exc:
+            raise HTTPException(422, str(exc)) from exc
     # Validate the expression block, if present, by parsing it with the same SDK
     # parser the runtime uses — a malformed match is rejected at create time, not
     # at fire time. Import locally so the SDK stays an optional API dependency.

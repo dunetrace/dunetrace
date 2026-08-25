@@ -119,6 +119,14 @@ Local policies (added via `add_policy`) take priority over remote ones at the sa
 
 Supported operators (flat condition): `gt` `gte` `lt` `lte` `eq` `neq` `contains`
 
+Operators are spelled out — `>`, `>=`, `==` are the *custom detector* syntax and
+are rejected here. An operator that cannot match its trigger's metric type is
+also rejected at registration rather than silently never firing: `signal` is
+list-valued, so it takes `contains` and nothing else. `eq` against it can never
+match and `neq` matches on *every* evaluation (firing the policy on every run,
+signals or not) — both are refused, by `dt.add_policy()`, by `POST`/`PUT
+/v1/policies`, and by the SDK's remote-policy loader.
+
 ### Expression conditions (argument & metadata values)
 
 Beyond the flat trigger, a policy's `condition` may carry an optional **`match`**
@@ -264,9 +272,10 @@ When multiple policies match simultaneously, only the highest-priority one fires
 **Who can define policies:** Bearer token authentication is required for all policy CRUD endpoints. In `AUTH_MODE=dev` (local Docker only), auth is skipped — do not expose port 8002 beyond localhost in dev mode. `dt.add_policy()` in-process requires no auth; trust is whoever controls the code.
 
 **Validation at write time:**
-1. Trigger, operator, and action type are checked against fixed allowlists — unknown values are rejected with 422.
-2. `inject_prompt` prompt content is scanned against the prompt injection pattern detector. Matching content is rejected before it reaches the database.
-3. Every policy is signed with HMAC-SHA256 at write time. The signature is stored alongside the policy. The signature covers the whole `condition` — including any [`match` expression block](policies/condition-expressions.md#signing) — so a tampered condition fails verification. Policies using a `match` block are signed under canonical-form version 2 (`sig_version: 2`); legacy policies stay version 1, byte-identical, so existing signatures keep verifying.
+1. Trigger, operator, and action type are checked against fixed allowlists — unknown values are rejected with 422. The trigger and operator allowlists are imported from `dunetrace.policies` (`VALID_TRIGGERS` / `VALID_OPERATORS`), not restated in the API, so a value this service accepts is always one the in-process engine can evaluate.
+2. Operator/trigger compatibility is checked against the metric's type — a combination that can never match (or that always matches) is rejected with 422 rather than stored as a policy that reads as enabled and prevents nothing. See the note under [Condition reference](#condition-reference).
+3. `inject_prompt` prompt content is scanned against the prompt injection pattern detector. Matching content is rejected before it reaches the database.
+4. Every policy is signed with HMAC-SHA256 at write time. The signature is stored alongside the policy. The signature covers the whole `condition` — including any [`match` expression block](policies/condition-expressions.md#signing) — so a tampered condition fails verification. Policies using a `match` block are signed under canonical-form version 2 (`sig_version: 2`); legacy policies stay version 1, byte-identical, so existing signatures keep verifying.
 
 **Signature verification:** Configure `POLICY_SIGNING_SECRET` (same value on server and SDK client) to enable end-to-end verification:
 

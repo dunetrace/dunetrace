@@ -132,7 +132,7 @@ dt.add_policy(
 # Inject a corrective prompt when a loop is detected
 dt.add_policy(
     name="loop fix",
-    condition={"trigger": "signal", "operator": "eq", "value": "TOOL_LOOP"},
+    condition={"trigger": "signal", "operator": "contains", "value": "TOOL_LOOP"},
     action={"type": "inject_prompt", "params": {"prompt": "Stop repeating tool calls. Summarise what you know and answer."}},
 )
 

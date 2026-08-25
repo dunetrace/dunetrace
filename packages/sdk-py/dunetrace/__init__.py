@@ -23,7 +23,7 @@ from dunetrace.detectors import (
     run_detectors,
     PROMPT_INJECTION_DETECTOR,
 )
-from dunetrace.policies import ApprovalDenied, Policy, PolicyViolation
+from dunetrace.policies import ApprovalDenied, Policy, PolicyConfigError, PolicyViolation
 from dunetrace.risk_engine import RiskEngine
 
 from importlib.metadata import version, PackageNotFoundError
@@ -47,6 +47,7 @@ __all__ = [
     "PROMPT_INJECTION_DETECTOR",
     "Policy",
     "PolicyViolation",
+    "PolicyConfigError",
     "ApprovalDenied",
     "RiskEngine",
     "RiskScore",

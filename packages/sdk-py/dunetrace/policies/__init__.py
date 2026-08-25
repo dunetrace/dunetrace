@@ -69,7 +69,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Required, TypedDict, cast
+from typing import Any, Dict, FrozenSet, List, Literal, Optional, Required, TypedDict, cast
 
 # Expression-based conditions (condition.match). Parser + immutable tree; the
 # evaluator lands in Phase 2. Re-exported here so callers keep importing from
@@ -83,6 +83,7 @@ from dunetrace.policies.expressions import (  # noqa: E402,F401
     FIELD_PREFIXES,
     MAX_DEPTH,
     Or,
+    _closest,
     parse_condition,
     parse_match_block,
 )
@@ -275,6 +276,158 @@ _OPERATORS: Dict[str, Any] = {
 }
 
 
+# ── Registration-time condition validation ────────────────────────────────────
+#
+# Every "never fires" condition below used to register cleanly and then evaluate
+# to False on every step, forever: `_legacy_matches` turns an unknown trigger
+# (metrics.get -> None), an unknown operator (_OPERATORS.get -> None), and a
+# TypeError from comparing mismatched types into the same silent False. A policy
+# built that way looks correct in the dashboard, reports as enabled, and prevents
+# nothing. These checks move that failure to registration time, where a human is
+# looking. Same principle as the require_approval/before_tool_call pairing check
+# in the API's routers/policies.py: dead config is rejected, not tolerated.
+
+#: Triggers `build_metrics()` (plus the two special cases) can actually produce.
+#: The API imports this rather than keeping its own copy — a trigger accepted by
+#: one and unknown to the other is a policy that stores fine and never fires.
+VALID_TRIGGERS: FrozenSet[str] = frozenset(
+    {
+        "tool_call_count",
+        "step_count",
+        "cost_usd",
+        "error_count",
+        "finish_reason",
+        "llm_latency_ms",
+        "signal",
+        # Not in build_metrics: supplied per-call by find_approval_policy().
+        "before_tool_call",
+        # Sentinel for a pure-expression policy; the flat fields are a no-op.
+        "expression",
+    }
+)
+
+#: Derived from the operator table itself, so the two can never disagree.
+VALID_OPERATORS: FrozenSet[str] = frozenset(_OPERATORS)
+
+#: Triggers whose metric is a list rather than a scalar. `contains` is the only
+#: operator that means anything against one — see _reject_list_trigger_operator.
+LIST_VALUED_TRIGGERS: FrozenSet[str] = frozenset({"signal"})
+
+#: What `_legacy_matches` uses when a condition omits `operator`. Validated as if
+#: it had been written out, so {"trigger": "signal", "value": "TOOL_LOOP"} is
+#: rejected too — it is a `gt` against a list, i.e. just as dead.
+DEFAULT_OPERATOR = "gt"
+
+#: Symbolic spellings, which policies do not accept. Custom detectors DO use
+#: these (`_VALID_OPERATORS` in api_svc/routers/custom_detectors.py is
+#: {">=", "<=", ">", "<", "==", "!="}), so a user moving between the two
+#: features reaches for them naturally. difflib will not connect ">" to "gt".
+_OPERATOR_SYMBOL_HINTS: Dict[str, str] = {
+    ">": "gt",
+    ">=": "gte",
+    "<": "lt",
+    "<=": "lte",
+    "==": "eq",
+    "!=": "neq",
+    "=": "eq",
+    "<>": "neq",
+}
+
+
+class PolicyConfigError(ValueError):
+    """Raised at policy registration for a condition that can never fire (or
+    that fires unconditionally). The message names the fix, not just the fault.
+
+    A ValueError like ExpressionError, its sibling for malformed `match` blocks.
+    PolicyEngine.load() catches both and refuses to install the policy rather
+    than letting a remote push seed a dead guardrail.
+    """
+
+
+def _reject_list_trigger_operator(trigger: str, operator: str, value: Any, where: str) -> None:
+    """Guard the one trigger whose metric is a list (`signal`).
+
+    Scoped deliberately to a **string** `value`, which is the documented and
+    universally-used form: every doc, example and dashboard hint writes a
+    failure-type name as a bare string. A list value is left permissive because
+    it is genuinely live — `["TOOL_LOOP"] == ["TOOL_LOOP"]` is True — just
+    order-sensitive and fragile. Rejecting that too would be guessing at intent;
+    rejecting a string is stating a fact.
+    """
+    if trigger not in LIST_VALUED_TRIGGERS or operator == "contains":
+        return
+    if not isinstance(value, str):
+        return
+    if operator == "neq":
+        # Not a no-op — the dangerous direction. [] != "TOOL_LOOP" is True, so
+        # this matches at the FIRST policy check of every run, signals or not.
+        problem = (
+            f"operator {operator!r} matches on every evaluation, so this policy "
+            f"fires on every run — including runs where no signal was detected "
+            f"at all"
+        )
+    elif operator == "eq":
+        problem = f"operator {operator!r} compares that list to a string and can never match"
+    else:
+        problem = (
+            f"operator {operator!r} compares a list to a string, which raises "
+            f"TypeError and evaluates as no match — it can never fire"
+        )
+    raise PolicyConfigError(
+        f"Policy{where}: trigger {trigger!r} produces a list of failure types; "
+        f"{problem}. Use 'contains' with the failure type name, e.g. "
+        f'{{"trigger": "{trigger}", "operator": "contains", "value": "{value}"}}.'
+    )
+
+
+def validate_condition(condition: Any, *, policy_name: str = "") -> None:
+    """Raise PolicyConfigError if this flat condition can never fire as written.
+
+    Checks, in order: the trigger is one the engine can supply a metric for; the
+    operator is one the engine implements; and the operator means something
+    against that trigger's metric type. The `match` block is NOT checked here —
+    that is parse_condition's job, which raises ExpressionError.
+
+    Only the flat condition is validated, so a pure-expression policy
+    (trigger="expression") returns after the trigger check.
+    """
+    if not isinstance(condition, dict):
+        raise PolicyConfigError(
+            f"A policy condition must be a mapping, got {type(condition).__name__}."
+        )
+    where = f" {policy_name!r}" if policy_name else ""
+
+    trigger = condition.get("trigger")
+    if trigger not in VALID_TRIGGERS:
+        hint_word = _closest(trigger, VALID_TRIGGERS)
+        hint = f" Did you mean {hint_word!r}?" if hint_word else ""
+        raise PolicyConfigError(
+            f"Policy{where}: unknown trigger {trigger!r}. A policy on an unknown "
+            f"trigger has no metric to read and can never fire. Valid triggers: "
+            f"{sorted(VALID_TRIGGERS)}.{hint}"
+        )
+
+    if trigger == "expression":
+        # The flat operator/value are ignored for this trigger; the whole
+        # condition lives in the match block, validated by parse_condition.
+        return
+
+    raw_operator = condition.get("operator")
+    if raw_operator is not None and raw_operator not in VALID_OPERATORS:
+        hint_word = _OPERATOR_SYMBOL_HINTS.get(raw_operator) or _closest(
+            raw_operator, VALID_OPERATORS
+        )
+        hint = f" Did you mean {hint_word!r}?" if hint_word else ""
+        raise PolicyConfigError(
+            f"Policy{where}: unknown operator {raw_operator!r}. An unrecognised "
+            f"operator is skipped at evaluation, so this policy can never fire. "
+            f"Valid operators: {sorted(VALID_OPERATORS)}.{hint}"
+        )
+
+    operator = raw_operator if raw_operator is not None else DEFAULT_OPERATOR
+    _reject_list_trigger_operator(trigger, operator, condition.get("value"), where)
+
+
 # ── Core data types ───────────────────────────────────────────────────────────
 
 
@@ -350,8 +503,13 @@ class Policy:
     )
 
     def __post_init__(self) -> None:
-        # Fail-fast: a malformed `match` raises ExpressionError here (at load),
-        # never at fire time. PolicyEngine.load() catches and skips such policies.
+        # Fail-fast: a condition that can never fire raises PolicyConfigError and
+        # a malformed `match` raises ExpressionError, both here (at load) rather
+        # than at fire time — which for these was never. This is the single choke
+        # point for every SDK registration path: dt.add_policy(), from_dict() on
+        # the remote-fetch path, and direct Policy(...) construction (it is in
+        # dunetrace.__all__). PolicyEngine.load() catches both and skips.
+        validate_condition(self.condition, policy_name=self.name)
         self.match_expr = parse_condition(dict(self.condition), policy_name=self.name)
 
     @property
@@ -585,6 +743,25 @@ class PolicyEngine:
                     p = {**p, "action": {"type": "log"}}
             try:
                 verified.append(Policy.from_dict(p))
+            except PolicyConfigError as exc:
+                # A condition that can never fire (or always fires). Refuse to
+                # install it rather than seeding a guardrail that prevents
+                # nothing — installing it would be indistinguishable, from the
+                # dashboard, from a working policy.
+                #
+                # ERROR, and deliberately not a raise: this runs on the daemon
+                # thread _fetch_policies() starts, under an
+                # `except Exception: logger.debug(...)` in client.py. Raising
+                # here would be swallowed at DEBUG and kill the fetch for every
+                # other policy in the batch — reproducing the silence this whole
+                # check exists to remove.
+                logger.error(
+                    "Remote policy '%s' (id=%s) was NOT installed — its condition can "
+                    "never fire as written: %s",
+                    p.get("name"),
+                    p.get("id"),
+                    exc,
+                )
             except ExpressionError as exc:
                 # A malformed condition.match block — skip this one policy rather
                 # than failing the whole load. A bad policy never reaches runtime.

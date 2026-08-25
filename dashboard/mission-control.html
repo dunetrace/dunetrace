@@ -4888,6 +4888,20 @@ function updatePolicyFormHints() {
   };
   if (labelEl) labelEl.textContent = triggerHints[trigger] || 'Value';
 
+  // The `signal` metric is a LIST of detected failure types, so `contains` is
+  // the only operator that means anything against it — `eq` compares list to
+  // string and never matches, the ordering operators raise TypeError (also
+  // never match). The API rejects those with a 422 now; don't offer them here
+  // and make the user discover it by failing to save.
+  const opEl = document.getElementById('pf-operator');
+  if (opEl) {
+    const listValued = trigger === 'signal';
+    for (const opt of opEl.options) {
+      opt.disabled = listValued && opt.value !== 'contains';
+    }
+    if (listValued) opEl.value = 'contains';
+  }
+
   const needsParam = action === 'switch_model' || action === 'inject_prompt';
   paramLabel.style.display = needsParam ? '' : 'none';
   paramInput.style.display = needsParam ? '' : 'none';
