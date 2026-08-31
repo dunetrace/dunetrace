@@ -18,6 +18,8 @@ import json
 import time
 from typing import Any, Dict
 
+from alerts_svc.formatters.slack import _plain
+
 
 def _approval_summary(approval: Dict[str, Any]) -> str:
     tool = approval.get("tool_name", "?")
@@ -64,8 +66,16 @@ def format_slack_approval(approval: Dict[str, Any]) -> dict:
             ],
         },
     ]
+    # Plain text — this is the desktop/mobile notification preview, where
+    # mrkdwn is not rendered, so an agent id or tool name containing a
+    # backtick/asterisk would leak the marker into the notification. Unlike
+    # the signal alert, this payload DOES carry top-level `blocks`, so Slack
+    # treats `text` as a pure fallback and it is not shown in the channel.
     return {
-        "text": f"Approval needed: {approval.get('tool_name', '?')}",
+        "text": (
+            f"Approval needed: agent {_plain(approval.get('agent_id', '?'))} "
+            f"wants to call {_plain(approval.get('tool_name', '?'))}"
+        ),
         "blocks": blocks,
     }
 

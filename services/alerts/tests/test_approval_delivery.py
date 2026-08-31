@@ -51,6 +51,27 @@ class TestApprovalFormatter(unittest.TestCase):
         self.assertIn("wire_money", text)
         self.assertIn("payments-agent", text)
 
+    def test_notification_text_names_agent_and_tool(self):
+        """Top-level `text` is the desktop notification preview — it must say
+        what is being approved, in plain text (no mrkdwn markers)."""
+        text = format_slack_approval(_APPROVAL)["text"]
+        self.assertIn("wire_money", text)
+        self.assertIn("payments-agent", text)
+        for ch in "`*~":
+            self.assertNotIn(ch, text)
+
+    def test_notification_text_strips_mrkdwn_from_identifiers(self):
+        """A notification renders `text` verbatim, so a backtick or asterisk
+        in an agent id or tool name would leak the marker through. The
+        underscore in the tool name must survive — stripping it would
+        corrupt the identifier."""
+        approval = dict(_APPROVAL, agent_id="pay*ments", tool_name="wire_`money`")
+        text = format_slack_approval(approval)["text"]
+        for ch in "`*~":
+            self.assertNotIn(ch, text)
+        self.assertIn("payments", text)
+        self.assertIn("wire_money", text)
+
     def test_webhook_payload_shape(self):
         p = format_webhook_approval(_APPROVAL)
         self.assertEqual(p["event"], "approval_request")

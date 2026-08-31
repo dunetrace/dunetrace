@@ -33,6 +33,35 @@ When token data is available for the run, a `:moneybag:` line is included showin
 
 > **Note:** `docker compose restart alerts` does not re-read `.env`. Use `docker compose up -d alerts` to recreate the container and pick up env var changes.
 
+### Desktop and mobile notification preview
+
+Slack builds the push/desktop notification preview from the top-level `blocks`
+first, falling back to the top-level **`text`** field (`message.text`); mobile
+notifications use `message.text`
+[*exclusively*](https://docs.slack.dev/messaging/formatting-message-text). These
+payloads nest their blocks inside `attachments` (that is what supplies the
+severity colour bar), so before this there was no source of preview text at all
+and the client showed *"no preview available"*. Every Slack payload the alerts
+worker sends now carries a plain-text one-line summary in `text` (mirrored into
+the attachment's `fallback`):
+
+```
+HIGH: Tool loop detected: web_search called 5× in steps 3–8 · agent research-agent · run run-abc123 · ~$3.42 wasted · systemic: 12/40 runs in 7d · +4 suppressed
+```
+
+The cost, systemic and suppressed-count segments appear only when that data is
+available. It is deliberately plain text: mrkdwn is not rendered in a
+notification, and backticks or asterisks from the title would appear literally.
+Underscores are kept, since tool names and agent ids contain them.
+
+For signal alerts and the weekly digest this line is **also visible in the
+channel**, as the message body above the coloured card — Slack treats `text` as
+a pure fallback only when the payload has top-level `blocks`, and these nest
+theirs in `attachments`. Hoisting the blocks would remove the duplicate line but
+would break the mobile preview entirely (mobile reads only `message.text`) and
+lose the severity colour bar, so the visible line is the deliberate trade.
+Approval requests already use top-level `blocks`, so their summary stays hidden.
+
 ### Rate context in Slack alerts
 
 The rate context line appears above the "What happened" block and describes how often this failure type has affected recent runs for the same agent:

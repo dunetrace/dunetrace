@@ -28,12 +28,15 @@
 
 AI agents fail silently:
 
-- ✓ API returns 200 &nbsp; ✓ Logs are clean
-- ✗ Agent called the same tool 12 times, burned $10, and gave the user a wrong answer
+- ✓ API returns 200 &nbsp; ✓ Latency is normal &nbsp; ✓ Cost looks normal
+- ✗ The upstream API returned an error body. The agent invented the numbers and reported success.
+- ✗ Two agents delegated in a circle. Eight runs, all green, no progress.
+- ✗ A document your agent read last week wrote an instruction into its memory. It fired today.
 
 Tracers answer "what happened?" — after you already know it broke.
-Dunetrace answers **"is something breaking right now?"** and fires an alert in 15 seconds,
-using zero-LLM structural checks that run in-path with sub-500μs per-hook overhead.¹
+Dunetrace answers **"is something breaking right now?"** with deterministic,
+zero-LLM structural checks that run on every run — and in the request path,
+where a policy can block the action before it executes.
 
 ---
 

@@ -198,7 +198,25 @@ def format_digest_slack(data: dict[str, Any], org_id: str) -> dict:
         }
     )
 
-    return {"attachments": [{"color": "#4a9ede", "blocks": blocks}]}
+    # Drives the desktop/mobile notification preview — a payload of
+    # `attachments` alone previews as "no preview available". Plain text
+    # only: mrkdwn is not rendered in a notification. Like the signal alert,
+    # this also renders as the visible message body above the card, since
+    # the blocks sit in `attachments` rather than at top level (see
+    # formatters/slack.py::notification_text).
+    summary = (
+        f"Weekly agent health digest ({week_start}–{week_end}): "
+        f"{total_agents} agent(s), {total_runs} runs, {total_signals} signal(s)"
+    )
+    if systemic:
+        summary += f", {len(systemic)} systemic pattern(s)"
+    elif not top_failures:
+        summary += " — no failures detected"
+
+    return {
+        "text": summary,
+        "attachments": [{"color": "#4a9ede", "fallback": summary, "blocks": blocks}],
+    }
 
 
 async def send_weekly_digest() -> int:
