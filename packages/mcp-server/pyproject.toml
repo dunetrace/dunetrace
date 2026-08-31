@@ -9,7 +9,7 @@ description = "Dunetrace MCP server - expose agent signals to Claude Code, Curso
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
-authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]
+authors = [{ name = "Dunetrace UG (haftungsbeschränkt)", email = "vikas@dunetrace.com" }]
 keywords = ["ai", "agents", "mcp", "observability", "llm", "monitoring"]
 dependencies = [
     # server.py imports `mcp.server.fastmcp`, which bounds this at BOTH ends:

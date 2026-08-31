@@ -320,7 +320,7 @@ Fork, branch, change, `make test`, PR — open an issue first for new integratio
 
 ## Contact
 
-[vikas@dunetrace.com](mailto:vikas@dunetrace.com)
+Dunetrace UG (haftungsbeschränkt) · Kolonnenstr. 8, 10827 Berlin, Germany · [vikas@dunetrace.com](mailto:vikas@dunetrace.com)
 
 ## License
 
