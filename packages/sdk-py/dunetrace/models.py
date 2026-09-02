@@ -302,6 +302,7 @@ class RunState:
     )
     baseline_p75_duration_s: Optional[float] = None  # P75 wall-clock run duration in seconds
 
+    baseline_p75_latency_by_tool: Optional[Dict[str, float]] = None
 
 # ── Risk Score ────────────────────────────────────────────────────────────────
 

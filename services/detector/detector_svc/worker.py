@@ -35,6 +35,7 @@ from detector_svc.db import (
     fetch_destination_baseline,
     fetch_duration_baseline,
     fetch_latency_baseline,
+    fetch_per_tool_latency_baselines,
     fetch_memory_writes,
     fetch_llm_tool_ratio_baseline,
     fetch_run_events,
@@ -387,14 +388,16 @@ async def process_run(
             state.baseline_p75_llm_tool_ratio,
             state.baseline_p75_total_tokens,
             state.baseline_p75_duration_s,
+            state.baseline_p75_latency_by_tool,
         ) = await asyncio.gather(
-            fetch_step_count_baseline(org_id, agent_id, agent_version, run_id),
-            fetch_latency_baseline(org_id, agent_id, agent_version, run_id, "tool.called"),
-            fetch_latency_baseline(org_id, agent_id, agent_version, run_id, "llm.called"),
-            fetch_token_growth_baseline(org_id, agent_id, agent_version, run_id),
-            fetch_llm_tool_ratio_baseline(org_id, agent_id, agent_version, run_id),
-            fetch_total_tokens_baseline(org_id, agent_id, agent_version, run_id),
-            fetch_duration_baseline(org_id, agent_id, agent_version, run_id),
+            fetch_step_count_baseline(agent_id, agent_version, run_id),
+            fetch_latency_baseline(agent_id, agent_version, run_id, "tool.called"),
+            fetch_latency_baseline(agent_id, agent_version, run_id, "llm.called"),
+            fetch_token_growth_baseline(agent_id, agent_version, run_id),
+            fetch_llm_tool_ratio_baseline(agent_id, agent_version, run_id),
+            fetch_total_tokens_baseline(agent_id, agent_version, run_id),
+            fetch_duration_baseline(agent_id, agent_version, run_id),
+            fetch_per_tool_latency_baselines(agent_id, agent_version, run_id),
         )
         detectors = await get_detectors(agent_id, org_id)
         signals = run_detectors(state, detectors=detectors)
