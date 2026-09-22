@@ -397,6 +397,14 @@ boundary the async context can't cross (it always wins over the inherited id).
 dt.markDeploy("my-agent", "v1.4.2", { commit: "abc123f", environment: "production" });
 ```
 
+### OpenTelemetry export
+
+Set `DUNETRACE_OTEL_ENABLED=1` and `DUNETRACE_OTEL_ENDPOINT` and the client
+sends every run to your OTLP backend as spans, next to its own ingest. Needs
+the `@opentelemetry/*` packages installed; see
+[OpenTelemetry export](integrations/opentelemetry.md) for the full variable
+list, or pass your own `DunetraceOtelExporter` as the `exporter` option.
+
 ### Grafana / Loki (no HTTP ingest)
 
 ```typescript

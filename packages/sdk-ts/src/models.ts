@@ -161,6 +161,11 @@ export interface LlmRespondedOptions {
  *  makes @opentelemetry/api a hard dependency of the core client. */
 export interface EventSink {
   handle(event: AgentEvent): void;
+  /** True on a sink that turns events into OpenTelemetry spans under the
+   *  run's deterministic trace id (DunetraceOtelExporter sets it). The client
+   *  stamps run.otelTraceId / run.otelParentSpanId only for such sinks, so a
+   *  sink that does something else never advertises OTel correlation ids. */
+  readonly exportsOtelSpans?: boolean;
 }
 
 export interface ClientOptions {

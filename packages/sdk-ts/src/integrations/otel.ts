@@ -77,24 +77,8 @@ function hrTime(tsSeconds: number): HrTime {
   return [seconds, nanos];
 }
 
-/** True when s is a usable 32-hex-char trace id (not the all-zero invalid one). */
-function isTraceIdHex(s: string): boolean {
-  return /^[0-9a-f]{32}$/.test(s) && s !== "00000000000000000000000000000000";
-}
-
-/** 32-hex-char trace ID for run_id (W3C traceparent format). A Dunetrace run UUID
- *  maps to a stable trace both a backend and the dashboard can address. Returns
- *  "" when run_id is not UUID-shaped. */
-export function traceIdHex(runId: string): string {
-  const hex = runId.replace(/-/g, "").toLowerCase();
-  return isTraceIdHex(hex) ? hex : "";
-}
-
-/** 16-hex-char root span ID for run_id (its lower 64 bits). "" when not UUID-shaped. */
-export function rootSpanIdHex(runId: string): string {
-  const hex = traceIdHex(runId);
-  return hex ? hex.slice(16) : "";
-}
+export { traceIdHex, rootSpanIdHex } from "../otel-ids.js";
+import { traceIdHex } from "../otel-ids.js";
 
 /** Deterministic SpanContext for a run's root span. Seeds a run's own trace and
  *  links a child run to its parent. Returns null when run_id is not UUID-shaped,
@@ -249,6 +233,8 @@ export interface DunetraceOtelExporterOptions {
  * naturally sequential per run.
  */
 export class DunetraceOtelExporter {
+  /** See EventSink.exportsOtelSpans. */
+  readonly exportsOtelSpans = true;
   private readonly _tracer: Tracer;
   private readonly _captureContent: boolean;
   private readonly _runs = new Map<string, RunSpans>();

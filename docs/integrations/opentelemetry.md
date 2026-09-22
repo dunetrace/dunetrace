@@ -29,6 +29,39 @@ That is the whole change. The SDK reads these at startup and, when enabled,
 builds an OTLP exporter on a background pipeline. Your existing `dt.run(...)`,
 `@dt.agent`, and `auto_instrument()` code is untouched.
 
+The TypeScript SDK reads the same variables. Install the OpenTelemetry
+packages next to `dunetrace` and set the same two env vars:
+
+```bash
+npm install @opentelemetry/api@1 @opentelemetry/sdk-trace-base@1 @opentelemetry/resources@1 \
+  @opentelemetry/exporter-trace-otlp-grpc@0.57
+
+export DUNETRACE_OTEL_ENABLED=1
+export DUNETRACE_OTEL_ENDPOINT=http://localhost:4317      # gRPC, the default
+```
+
+For OTLP over HTTP install `@opentelemetry/exporter-trace-otlp-proto@0.57`
+instead and point at the HTTP port with the traces path:
+
+```bash
+export DUNETRACE_OTEL_PROTOCOL=http/protobuf
+export DUNETRACE_OTEL_ENDPOINT=http://localhost:4318/v1/traces
+```
+
+The SDK is tested against the 1.x trace SDK and the 0.57 exporters, and the
+peer ranges say so; the 2.x line changed the resources API and is not
+supported yet, which is why the versions above are pinned.
+
+`new Dunetrace()` then builds the pipeline itself and every run, LLM call, tool
+call and retrieval becomes a span. Only the exporter package for the protocol
+you use is needed. If you already run your own OpenTelemetry setup, pass a
+`DunetraceOtelExporter` built on your tracer as the `exporter` option instead;
+an explicit exporter always wins over the env bootstrap. The Node batch
+processor has no exit hook, so call `await dt.shutdown()` before a short-lived
+process ends, or rely on the SDK's own exit flush, which pushes the last spans
+too. Both waits are bounded, so an unresponsive collector cannot hold the
+process. `otel.shutdown()` from the package root tears the pipeline down.
+
 ### Configuration
 
 All config is env-driven. Nothing here is required except enabling export and
@@ -143,8 +176,10 @@ a dead or slow collector is not retried on every batch. A missing
 **Nothing shows up.** Confirm `DUNETRACE_OTEL_ENABLED` and
 `DUNETRACE_OTEL_ENDPOINT` are set in the process actually running the agent. Turn
 on `logging.getLogger("dunetrace.otel").setLevel(logging.DEBUG)` to see whether
-the provider built. A quick check: point at a local collector with a debug
-exporter (see `otel/` in the repo) and watch the spans print.
+the provider built. In TypeScript, `otel.isEnabled()` from the package root
+answers the same question, and a missing package is reported once on stderr
+with the install command. A quick check: point at a local collector with a
+debug exporter (see `otel/` in the repo) and watch the spans print.
 
 **Connection refused on gRPC.** For a plaintext local collector, set
 `OTEL_EXPORTER_OTLP_INSECURE=true`, or use `DUNETRACE_OTEL_PROTOCOL=http/protobuf`

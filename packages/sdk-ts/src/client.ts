@@ -16,6 +16,8 @@ import {
 import { HttpBatchEmitter, type BatchEmitter } from "./emitters.js";
 import { runStorage as _runStorage, getCurrentRun } from "./context.js";
 import { registerOwnEndpoint, wrapAnthropicClient, wrapOpenAIClient } from "./auto.js";
+import * as otel from "./otel.js";
+import { rootSpanIdHex, traceIdHex } from "./otel-ids.js";
 import type { AgentEvent, ClientOptions, EventSink, RunOptions } from "./models.js";
 
 export { getCurrentRun };
@@ -63,7 +65,7 @@ function _installExitFlushHook(): void {
   _exitHookInstalled = true;
   process.on("beforeExit", () => {
     for (const ref of _liveClients) {
-      ref.deref()?._flushBeforeExit();
+      void ref.deref()?._flushBeforeExit();
     }
   });
 }
@@ -110,7 +112,11 @@ export class Dunetrace {
       denylist:      compileDenylist(opts.redactKeys),
     };
     this._emitter    = opts.emitter ?? new HttpBatchEmitter(base, this._apiKey, this._timeoutMs);
-    this._exporter   = opts.exporter ?? null;
+    // OTel export (opt-in via DUNETRACE_OTEL_* env). When enabled and the
+    // caller didn't wire an exporter explicitly, build one on the shared tracer.
+    // otel.init() never throws and returns false when unconfigured, so this is
+    // a no-op for anyone not using OTel.
+    this._exporter   = opts.exporter ?? (otel.init() ? otel.createEventSink() : null);
 
     const interval = opts.flushIntervalMs ?? 200;
     this._drainTimer = setInterval(() => { this._drain(); }, interval);
@@ -142,6 +148,13 @@ export class Dunetrace {
     const tools   = opts.tools        ?? [];
     const version = agentVersion(opts.systemPrompt ?? "", model, tools);
     const run     = new DunetraceRun(agentId, version, this, opts.runId);
+    // Only a sink that actually produces OTel spans gets the correlation ids;
+    // an arbitrary EventSink would otherwise advertise a trace that exists
+    // nowhere.
+    if (this._exporter?.exportsOtelSpans === true) {
+      run.otelTraceId      = traceIdHex(run.runId) || null;
+      run.otelParentSpanId = rootSpanIdHex(run.runId) || null;
+    }
 
     // Auto-thread parent_run_id: if this run opens while another run is already
     // active (this call is nested inside an enclosing run's fn, so
@@ -370,6 +383,11 @@ export class Dunetrace {
     while (this._buffer.length > 0 && Date.now() < deadline) {
       await this.flush();
     }
+    // Push any spans still sitting in the OTel batch processor, within
+    // whatever is left of the caller's deadline. The pipeline itself stays up
+    // (another client may share it); otel.shutdown() tears it down. A no-op
+    // when export is off.
+    await otel.forceFlush(Math.max(0, deadline - Date.now()));
   }
 
   // ── Internal ───────────────────────────────────────────────────────────────
@@ -437,11 +455,19 @@ export class Dunetrace {
    *
    * @internal — public only because the module-level listener calls it.
    */
-  _flushBeforeExit(): void {
-    if (this._exitFlushing || this._buffer.length === 0) return;
+  _flushBeforeExit(): Promise<void> {
+    if (this._exitFlushing) return Promise.resolve();
+    // The OTel batch processor has no exit hook of its own, so a short-lived
+    // process would otherwise leave its last spans in the queue. The provider
+    // is shared by every client, so otel.flushForExit() runs once per process
+    // and returns null afterwards: every flush is pending work that makes Node
+    // fire `beforeExit` again, and repeating it would keep the loop alive. It
+    // never rejects and is bounded, so a silent collector cannot hold the exit.
+    const spans = otel.flushForExit();
+    if (this._buffer.length === 0 && spans === null) return Promise.resolve();
     this._exitFlushing = true;
-    void this.flush()
-      .catch(() => {})
+    return Promise.all([this.flush().catch(() => {}), spans])
+      .then(() => undefined)
       .finally(() => { this._exitFlushing = false; });
   }
 

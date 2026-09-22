@@ -10,6 +10,8 @@ export {
 } from "./auto.js";
 export { DunetraceRun } from "./run.js";
 export { agentVersion } from "./hash.js";
+export * as otel from "./otel.js";
+export { traceIdHex, rootSpanIdHex } from "./otel-ids.js";
 export {
   HttpBatchEmitter,
   NoopBatchEmitter,
