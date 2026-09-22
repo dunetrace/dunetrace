@@ -51,7 +51,7 @@ try:
         SpanExporter,
         SpanExportResult,
     )
-    from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+    from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 
     _OTEL_AVAILABLE = True
 except ImportError:
@@ -324,7 +324,7 @@ def build_tracer_provider(config: OTelConfig) -> Optional[object]:
         )
         provider = TracerProvider(
             resource=_build_resource(config),
-            sampler=ParentBased(root=TraceIdRatioBased(config.sampling_ratio)),
+            sampler=TraceIdRatioBased(config.sampling_ratio),
         )
         provider.add_span_processor(processor)
         logger.debug(
