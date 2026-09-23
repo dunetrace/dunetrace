@@ -397,6 +397,22 @@ boundary the async context can't cross (it always wins over the inherited id).
 dt.markDeploy("my-agent", "v1.4.2", { commit: "abc123f", environment: "production" });
 ```
 
+### Runs that open themselves
+
+`new Dunetrace()` alone is enough for a script that uses a wrapped OpenAI,
+Anthropic or Mistral client: a call with no run active opens an *implicit*
+run, the calls that follow attach to it, and it closes after 30s without
+events (`implicitRunIdleS`, env `DUNETRACE_IMPLICIT_RUN_IDLE_S`), at
+`dt.shutdown()`, or at process exit. Such a run is marked (`implicit: true`,
+`opened_by`) and the detector holds its signals in shadow, because its
+boundary is a guess. `wrapGenerateText` and `wrapStreamText` open an exact
+run around the call instead, closed when the call settles, which is what you
+want for anything on the Vercel AI SDK. An uncaught exception becomes
+`run.errored`. `implicitRuns: false` or `DUNETRACE_IMPLICIT_RUNS=0` turns the
+guessing off. The full set of rules, in the order they apply, is in
+[auto-instrumentation.md](integrations/auto-instrumentation.md#runs-that-open-themselves).
+`DUNETRACE_DSN=https://<api_key>@host` configures endpoint and key in one value.
+
 ### Grafana / Loki (no HTTP ingest)
 
 ```typescript

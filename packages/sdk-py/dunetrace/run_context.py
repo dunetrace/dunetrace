@@ -254,6 +254,11 @@ class RunContext:
         self.agent_version = agent_version
         self.step = 0
         self.exit_reason: Optional[str] = None
+        # True for a run the SDK opened on its own (see dunetrace.implicit);
+        # _implicit_closed flips once it has been closed from any thread, so a
+        # context variable still pointing at it reads as "no run".
+        self.implicit: bool = False
+        self._implicit_closed: bool = False
         self._parent_run_id = parent_run_id
         # Correlation key for external evaluation integrations (Langfuse/
         # LangSmith/Braintrust) — not folded into agent_version's hash like

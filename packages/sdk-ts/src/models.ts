@@ -166,6 +166,22 @@ export interface EventSink {
 export interface ClientOptions {
   endpoint?:        string;
   apiKey?:          string;
+  /** `https://<api_key>@host[:port][/path]`, env `DUNETRACE_DSN`: endpoint
+   *  and key in one value. An explicit `endpoint`/`apiKey` (or the
+   *  `DUNETRACE_ENDPOINT`/`DUNETRACE_API_KEY` env vars) wins over it. */
+  dsn?:             string;
+  /** When a patched LLM call arrives with no run active, open one and attach
+   *  the calls that follow in this async context to it. Default true (env
+   *  `DUNETRACE_IMPLICIT_RUNS`). Entry points such as `wrapGenerateText` and
+   *  `dt.run()` always take precedence; implicit runs are marked on the wire
+   *  and their signals are held in shadow by the detector. */
+  implicitRuns?:    boolean;
+  /** Seconds without events after which an implicit run closes with
+   *  `exit_reason: idle`. Default 30 (env `DUNETRACE_IMPLICIT_RUN_IDLE_S`). */
+  implicitRunIdleS?: number;
+  /** Agent id for runs the SDK opens on its own (env `DUNETRACE_AGENT_ID`);
+   *  falls back to the script name. */
+  defaultAgentId?:  string;
   flushIntervalMs?: number;
   emitAsJson?:      boolean;
   bufferSize?:      number;

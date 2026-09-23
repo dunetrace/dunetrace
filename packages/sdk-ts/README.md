@@ -169,6 +169,18 @@ await dt.run("my-agent", { userInput: prompt, model: "gpt-4o" }, async (run) => 
 
 See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, Next.js, and `traceGenerateText`. Requires the `ai` package (`npm install ai`).
 
+## Runs that open themselves
+
+A wrapped OpenAI, Anthropic or Mistral call with no run active opens an
+implicit run; the calls that follow attach to it, and it closes after 30s
+without events, at `dt.shutdown()`, or at process exit. The run is marked
+(`implicit: true`, `opened_by`) and its signals are held in shadow. For the
+Vercel AI SDK, `wrapGenerateText` / `wrapStreamText` open an exact run around
+each call instead. Uncaught exceptions become `run.errored`. Turn the guessing
+off with `implicitRuns: false`. `DUNETRACE_DSN=https://<api_key>@host` sets
+endpoint and key in one value. The rules, in order, are in
+[docs/integrations/auto-instrumentation.md](../../docs/integrations/auto-instrumentation.md#runs-that-open-themselves).
+
 ## Output modes
 
 | Mode | How to enable | Destination |

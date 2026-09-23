@@ -37,7 +37,7 @@
  *     (see integrations/vercel-ai.ts).
  */
 
-import { getCurrentRun, httpInstrumentationSuppressed, httpSuppression } from "./context.js";
+import { getCurrentRun, httpInstrumentationSuppressed, httpSuppression, resolveRun } from "./context.js";
 import { safeEmit as _safeEmit } from "./util.js";
 
 /** Marks a function as already instrumented, so re-patching is a no-op. */
@@ -466,6 +466,7 @@ function instrumentCreate(
   emit: Emitter,
   collectorFor: CollectorFactory,
   alwaysStream = false,
+  openedBy = "llm.create",
 ): AsyncFn {
   if ((orig as unknown as Record<symbol, unknown>)[INSTRUMENTED]) return orig;
 
@@ -473,6 +474,12 @@ function instrumentCreate(
     const opts = isRecord(args[0]) ? args[0] : undefined;
     const model = str(opts?.["model"]) ?? "unknown";
     const startedAt = Date.now();
+    // Decide the run at CALL time. With no run active the client opens an
+    // implicit one and enters it into this async context, so the response
+    // readers below and the calls that follow find it with getCurrentRun().
+    // With no client, or implicit runs off, this is null and the call is
+    // simply forwarded, as before.
+    resolveRun(openedBy);
 
     // The SDK issues its request through fetch; suppress HTTP instrumentation for
     // the duration so one LLM call doesn't also register as a tool call.
@@ -548,10 +555,11 @@ function instrumentResource(
   resource: Record<string, unknown>,
   emit: Emitter,
   collectorFor: CollectorFactory,
+  openedBy: string,
 ): void {
   const existing = resource["create"] as AsyncFn;
   if ((existing as unknown as Record<symbol, unknown>)[INSTRUMENTED]) return;
-  resource["create"] = instrumentCreate(existing, emit, collectorFor);
+  resource["create"] = instrumentCreate(existing, emit, collectorFor, false, openedBy);
 }
 
 /** Instrument one OpenAI client instance in place. Returns the same object. */
@@ -563,7 +571,7 @@ export function wrapOpenAIClient<T>(client: T): T {
     warn("wrapOpenAI: client has no chat.completions.create — leaving it untouched");
     return client;
   }
-  instrumentResource(completions, emitOpenAIResponse, openAIStreamCollector);
+  instrumentResource(completions, emitOpenAIResponse, openAIStreamCollector, "openai.chat.completions.create");
   return client;
 }
 
@@ -575,7 +583,7 @@ export function wrapAnthropicClient<T>(client: T): T {
     warn("wrapAnthropic: client has no messages.create — leaving it untouched");
     return client;
   }
-  instrumentResource(messages, emitAnthropicResponse, anthropicStreamCollector);
+  instrumentResource(messages, emitAnthropicResponse, anthropicStreamCollector, "anthropic.messages.create");
   return client;
 }
 
@@ -817,6 +825,7 @@ export function autoInstrument(options: AutoInstrumentOptions = {}): string[] {
         spec.emit,
         spec.collector,
         method.alwaysStream ?? false,
+        `${name}.${method.name}`,
       );
     }
     _patched.add(name);

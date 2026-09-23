@@ -16,7 +16,9 @@ from dunetrace.detectors import (
     UngroundedDestinationDetector,
     run_detectors,
 )
-from dunetrace.models import FailureSignal, FailureType, Severity
+from typing import Optional
+
+from dunetrace.models import FailureSignal, FailureType, RunState, Severity
 from dunetrace.risk_engine import RiskEngine
 from detector_svc.detectors import get_detectors
 
@@ -234,24 +236,44 @@ _INCOMPLETE_SEVERITY_CAP = Severity.MEDIUM
 _SEVERITIES_ABOVE_CAP = frozenset({Severity.CRITICAL.value, Severity.HIGH.value})
 
 
-def _incomplete_marker(dropped_events: int) -> dict:
-    return {"dropped_events": dropped_events, "reason": "sdk_buffer_shed"}
+# An implicit run (the SDK opened it because a patched LLM call had no run to
+# attach to) is incomplete for the same reason: its boundary is a guess, so a
+# verdict decided across it must not go live. Same shadow, cap and marker,
+# with its own reason.
+_REASON_SHED = "sdk_buffer_shed"
+_REASON_IMPLICIT = "implicit_run"
 
 
-def _mark_incomplete(signal: FailureSignal, dropped_events: int) -> None:
-    """Cap a built-in / plugin signal decided on a shed run and mark its evidence."""
+def _incomplete_reason(state: RunState) -> Optional[str]:
+    if state.dropped_events > 0:
+        return _REASON_SHED
+    # `is True`, not truthiness: a mocked or older RunState without the field
+    # must read as an ordinary run, never as an incomplete one.
+    if getattr(state, "implicit", False) is True:
+        return _REASON_IMPLICIT
+    return None
+
+
+def _incomplete_marker(dropped_events: int, reason: str = _REASON_SHED) -> dict:
+    return {"dropped_events": dropped_events, "reason": reason}
+
+
+def _mark_incomplete(
+    signal: FailureSignal, dropped_events: int, reason: str = _REASON_SHED
+) -> None:
+    """Cap a built-in / plugin signal decided on a shed or implicit run and mark its evidence."""
     if not isinstance(signal.evidence, dict):
         signal.evidence = {}
-    signal.evidence["incomplete_data"] = _incomplete_marker(dropped_events)
+    signal.evidence["incomplete_data"] = _incomplete_marker(dropped_events, reason)
     signal.confidence = round(min(signal.confidence, _INCOMPLETE_CONFIDENCE_CAP), 4)
     if signal.severity.value in _SEVERITIES_ABOVE_CAP:
         signal.severity = _INCOMPLETE_SEVERITY_CAP
 
 
-def _mark_incomplete_custom(result: dict, dropped_events: int) -> None:
+def _mark_incomplete_custom(result: dict, dropped_events: int, reason: str = _REASON_SHED) -> None:
     """Same treatment for a JSON-config custom detector's result dict."""
     evidence = dict(result.get("evidence") or {})
-    evidence["incomplete_data"] = _incomplete_marker(dropped_events)
+    evidence["incomplete_data"] = _incomplete_marker(dropped_events, reason)
     result["evidence"] = evidence
     try:
         confidence = float(result.get("confidence") or 0.0)
@@ -568,16 +590,27 @@ async def process_run(
     existing_types: set = prior["signal_types"]
 
     incomplete = False
+    incomplete_reason: Optional[str] = None
     try:
         state = build_run_state(events)
-        incomplete = state.dropped_events > 0
-        if incomplete:
+        incomplete_reason = _incomplete_reason(state)
+        incomplete = incomplete_reason is not None
+        if incomplete_reason == _REASON_SHED:
             logger.info(
                 "Run %s is incomplete: the SDK buffer shed %d of its events under overload. "
                 "Its signals are held in shadow with capped confidence/severity and it is "
                 "excluded from issue tracking and baselines. agent_id=%s",
                 run_id,
                 state.dropped_events,
+                agent_id,
+            )
+        elif incomplete_reason == _REASON_IMPLICIT:
+            logger.info(
+                "Run %s was opened by the SDK on its own (no dt.run() or framework entry "
+                "point), so its boundary is a guess. Its signals are held in shadow with "
+                "capped confidence/severity and it is excluded from issue tracking and "
+                "baselines. agent_id=%s",
+                run_id,
                 agent_id,
             )
         (
@@ -704,7 +737,7 @@ async def process_run(
     try:
         if incomplete:
             for signal in signals:
-                _mark_incomplete(signal, state.dropped_events)
+                _mark_incomplete(signal, state.dropped_events, incomplete_reason or _REASON_SHED)
 
         count = 0
         for signal in signals:
@@ -836,7 +869,9 @@ async def process_run(
                     )
                     if fired:
                         if incomplete:
-                            _mark_incomplete_custom(result, state.dropped_events)
+                            _mark_incomplete_custom(
+                                result, state.dropped_events, incomplete_reason or _REASON_SHED
+                            )
                         await write_custom_signal(
                             failure_type=result["failure_type"],
                             severity=result["severity"],

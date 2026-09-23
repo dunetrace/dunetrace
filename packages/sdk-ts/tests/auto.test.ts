@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { setRunOpener } from "../src/context.js";
 import { Dunetrace } from "../src/client.js";
 import {
   autoInstrument,
@@ -257,10 +258,19 @@ describe("autoInstrument — emitted events", () => {
     }
   });
 
-  it("emits nothing outside a run, and still returns the response", async () => {
+  it("with implicit runs off, emits nothing outside a run, and still returns the response", async () => {
     const original = FakeCompletions.prototype.create;
     try {
-      newClient();
+      // Implicit runs (on by default) would open a run for this call; the
+      // attach-only contract is the opt-out behaviour. Earlier tests in this
+      // file registered their clients as the process's run opener, so drop
+      // that too: a client with implicit runs off does not unregister another.
+      captured.length = 0;
+      setRunOpener(null);
+      new Dunetrace({
+        exporter: { handle: (event: AgentEvent) => { captured.push(event); } },
+        implicitRuns: false,
+      });
       autoInstrument({ openai: FakeOpenAI, targets: ["openai"] });
       const resp = await new FakeOpenAI().chat.completions.create({ model: "gpt-4o", messages: [] });
       expect(captured).toHaveLength(0);

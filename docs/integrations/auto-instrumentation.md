@@ -247,3 +247,81 @@ so this caveat is OpenAI-only.
 
 A stream that fails partway through is recorded with `finish_reason="error"` and
 the exception text, rather than as a clean `stop`.
+
+## Runs that open themselves
+
+Every event belongs to a run, and a run needs a start and an end. `dt.run()`,
+the decorators and the middleware give both explicitly. Since this feature,
+`dt.init()` alone is enough: the SDK decides where a run starts and, the
+harder half, where it ends, for code that never calls Dunetrace.
+
+### How a run ends, in the order the SDK tries them
+
+1. **A framework says so.** Entry points with a natural end open an exact run
+   and close it when they return. Nothing is guessed; these are ordinary runs.
+
+   | Entry point | Opens a run when | Closes it when |
+   |---|---|---|
+   | FastAPI / Flask app (middleware auto-installed on apps built after `dt.init()`) | a request arrives | the response is sent |
+   | LangGraph `invoke` / `ainvoke` / `stream` / `astream` on a compiled graph | called with no run active | the call returns or the stream is exhausted |
+   | CrewAI `kickoff` | called with no run active | it returns |
+   | OpenAI Agents `Runner` (trace processor) | the trace starts | the trace ends |
+   | Vercel AI `wrapGenerateText` / `wrapStreamText` (TypeScript) | called with no run active | the promise settles / `onFinish` or `onError` fires |
+
+   Nested calls attach to the run that is already open, which is how subgraphs
+   and sub-agents land under their parent instead of opening their own.
+
+2. **Your own `dt.run()`** closes an implicit run that was open in the same
+   context (`exit_reason: explicit_run_opened`), so a declared run never nests
+   under a guessed one.
+
+3. **Idle.** When a patched LLM call (`openai`, `anthropic`, `mistral`,
+   Bedrock) arrives with no run active and no framework boundary in sight, the
+   SDK opens an *implicit* run and attaches the calls that follow in the same
+   thread or task to it. That run closes after 30 seconds with no events
+   (`DUNETRACE_IMPLICIT_RUN_IDLE_S`, or `implicit_run_idle_s=` on the client).
+   This is the rule for scripts and notebooks. It is a guess, and the run says
+   so: `run.started` carries `implicit: true` and `opened_by` (the call that
+   opened it), and the terminal event's `exit_reason` is `idle`. HTTP-only
+   activity never opens a run; it attaches when one exists.
+
+4. **Process exit.** `dt.shutdown()` and the at-exit flush close whatever
+   implicit runs are still open (`exit_reason: process_exit`).
+
+5. **A crash.** After `dt.init()`, an unhandled exception on the main thread
+   or a worker thread becomes `run.errored` on the run active in that
+   context, or on a one-event run when none is open, so a crash is never
+   silent. The traceback still prints exactly as before.
+
+### What the detector does with an implicit run
+
+A guessed boundary is not a declared one. The detector treats an implicit run
+the way it treats a run whose events were shed under overload: every signal is
+stored in shadow with confidence capped at 0.5 and severity at MEDIUM, evidence
+carries `incomplete_data: {"reason": "implicit_run"}`, and the run feeds neither
+issue tracking nor baselines. Implicit runs show up in the dashboard's shadow
+section and never alert. Runs opened by a framework entry point are ordinary
+runs and alert normally.
+
+The known weak spot is a synchronous server whose worker threads outlive
+requests and that has no request boundary: without the middleware, the calls
+of many requests on one thread would share an implicit run until the thread
+goes idle. That is why implicit runs are shadowed, why the middleware is
+auto-installed, and why the entry-point rules run first.
+
+### Turning it off
+
+`Dunetrace(implicit_runs=False)` or `DUNETRACE_IMPLICIT_RUNS=0` restores the
+attach-only behaviour: a patched call outside a run records nothing, and no
+crash hooks are installed. Entry-point runs and the middleware are unaffected.
+
+### One value to configure: the DSN
+
+```bash
+export DUNETRACE_DSN=https://<api_key>@ingest.example.com
+```
+
+`Dunetrace()` reads the endpoint and the key from it. An explicit `endpoint`
+or `api_key` argument, or `DUNETRACE_ENDPOINT` / `DUNETRACE_API_KEY`, wins over
+the corresponding part of the DSN. The key still travels as a bearer token;
+the DSN is a convenience, and the SDK never logs it whole.

@@ -1,5 +1,6 @@
 export { Dunetrace } from "./client.js";
-export { getCurrentRun } from "./context.js";
+export { getCurrentRun, resolveRun, openEntryRun, type EntryRunHandle } from "./context.js";
+export { parseDsn, dsnHost, type ParsedDsn } from "./dsn.js";
 export {
   autoInstrument,
   instrumentHttp,

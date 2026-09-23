@@ -24,6 +24,16 @@ from threading import Event, Lock, Thread
 from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from dunetrace.buffer import RingBuffer
+from dunetrace.implicit import (
+    DEFAULT_IDLE_S,
+    ImplicitRunManager,
+    dsn_host,
+    env_bool,
+    install_crash_hooks,
+    mark_recorded,
+    parse_dsn,
+    resolve_run,
+)
 from dunetrace.context import _current_run
 from dunetrace.detector_config import DetectorConfigStore
 from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
@@ -249,8 +259,27 @@ class Dunetrace:
         max_field_chars: Optional[int] = None,
         redact: Optional[Callable[[dict], dict]] = None,
         redact_keys: Optional[Iterable[str]] = None,
+        dsn: Optional[str] = None,
+        implicit_runs: Optional[bool] = None,
+        implicit_run_idle_s: Optional[float] = None,
     ) -> None:
         """
+        One-value configuration (see ``dunetrace.implicit.parse_dsn``):
+        :param dsn: ``https://<api_key>@host[:port][/path]``, env
+            ``DUNETRACE_DSN``. Sets the ingest endpoint and the API key at once.
+            An explicit ``endpoint`` or ``api_key`` argument or env var wins
+            over the corresponding part of the DSN.
+
+        Runs that open themselves (see ``dunetrace.implicit``):
+        :param implicit_runs: When a patched LLM call arrives with no run
+            active, open one and attach the following calls to it. Default
+            ``True`` (env ``DUNETRACE_IMPLICIT_RUNS``). Framework entry points
+            and ``dt.run()`` always take precedence; implicit runs are marked
+            as such and their signals are held in shadow by the detector.
+        :param implicit_run_idle_s: Seconds without events after which an
+            implicit run closes with ``exit_reason: idle``. Default 30 (env
+            ``DUNETRACE_IMPLICIT_RUN_IDLE_S``).
+
         Content caps and redaction (see ``dunetrace.redaction``):
 
         :param max_field_chars: Per-field character cap on every free-text
@@ -287,13 +316,25 @@ class Dunetrace:
         # literally rather than silently falling back. To disable HTTP shipping,
         # pass emitter=NoopBatchingEmitter() (see dunetrace.emitters); that's the
         # one supported way to opt out, not a magic endpoint value.
+        # A DSN carries endpoint and key in one value. Explicit arguments and
+        # the dedicated env vars win over it, so an existing configuration is
+        # never changed by adding one.
+        _dsn = dsn if dsn is not None else os.environ.get("DUNETRACE_DSN", "")
+        _dsn_endpoint, _dsn_key = "", ""
+        if _dsn:
+            try:
+                _dsn_endpoint, _dsn_key = parse_dsn(_dsn)
+            except ValueError as exc:
+                logger.warning(
+                    "Dunetrace: ignoring DUNETRACE_DSN for host %s: %s", dsn_host(_dsn), exc
+                )
         _endpoint = (
             endpoint
             if endpoint is not None
-            else os.environ.get("DUNETRACE_ENDPOINT", "http://localhost:8001")
+            else os.environ.get("DUNETRACE_ENDPOINT") or _dsn_endpoint or "http://localhost:8001"
         )
         self._ingest_url = _endpoint.rstrip("/") + "/v1/ingest"
-        self._api_key = api_key or os.environ.get("DUNETRACE_API_KEY", "")
+        self._api_key = api_key or os.environ.get("DUNETRACE_API_KEY", "") or _dsn_key
         # Customer API base URL (port 8002 in local docker-compose) — a
         # different service from the ingest endpoint above (port 8001), not
         # derivable from it (a real deployment may put them on entirely
@@ -325,6 +366,22 @@ class Dunetrace:
             weakref.WeakValueDictionary()
         )
         self._run_contexts_lock = Lock()
+        # Runs the SDK opens on its own when a patched call has no run to
+        # attach to. See dunetrace.implicit for the rules on when they end.
+        self._default_agent_id = ""  # set by init()
+        self._implicit = ImplicitRunManager(
+            self,
+            enabled=(
+                implicit_runs
+                if implicit_runs is not None
+                else env_bool("DUNETRACE_IMPLICIT_RUNS", True)
+            ),
+            idle_s=(
+                implicit_run_idle_s
+                if implicit_run_idle_s is not None
+                else float(os.environ.get("DUNETRACE_IMPLICIT_RUN_IDLE_S") or DEFAULT_IDLE_S)
+            ),
+        )
 
         # OTel export (opt-in via DUNETRACE_OTEL_* env). When enabled and the
         # caller didn't wire an exporter explicitly, build one on the shared
@@ -348,7 +405,6 @@ class Dunetrace:
                     )
         self._otel_exporter = otel_exporter
         self._exporters: List[Exporter] = list(exporters or [])
-        self._default_agent_id = ""  # set by init()
         self._policy_engine = PolicyEngine()
         # Server-authoritative detector thresholds for the in-path pass
         # (dunetrace/detector_config.py), refreshed by the same background
@@ -454,6 +510,8 @@ class Dunetrace:
         parent_run_id: Optional[str] = None,
         trace_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
+        _opened_by: Optional[str] = None,
+        _implicit: bool = False,
     ):
         """
         Context manager wrapping a single agent run.
@@ -496,9 +554,16 @@ class Dunetrace:
         # a sub-agent dispatched to a bare thread does not (the thread starts
         # with a fresh context) unless the caller copies context or passes
         # parent_run_id explicitly.
+        # An explicit run never nests under a guessed one: close the implicit
+        # run active in this context first, so the events that follow belong
+        # to the run the agent declared.
+        if not _implicit:
+            _manager = getattr(self, "_implicit", None)
+            if _manager is not None:
+                _manager.close_current("explicit_run_opened")
         if parent_run_id is None:
             _active_run = _current_run.get()
-            if _active_run is not None:
+            if _active_run is not None and not getattr(_active_run, "_implicit_closed", False):
                 parent_run_id = _active_run.run_id
 
         # Content caps (dunetrace.redaction). Applied after the version hash,
@@ -566,6 +631,13 @@ class Dunetrace:
             payload["system_prompt_original_length"] = sys_prompt_len
         if _injection_evidence:
             payload["injection_signal"] = _injection_evidence
+        # A run the SDK opened on its own says so, and names the call that
+        # opened it. The detector reads `implicit` and shadows the run's signals.
+        if _opened_by:
+            payload["opened_by"] = _opened_by
+        if _implicit:
+            ctx.implicit = True
+            payload["implicit"] = True
         # Which SDK build, and which provider libraries it patched. Additive and
         # always present for the SDK version; `instrumented` is omitted entirely
         # when nothing was auto-patched, keeping manual callers' run.started
@@ -662,8 +734,10 @@ class Dunetrace:
                 )
             except Exception:
                 logger.debug("Dunetrace: failed to record policy violation", exc_info=True)
+            mark_recorded(exc)
             raise
         except Exception as exc:
+            mark_recorded(exc)
             try:
                 ctx.state.current_step = ctx.step
                 ctx.state.exit_reason = "error"
@@ -720,7 +794,13 @@ class Dunetrace:
             except Exception:
                 logger.debug("Dunetrace: failed to record run completion", exc_info=True)
         finally:
-            _current_run.reset(_token)
+            try:
+                _current_run.reset(_token)
+            except ValueError:
+                # The run was closed from another context (an implicit run
+                # swept on the idle thread). The opening context still holds
+                # the closed run; resolve_run() treats it as none.
+                pass
 
     def init(
         self,
@@ -757,6 +837,10 @@ class Dunetrace:
                            requests, langchain, crewai).
         """
         self._default_agent_id = agent_id or os.environ.get("DUNETRACE_AGENT_ID", "")
+        # Sentry-style: an unhandled exception becomes run.errored on the run
+        # in that context, or on a one-event run when none is open.
+        if self._implicit.enabled:
+            install_crash_hooks(self)
         from dunetrace.auto import auto_instrument as _auto_instrument
 
         _auto_instrument(
@@ -1606,6 +1690,14 @@ class Dunetrace:
             except Exception:
                 pass
             self._atexit_hook = None
+        # Terminal events for runs the SDK opened on its own, before the
+        # buffer drains, so they leave in the same flush.
+        implicit = getattr(self, "_implicit", None)
+        if implicit is not None:
+            try:
+                implicit.close_all("process_exit")
+            except Exception:
+                logger.debug("Dunetrace: closing implicit runs at shutdown failed", exc_info=True)
         self._stop_evt.set()
         self._flush_gate.set()  # wake the drain thread so shutdown is immediate
         self._drain_thread.join(timeout=timeout)
@@ -1632,6 +1724,11 @@ class Dunetrace:
         if dropped > 0:
             payload["dropped_events"] = dropped
         return payload
+
+    def _resolve_run(self, opened_by: str) -> "Optional[RunContext]":
+        """The run a patched LLM call should attach to: the active one, or an
+        implicit one opened here when none is active. See dunetrace.implicit."""
+        return resolve_run(self, opened_by)
 
     def _register_run(self, ctx: "RunContext") -> None:
         """Index a live RunContext by run_id. Called from RunContext.__init__.

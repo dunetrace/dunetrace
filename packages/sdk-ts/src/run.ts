@@ -37,6 +37,15 @@ function omitLlmOutputText(): boolean {
 
 export class DunetraceRun {
   readonly runId: string;
+  /** True for a run the client opened on its own because a patched LLM call
+   *  had no run to attach to (see client.ts). Its boundary is a guess, and
+   *  the detector holds its signals in shadow. */
+  implicit = false;
+  /** Set once the terminal event has been emitted. A closed run still sitting
+   *  in the async context reads as "no run" to resolveRun(). */
+  closed = false;
+  /** The call that opened the run when the SDK, not the caller, opened it. */
+  openedBy: string | null = null;
 
   private _agentId:    string;
   private _version:    string;
@@ -353,6 +362,13 @@ export class DunetraceRun {
 
   finalAnswer(): void {
     this._exitReason = "final_answer";
+  }
+
+  /** Set the exit reason the client reports if the agent set none. Used for
+   *  the SDK-decided endings: `idle`, `process_exit`, `explicit_run_opened`.
+   *  @internal */
+  _setExitReasonIfUnset(reason: string): void {
+    if (this._exitReason === null) this._exitReason = reason;
   }
 
   // ── Accessors (internal / testing) ────────────────────────────────────────

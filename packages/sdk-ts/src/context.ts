@@ -41,3 +41,55 @@ export const httpSuppression = new AsyncLocalStorage<boolean>();
 export function httpInstrumentationSuppressed(): boolean {
   return httpSuppression.getStore() === true;
 }
+
+// ── Runs that open themselves ─────────────────────────────────────────────────
+//
+// Every event belongs to a run, and a run needs a start and an end. The client
+// registers an opener here so instrumentation that finds no active run can ask
+// for one without importing the client (which would be an import cycle). How
+// the run it gets will END is decided by which opener is used:
+//
+//   openEntryRun()  — a framework entry point with a natural end (Vercel AI's
+//                     generateText, an HTTP request). The caller closes it when
+//                     the call returns. Exact boundary; an ordinary run.
+//   resolveRun()    — a bare LLM call with no boundary in sight. The client
+//                     opens an *implicit* run, attaches the calls that follow in
+//                     this async context, and closes it after an idle window or
+//                     at process exit. A guess, marked as such on the wire and
+//                     shadowed by the detector. See client.ts.
+
+export interface EntryRunHandle {
+  run: DunetraceRun;
+  /** Emit the terminal event: run.completed, or run.errored when `err` is given. */
+  finish(err?: unknown): void;
+}
+
+export interface RunOpener {
+  implicit(openedBy: string): DunetraceRun | null;
+  entry(openedBy: string, agentId?: string): EntryRunHandle | null;
+}
+
+let _opener: RunOpener | null = null;
+
+/** Called by the client constructor; the most recent client wins. */
+export function setRunOpener(opener: RunOpener | null): void {
+  _opener = opener;
+}
+
+/** The active run when there is a live one, else an implicit run opened by
+ *  the registered client, else null (no client, or implicit runs disabled).
+ *  A closed run left in the async context reads as none. */
+export function resolveRun(openedBy: string): DunetraceRun | null {
+  const current = runStorage.getStore();
+  if (current && !current.closed) return current;
+  return _opener?.implicit(openedBy) ?? null;
+}
+
+/** An exact run for a framework entry point, or null when a real run is
+ *  already active (the entry point then attaches to it) or no client is
+ *  registered. An implicit run active here is closed by the client first. */
+export function openEntryRun(openedBy: string, agentId?: string): EntryRunHandle | null {
+  const current = runStorage.getStore();
+  if (current && !current.closed && !current.implicit) return null;
+  return _opener?.entry(openedBy, agentId) ?? null;
+}
