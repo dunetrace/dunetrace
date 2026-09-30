@@ -1,6 +1,6 @@
 # Detectors
 
-Dunetrace runs 34 structural detectors against every completed agent run. All of
+Dunetrace runs 35 structural detectors against every completed agent run. All of
 them are listed in the table below; the twelve newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
@@ -43,6 +43,7 @@ Semantic findings never trigger a policy — see
 | `SLOW_STEP` | Step duration exceeds threshold — 2× P75 baseline ¹ or static fallback (tool >15s, LLM >30s) | MEDIUM/HIGH |
 | `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
 | `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
+| `RAG_QUALITY_DEGRADATION` | Late retrieval relevance drops >30% from the early average within one index | MEDIUM |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM |
 | `EXCESSIVE_RETRIEVAL` | Run made at least 8 retrieval calls — high retrieval volume, indicating inefficient grounding | MEDIUM |
 | `CONTEXT_BLOAT` | Prompt tokens grow beyond 2× P75 baseline ¹ or static fallback (3× from first to last call) | MEDIUM |
@@ -204,9 +205,9 @@ docker compose restart detector ingest
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`). Four are not:
+Most built-in detectors are live (`shadow = false`). Five are not:
 `INSTRUMENTATION_DEGRADED`, `OVERSIZED_TOOL_ARGUMENTS`,
-`SCATTERSHOT_TOOL_USE` and `UNRESOLVED_AMBIGUITY` remain shadowed by default
+`SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY` and `RAG_QUALITY_DEGRADATION` remain shadowed by default
 until their precision is checked against real traffic. A new built-in detector should be added to
 `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
 `services/detector/detector_svc/db.py` once validated; leaving it out of
@@ -1202,7 +1203,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 34 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 35 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`
@@ -1528,3 +1529,24 @@ alert, because the human is the only party who knows the intent.
 **Tunable**: `min_candidates`, `irreversible_tools`, `warrant_surfaces`,
 `min_token_len`, `max_candidates_per_run`, `max_scan_ns`, `max_output_chars`,
 `max_depth`, `user_turn_signals`, `user_turn_text_keys`.
+
+## RAG_QUALITY_DEGRADATION
+
+A single run's retrieval relevance deteriorates: the late-half average top
+score is more than 30% below the early-half average. This is a relative trend
+signal, unlike `RAG_EMPTY_RETRIEVAL` (absolute relevance) and
+`EXCESSIVE_RETRIEVAL` (volume). Severity: MEDIUM; ships in shadow mode.
+
+Requires at least three finite, nonnegative scored retrievals **per index**;
+missing/invalid scores are ignored. Calls are ordered by step_index. For an odd
+count, the middle call belongs to the late half. Zero early averages do not
+fire. Different indexes are not compared because score scales can differ.
+This assumes higher scores mean better relevance; convert distance metrics
+before instrumentation. Changing query intent or scoring models can also cause
+legitimate drops: this heuristic cannot establish answer quality or root cause.
+
+Config: `min_retrievals` (default 3; minimum effective value 3),
+`drop_threshold` (default 0.3, relative fraction). Evidence includes
+`early_avg_score`, `late_avg_score`, `drop_pct`, `retrieval_count`, index and
+step range. Confidence increases with drop magnitude. See the synthetic
+[calibration report](../scripts/calibration/rag_quality_degradation_calibration.md).

@@ -51,6 +51,14 @@
 #                              # protection). Must be <= evaluation_budget_ms.
 
 default:
+  rag_quality_degradation:
+    min_retrievals: 3
+    drop_threshold: 0.3
+    alert_policy:
+      mode: immediate
+      threshold: 1
+      window_runs: 1
+
 
   instrumentation_degraded:
     min_calls: 2      # runs with fewer LLM calls are left to EMPTY_LLM_RESPONSE

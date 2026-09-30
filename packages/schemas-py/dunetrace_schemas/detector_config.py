@@ -66,6 +66,7 @@ BUILTIN_DETECTOR_KEYS: frozenset[str] = frozenset(
         "prompt_injection_signal",
         "rag_empty_retrieval",
         "excessive_retrieval",
+        "rag_quality_degradation",
         "llm_truncation_loop",
         "silent_truncation",
         "context_bloat",
@@ -115,6 +116,7 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
     "goal_abandonment": {"stall_steps": "STALL_STEPS"},
     "rag_empty_retrieval": {"min_score": "MIN_SCORE", "min_results": "MIN_RESULTS"},
     "excessive_retrieval": {"max_retrievals": "MAX_RETRIEVALS"},
+    "rag_quality_degradation": {"min_retrievals": "MIN_RETRIEVALS", "drop_threshold": "DROP_THRESHOLD"},
     "llm_truncation_loop": {"threshold": "THRESHOLD"},
     "silent_truncation": {
         "min_output_length": "MIN_OUTPUT_LENGTH",

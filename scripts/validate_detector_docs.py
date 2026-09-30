@@ -201,8 +201,8 @@ def validate(
 # audit — "Runs 29 detectors", "the 15 checks", "34 structural detectors,
 # in-path" — and NONE was caught, because this script validated NAMES and never
 # numbers, and because the files carrying them were outside _SCAN_GLOBS.
-_TOTAL_DETECTORS = 34  # detector classes / _DETECTOR_CLASSES / detectors.yml sections
-_IN_PATH_DETECTORS = 31  # TIER1_DETECTORS — the SDK's client-side subset
+_TOTAL_DETECTORS = 35  # detector classes / _DETECTOR_CLASSES / detectors.yml sections
+_IN_PATH_DETECTORS = 32  # TIER1_DETECTORS — the SDK's client-side subset
 # Below this, a number is counting something other than the battery (a table
 # row, a pack, a single detector), not asserting how many exist.
 _MIN_BATTERY_CLAIM = 10

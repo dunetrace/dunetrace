@@ -116,9 +116,9 @@ class _CapturingExporter:
 
 class TestSharedPieces(unittest.TestCase):
     def test_detector_keys_cover_every_detector_class_once(self):
-        self.assertEqual(len(DETECTOR_KEYS), 34)
+        self.assertEqual(len(DETECTOR_KEYS), 35)
         classes = list(DETECTOR_KEYS.values())
-        self.assertEqual(len(set(classes)), 34, "a class is mapped under two keys")
+        self.assertEqual(len(set(classes)), 35, "a class is mapped under two keys")
         for d in TIER1_DETECTORS:
             self.assertIn(type(d), classes, f"{type(d).__name__} has no yaml key")
         for cls in (PromptInjectionDetector, HandoffContextLossDetector, DelegationLoopDetector):
