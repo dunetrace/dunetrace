@@ -66,6 +66,7 @@ BUILTIN_DETECTOR_KEYS: frozenset[str] = frozenset(
         "prompt_injection_signal",
         "rag_empty_retrieval",
         "excessive_retrieval",
+        "rag_quality_degradation",
         "llm_truncation_loop",
         "silent_truncation",
         "context_bloat",
@@ -115,6 +116,10 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
     "goal_abandonment": {"stall_steps": "STALL_STEPS"},
     "rag_empty_retrieval": {"min_score": "MIN_SCORE", "min_results": "MIN_RESULTS"},
     "excessive_retrieval": {"max_retrievals": "MAX_RETRIEVALS"},
+    "rag_quality_degradation": {
+        "min_retrievals": "MIN_RETRIEVALS",
+        "drop_threshold": "DROP_THRESHOLD",
+    },
     "llm_truncation_loop": {"threshold": "THRESHOLD"},
     "silent_truncation": {
         "min_output_length": "MIN_OUTPUT_LENGTH",
@@ -390,6 +395,25 @@ def load_detector_kwargs(
                     ", ".join(sorted(param_map)) or "(none)",
                 )
             kwargs = {param_map[k]: v for k, v in params.items() if k in param_map}
+
+            if det_key == "rag_quality_degradation":
+                for key, value in list(kwargs.items()):
+                    valid = (
+                        isinstance(value, int) and not isinstance(value, bool) and value > 0
+                        if key == "MIN_RETRIEVALS"
+                        else isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and 0 <= value <= 1
+                    )
+                    if not valid:
+                        logger.warning(
+                            "detectors.yml: %s.%s has invalid %s %r. Ignoring override.",
+                            category,
+                            det_key,
+                            key,
+                            value,
+                        )
+                        del kwargs[key]
 
             if _SEVERITY_KEY in params:
                 raw_severity = str(params[_SEVERITY_KEY]).upper()

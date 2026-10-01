@@ -1785,6 +1785,29 @@ def explain_session_latency(signal: FailureSignal) -> Explanation:
 # EXCESSIVE_RETRIEVAL
 
 
+def explain_rag_quality_degradation(signal: FailureSignal) -> Explanation:
+    ev = signal.evidence
+    early = ev.get("early_avg_score", "?")
+    late = ev.get("late_avg_score", "?")
+    drop = ev.get("drop_pct", "?")
+    count = ev.get("retrieval_count", "?")
+    index = ev.get("index_name", "unknown")
+    return Explanation(
+        **_base(signal),
+        title="Retrieval relevance declined during the run",
+        what=f"Index {index}: average relevance declined from {early} to {late} across {count} scored retrievals ({drop}% drop).",
+        why_it_matters="Repeated query reformulation may be retrieving less useful context. A score decline is a heuristic, not proof that the final answer is incorrect.",
+        evidence_summary=f"Early average: {early}; late average: {late}; relative drop: {drop}%; scored calls: {count}.",
+        suggested_fixes=[
+            CodeFix(
+                description="Inspect query changes and the retrieved documents before changing thresholds",
+                language="text",
+                code="Check whether query intent changed, whether the same scoring model was used, and whether the index contains the requested information. Convert distance metrics to higher-is-better relevance before instrumentation.",
+            )
+        ],
+    )
+
+
 def explain_excessive_retrieval(signal: FailureSignal) -> Explanation:
     ev = signal.evidence
     count = ev.get("retrieval_count", "?")
@@ -3174,6 +3197,7 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.COST_SPIKE: explain_cost_spike,
     FailureType.SESSION_LATENCY: explain_session_latency,
     FailureType.EXCESSIVE_RETRIEVAL: explain_excessive_retrieval,
+    FailureType.RAG_QUALITY_DEGRADATION: explain_rag_quality_degradation,
     FailureType.SILENT_TRUNCATION: explain_silent_truncation,
     FailureType.PREMATURE_TERMINATION: explain_premature_termination,
     FailureType.UNREAD_TOOL_ERROR: explain_unread_tool_error,

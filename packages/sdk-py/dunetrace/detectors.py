@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -38,6 +39,7 @@ from dunetrace.models import (
     FailureSignal,
     FailureType,
     LlmCall,
+    RetrievalResult,
     RunState,
     Severity,
     ToolCall,
@@ -762,6 +764,89 @@ class RagEmptyRetrievalDetector(BaseDetector):
 
 
 # ── EXCESSIVE_RETRIEVAL ───────────────────────────────────────────────────────
+
+
+class RagQualityDegradationDetector(BaseDetector):
+    """Detect declining relevance within one index during a run.
+
+    Compare early and late halves of at least MIN_RETRIEVALS scored calls.
+    For odd counts, the late half includes the middle call. Scores must be
+    finite, nonnegative, higher-is-better relevance values. Distance metrics
+    must be converted by the caller. Different indexes are never compared.
+    Tunable: MIN_RETRIEVALS (3), DROP_THRESHOLD (0.3, a relative fraction).
+    """
+
+    name = "RAG_QUALITY_DEGRADATION"
+    SEVERITY = Severity.MEDIUM
+    MIN_RETRIEVALS = 3
+    DROP_THRESHOLD = 0.3
+
+    def __init__(self, **overrides):
+        super().__init__(**overrides)
+        if (
+            isinstance(self.MIN_RETRIEVALS, bool)
+            or not isinstance(self.MIN_RETRIEVALS, int)
+            or self.MIN_RETRIEVALS <= 0
+        ):
+            raise ValueError("MIN_RETRIEVALS must be a positive integer")
+        if (
+            isinstance(self.DROP_THRESHOLD, bool)
+            or not isinstance(self.DROP_THRESHOLD, (int, float))
+            or not 0 <= self.DROP_THRESHOLD <= 1
+        ):
+            raise ValueError("DROP_THRESHOLD must be a finite number between 0 and 1")
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        groups: Dict[str, List[RetrievalResult]] = {}
+        for retrieval in state.retrievals:
+            score = retrieval.top_score
+            if (
+                isinstance(score, (int, float))
+                and not isinstance(score, bool)
+                and math.isfinite(score)
+                and score >= 0
+            ):
+                groups.setdefault(retrieval.index_name, []).append(retrieval)
+
+        worst = None
+        for index_name, retrievals in groups.items():
+            if len(retrievals) < max(3, self.MIN_RETRIEVALS):
+                continue
+            retrievals.sort(key=lambda r: r.step_index)
+            scores = [r.top_score for r in retrievals if r.top_score is not None]
+            middle = len(scores) // 2
+            early = sum(scores[:middle]) / middle
+            late = sum(scores[middle:]) / (len(scores) - middle)
+            if early <= 0:
+                continue
+            drop = (early - late) / early
+            if drop <= self.DROP_THRESHOLD:
+                continue
+            if worst is None or drop > worst[0]:
+                worst = (drop, index_name, retrievals, early, late)
+
+        if worst is None:
+            return None
+        drop, index_name, retrievals, early, late = worst
+        return FailureSignal(
+            failure_type=FailureType.RAG_QUALITY_DEGRADATION,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=retrievals[-1].step_index,
+            confidence=min(0.95, 0.5 + 0.45 * drop),
+            evidence={
+                "index_name": index_name,
+                "early_avg_score": early,
+                "late_avg_score": late,
+                "drop_pct": drop * 100,
+                "retrieval_count": len(retrievals),
+                "drop_threshold": self.DROP_THRESHOLD,
+                "first_step": retrievals[0].step_index,
+                "last_step": retrievals[-1].step_index,
+            },
+        )
 
 
 class ExcessiveRetrievalDetector(BaseDetector):
@@ -5047,6 +5132,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     GoalAbandonmentDetector(),
     RagEmptyRetrievalDetector(),
     ExcessiveRetrievalDetector(),
+    RagQualityDegradationDetector(),
     LlmTruncationLoopDetector(),
     SilentTruncationDetector(),
     ContextBloatDetector(),
@@ -5099,7 +5185,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
 
 # detectors.yml section key → detector class, one entry per built-in detector
-# (all 34). The single source of that mapping: the server-side worker's
+# (all 35). The single source of that mapping: the server-side worker's
 # ``detector_svc.detectors._DETECTOR_CLASSES`` is an alias of this dict, and
 # the SDK's ``dunetrace.detector_config.build_detectors`` reads the server's
 # ``GET /v1/detector-config`` response through it, so a threshold keyed by
@@ -5116,6 +5202,7 @@ DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
     "prompt_injection_signal": PromptInjectionDetector,
     "rag_empty_retrieval": RagEmptyRetrievalDetector,
     "excessive_retrieval": ExcessiveRetrievalDetector,
+    "rag_quality_degradation": RagQualityDegradationDetector,
     "llm_truncation_loop": LlmTruncationLoopDetector,
     "silent_truncation": SilentTruncationDetector,
     "context_bloat": ContextBloatDetector,
