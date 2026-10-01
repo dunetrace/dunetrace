@@ -28,6 +28,10 @@ def state(scores, index="docs"):
         [float("nan"), 0.9, 0.1],
         [float("inf"), 0.9, 0.1],
         [-1, 0.9, 0.1],
+        [True, 0.9, 0.1],
+        [False, 0.9, 0.1],
+        ["bad", 0.9, 0.1],
+        [{}, 0.9, 0.1],
     ],
 )
 def test_no_signal_without_meaningful_scored_decline(scores):
@@ -84,3 +88,23 @@ def test_confidence_increases_with_decline():
 def test_registered_for_default_and_configured_execution():
     assert DETECTOR_KEYS["rag_quality_degradation"] is RagQualityDegradationDetector
     assert any(isinstance(detector, RagQualityDegradationDetector) for detector in TIER1_DETECTORS)
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, "3", None])
+def test_invalid_minimum_rejected(value):
+    with pytest.raises(ValueError, match="MIN_RETRIEVALS"):
+        RagQualityDegradationDetector(MIN_RETRIEVALS=value)
+
+
+@pytest.mark.parametrize("value", [True, False, -0.1, 1.1, float("nan"), float("inf"), "0.3", None])
+def test_invalid_threshold_rejected(value):
+    with pytest.raises(ValueError, match="DROP_THRESHOLD"):
+        RagQualityDegradationDetector(DROP_THRESHOLD=value)
+
+
+def test_mixed_invalid_scores_do_not_change_evidence():
+    signal = RagQualityDegradationDetector().on_run_completion(
+        state([True, "bad", 1.0, None, 0.5, False, 0.5])
+    )
+    assert signal.evidence["retrieval_count"] == 3
+    assert signal.evidence["drop_pct"] == pytest.approx(50)

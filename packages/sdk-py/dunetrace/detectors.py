@@ -781,11 +781,31 @@ class RagQualityDegradationDetector(BaseDetector):
     MIN_RETRIEVALS = 3
     DROP_THRESHOLD = 0.3
 
+    def __init__(self, **overrides):
+        super().__init__(**overrides)
+        if (
+            isinstance(self.MIN_RETRIEVALS, bool)
+            or not isinstance(self.MIN_RETRIEVALS, int)
+            or self.MIN_RETRIEVALS <= 0
+        ):
+            raise ValueError("MIN_RETRIEVALS must be a positive integer")
+        if (
+            isinstance(self.DROP_THRESHOLD, bool)
+            or not isinstance(self.DROP_THRESHOLD, (int, float))
+            or not 0 <= self.DROP_THRESHOLD <= 1
+        ):
+            raise ValueError("DROP_THRESHOLD must be a finite number between 0 and 1")
+
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
         groups: Dict[str, List[RetrievalResult]] = {}
         for retrieval in state.retrievals:
             score = retrieval.top_score
-            if score is not None and math.isfinite(score) and score >= 0:
+            if (
+                isinstance(score, (int, float))
+                and not isinstance(score, bool)
+                and math.isfinite(score)
+                and score >= 0
+            ):
                 groups.setdefault(retrieval.index_name, []).append(retrieval)
 
         worst = None
