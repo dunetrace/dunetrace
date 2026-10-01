@@ -1,7 +1,6 @@
 """Offline trend detection, evidence and registration checks."""
 
 import pytest
-
 from dunetrace.detectors import DETECTOR_KEYS, TIER1_DETECTORS, RagQualityDegradationDetector
 from dunetrace.models import FailureType, RetrievalResult, RunState
 
@@ -59,6 +58,14 @@ def test_exact_threshold_does_not_fire():
         RagQualityDegradationDetector(DROP_THRESHOLD=0.5).on_run_completion(state([1, 1, 0.5, 0.5]))
         is None
     )
+
+
+def test_low_scores_can_signal_despite_a_small_absolute_gap():
+    signal = RagQualityDegradationDetector().on_run_completion(state([0.15, 0.10, 0.05]))
+    assert signal is not None
+    assert signal.evidence["early_avg_score"] == pytest.approx(0.15)
+    assert signal.evidence["late_avg_score"] == pytest.approx(0.075)
+    assert signal.evidence["drop_pct"] == pytest.approx(50)
 
 
 def test_scores_from_different_indexes_are_not_compared():

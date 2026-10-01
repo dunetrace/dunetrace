@@ -15,6 +15,7 @@ CORPUS = [
     ("gradual degradation below default", [0.8, 0.75, 0.65, 0.6], True),
     ("stable high", [0.9, 0.91, 0.9, 0.92], False),
     ("stable low", [0.1, 0.1, 0.1, 0.1], False),
+    ("low-score benign query mix", [0.15, 0.10, 0.05], False),
     ("three noisy flat high scores", [0.8, 0.75, 0.85], False),
     ("three benign mixed queries", [0.9, 0.3, 0.8], False),
     ("improving", [0.2, 0.3, 0.8, 0.9], False),
@@ -92,6 +93,8 @@ def main():
             f"false-positive rate {fp / (fp + tn):.1%}, precision {tp / (tp + fp):.1%}.\n\n"
             "The labels describe intended query scenarios, not information available to the detector. "
             "Both a legitimate intent change and a three-call benign mixed-query trace fire. "
+            "The low-score benign trace [0.15, 0.10, 0.05] also fires: a 0.05 absolute gap "
+            "becomes a 50% relative drop. Constant low scores cannot reveal this boundary. "
             "A noisy but flat three-call high-score trace does not. A gradual decline below "
             "the default threshold is missed. These fixed hand-assigned scores are boundary checks, "
             "not a representative scorer population or production precision estimate.\n\n"
@@ -113,7 +116,24 @@ def main():
             "traffic for each index/scorer and query mix, select a threshold against the actual "
             "false-positive budget, and measure recall separately. Query intent changes cannot be "
             "distinguished from degradation using scores alone. Use consistent higher-is-better "
-            "scores; raw distances and cross-index comparisons are unsupported. No LLM judge is used.\n",
+            "scores; raw distances and cross-index comparisons are unsupported. No LLM judge is used.\n\n"
+            "### Sample cost of a false-positive budget\n\n"
+            "An empirical quantile alone is not a high-confidence false-positive guarantee. "
+            "For n IID benign traces from a fixed continuous relative-drop distribution, take "
+            "the (k+1)-th largest drop as the threshold (k observations strictly above it). "
+            "The fresh-draw exceedance probability has distribution Beta(k+1, n-k). "
+            "To bound it by 2% with 95% confidence requires the following minimum sample sizes:\n\n"
+            "| Allowed calibration exceedances k | Minimum benign traces n |\n"
+            "|---:|---:|\n| 0 | 149 |\n| 1 | 236 |\n| 2 | 313 |\n\n"
+            "For k=0, confidence is 1 - 0.98**n; at n=97, the 95% upper bound is "
+            "1 - 0.05**(1/97), about 3.04%. The table follows the binomial tail "
+            "P(Binomial(n, 0.02) >= k+1) >= 0.95. It concerns relative-drop statistics "
+            "across traces, not individual retrieval scores. This is an illustrative "
+            "calibration requirement, not a guarantee supplied by this synthetic corpus "
+            "or the default threshold. Dependence, distribution shifts, ties, and "
+            "post-selection tuning require separate treatment and independent validation. "
+            "See [NIST nonparametric tolerance limits]"
+            "(https://www.itl.nist.gov/div898/software/dataplot/refman1/auxillar/tolelimi.htm).\n",
             encoding="utf-8",
         )
 
