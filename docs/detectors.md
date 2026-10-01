@@ -1550,3 +1550,7 @@ Config: `min_retrievals` (default 3; minimum effective value 3),
 `early_avg_score`, `late_avg_score`, `drop_pct`, `retrieval_count`, index and
 step range. Confidence increases with drop magnitude. See the synthetic
 [calibration report](../scripts/calibration/rag_quality_degradation_calibration.md).
+The default 0.3 threshold is heuristic: stationary benign score distributions
+can produce substantially different false-positive rates, especially at three
+retrievals. Keep it shadow-only until the index/scorer and query mix have been
+evaluated on labeled real traffic; increasing sample count alone is insufficient.
