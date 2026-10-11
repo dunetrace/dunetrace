@@ -70,6 +70,22 @@ def _is_unmeasurable(call: "LlmCall") -> bool:
     return getattr(call, "instrumentation_degraded", None) is not None
 
 
+def _try_parse_tool_args(args_text: str) -> object | None:
+    """Parse the two structured argument encodings emitted by the SDKs.
+
+    Python instrumentation commonly records ``str(dict)`` while TypeScript
+    instrumentation records JSON. This deliberately reports no parse detail:
+    callers only need to distinguish a usable structured payload from one that
+    is malformed.
+    """
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            return parser(args_text)
+        except Exception:
+            continue
+    return None
+
+
 # The shape a call takes when instrumentation is silently broken: nothing was
 # read, but the call demonstrably happened (latency was measured). Kept here as
 # one definition because InstrumentationDegradedDetector and the vendor-side
@@ -2207,14 +2223,6 @@ class ToolArgumentFabricationDetector(BaseDetector):
     # query terms — are legitimately agent-generated and must NOT be flagged.
     MIN_OPAQUE_LEN = 12
 
-    def _try_parse_args(self, args_text: str):
-        for parser in (json.loads, ast.literal_eval):
-            try:
-                return parser(args_text)
-            except Exception:
-                continue
-        return None
-
     def _collect_leaf_texts(self, value) -> List[Tuple[str, bool]]:
         """Walk a parsed args structure to its leaves. Returns (text,
         is_string_value) pairs — is_string_value gates the whole-value
@@ -2248,7 +2256,7 @@ class ToolArgumentFabricationDetector(BaseDetector):
         return len(s) >= self.MIN_OPAQUE_LEN
 
     def _extract_entities(self, args_text: str) -> List[str]:
-        parsed = self._try_parse_args(args_text)
+        parsed = _try_parse_tool_args(args_text)
         leaves = self._collect_leaf_texts(parsed) if parsed is not None else [(args_text, False)]
 
         candidates: List[str] = []
@@ -2352,6 +2360,55 @@ class ToolArgumentFabricationDetector(BaseDetector):
             elif tc.success is not None:
                 visibility_complete = False
 
+        return None
+
+
+# ── MALFORMED_TOOL_CALL ───────────────────────────────────────────────────────
+
+
+class MalformedToolCallDetector(BaseDetector):
+    """Detect structured-looking tool arguments that cannot be parsed.
+
+    A model can emit a JSON-shaped tool payload that a framework forwards as a
+    string, or recover from by passing malformed text to a downstream tool. In
+    either case the run can appear successful while the tool receives unusable
+    arguments. Plain-text arguments are legitimate for many tools, so only
+    values beginning with ``{`` or ``[`` are considered structured candidates.
+
+    JSON is tried first, followed by Python literals because the Python SDK's
+    own ``tool_called`` serialisation commonly produces ``str(dict)``. The
+    parser is shared with ``ToolArgumentFabricationDetector`` to keep those two
+    interpretations of tool arguments consistent.
+
+    Fires once per run, on the first malformed structured argument. This is a
+    new, shadow-only detector; malformed input is concrete, but its operational
+    impact depends on how the receiving framework handles it.
+    """
+
+    name = "MALFORMED_TOOL_CALL"
+    SEVERITY = Severity.HIGH
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        for tc in state.tool_calls:
+            args = tc.args.strip()
+            if not args.startswith(("{", "[")):
+                continue
+            if _try_parse_tool_args(args) is not None:
+                continue
+            return FailureSignal(
+                failure_type=FailureType.MALFORMED_TOOL_CALL,
+                severity=self.SEVERITY,
+                run_id=state.run_id,
+                agent_id=state.agent_id,
+                agent_version=state.agent_version,
+                step_index=tc.step_index,
+                confidence=0.9,
+                evidence={
+                    "tool_name": tc.tool_name,
+                    "tool_step": tc.step_index,
+                    "args_snippet": args[:200],
+                },
+            )
         return None
 
 
@@ -3319,10 +3376,12 @@ def _approval_notes(state: "RunState") -> List[Tuple[int, str]]:
 # ── UNGROUNDED_DESTINATION ────────────────────────────────────────────────────
 #
 # Shared extraction helpers. These deliberately do NOT replace
-# ToolArgumentFabricationDetector's own _try_parse_args/_collect_leaf_texts, even
-# though the parsing half overlaps: that detector is calibrated and live, and
+# ToolArgumentFabricationDetector's own _collect_leaf_texts, even though their
+# recursive extraction overlaps: that detector is calibrated and live, and
 # re-pointing it at shared code — however behaviour-preserving it looks — is a
-# regression risk taken for style. The duplication is ~20 lines and bounded.
+# regression risk taken for style. The duplication is bounded. Structured-args
+# parsing is the exception: `_try_parse_tool_args` is shared by two detectors so
+# both recognize the same JSON and Python-literal encodings.
 
 # Multi-label public suffixes. The real Public Suffix List has ~9,000 entries and
 # needs periodic refreshes; the core SDK has zero required dependencies, so it
@@ -5062,6 +5121,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     PrematureTerminationDetector(),
     UnreadToolErrorDetector(),
     ToolArgumentFabricationDetector(),
+    MalformedToolCallDetector(),
     RetrievedContentInjectionDetector(),
     AgentHandoffFailureDetector(),
     RunawayIterationDetector(),
@@ -5099,7 +5159,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
 
 # detectors.yml section key → detector class, one entry per built-in detector
-# (all 34). The single source of that mapping: the server-side worker's
+# (all 35). The single source of that mapping: the server-side worker's
 # ``detector_svc.detectors._DETECTOR_CLASSES`` is an alias of this dict, and
 # the SDK's ``dunetrace.detector_config.build_detectors`` reads the server's
 # ``GET /v1/detector-config`` response through it, so a threshold keyed by
@@ -5131,6 +5191,7 @@ DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
     "premature_termination": PrematureTerminationDetector,
     "unread_tool_error": UnreadToolErrorDetector,
     "tool_argument_fabrication": ToolArgumentFabricationDetector,
+    "malformed_tool_call": MalformedToolCallDetector,
     "retrieved_content_injection": RetrievedContentInjectionDetector,
     "agent_handoff_failure": AgentHandoffFailureDetector,
     "handoff_context_loss": HandoffContextLossDetector,

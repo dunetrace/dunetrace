@@ -283,6 +283,13 @@
       "enriches": [],
       "why": "`if not state.tool_calls: return None`, then builds the grounding surface from input_text and system_prompt. With neither, every argument reads as ungrounded."
     },
+    "MALFORMED_TOOL_CALL": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [],
+      "why": "Checks each ToolCall.args value that begins with `{` or `[` and fires only when neither JSON nor a Python literal can parse it."
+    },
     "RETRIEVED_CONTENT_INJECTION": {
       "requires": [
         [

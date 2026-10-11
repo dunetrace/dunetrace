@@ -243,7 +243,7 @@ something no single-run evaluator can see. See
 
 - Not a replacement for structural detection — semantic evaluation
   *augments* it (100% of structurally-flagged runs also get semantic
-  context) and catches a different class of failure, but the 34 structural
+  context) and catches a different class of failure, but the 35 structural
   detectors remain the always-on, zero-cost, zero-LLM first line.
 - Not a runtime guardrail — see the policies cross-link above.
 - Not required — `SEMANTIC_WORKER_ENABLED` defaults to off; everything else

@@ -39,7 +39,7 @@ quick start uses `ngrok`.
 
 ## What this does
 
-Langdock sends an OTLP/HTTP span for every assistant execution. Dunetrace's ingest service accepts those directly at `POST /v1/otlp/traces` and maps them onto its own event model — LLM calls, tool calls, and retrievals all become the same events a code-instrumented agent would produce. All 34 detectors run on every completed execution automatically.
+Langdock sends an OTLP/HTTP span for every assistant execution. Dunetrace's ingest service accepts those directly at `POST /v1/otlp/traces` and maps them onto its own event model — LLM calls, tool calls, and retrievals all become the same events a code-instrumented agent would produce. All 35 detectors run on every completed execution automatically.
 
 ## Verification
 

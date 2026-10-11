@@ -2212,6 +2212,50 @@ def explain_tool_argument_fabrication(signal: FailureSignal) -> Explanation:
     )
 
 
+# MALFORMED_TOOL_CALL
+
+
+def explain_malformed_tool_call(signal: FailureSignal) -> Explanation:
+    ev = signal.evidence
+    tool = ev.get("tool_name", "a tool")
+    step = ev.get("tool_step", signal.step_index)
+    args_snippet = ev.get("args_snippet")
+
+    return Explanation(
+        **_base(signal),
+        title=f"Malformed structured arguments passed to `{tool}`",
+        what=(
+            f"At step {step} the agent called `{tool}` with arguments that started "
+            "like a JSON object or list but could not be parsed as JSON or a Python "
+            "literal. The receiving tool may have been given unusable input."
+        ),
+        why_it_matters=(
+            "Malformed arguments can be silently retried, ignored, or coerced by a "
+            "framework, leaving an agent to continue as if the intended tool action "
+            "had succeeded. Validate the payload before dispatching the tool."
+        ),
+        evidence_summary=(
+            f"Tool `{tool}` at step {step}. "
+            + (f"Arguments: `{args_snippet}`. " if args_snippet else "")
+            + f"Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description="Reject malformed structured arguments before calling the tool",
+                language="python",
+                code=(
+                    "import json\n\n"
+                    "def parse_tool_args(args_text: str) -> dict:\n"
+                    "    try:\n"
+                    "        return json.loads(args_text)\n"
+                    "    except json.JSONDecodeError as exc:\n"
+                    "        raise ValueError(f'Invalid tool arguments: {exc.msg}') from exc\n"
+                ),
+            )
+        ],
+    )
+
+
 # RETRIEVED_CONTENT_INJECTION
 
 
@@ -3178,6 +3222,7 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.PREMATURE_TERMINATION: explain_premature_termination,
     FailureType.UNREAD_TOOL_ERROR: explain_unread_tool_error,
     FailureType.TOOL_ARGUMENT_FABRICATION: explain_tool_argument_fabrication,
+    FailureType.MALFORMED_TOOL_CALL: explain_malformed_tool_call,
     FailureType.RETRIEVED_CONTENT_INJECTION: explain_retrieved_content_injection,
     FailureType.HANDOFF_CONTEXT_LOSS: explain_handoff_context_loss,
     FailureType.AGENT_HANDOFF_FAILURE: explain_agent_handoff_failure,

@@ -111,6 +111,11 @@ REAL_EVIDENCE = {
         "is_destructive_tool": True,
         "args_snippet": '{"account_id": "acct_99213"}',
     },
+    FailureType.MALFORMED_TOOL_CALL: {
+        "tool_name": "create_ticket",
+        "tool_step": 7,
+        "args_snippet": '{"title": }',
+    },
     FailureType.RETRIEVED_CONTENT_INJECTION: {
         "source_type": "retrieved_document",
         "source_name": "policy.pdf",
