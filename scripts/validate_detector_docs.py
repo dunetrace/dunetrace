@@ -71,6 +71,11 @@ _COUNT_SCAN_GLOBS = _SCAN_GLOBS + [
     "CLAUDE.md",
     "docs/architecture.md",
     "docs/dashboard.md",
+    "docs/policies.md",
+    "docs/quickstart.md",
+    "docs/integrate-langdock.md",
+    "packages/sdk-py/README.md",
+    "packages/sdk-ts/README.md",
 ]
 
 # All-caps-snake tokens that appear in the scanned docs but are legitimately NOT

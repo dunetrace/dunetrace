@@ -2389,7 +2389,14 @@ class MalformedToolCallDetector(BaseDetector):
     SEVERITY = Severity.HIGH
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
-        for tc in state.tool_calls:
+        blocked = _approval_blocked_calls(state)
+        for tc_index, tc in enumerate(state.tool_calls):
+            if tc_index in blocked:
+                continue
+            # A capped prefix of a valid payload is indistinguishable from a
+            # malformed payload. Only classify arguments we have in full.
+            if tc.args_length is not None and tc.args_length > len(tc.args):
+                continue
             args = tc.args.strip()
             if not args.startswith(("{", "[")):
                 continue

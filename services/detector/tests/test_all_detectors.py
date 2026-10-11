@@ -74,7 +74,13 @@ def base_state(**kwargs) -> RunState:
 
 
 def make_tool_call(
-    tool: str, step: int, args: str = "aa", success=None, error=None, output=None
+    tool: str,
+    step: int,
+    args: str = "aa",
+    success=None,
+    error=None,
+    output=None,
+    args_length=None,
 ) -> ToolCall:
     return ToolCall(
         tool_name=tool,
@@ -84,6 +90,7 @@ def make_tool_call(
         success=success,
         error=error,
         output=output,
+        args_length=args_length,
     )
 
 
@@ -1926,6 +1933,24 @@ class TestMalformedToolCallDetector(unittest.TestCase):
 
     def test_does_not_fire_for_plain_text_arguments(self):
         state = self._state([make_tool_call("search", 1, args="refund policy")])
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_does_not_fire_for_approval_blocked_call(self):
+        state = self._state([make_tool_call("create_ticket", 1, args='{"title": }')])
+        state.events = [
+            make_event(
+                EventType.APPROVAL_DENIED,
+                2,
+                payload={"tool_name": "create_ticket"},
+            )
+        ]
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_does_not_fire_for_transport_truncated_arguments(self):
+        args = '{"title": "partially stored'
+        state = self._state(
+            [make_tool_call("create_ticket", 1, args=args, args_length=len(args) + 100)]
+        )
         self.assertIsNone(self.d.on_run_completion(state))
 
 

@@ -2244,12 +2244,18 @@ def explain_malformed_tool_call(signal: FailureSignal) -> Explanation:
                 description="Reject malformed structured arguments before calling the tool",
                 language="python",
                 code=(
+                    "import ast\n"
                     "import json\n\n"
-                    "def parse_tool_args(args_text: str) -> dict:\n"
-                    "    try:\n"
-                    "        return json.loads(args_text)\n"
-                    "    except json.JSONDecodeError as exc:\n"
-                    "        raise ValueError(f'Invalid tool arguments: {exc.msg}') from exc\n"
+                    "def parse_tool_args(args_text: str) -> object:\n"
+                    "    text = args_text.strip()\n"
+                    "    if not text.startswith(('{', '[')):\n"
+                    "        return text\n"
+                    "    for parser in (json.loads, ast.literal_eval):\n"
+                    "        try:\n"
+                    "            return parser(text)\n"
+                    "        except (json.JSONDecodeError, SyntaxError, ValueError):\n"
+                    "            pass\n"
+                    "    raise ValueError('Invalid structured tool arguments')\n"
                 ),
             )
         ],
