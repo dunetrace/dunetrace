@@ -81,6 +81,7 @@ BUILTIN_DETECTOR_KEYS: frozenset[str] = frozenset(
         "premature_termination",
         "unread_tool_error",
         "tool_argument_fabrication",
+        "malformed_tool_call",
         "retrieved_content_injection",
         "agent_handoff_failure",
         "handoff_context_loss",

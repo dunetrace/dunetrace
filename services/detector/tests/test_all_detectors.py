@@ -39,6 +39,7 @@ from dunetrace.detectors import (
     PrematureTerminationDetector,
     UnreadToolErrorDetector,
     ToolArgumentFabricationDetector,
+    MalformedToolCallDetector,
     RetrievedContentInjectionDetector,
     HandoffContextLossDetector,
     RunawayIterationDetector,
@@ -73,7 +74,13 @@ def base_state(**kwargs) -> RunState:
 
 
 def make_tool_call(
-    tool: str, step: int, args: str = "aa", success=None, error=None, output=None
+    tool: str,
+    step: int,
+    args: str = "aa",
+    success=None,
+    error=None,
+    output=None,
+    args_length=None,
 ) -> ToolCall:
     return ToolCall(
         tool_name=tool,
@@ -83,6 +90,7 @@ def make_tool_call(
         success=success,
         error=error,
         output=output,
+        args_length=args_length,
     )
 
 
@@ -1881,7 +1889,73 @@ class TestToolArgumentFabricationDetector(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 20. RETRIEVED_CONTENT_INJECTION
+# 20. MALFORMED_TOOL_CALL
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMalformedToolCallDetector(unittest.TestCase):
+    def setUp(self):
+        self.d = MalformedToolCallDetector()
+
+    def _state(self, tool_calls):
+        state = base_state()
+        state.tool_calls = tool_calls
+        state.current_step = max((tc.step_index for tc in tool_calls), default=0)
+        return state
+
+    def test_fires_for_json_shaped_arguments_that_do_not_parse(self):
+        sig = self.d.on_run_completion(
+            self._state([make_tool_call("create_ticket", 4, args='{"title": }')])
+        )
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.failure_type, FailureType.MALFORMED_TOOL_CALL)
+        self.assertEqual(sig.severity, Severity.HIGH)
+        self.assertEqual(sig.step_index, 4)
+        self.assertEqual(sig.evidence["tool_name"], "create_ticket")
+        self.assertEqual(sig.evidence["tool_step"], 4)
+        self.assertEqual(sig.evidence["args_snippet"], '{"title": }')
+
+    def test_fires_for_list_shaped_arguments_that_do_not_parse(self):
+        sig = self.d.on_run_completion(
+            self._state([make_tool_call("bulk_update", 2, args="[{'id': 1},")])
+        )
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.failure_type, FailureType.MALFORMED_TOOL_CALL)
+
+    def test_does_not_fire_for_valid_json_or_python_literal_arguments(self):
+        state = self._state(
+            [
+                make_tool_call("search", 1, args='{"query": "refunds"}'),
+                make_tool_call("update", 2, args="{'status': 'open'}"),
+            ]
+        )
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_does_not_fire_for_plain_text_arguments(self):
+        state = self._state([make_tool_call("search", 1, args="refund policy")])
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_does_not_fire_for_approval_blocked_call(self):
+        state = self._state([make_tool_call("create_ticket", 1, args='{"title": }')])
+        state.events = [
+            make_event(
+                EventType.APPROVAL_DENIED,
+                2,
+                payload={"tool_name": "create_ticket"},
+            )
+        ]
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_does_not_fire_for_transport_truncated_arguments(self):
+        args = '{"title": "partially stored'
+        state = self._state(
+            [make_tool_call("create_ticket", 1, args=args, args_length=len(args) + 100)]
+        )
+        self.assertIsNone(self.d.on_run_completion(state))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 21. RETRIEVED_CONTENT_INJECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
 

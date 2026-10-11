@@ -1,6 +1,6 @@
 # Detectors
 
-Dunetrace runs 34 structural detectors against every completed agent run. All of
+Dunetrace runs 35 structural detectors against every completed agent run. All of
 them are listed in the table below; the twelve newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
@@ -11,7 +11,7 @@ i.e. no code changes required.
 > detectors the SDK can evaluate during runtime event collection. The other
 > three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
 > need raw input or a second run's data and are handled separately. The detector
-> worker runs all 34 regardless — see
+> worker runs all 35 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -67,6 +67,7 @@ Semantic findings never trigger a policy — see
 | `PREMATURE_TERMINATION` | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
 | `UNREAD_TOOL_ERROR` | Tool failed, agent's next action doesn't acknowledge it | MEDIUM/HIGH |
 | `TOOL_ARGUMENT_FABRICATION` | Tool call argument references an entity not present anywhere in prior context | HIGH/CRITICAL |
+| `MALFORMED_TOOL_CALL` | Tool args look structured but cannot be parsed as JSON or a Python literal | HIGH |
 | `RETRIEVED_CONTENT_INJECTION` | Retrieved or fetched content contains text directed at the agent as an instruction | HIGH/CRITICAL |
 | `HANDOFF_CONTEXT_LOSS` | Multi-agent handoff loses a large chunk of the parent agent's context | HIGH |
 | `AGENT_HANDOFF_FAILURE` | A handoff-named tool call fails or returns an empty/insufficient payload | HIGH |
@@ -204,9 +205,9 @@ docker compose restart detector ingest
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`). Four are not:
+Most built-in detectors are live (`shadow = false`). Five are not:
 `INSTRUMENTATION_DEGRADED`, `OVERSIZED_TOOL_ARGUMENTS`,
-`SCATTERSHOT_TOOL_USE` and `UNRESOLVED_AMBIGUITY` remain shadowed by default
+`SCATTERSHOT_TOOL_USE`, `MALFORMED_TOOL_CALL`, and `UNRESOLVED_AMBIGUITY` remain shadowed by default
 until their precision is checked against real traffic. A new built-in detector should be added to
 `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
 `services/detector/detector_svc/db.py` once validated; leaving it out of
@@ -722,6 +723,38 @@ Same shape as a fabrication case — a specific ID passed to a second tool call 
 
 ---
 
+### MALFORMED_TOOL_CALL
+
+#### What it catches
+
+A tool call whose `args` begins like a structured JSON object or list but cannot be parsed as JSON or as the Python-literal form emitted by the Python SDK. Plain-text arguments are ignored: many tools intentionally accept a free-text query or instruction.
+
+#### Signal
+
+For each tool call, in step order, Dunetrace trims `args`. If the first character is `{` or `[`, it tries `json.loads` and then `ast.literal_eval`. If both fail, it emits one signal for the first malformed call with the tool name, step, and a capped argument snippet.
+
+#### Severity and rollout
+
+**HIGH · Shadow by default.** The syntax error is unambiguous, but the operational consequence is framework-specific: some frameworks reject it loudly while others coerce, retry, or pass it downstream. Validate the observed fire rate and handling behavior before adding it to `LIVE_DETECTORS`.
+
+#### Example — fires on:
+
+```json
+{"tool_name": "create_ticket", "step_index": 4, "args": "{\"title\": }"}
+```
+
+#### Example — does NOT fire on:
+
+```json
+{"tool_name": "search_docs", "step_index": 1, "args": "refund policy"}
+```
+
+#### Related detectors
+
+- `TOOL_ARGUMENT_FABRICATION` — validates whether structured arguments are grounded in prior context; this detector validates only whether a structured-looking payload is parseable.
+
+---
+
 ### RETRIEVED_CONTENT_INJECTION
 
 #### What it catches
@@ -1202,7 +1235,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 34 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 35 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`

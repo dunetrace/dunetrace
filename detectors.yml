@@ -281,6 +281,14 @@ default:
       threshold: 1
       window_runs: 1
 
+  malformed_tool_call:
+    # Shadow by default: malformed structured args are a concrete syntax
+    # failure, but the operational impact depends on the receiving framework.
+    alert_policy:
+      mode: immediate
+      threshold: 1
+      window_runs: 1
+
   retrieved_content_injection:
     case_sensitive: false
     detect_behavior_deviation: true
