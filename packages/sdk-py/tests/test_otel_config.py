@@ -239,8 +239,13 @@ class TestBuildProvider:
             with_org.shutdown()
             without_org.shutdown()
 
-    def _run_span_count(self, sampling_ratio):
-        cfg = OTelConfig(enabled=True, endpoint="http://localhost:4317", sampling_ratio=sampling_ratio)
+    def _run_span_count(self, monkeypatch, sampling_ratio):
+        # Keep the production BatchSpanProcessor off the network: without this,
+        # provider.shutdown() flushes a sampled span to the real OTLP endpoint.
+        monkeypatch.setattr(otel, "_build_span_exporter", lambda _config: InMemorySpanExporter())
+        cfg = OTelConfig(
+            enabled=True, endpoint="http://localhost:4317", sampling_ratio=sampling_ratio
+        )
         provider = otel.build_tracer_provider(cfg)
         memory = InMemorySpanExporter()
         provider.add_span_processor(SimpleSpanProcessor(memory))
@@ -271,14 +276,14 @@ class TestBuildProvider:
         finally:
             provider.shutdown()
 
-    def test_sampling_ratio_zero_drops_run_spans(self):
+    def test_sampling_ratio_zero_drops_run_spans(self, monkeypatch):
         # DunetraceOTelExporter starts every run under a sampled remote
         # parent, so a ParentBased(root=TraceIdRatioBased(...)) sampler would
         # keep this regardless of the ratio. Regression test for that case.
-        assert self._run_span_count(0.0) == 0
+        assert self._run_span_count(monkeypatch, 0.0) == 0
 
-    def test_sampling_ratio_one_keeps_run_spans(self):
-        assert self._run_span_count(1.0) == 1
+    def test_sampling_ratio_one_keeps_run_spans(self, monkeypatch):
+        assert self._run_span_count(monkeypatch, 1.0) == 1
 
     def test_build_swallows_exporter_construction_error(self, monkeypatch):
         def boom(_config):
