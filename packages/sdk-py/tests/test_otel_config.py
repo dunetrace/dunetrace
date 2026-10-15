@@ -15,9 +15,14 @@ import unittest
 import pytest
 
 try:
-    from opentelemetry.sdk.trace.export import SpanExportResult
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
 
     from dunetrace import otel
+    from dunetrace.integrations.otel import DunetraceOTelExporter
+    from dunetrace.models import AgentEvent, EventType
     from dunetrace.otel import OTelConfig, _CircuitBreakerExporter
 
     _OTEL_AVAILABLE = True
@@ -234,15 +239,51 @@ class TestBuildProvider:
             with_org.shutdown()
             without_org.shutdown()
 
-    def test_sampler_is_parent_based_ratio(self):
-        cfg = OTelConfig(enabled=True, endpoint="http://localhost:4317", sampling_ratio=0.25)
+    def _run_span_count(self, monkeypatch, sampling_ratio):
+        # Keep the production BatchSpanProcessor off the network: without this,
+        # provider.shutdown() flushes a sampled span to the real OTLP endpoint.
+        monkeypatch.setattr(otel, "_build_span_exporter", lambda _config: InMemorySpanExporter())
+        cfg = OTelConfig(
+            enabled=True, endpoint="http://localhost:4317", sampling_ratio=sampling_ratio
+        )
         provider = otel.build_tracer_provider(cfg)
+        memory = InMemorySpanExporter()
+        provider.add_span_processor(SimpleSpanProcessor(memory))
         try:
-            # ParentBased wraps a TraceIdRatioBased root; assert we didn't get
-            # the always-on default sampler.
-            assert provider.sampler.__class__.__name__ == "ParentBased"
+            exporter = DunetraceOTelExporter(tracer_provider=provider)
+            run_id = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
+            exporter.handle(
+                AgentEvent(
+                    event_type=EventType.RUN_STARTED,
+                    run_id=run_id,
+                    agent_id="a",
+                    agent_version="v",
+                    step_index=0,
+                    payload={"model": "gpt-4o", "tools": []},
+                )
+            )
+            exporter.handle(
+                AgentEvent(
+                    event_type=EventType.RUN_COMPLETED,
+                    run_id=run_id,
+                    agent_id="a",
+                    agent_version="v",
+                    step_index=0,
+                    payload={},
+                )
+            )
+            return len(memory.get_finished_spans())
         finally:
             provider.shutdown()
+
+    def test_sampling_ratio_zero_drops_run_spans(self, monkeypatch):
+        # DunetraceOTelExporter starts every run under a sampled remote
+        # parent, so a ParentBased(root=TraceIdRatioBased(...)) sampler would
+        # keep this regardless of the ratio. Regression test for that case.
+        assert self._run_span_count(monkeypatch, 0.0) == 0
+
+    def test_sampling_ratio_one_keeps_run_spans(self, monkeypatch):
+        assert self._run_span_count(monkeypatch, 1.0) == 1
 
     def test_build_swallows_exporter_construction_error(self, monkeypatch):
         def boom(_config):
