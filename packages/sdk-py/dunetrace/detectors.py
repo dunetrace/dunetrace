@@ -3130,6 +3130,129 @@ class MemoryPoisonedDetector(BaseDetector):
         )
 
 
+# ── MEMORY_GROWTH_PATTERN ─────────────────────────────────────────────────────
+
+
+class MemoryGrowthPatternDetector(BaseDetector):
+    """An agent writes to memory far more than it reads that memory back.
+
+    Primary signal is ``state.memory_events``: count ``op == "written"`` against
+    ``op == "read"``. ``cleared`` counts as neither. A non-empty ``memory_events``
+    list is the whole signal — tool names are not consulted, even when the counts
+    miss the thresholds.
+
+    When ``memory_events`` is empty, fall back to case-insensitive tool-name
+    substrings. A call is a write when its name contains write, store, save,
+    append, add, or insert, and a read when it contains read, retrieve, recall,
+    search, query, fetch, or get. A name that contains both kinds of marker
+    counts once as each.
+
+    Fires when ``write_count >= MIN_WRITES`` and
+    ``write_count >= read_count * WRITE_READ_RATIO``. The comparison multiplies,
+    so it stays defined at zero reads: three or more writes and no reads fires,
+    and evidence ``ratio`` is None rather than a fabricated finite ratio.
+
+    Tunable: WRITE_READ_RATIO (default 3), MIN_WRITES (default 3).
+    """
+
+    name = "MEMORY_GROWTH_PATTERN"
+    SEVERITY = Severity.MEDIUM
+    WRITE_READ_RATIO = 3
+    MIN_WRITES = 3
+
+    def _count_tool_names(
+        self, state: RunState
+    ) -> Tuple[int, int, List[str], List[str], List[int]]:
+        # Issue #24's documented substrings, not a token or memory-noun gate.
+        write_markers = ("write", "store", "save", "append", "add", "insert")
+        read_markers = ("read", "retrieve", "recall", "search", "query", "fetch", "get")
+        write_count = 0
+        read_count = 0
+        write_tools: set[str] = set()
+        read_tools: set[str] = set()
+        steps: List[int] = []
+        for call in state.tool_calls:
+            raw = call.tool_name or ""
+            name = raw.lower()
+            is_write = any(marker in name for marker in write_markers)
+            is_read = any(marker in name for marker in read_markers)
+            if not is_write and not is_read:
+                continue
+            if is_write:
+                write_count += 1
+                if raw:
+                    write_tools.add(raw)
+            if is_read:
+                read_count += 1
+                if raw:
+                    read_tools.add(raw)
+            steps.append(call.step_index)
+        return write_count, read_count, sorted(write_tools), sorted(read_tools), steps
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        if state.memory_events:
+            writes = [m for m in state.memory_events if m.op == "written"]
+            reads = [m for m in state.memory_events if m.op == "read"]
+            write_count = len(writes)
+            read_count = len(reads)
+            signal_source = "memory_events"
+            write_tools: List[str] = []
+            read_tools: List[str] = []
+            write_keys = sorted({m.key for m in writes if m.key})
+            read_keys = sorted({m.key for m in reads if m.key})
+            steps = [m.step_index for m in writes + reads]
+        else:
+            write_count, read_count, write_tools, read_tools, steps = self._count_tool_names(state)
+            signal_source = "tool_names"
+            write_keys = []
+            read_keys = []
+
+        if write_count == 0 and read_count == 0:
+            return None
+        if write_count < self.MIN_WRITES:
+            return None
+        # Multiply so read_count == 0 is ``write_count >= 0``, not a division.
+        if write_count < read_count * self.WRITE_READ_RATIO:
+            return None
+
+        ratio = round(write_count / read_count, 2) if read_count else None
+        try:
+            magnitude = (write_count / read_count) if read_count else float(write_count)
+            confidence = _scale_confidence(magnitude / self.WRITE_READ_RATIO)
+        except (TypeError, ZeroDivisionError):
+            confidence = 0.5
+
+        if steps:
+            first_step = min(steps)
+            last_step = max(steps)
+        else:
+            first_step = last_step = state.current_step
+
+        return FailureSignal(
+            failure_type=FailureType.MEMORY_GROWTH_PATTERN,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=last_step,
+            confidence=confidence,
+            evidence={
+                "write_count": write_count,
+                "read_count": read_count,
+                "ratio": ratio,
+                "write_tools": write_tools,
+                "read_tools": read_tools,
+                "write_keys": write_keys,
+                "read_keys": read_keys,
+                "signal_source": signal_source,
+                "write_read_ratio": self.WRITE_READ_RATIO,
+                "min_writes": self.MIN_WRITES,
+                "first_step": first_step,
+                "last_step": last_step,
+            },
+        )
+
+
 # ── DELEGATION_LOOP ───────────────────────────────────────────────────────────
 
 
@@ -5067,6 +5190,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     RunawayIterationDetector(),
     ModelFallbackDriftDetector(),
     MemoryPoisonedDetector(),
+    MemoryGrowthPatternDetector(),
     # In-path instance, deliberately NOT the class defaults. Benchmarking against
     # realistic payloads (100KB+ tool outputs, 8-level nesting, 400 candidates in
     # one arg) put unscoped scanning 6–9x over MAX_COST_NS, and the cost is
@@ -5099,7 +5223,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
 
 # detectors.yml section key → detector class, one entry per built-in detector
-# (all 34). The single source of that mapping: the server-side worker's
+# (all 35). The single source of that mapping: the server-side worker's
 # ``detector_svc.detectors._DETECTOR_CLASSES`` is an alias of this dict, and
 # the SDK's ``dunetrace.detector_config.build_detectors`` reads the server's
 # ``GET /v1/detector-config`` response through it, so a threshold keyed by
@@ -5137,6 +5261,7 @@ DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
     "runaway_iteration": RunawayIterationDetector,
     "model_fallback_drift": ModelFallbackDriftDetector,
     "memory_poisoning": MemoryPoisonedDetector,
+    "memory_growth_pattern": MemoryGrowthPatternDetector,
     "delegation_loop": DelegationLoopDetector,
     "ungrounded_destination": UngroundedDestinationDetector,
     "unresolved_ambiguity": UnresolvedAmbiguityDetector,

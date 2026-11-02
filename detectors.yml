@@ -358,6 +358,18 @@ default:
       threshold: 1
       window_runs: 1
 
+  memory_growth_pattern:
+    write_read_ratio: 3   # fire when writes are at least this many times the reads
+    min_writes: 3         # ignore runs with only trivial memory use
+    # Shadow by default (not in LIVE_DETECTORS) pending real-traffic validation.
+    # Counts memory.written vs memory.read. Tool-name substrings are used only
+    # when the run recorded no memory events. Distinct from memory_poisoning,
+    # which checks what was written rather than how often.
+    alert_policy:
+      mode: frequency     # one write-heavy run is counted; alert when it recurs
+      threshold: 3
+      window_runs: 10
+
   ungrounded_destination:
     mode: provenance          # provenance | provenance+novelty
                               # provenance (default) asks only "did THIS run's own

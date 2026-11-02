@@ -132,6 +132,7 @@ FAILURE_TYPE_MEMBERS: List[EnumMember] = [
         "enum so it travels the existing signal pipeline, but it describes the\n"
         "telemetry, not the agent.",
     ),
+    ("MEMORY_GROWTH_PATTERN", "MEMORY_GROWTH_PATTERN", None),
     ("CUSTOM", "CUSTOM", "Sentinel for user-defined custom detectors."),
 ]
 

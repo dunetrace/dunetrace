@@ -87,6 +87,7 @@ BUILTIN_DETECTOR_KEYS: frozenset[str] = frozenset(
         "runaway_iteration",
         "model_fallback_drift",
         "memory_poisoning",
+        "memory_growth_pattern",
         "delegation_loop",
         "ungrounded_destination",
         "unresolved_ambiguity",
@@ -191,6 +192,10 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
         "poison_phrases": "POISON_PHRASES",
         "case_sensitive": "CASE_SENSITIVE",
         "require_untrusted_source": "REQUIRE_UNTRUSTED_SOURCE",
+    },
+    "memory_growth_pattern": {
+        "write_read_ratio": "WRITE_READ_RATIO",
+        "min_writes": "MIN_WRITES",
     },
     "delegation_loop": {
         "min_loop_runs": "MIN_LOOP_RUNS",

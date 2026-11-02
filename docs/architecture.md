@@ -56,7 +56,7 @@ Dunetrace is a pipeline of independent services communicating through a shared P
 │           │  │ Fetches       │  │  by default)        │  │  by default)        │
 │ Reconstr. │  │ unalerted     │  │                      │  │                     │
 │ RunState  │  │ shadow=FALSE  │  │  Adaptive sampling   │  │  Pulls Langfuse /   │
-│ Runs 34   │  │ signals       │  │  → DeepEval          │  │  LangSmith /        │
+│ Runs 35   │  │ signals       │  │  → DeepEval          │  │  LangSmith /        │
 │ detectors │  │ → explain()   │  │  evaluators →        │  │  Braintrust results │
 │ Writes    │  │ → Slack /     │  │  failure_signals     │  │  → failure_signals  │
 │ signals   │  │ webhook       │  │  (source=semantic)   │  │  (source=provider)  │
@@ -129,7 +129,7 @@ per step      │    run_detectors(state, detectors=<per-agent list>,    │
                                           ▼
               ┌──────────────────────────────────────────────────────┐
 PATH 2        │  Server-side pass                                      │
-server-side,  │  all 34 built-ins + packs + custom detectors           │
+server-side,  │  all 35 built-ins + packs + custom detectors           │
 after         │  detectors.yml thresholds + P75 baselines              │
 ingestion     │  → failure_signals → alerts, dashboard, issues,        │
               │    OTel signal spans (emit_signal_span)                │
@@ -140,7 +140,7 @@ ingestion     │  → failure_signals → alerts, dashboard, issues,        │
 |---|---|---|
 | Where it runs | Inside the agent process, `run_context.py` | Detector worker, after ingestion |
 | When | After each step, **only while a `trigger="signal"` policy is active** for the agent; otherwise never | On the next 5s poll after the run completes or stalls |
-| Detectors | The per-agent list from `GET /v1/detector-config` (`dunetrace/detector_config.py::build_detectors`), narrowed to the failure types the active signal policies name; `TIER1_DETECTORS` (31) before the first fetch. Never `PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP` | All 34 (`_DETECTOR_CLASSES`, an alias of the SDK's `DETECTOR_KEYS`) + registered plugins + enabled packs + JSON custom detectors |
+| Detectors | The per-agent list from `GET /v1/detector-config` (`dunetrace/detector_config.py::build_detectors`), narrowed to the failure types the active signal policies name; `TIER1_DETECTORS` (32) before the first fetch. Never `PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP` | All 35 (`_DETECTOR_CLASSES`, an alias of the SDK's `DETECTOR_KEYS`) + registered plugins + enabled packs + JSON custom detectors |
 | Thresholds | `detectors.yml` `default` + agent-category overrides, as served by ingest; in-path scan caps can only be lowered | `detectors.yml`, loaded at worker startup |
 | Baselines | `baselines` from the same response, copied onto `RunState.baseline_*` before the pass | Computed from `run_baseline_metrics` per run |
 | Output | A policy decision — nothing is written to `failure_signals` | `failure_signals` rows |
@@ -465,7 +465,7 @@ A background polling loop that runs every 5 seconds. It is the only process that
 1. Fetches runs completed since last poll (terminal events `run.completed` or `run.errored`) plus any runs that have stalled (no new events for `STALL_TIMEOUT_SECS`, default 90s)
 2. Checks `processed_runs` to skip already-processed runs
 3. Reconstructs `RunState` by fetching and replaying all events for each run
-4. Runs all 34 structural detectors against the `RunState` (`_DETECTOR_CLASSES` in `detector_svc/detectors.py`), then any active custom detectors and any detectors belonging to a pack this org has enabled. Three of the 34 don't evaluate off `RunState` alone: `PROMPT_INJECTION_SIGNAL` is detected by the SDK on raw input at run-start and embedded in the `run.started` payload, so the worker extracts it from there; `HANDOFF_CONTEXT_LOSS` and `DELEGATION_LOOP` need a second run's data and are evaluated against the cross-run delegation graph (`_handoff_signal_from_parent` / `_delegation_signal_from_chain` in `worker.py`)
+4. Runs all 35 structural detectors against the `RunState` (`_DETECTOR_CLASSES` in `detector_svc/detectors.py`), then any active custom detectors and any detectors belonging to a pack this org has enabled. Three of the 35 don't evaluate off `RunState` alone: `PROMPT_INJECTION_SIGNAL` is detected by the SDK on raw input at run-start and embedded in the `run.started` payload, so the worker extracts it from there; `HANDOFF_CONTEXT_LOSS` and `DELEGATION_LOOP` need a second run's data and are evaluated against the cross-run delegation graph (`_handoff_signal_from_parent` / `_delegation_signal_from_chain` in `worker.py`)
 5. Writes any `FailureSignal` rows to Postgres
 6. Updates the `issues` table: UPSERTs an issue row for each live signal fired (`upsert_fired_issues`) and increments the clean-run counter for any open issues that did not fire this run (`advance_clean_runs`). An issue auto-resolves after 5 consecutive clean runs. Issue tracking failures are caught and logged — they do not affect run processing.
 7. Marks the run as processed

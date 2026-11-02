@@ -1,17 +1,17 @@
 # Detectors
 
-Dunetrace runs 34 structural detectors against every completed agent run. All of
-them are listed in the table below; the twelve newest get a full write-up in
+Dunetrace runs 35 structural detectors against every completed agent run. All of
+them are listed in the table below; the thirteen newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
 
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
-> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **31**
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **32**
 > detectors the SDK can evaluate during runtime event collection. The other
 > three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
 > need raw input or a second run's data and are handled separately. The detector
-> worker runs all 34 regardless — see
+> worker runs all 35 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -72,6 +72,7 @@ Semantic findings never trigger a policy — see
 | `AGENT_HANDOFF_FAILURE` | A handoff-named tool call fails or returns an empty/insufficient payload | HIGH |
 | `RUNAWAY_ITERATION` | Step or cost ceiling crossed with no completion signal | HIGH/CRITICAL |
 | `MEMORY_POISONING` | An injection/override directive was written into the agent's own memory, where it re-steers the agent when read back | HIGH/CRITICAL |
+| `MEMORY_GROWTH_PATTERN` | Writes to memory at least 3× as often as it reads (minimum 3 writes), including a run that writes and never reads | MEDIUM |
 | `DELEGATION_LOOP` | Two or more agents delegate to each other in a cycle that keeps going around instead of converging | HIGH/CRITICAL |
 | `INSTRUMENTATION_DEGRADED` | The SDK could not measure the run's LLM calls — a telemetry fault, not an agent fault ³ | MEDIUM |
 
@@ -204,9 +205,10 @@ docker compose restart detector ingest
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`). Four are not:
+Most built-in detectors are live (`shadow = false`). Five are not:
 `INSTRUMENTATION_DEGRADED`, `OVERSIZED_TOOL_ARGUMENTS`,
-`SCATTERSHOT_TOOL_USE` and `UNRESOLVED_AMBIGUITY` remain shadowed by default
+`SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY`, and
+`MEMORY_GROWTH_PATTERN` remain shadowed by default
 until their precision is checked against real traffic. A new built-in detector should be added to
 `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
 `services/detector/detector_svc/db.py` once validated; leaving it out of
@@ -1014,6 +1016,80 @@ The memory channel is opt-in instrumentation. It's populated either by calling `
 
 ---
 
+### MEMORY_GROWTH_PATTERN
+
+**Signal**: `MEMORY_GROWTH_PATTERN` · **Severity**: MEDIUM · **Shadow by default**
+
+#### What it catches
+
+An agent writes to memory far more often than it reads that memory back. The
+failure is volume, not content: a store that only grows, including a run that
+writes and never reads.
+
+#### How it decides
+
+The primary signal is `state.memory_events`. Each event with `op == "written"`
+counts as a write and each `op == "read"` counts as a read. `cleared` counts
+as neither. A non-empty `memory_events` list is the whole signal: tool names
+are not consulted, even when the counts miss the thresholds.
+
+Tool names are the fallback only when `memory_events` is empty. Matching is
+the issue's case-insensitive substring lists, with no token boundary:
+
+- write markers: write, store, save, append, add, insert
+- read markers: read, retrieve, recall, search, query, fetch, get
+
+A name that contains both kinds of marker counts once as each.
+
+It fires when writes are at least `min_writes` (default 3) and writes are at
+least `write_read_ratio` times the reads (default 3). Equality at a ratio of
+3 fires. A ratio of 2 with three or more writes does not. Zero reads stays
+defined, because the comparison multiplies instead of dividing: three or more
+writes and no reads fires, and the evidence ratio is null rather than a
+stand-in such as writes divided by one. The explainer says "no reads" in that
+case.
+
+#### How this one is different
+
+`MEMORY_POISONING` inspects the content of a write for an injection or
+override phrase, and it requires a value. This detector ignores content and
+counts operations, including a write whose value is empty. One poisoned write
+does not fire here. A clean key rewritten many times, with almost no reads,
+does not fire `MEMORY_POISONING`.
+
+#### Shadow
+
+Not in `LIVE_DETECTORS`. Signals are stored with `shadow = true`. On the
+synthetic calibration corpus the memory-event path separates cleanly. The
+fallback does not, and the issue requires that fallback, so the detector
+stays shadow-only regardless of how the memory-event slice scores.
+
+#### Known limitation
+
+On an empty `memory_events` list — the common case for an agent that does not
+instrument memory — ordinary tool names collide with the substring lists.
+`write_file` counts as a write. `read_file`, `web_search`, `get_weather`, and
+`fetch_url` count as reads. Three `write_file` calls and no read-marker call
+is a false positive, and so is three `write_file` plus one of those read
+names (ratio exactly 3). Those read names alone do not fire. The same read
+markers can hide a real memory-write run: three `save_memory` calls plus two
+`web_search` calls is a false negative at ratio 1.5.
+
+Those numbers are synthetic calibration results, not production estimates.
+On the 45-run synthetic corpus the boundary slice (memory events and
+memory-tool names, including ratio-just-below-3 negatives that clear the
+write floor) is 100% precision, 100% recall, and 0% false-positive rate.
+The collision slice is what exposes the substring-fallback weakness. Overall
+synthetic precision is 71.4% (15/21), recall is 93.8% (15/16), and the
+false-positive rate is 20.7% (6/29): 15 true positives, 6 false positives,
+1 false negative, and 23 true negatives. All six false positives and the
+one false negative are in the 13-run collision slice (false-positive rate
+50%). The marker lists were not changed to improve these numbers, and the
+detector remains shadow-only. Full table:
+`scripts/calibration/memory_growth_pattern_calibration.md`.
+
+---
+
 ### DELEGATION_LOOP
 
 #### What it catches
@@ -1202,7 +1278,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 34 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 35 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`

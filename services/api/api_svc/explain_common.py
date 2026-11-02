@@ -13,6 +13,7 @@ _STEP_RANGE_FIELDS: Dict[str, tuple] = {
     # Whole-run breadth pattern: without a range the UI highlights only the
     # last tool call of something that spans the run.
     "SCATTERSHOT_TOOL_USE": ("first_step", "last_step"),
+    "MEMORY_GROWTH_PATTERN": ("first_step", "last_step"),
     "TOOL_LOOP": ("first_step", "last_step"),
     "EMPTY_LLM_RESPONSE": ("first_step", "first_step"),
     "LLM_TRUNCATION_LOOP": ("first_truncation_step", "last_truncation_step"),

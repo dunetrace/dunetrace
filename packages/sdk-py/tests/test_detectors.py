@@ -9,7 +9,7 @@ Run: python -m unittest discover -s packages/sdk-py/tests
 import unittest
 import time
 
-from dunetrace.models import RunState, ToolCall, RetrievalResult, FailureType
+from dunetrace.models import RunState, ToolCall, RetrievalResult, FailureType, MemoryEvent
 from dunetrace.detectors import (
     AgentHandoffFailureDetector,
     ExcessiveRetrievalDetector,
@@ -20,6 +20,7 @@ from dunetrace.detectors import (
     ToolAvoidanceDetector,
     PromptInjectionDetector,
     RagEmptyRetrievalDetector,
+    MemoryGrowthPatternDetector,
 )
 
 
@@ -959,3 +960,127 @@ class TestOversizedToolArgumentsAcrossTransports(unittest.TestCase):
         signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.evidence["arg_length"] == 15_000
+
+
+# ── MemoryGrowthPatternDetector ───────────────────────────────────────────────
+
+
+def make_memory(op: str, key: str, step: int) -> MemoryEvent:
+    return MemoryEvent(op=op, key=key, step_index=step, timestamp=float(step))
+
+
+class TestMemoryGrowthPatternDetector(unittest.TestCase):
+    detector = MemoryGrowthPatternDetector()
+
+    def test_no_memory_usage_returns_none(self):
+        state = make_state()
+        state.tool_calls = [
+            make_tool_call("calculator", step=1),
+            make_tool_call("summarize", step=2),
+        ]
+        assert self.detector.on_run_completion(state) is None
+
+        cleared = make_state()
+        cleared.memory_events = [make_memory("cleared", "scratch", 1)]
+        assert self.detector.on_run_completion(cleared) is None
+
+    def test_below_min_writes_returns_none(self):
+        """Two writes and zero reads would pass the ratio gate, so this isolates MIN_WRITES."""
+        state = make_state()
+        state.memory_events = [
+            make_memory("written", "scratch", 1),
+            make_memory("written", "scratch", 2),
+        ]
+        assert self.detector.on_run_completion(state) is None
+
+    def test_fires_at_ratio_three(self):
+        state = make_state()
+        state.memory_events = [
+            make_memory("written", "notes", 1),
+            make_memory("written", "notes", 2),
+            make_memory("written", "notes", 3),
+            make_memory("read", "notes", 4),
+        ]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.MEMORY_GROWTH_PATTERN
+        assert signal.severity.value == "MEDIUM"
+        assert signal.evidence["write_count"] == 3
+        assert signal.evidence["read_count"] == 1
+        assert signal.evidence["ratio"] == 3.0
+        assert signal.evidence["signal_source"] == "memory_events"
+        assert signal.evidence["write_tools"] == []
+        assert signal.evidence["read_tools"] == []
+        assert signal.evidence["write_keys"] == ["notes"]
+        assert signal.evidence["read_keys"] == ["notes"]
+        assert signal.step_index == 4
+
+    def test_ratio_two_does_not_fire(self):
+        """Six writes clears MIN_WRITES, so only the 2.0 ratio keeps this quiet."""
+        state = make_state()
+        state.memory_events = [make_memory("written", "notes", i) for i in range(1, 7)]
+        state.memory_events += [make_memory("read", "notes", i) for i in range(7, 10)]
+        assert self.detector.on_run_completion(state) is None
+
+    def test_three_writes_and_zero_reads_fires_with_null_ratio(self):
+        state = make_state()
+        state.memory_events = [make_memory("written", "notes", i) for i in range(1, 4)]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.MEMORY_GROWTH_PATTERN
+        assert signal.evidence["write_count"] == 3
+        assert signal.evidence["read_count"] == 0
+        assert signal.evidence["ratio"] is None
+        assert signal.evidence["signal_source"] == "memory_events"
+
+    def test_nonempty_memory_events_do_not_fall_through_to_tool_names(self):
+        """One memory write is under MIN_WRITES. Three save_* calls would fire the fallback."""
+        suppressed = make_state()
+        suppressed.memory_events = [make_memory("written", "notes", 1)]
+        suppressed.tool_calls = [make_tool_call("save_note", step=i) for i in range(1, 4)]
+        assert self.detector.on_run_completion(suppressed) is None
+
+        # Memory writes fire even when every tool name is a read marker.
+        fired = make_state()
+        fired.memory_events = [make_memory("written", "notes", i) for i in range(1, 4)]
+        fired.tool_calls = [make_tool_call("search_note", step=i) for i in range(1, 5)]
+        signal = self.detector.on_run_completion(fired)
+        assert signal is not None
+        assert signal.evidence["signal_source"] == "memory_events"
+        assert signal.evidence["write_count"] == 3
+        assert signal.evidence["read_count"] == 0
+        assert signal.evidence["write_tools"] == []
+
+    def test_empty_memory_events_use_tool_name_fallback(self):
+        state = make_state()
+        state.tool_calls = [make_tool_call("SAVE_NOTE", step=i) for i in range(1, 4)]
+        state.tool_calls.append(make_tool_call("Search_Docs", step=4))
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.MEMORY_GROWTH_PATTERN
+        assert signal.evidence["signal_source"] == "tool_names"
+        assert signal.evidence["write_count"] == 3
+        assert signal.evidence["read_count"] == 1
+        assert signal.evidence["ratio"] == 3.0
+        assert signal.evidence["write_tools"] == ["SAVE_NOTE"]
+        assert signal.evidence["read_tools"] == ["Search_Docs"]
+        assert signal.evidence["write_keys"] == []
+
+    def test_tunable_overrides_are_respected(self):
+        state = make_state()
+        state.memory_events = [
+            make_memory("written", "notes", 1),
+            make_memory("written", "notes", 2),
+            make_memory("read", "notes", 3),
+        ]
+        assert MemoryGrowthPatternDetector().on_run_completion(state) is None
+
+        signal = MemoryGrowthPatternDetector(MIN_WRITES=2, WRITE_READ_RATIO=2).on_run_completion(
+            state
+        )
+        assert signal is not None
+        assert signal.evidence["write_count"] == 2
+        assert signal.evidence["read_count"] == 1
+        assert signal.evidence["ratio"] == 2.0
+        assert signal.evidence["min_writes"] == 2
+        assert signal.evidence["write_read_ratio"] == 2
