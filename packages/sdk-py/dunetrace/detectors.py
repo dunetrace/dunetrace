@@ -3160,6 +3160,14 @@ class MemoryGrowthPatternDetector(BaseDetector):
     WRITE_READ_RATIO = 3
     MIN_WRITES = 3
 
+    def __init__(self, **overrides: object) -> None:
+        super().__init__(**overrides)
+        ratio = self.WRITE_READ_RATIO
+        # A ratio of 0 or below makes `writes >= reads * ratio` true for every
+        # run that clears MIN_WRITES, including a balanced one.
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or ratio <= 0:
+            raise ValueError("WRITE_READ_RATIO must be a number > 0")
+
     def _count_tool_names(
         self, state: RunState
     ) -> Tuple[int, int, List[str], List[str], List[int]]:
@@ -3171,7 +3179,12 @@ class MemoryGrowthPatternDetector(BaseDetector):
         write_tools: set[str] = set()
         read_tools: set[str] = set()
         steps: List[int] = []
-        for call in state.tool_calls:
+        # A denied or timed-out call is still in tool_calls, with success left
+        # unset. Counting it reports a write the approval gate stopped.
+        blocked = _approval_blocked_calls(state)
+        for index, call in enumerate(state.tool_calls):
+            if index in blocked:
+                continue
             raw = call.tool_name or ""
             name = raw.lower()
             is_write = any(marker in name for marker in write_markers)

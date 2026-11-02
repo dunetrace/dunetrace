@@ -9,7 +9,15 @@ Run: python -m unittest discover -s packages/sdk-py/tests
 import unittest
 import time
 
-from dunetrace.models import RunState, ToolCall, RetrievalResult, FailureType, MemoryEvent
+from dunetrace.models import (
+    AgentEvent,
+    EventType,
+    RunState,
+    ToolCall,
+    RetrievalResult,
+    FailureType,
+    MemoryEvent,
+)
 from dunetrace.detectors import (
     AgentHandoffFailureDetector,
     ExcessiveRetrievalDetector,
@@ -1065,6 +1073,53 @@ class TestMemoryGrowthPatternDetector(unittest.TestCase):
         assert signal.evidence["write_tools"] == ["SAVE_NOTE"]
         assert signal.evidence["read_tools"] == ["Search_Docs"]
         assert signal.evidence["write_keys"] == []
+
+    def test_approval_blocked_write_tools_do_not_fire(self):
+        """Three denied save_note calls would fire the fallback if they had run."""
+        state = make_state()
+        state.tool_calls = [make_tool_call("save_note", step=i, success=None) for i in (1, 2, 3)]
+        state.events = [
+            AgentEvent(
+                event_type=EventType.APPROVAL_DENIED,
+                run_id=state.run_id,
+                agent_id=state.agent_id,
+                agent_version=state.agent_version,
+                step_index=i + 1,
+                payload={"tool_name": "save_note"},
+            )
+            for i in (1, 2, 3)
+        ]
+        assert self.detector.on_run_completion(state) is None
+
+        executed = make_state()
+        executed.tool_calls = [make_tool_call("save_note", step=i, success=True) for i in (1, 2, 3)]
+        signal = self.detector.on_run_completion(executed)
+        assert signal is not None
+        assert signal.evidence["signal_source"] == "tool_names"
+        assert signal.evidence["write_count"] == 3
+        assert signal.evidence["read_count"] == 0
+        assert signal.evidence["write_tools"] == ["save_note"]
+
+    def test_nonpositive_write_read_ratio_is_rejected(self):
+        assert MemoryGrowthPatternDetector().WRITE_READ_RATIO == 3
+        with self.assertRaises(ValueError):
+            MemoryGrowthPatternDetector(WRITE_READ_RATIO=0)
+        with self.assertRaises(ValueError):
+            MemoryGrowthPatternDetector(WRITE_READ_RATIO=-1)
+
+    def test_positive_write_read_ratio_override_behaves_normally(self):
+        """Six writes and three reads is ratio 2: the default stays quiet, 2 fires."""
+        state = make_state()
+        state.memory_events = [make_memory("written", "notes", i) for i in range(1, 7)]
+        state.memory_events += [make_memory("read", "notes", i) for i in range(7, 10)]
+        assert MemoryGrowthPatternDetector().on_run_completion(state) is None
+
+        signal = MemoryGrowthPatternDetector(WRITE_READ_RATIO=2).on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["write_count"] == 6
+        assert signal.evidence["read_count"] == 3
+        assert signal.evidence["ratio"] == 2.0
+        assert signal.evidence["write_read_ratio"] == 2
 
     def test_tunable_overrides_are_respected(self):
         state = make_state()
