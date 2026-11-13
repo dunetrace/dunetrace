@@ -121,6 +121,7 @@ def build_run_state(events: list[dict]) -> RunState:
             state.available_tools = payload.get("tools", [])
             state.input_text = payload.get("input_text")
             state.system_prompt = payload.get("system_prompt") or None
+            state.implicit = payload.get("implicit") is True
 
         # run.completed - record exit reason
         elif event_type == "run.completed":
@@ -255,13 +256,12 @@ def build_run_state(events: list[dict]) -> RunState:
         # know it when the retriever starts (LangChain's on_retriever_start);
         # remember it for the matching retrieval.responded.
         elif event_type == "retrieval.called":
-            called_index = payload.get("index_name")
-            if called_index:
-                last_retrieval_index = called_index
+            last_retrieval_index = payload.get("index_name")
 
         # retrieval.responded - append to retrievals list
         elif event_type == "retrieval.responded":
             index_name = payload.get("index_name") or last_retrieval_index or "unknown"
+            last_retrieval_index = None
             if not isinstance(index_name, str):
                 # payload validates nothing inside itself: an OTLP arrayValue or
                 # a hand-rolled dict here would be unhashable for every detector

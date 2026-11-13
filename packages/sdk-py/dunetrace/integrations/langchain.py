@@ -55,7 +55,7 @@ except ImportError:
     _LANGCHAIN_AVAILABLE = False
     BaseCallbackHandler = object  # type: ignore[assignment,misc]
 
-from dunetrace.context import _current_run
+from dunetrace.context import _current_run, active_run
 from dunetrace.models import agent_version as calc_version
 from dunetrace.policies import PolicyViolation
 
@@ -90,6 +90,7 @@ class _RunCtx:
     child_tool_names: Dict[str, str] = field(
         default_factory=dict
     )  # lc_run_id → tool_name at call time
+    child_retrieval_indexes: Dict[str, str] = field(default_factory=dict)
     ctx_token: Any = field(default=None, repr=False)  # _current_run reset token
 
     @property
@@ -191,9 +192,8 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
         BaseChatModel/BaseTool calls directly, not into the top-level
         chain/agent invoke, so on_chain_start is never triggered for it).
         Every leaf call within the same dt.run() block resolves the same
-        ambient RunContext, so no root-tracking bookkeeping is needed here —
-        each call just gets a fresh lightweight wrapper around the same
-        underlying (shared) RunContext.
+        ambient RunContext. Keep its callback state on that run so start/end
+        callbacks share child mappings without retaining completed ambient runs.
         """
         with self._lock:
             for key in ("parent_run_id", "run_id"):
@@ -203,11 +203,20 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 root = self._lc_parent.get(lc_id) or (lc_id if lc_id in self._runs else None)
                 if root and root in self._runs:
                     return self._runs[root]
-        ambient = _current_run.get()
+        ambient = active_run()
         if ambient is not None and not getattr(ambient, "_dt_langchain_handler_owned", False):
-            return _RunCtx(
-                run_id=ambient.run_id, dt_ctx=ambient, agent_id=ambient.agent_id, owns_run=False
-            )
+            with self._lock:
+                contexts = getattr(ambient, "_dt_langchain_contexts", None)
+                if contexts is None:
+                    contexts = ambient._dt_langchain_contexts = {}
+                if self not in contexts:
+                    contexts[self] = _RunCtx(
+                        run_id=ambient.run_id,
+                        dt_ctx=ambient,
+                        agent_id=ambient.agent_id,
+                        owns_run=False,
+                    )
+                return contexts[self]
         return None
 
     def _register_child(self, child_lc_id: str, parent_lc_id: str) -> None:
@@ -308,7 +317,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             # that doesn't call it, or an interrupted invocation elsewhere in
             # the same thread) can never be mistaken for an ambient wrap by
             # some *other* invocation that happens to run next.
-            ambient_run = _current_run.get()
+            ambient_run = active_run()
             if ambient_run is not None and not getattr(
                 ambient_run, "_dt_langchain_handler_owned", False
             ):
@@ -576,7 +585,11 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             if lc_run_id:
                 self._register_child(lc_run_id, str(kwargs.get("parent_run_id") or ""))
             tool_name = serialized.get("name", kwargs.get("name", "unknown"))
-            self._safe_call(ctx.dt_ctx.tool_called, tool_name, {"input": input_str})
+            inputs = kwargs.get("inputs")
+            tool_input = inputs if isinstance(inputs, dict) else input_str
+            self._safe_call(
+                ctx.dt_ctx.tool_called, tool_name, {"input": tool_input}, _input_wrapper=True
+            )
             if lc_run_id:
                 ctx.child_steps[lc_run_id] = ctx.step
                 ctx.child_tool_names[lc_run_id] = tool_name
@@ -591,7 +604,12 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             ctx = self._ctx(kwargs)
             if not ctx:
                 return
-            self._safe_call(ctx.dt_ctx.tool_called, action.tool, {"input": action.tool_input})
+            self._safe_call(
+                ctx.dt_ctx.tool_called,
+                action.tool,
+                {"input": action.tool_input},
+                _input_wrapper=True,
+            )
         except PolicyViolation:
             raise
         except Exception as exc:
@@ -676,6 +694,8 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                     else "unknown"
                 ),
             )
+            if lc_run_id:
+                ctx.child_retrieval_indexes[lc_run_id] = index_name or "unknown"
             from dunetrace.models import EventType
 
             self._safe_emit(
@@ -713,6 +733,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 EventType.RETRIEVAL_RESPONDED,
                 ctx,
                 {
+                    "index_name": ctx.child_retrieval_indexes.pop(lc_run_id, "unknown"),
                     "result_count": result_count,
                     "top_score": top_score,
                 },
@@ -734,6 +755,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 EventType.RETRIEVAL_RESPONDED,
                 ctx,
                 {
+                    "index_name": ctx.child_retrieval_indexes.pop(lc_run_id, "unknown"),
                     "result_count": 0,
                     "top_score": None,
                     "error": str(error),

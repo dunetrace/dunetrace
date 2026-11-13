@@ -20,6 +20,7 @@ Postgres LISTEN/NOTIFY) this codebase has never used.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -475,6 +476,7 @@ async def _run_evaluators(
     run = build_evaluation_input(events)
     if run is None:
         return 0
+    implicit = _is_implicit_run(events)
 
     names = evaluator_names or list(_evaluators.keys())
     written = 0
@@ -590,6 +592,7 @@ async def _run_evaluators(
             confidence=confidence,
             evidence=evidence,
             org_id=org_id,
+            shadow=implicit,
         )
         await record_signal_group_membership(
             org_id, agent_id, result.evaluator, result.reasoning, signal_id, run_id
@@ -688,10 +691,28 @@ async def _maybe_run_conversation_evaluator(
                 "conversation_id": conversation_external_id,
                 "run_ids_considered": sibling_run_ids,
             },
+            # A window containing a guessed run boundary is not alerted on.
+            shadow=any(_is_implicit_run(evs) for _, evs in runs_events),
             org_id=org_id,
         )
         signals_written += 1
     return signals_written
+
+
+def _is_implicit_run(events: list) -> bool:
+    """True when the SDK opened this run on its own (run.started payload
+    ``implicit``): its boundary is a guess -- it may span several requests on
+    one thread -- so a semantic finding on it must not page anyone."""
+    for e in events:
+        if e.get("event_type") == "run.started":
+            payload = e.get("payload") or {}
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except ValueError:
+                    return False
+            return isinstance(payload, dict) and payload.get("implicit") is True
+    return False
 
 
 async def process_run(

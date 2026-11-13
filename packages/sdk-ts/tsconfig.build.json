@@ -1,7 +1,10 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // Drops `@internal` members (test hooks such as otel._resetForTests) from
+    // the published declarations, so they are not public API.
+    "stripInternal": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "tests", "examples"]

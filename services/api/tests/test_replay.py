@@ -198,6 +198,20 @@ class TestReplayComparesLikeWithLike(unittest.IsolatedAsyncioTestCase):
     """Replay re-runs every detector, shadow ones included. A shadow detector
     that fired on the original run used to come back as "new" in every replay."""
 
+    async def test_live_detector_first_triggered_by_replay_is_reported(self):
+        from unittest.mock import AsyncMock, patch
+        import api_svc.routers.replay as replay
+
+        events = TestReduceContext()._bloated_run()
+        with (
+            patch.object(replay, "_fetch_events", AsyncMock(return_value=events)),
+            patch.object(replay, "_fetch_signals", AsyncMock(return_value=[])),
+        ):
+            out = await replay.replay_run(
+                "r1", replay.ReplayRequest(modifications=[]), org_id="org"
+            )
+        self.assertIn("CONTEXT_BLOAT", out["new"])
+
     async def test_shadow_original_is_not_reported_as_new(self):
         from unittest.mock import AsyncMock, patch
 
@@ -222,6 +236,30 @@ class TestReplayComparesLikeWithLike(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(out["new"], [])
         self.assertEqual(out["original_signals"], [])
+        self.assertNotIn(
+            "RAG_QUALITY_DEGRADATION", {s["failure_type"] for s in out["replay_signals"]}
+        )
+
+    async def test_shadow_first_triggered_by_replay_is_not_reported_as_new(self):
+        from unittest.mock import AsyncMock, patch
+        import api_svc.routers.replay as replay
+
+        events = TestFixRagRetrievalNeverManufacturesADecline()._run(
+            [0.95, 0.9, 0.5, 0.45, 1, 1, 1, 1]
+        )
+        self.assertNotIn("RAG_QUALITY_DEGRADATION", _fired(events))
+        modifications = [{"type": "truncate_at_step", "step": 4}]
+        self.assertIn(
+            "RAG_QUALITY_DEGRADATION", _fired(_apply_modifications(events, modifications))
+        )
+        with (
+            patch.object(replay, "_fetch_events", AsyncMock(return_value=events)),
+            patch.object(replay, "_fetch_signals", AsyncMock(return_value=[])),
+        ):
+            out = await replay.replay_run(
+                "r1", replay.ReplayRequest(modifications=modifications), org_id="org"
+            )
+        self.assertNotIn("RAG_QUALITY_DEGRADATION", out["new"])
         self.assertNotIn(
             "RAG_QUALITY_DEGRADATION", {s["failure_type"] for s in out["replay_signals"]}
         )

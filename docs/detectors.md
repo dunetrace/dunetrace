@@ -69,7 +69,7 @@ Semantic findings never trigger a policy — see
 | `PREMATURE_TERMINATION` | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
 | `UNREAD_TOOL_ERROR` | Tool failed, agent's next action doesn't acknowledge it | MEDIUM/HIGH |
 | `TOOL_ARGUMENT_FABRICATION` | Tool call argument references an entity not present anywhere in prior context | HIGH/CRITICAL |
-| `MALFORMED_TOOL_CALL` | Tool args look structured but cannot be parsed as JSON or a Python literal | HIGH |
+| `MALFORMED_TOOL_CALL` | Tool args look like JSON but cannot be parsed as strict JSON | HIGH |
 | `RETRIEVED_CONTENT_INJECTION` | Retrieved or fetched content contains text directed at the agent as an instruction | HIGH/CRITICAL |
 | `HANDOFF_CONTEXT_LOSS` | Multi-agent handoff loses a large chunk of the parent agent's context | HIGH |
 | `AGENT_HANDOFF_FAILURE` | A handoff-named tool call fails or returns an empty/insufficient payload | HIGH |
@@ -215,10 +215,12 @@ Most built-in detectors are live (`shadow = false`). Seven are not:
 `SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY`, `RAG_QUALITY_DEGRADATION`, `MALFORMED_TOOL_CALL` and `MEMORY_GROWTH_PATTERN` remain shadowed by default
 until their precision is checked against real traffic. A new built-in detector should be added to
 `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
-`services/detector/detector_svc/db.py` once validated; leaving it out of
+`packages/schemas-py/dunetrace_schemas/detector_status.py` once validated; leaving it out of
 `LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
 
 User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
+
+**Implicit runs are always shadow.** A run the SDK opened on its own because a patched LLM call had no run to attach to (`run.started` payload `implicit: true`, see [runs that open themselves](integrations/auto-instrumentation.md#runs-that-open-themselves)) has a guessed boundary. It gets the same treatment as an incomplete run below: every signal shadow, confidence capped at 0.5, severity at MEDIUM, evidence marked `incomplete_data: {"dropped_events": 0, "reason": "implicit_run"}`, and no issue tracking or baseline contribution. A run opened at a framework entry point (`opened_by` without `implicit`) is an ordinary run.
 
 **Incomplete runs are always shadow.** When the SDK's outbound buffer overflows it sheds whole runs and stamps `dropped_events: <n>` on that run's `run.completed` / `run.errored` payload (see the SDK drain-thread notes in `docs/architecture.md`). `build_run_state` reads it into `RunState.dropped_events`, and `process_run` treats any run with `dropped_events > 0` as *incomplete*: every signal it produces — built-in, Python-plugin and JSON-config custom alike — is written with `shadow = true` regardless of `LIVE_DETECTORS` or the custom detector's status, its confidence is capped at 0.5, its severity at MEDIUM, and its evidence carries `incomplete_data: {"dropped_events": n, "reason": "sdk_buffer_shed"}`. Such signals never feed the risk engine's hard override or co-occurrence boost, and the run is treated as *unknown* rather than fired or clean: neither `upsert_fired_issues` nor `advance_clean_runs` runs for it (five shed runs in a row must not auto-resolve an issue nobody verified) and it contributes nothing to baselines. The worker logs one INFO line per incomplete run; the signals are still stored and visible with `?include_shadow=true`.
 
@@ -736,7 +738,7 @@ A tool call whose `args` is a JSON attempt that is not valid JSON: trailing comm
 
 #### Signal
 
-For each tool call, in step order: if `args` opens like JSON (an object starting with a key or `}`, or an array starting with a value or `]`), it is parsed with strict `json.loads` (`NaN`/`Infinity` rejected). LangChain's `{"input": "<tool input>"}` wrapper is looked through, so a malformed inner payload is judged rather than its valid wrapper. Arguments recorded truncated (`args_length` larger than what arrived) and arguments over `max_args_chars` (default 32,768) are skipped, which also bounds the in-path cost; parse results are cached because a signal policy re-reads every earlier call at each step. One signal for the first malformed call, with the tool name, step, and a capped argument snippet. A calibration corpus and report ship with it: `scripts/calibrate_malformed_tool_call.py`.
+For each tool call, in step order: if `args` opens like JSON (an object starting with a key or `}`, or an array starting with a value or `]`), it is parsed with strict `json.loads` (`NaN`/`Infinity` rejected). LangChain records the original tool arguments directly. String-valued fields inside valid JSON stay opaque. Arguments recorded truncated (`args_length` larger than what arrived) and arguments over `max_args_chars` (default 32,768) are skipped, which also bounds the in-path cost; parse results are cached because a signal policy re-reads every earlier call at each step. One signal for the first malformed call, with the tool name, step, and a capped argument snippet. A calibration corpus and report ship with it: `scripts/calibrate_malformed_tool_call.py`.
 
 #### Severity and rollout
 

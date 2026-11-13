@@ -143,7 +143,7 @@ Add a section under `default:` in `detectors.yml` documenting the tunables and a
 ```
 
 **New detectors ship in shadow mode**: leave your detector *out* of
-`LIVE_DETECTORS` in `services/detector/detector_svc/db.py`. Shadow signals are
+`LIVE_DETECTORS` in `packages/schemas-py/dunetrace_schemas/detector_status.py`. Shadow signals are
 stored and visible but never alert, so you can validate the false-positive rate
 on real traffic before promoting it.
 

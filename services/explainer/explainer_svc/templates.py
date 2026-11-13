@@ -2291,9 +2291,11 @@ def explain_malformed_tool_call(signal: FailureSignal) -> Explanation:
                 language="python",
                 code=(
                     "import json\n\n"
+                    "def reject_constant(name: str) -> object:\n"
+                    "    raise ValueError(f'Invalid JSON constant: {name}')\n\n"
                     "def parse_tool_args(args_text: str) -> object:\n"
                     "    try:\n"
-                    "        return json.loads(args_text)\n"
+                    "        return json.loads(args_text, parse_constant=reject_constant)\n"
                     "    except (ValueError, RecursionError) as exc:\n"
                     "        # Ask the model to re-emit the call rather than guessing.\n"
                     "        raise ValueError(f'Invalid tool arguments: {exc}') from exc\n"

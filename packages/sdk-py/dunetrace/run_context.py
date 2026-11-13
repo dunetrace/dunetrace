@@ -254,6 +254,12 @@ class RunContext:
         self.agent_version = agent_version
         self.step = 0
         self.exit_reason: Optional[str] = None
+        # True for a run the SDK opened on its own (see dunetrace.implicit).
+        # _closed flips once a run the SDK closes for the caller (an implicit
+        # run, a lazily opened request run) has emitted its terminal event, so
+        # a context variable still pointing at it reads as "no run".
+        self.implicit: bool = False
+        self._closed: bool = False
         self._parent_run_id = parent_run_id
         # Correlation key for external evaluation integrations (Langfuse/
         # LangSmith/Braintrust) — not folded into agent_version's hash like
@@ -533,12 +539,20 @@ class RunContext:
         args: Optional[Dict[str, Any]] = None,
         *,
         _enforce_approval: bool = True,
+        _input_wrapper: bool = False,
     ) -> None:
         # What leaves the process — and what the in-path detectors read off
         # ToolCall.args — is the redacted, capped serialisation, never the raw
         # dict. Policy evaluation below still sees the raw ``args`` (a policy
         # gating on args.amount needs the real value), but that never ships.
-        args_repr, args_truncated, args_len = self._serialize_args(args)
+        if _input_wrapper and isinstance(args, dict):
+            # LangChain's wrapper is needed by redaction hooks and args.input policies.
+            recorded = _apply_redaction(self._redact_hook, self._redact_denylist, args)
+            args_repr, args_truncated, args_len = _serialize_args(
+                None, self._redact_denylist, recorded.get("input", {}), self._max_chars()
+            )
+        else:
+            args_repr, args_truncated, args_len = self._serialize_args(args)
         self.state.tool_calls.append(
             ToolCall(
                 tool_name=tool_name,
@@ -1073,7 +1087,7 @@ class RunContext:
         (the raw call arguments) feed any ``condition.match`` expression so a
         policy can gate on argument values, not just the tool name."""
         engine = self._client._policy_engine  # type: ignore[attr-defined]
-        if not len(engine):
+        if not len(engine) or self.implicit:  # implicit runs: record only
             return None
         context = self._build_eval_context(
             args=args,
@@ -1283,7 +1297,11 @@ class RunContext:
         ``args.*`` expression is a before_tool_call-gate concern, not a metric one.
         """
         engine = self._client._policy_engine  # type: ignore[attr-defined]
-        if not len(engine):
+        # An implicit run's boundary is a guess: its metrics may sum several
+        # requests on one thread. Policies never act on it (record only), so a
+        # stop policy cannot raise out of a bare LLM call in code that never
+        # opened a run.
+        if not len(engine) or self.implicit:
             return
 
         metrics = build_metrics(
@@ -1486,6 +1504,10 @@ class RunContext:
             )
 
     def _emit(self, event_type: EventType, payload: dict, *, advance: bool = True) -> None:
+        if self._closed and event_type not in (EventType.RUN_COMPLETED, EventType.RUN_ERRORED):
+            # Closed from another thread (the implicit-run sweeper) while code in
+            # this context still held it: never attach events after run.completed.
+            return
         if advance:
             self.step += 1
         event = AgentEvent(

@@ -213,6 +213,10 @@ class RunState:
     # incomplete: the detector holds its signals in shadow with capped
     # confidence and severity rather than trusting a verdict on partial data.
     dropped_events: int = 0
+    # True when the SDK opened this run on its own because a patched LLM call
+    # had no run to attach to (run.started payload `implicit`). Its boundary
+    # is a guess, so the detector holds its signals in shadow like a shed run.
+    implicit: bool = False
     # Cross-run baselines populated by the server before detectors run.
     # None = insufficient history. Local self-hosted mode may leave these None.
     baseline_p75_steps: Optional[float] = None
