@@ -14,7 +14,7 @@ import {
   type RedactionSettings,
 } from "./redaction.js";
 import { HttpBatchEmitter, type BatchEmitter } from "./emitters.js";
-import { runStorage as _runStorage, getCurrentRun, setRunOpener, type EntryRunHandle } from "./context.js";
+import { runStorage as _runStorage, clearRunOpener, getCurrentRun, setRunOpener, type EntryRunHandle } from "./context.js";
 import { parseDsn, dsnHost } from "./dsn.js";
 import { registerOwnEndpoint, wrapAnthropicClient, wrapOpenAIClient } from "./auto.js";
 import * as otel from "./otel.js";
@@ -118,7 +118,15 @@ interface ImplicitHandle {
   run: DunetraceRun;
   finish: (err?: unknown) => void;
   timer: ReturnType<typeof setTimeout> | null;
+  openedAt: number;
 }
+
+/** Hard caps on a guessed run, as in the Python SDK: a busy async context with
+ *  no request boundary never goes idle, so without them an implicit run grows
+ *  without bound. Hitting either closes it (exit_reason max_age / max_events);
+ *  the next call opens a fresh one. */
+const IMPLICIT_MAX_AGE_MS = 600_000;
+const IMPLICIT_MAX_EVENTS = 1000;
 
 export class Dunetrace {
   private _ingestUrl:  string | null;
@@ -143,6 +151,8 @@ export class Dunetrace {
   /** Runs this client opened on its own, by run id, with their idle timers.
    *  See _openImplicitRun for how they end. */
   private _implicitOpen = new Map<string, ImplicitHandle>();
+  /** Entry-point runs (wrapGenerateText / wrapStreamText) not yet finished. */
+  private _entryOpen = new Map<string, (err?: unknown) => void>();
   private _implicitRuns: boolean;
   private _implicitIdleMs: number;
   private _defaultAgentId: string;
@@ -196,13 +206,19 @@ export class Dunetrace {
     this._implicitIdleMs = Math.max(0.01, Number.isFinite(idleS) && idleS > 0 ? idleS : 30) * 1000;
     this._defaultAgentId = opts.defaultAgentId ?? process.env.DUNETRACE_AGENT_ID ?? "";
     if (this._implicitRuns) {
+      // Weakly held: the process-wide opener must not keep a client alive
+      // (that defeated the exit-flush registry's WeakRef design).
+      const self = new WeakRef(this);
       setRunOpener({
-        implicit: (openedBy) => this._openImplicitRun(openedBy),
-        entry:    (openedBy, agentId) => this._openEntryRun(openedBy, agentId),
-      });
+        implicit: (openedBy) => self.deref()?._openImplicitRun(openedBy) ?? null,
+        entry:    (openedBy, agentId) => self.deref()?._openEntryRun(openedBy, agentId) ?? null,
+      }, this);
       this._crashRef = new WeakRef(this);
       _crashClients.add(this._crashRef);
       _installCrashHook();
+    } else {
+      // Most recent client wins in both directions: this one opted out.
+      setRunOpener(null);
     }
 
     const interval = opts.flushIntervalMs ?? 200;
@@ -416,7 +432,7 @@ export class Dunetrace {
     // continuation from it sees this run, which is how the calls that follow
     // attach without any code at the call site.
     _runStorage.enterWith(run);
-    const handle: ImplicitHandle = { run, finish, timer: null };
+    const handle: ImplicitHandle = { run, finish, timer: null, openedAt: Date.now() };
     this._implicitOpen.set(run.runId, handle);
     this._armIdle(handle);
     if (!this._implicitAnnounced) {
@@ -433,14 +449,35 @@ export class Dunetrace {
 
   _openEntryRun(openedBy: string, agentId?: string): EntryRunHandle | null {
     if (!this._implicitRuns) return null;
-    const id = agentId || this._defaultAgentId || openedBy.split(".")[0] || "agent";
+    // What the user configured wins over a name derived from the entry point.
+    const id = this._defaultAgentId || agentId || openedBy.split(".")[0] || "agent";
     const { run, finish } = this._startRun(id, {}, { openedBy });
-    return { run, finish };
+    // Tracked until it finishes, so a stream that is aborted, never consumed,
+    // or whose callbacks never fire still gets its terminal event at
+    // shutdown() / process exit instead of being left stalled.
+    this._entryOpen.set(run.runId, finish);
+    const tracked = (err?: unknown): void => {
+      this._entryOpen.delete(run.runId);
+      finish(err);
+    };
+    return { run, finish: tracked };
   }
 
   private _armIdle(handle: ImplicitHandle): void {
     if (handle.timer !== null) clearTimeout(handle.timer);
-    handle.timer = setTimeout(() => { this._closeImplicit(handle.run.runId, "idle"); }, this._implicitIdleMs);
+    const sinceOpen = Date.now() - handle.openedAt;
+    const untilCap = Math.max(0, IMPLICIT_MAX_AGE_MS - sinceOpen);
+    handle.timer = setTimeout(() => {
+      if (Date.now() - handle.openedAt >= IMPLICIT_MAX_AGE_MS) {
+        this._closeImplicit(handle.run.runId, "max_age");
+      } else if (handle.run._busy()) {
+        // A request or stream still in flight is not idle: closing under it
+        // would attach its response to a run that already ended.
+        this._armIdle(handle);
+      } else {
+        this._closeImplicit(handle.run.runId, "idle");
+      }
+    }, Math.min(this._implicitIdleMs, untilCap || this._implicitIdleMs));
     // Never keep the process alive just to close a guessed run; exit closes it.
     if (typeof handle.timer.unref === "function") handle.timer.unref();
   }
@@ -460,6 +497,12 @@ export class Dunetrace {
     let n = 0;
     for (const runId of [...this._implicitOpen.keys()]) {
       if (this._closeImplicit(runId, exitReason, err)) n += 1;
+    }
+    // Entry runs still open at exit (a stream never consumed or aborted).
+    for (const [runId, finish] of [...this._entryOpen]) {
+      this._entryOpen.delete(runId);
+      finish(err);
+      n += 1;
     }
     return n;
   }
@@ -481,7 +524,16 @@ export class Dunetrace {
       finish(err);
       n = 1;
     }
-    if (n > 0) _markRecorded(err);
+    if (n > 0) {
+      _markRecorded(err);
+      // Node exits right after an uncaught exception without firing
+      // beforeExit, and the drain timer is unref'd, so an async flush never
+      // happens. Deliver what is buffered synchronously, when the emitter can.
+      const ship = this._emitter.shipSync;
+      if (typeof ship === "function") {
+        try { ship.call(this._emitter, this._buffer.drainAll()); } catch { /* crash path: never throw */ }
+      }
+    }
     return n;
   }
 
@@ -631,6 +683,8 @@ export class Dunetrace {
       _crashClients.delete(this._crashRef);
       this._crashRef = null;
     }
+    // A stopped client never opens runs whose events nobody would drain.
+    clearRunOpener(this);
     // Terminal events for runs the SDK opened on its own, before the buffer
     // drains, so they leave in the same flush.
     this._closeImplicitRuns("process_exit");
@@ -658,7 +712,11 @@ export class Dunetrace {
       // Activity on an implicit run pushes its idle deadline out.
       const implicit = this._implicitOpen.get(event.run_id);
       if (implicit && event.event_type !== "run.completed" && event.event_type !== "run.errored") {
-        this._armIdle(implicit);
+        if (implicit.run.getEvents().length >= IMPLICIT_MAX_EVENTS) {
+          queueMicrotask(() => { this._closeImplicit(implicit.run.runId, "max_events"); });
+        } else {
+          this._armIdle(implicit);
+        }
       }
       if (this._emitJson) this._writeJsonLine(event);
       // Fan out to the optional OTel exporter. It never throws (see handle()), but

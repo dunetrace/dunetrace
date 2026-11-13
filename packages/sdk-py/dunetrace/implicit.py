@@ -49,7 +49,7 @@ import weakref
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
-from dunetrace.context import _current_run
+from dunetrace.context import _pending_entry, active_run
 
 if TYPE_CHECKING:  # pragma: no cover
     from dunetrace.client import Dunetrace
@@ -58,6 +58,12 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger("dunetrace.implicit")
 
 DEFAULT_IDLE_S = 30.0
+# Hard caps on a guessed run. In a busy thread with no request boundary an
+# implicit run never goes idle, so without them it grows without bound and is
+# only ever seen server-side as one endless stalled run. Hitting either closes
+# it (exit_reason max_age / max_events); the next call opens a fresh one.
+DEFAULT_MAX_AGE_S = 600.0
+DEFAULT_MAX_EVENTS = 1000
 _SWEEP_INTERVAL_S = 1.0
 
 
@@ -126,10 +132,20 @@ class ImplicitRunManager:
     a stale context variable can never attach new events to it.
     """
 
-    def __init__(self, client: "Dunetrace", *, enabled: bool, idle_s: float) -> None:
+    def __init__(
+        self,
+        client: "Dunetrace",
+        *,
+        enabled: bool,
+        idle_s: float,
+        max_age_s: float = DEFAULT_MAX_AGE_S,
+        max_events: int = DEFAULT_MAX_EVENTS,
+    ) -> None:
         self._client_ref = weakref.ref(client)
         self.enabled = enabled
         self.idle_s = max(1.0, float(idle_s))
+        self.max_age_s = max(self.idle_s, float(max_age_s))
+        self.max_events = max(1, int(max_events))
         self._lock = threading.Lock()
         self._open: Dict[str, _Handle] = {}
         self._sweeper: Optional[threading.Thread] = None
@@ -182,7 +198,7 @@ class ImplicitRunManager:
     def close_current(self, exit_reason: str) -> bool:
         """Close the implicit run active in *this* context, if any. Called when
         an explicit run opens, so a real run never nests under a guessed one."""
-        run = _current_run.get()
+        run = active_run()
         if run is None or not getattr(run, "implicit", False):
             return False
         return self.close(run.run_id, exit_reason)
@@ -203,9 +219,14 @@ class ImplicitRunManager:
 
     def _finish(self, handle: _Handle, exit_reason: str, exc: Optional[BaseException]) -> None:
         ctx = handle.ctx
-        ctx._implicit_closed = True
         try:
-            if exc is not None:
+            if exc is not None and not isinstance(exc, Exception):
+                # KeyboardInterrupt / SystemExit: client.run() handles Exception,
+                # so throwing one of these in would skip the terminal event. Record
+                # the interruption as the exit reason and close normally.
+                ctx.exit_reason = ctx.exit_reason or type(exc).__name__
+                handle.cm.__exit__(None, None, None)
+            elif exc is not None:
                 handle.cm.__exit__(type(exc), exc, exc.__traceback__)
             else:
                 if ctx.exit_reason is None:
@@ -213,6 +234,10 @@ class ImplicitRunManager:
                 handle.cm.__exit__(None, None, None)
         except Exception:
             logger.debug("Dunetrace: closing implicit run %s failed", ctx.run_id, exc_info=True)
+        finally:
+            # After the terminal event, never before: _emit drops events on a
+            # closed run, and run.completed itself must still go out.
+            ctx._closed = True
 
     # ── idle sweep ──────────────────────────────────────────────────────────
 
@@ -221,13 +246,31 @@ class ImplicitRunManager:
         how many closed. ``now`` is wall-clock seconds; events carry
         ``time.time()`` timestamps, so idleness is measured on the same clock."""
         now = time.time() if now is None else now
+        due: List[Tuple[_Handle, str]] = []
         with self._lock:
-            due = [h for h in self._open.values() if now - _last_activity(h) >= self.idle_s]
-            for h in due:
-                self._open.pop(h.ctx.run_id, None)
-        for h in due:
-            self._finish(h, "idle", None)
+            for h in list(self._open.values()):
+                reason = self._due(h, now)
+                if reason:
+                    due.append((h, reason))
+                    self._open.pop(h.ctx.run_id, None)
+        for h, reason in due:
+            self._finish(h, reason, None)
         return len(due)
+
+    def _due(self, handle: _Handle, now: float) -> Optional[str]:
+        if now - handle.opened_at >= self.max_age_s:
+            return "max_age"
+        if len(handle.ctx.state.events) >= self.max_events:
+            return "max_events"
+        # Idle is measured from the last event, but a call still in flight (a
+        # slow reasoning-model call, a stream the caller is still iterating) is
+        # not idle: closing under it attached its response to a run that had
+        # already sent run.completed.
+        if _in_flight(handle.ctx):
+            return None
+        if now - _last_activity(handle) >= self.idle_s:
+            return "idle"
+        return None
 
     def _ensure_sweeper(self) -> None:
         # Called under self._lock. One daemon thread while any run is open;
@@ -252,6 +295,20 @@ class ImplicitRunManager:
                     return
 
 
+def _in_flight(ctx: "RunContext") -> bool:
+    """An LLM call has started and not responded, or a stream is still open."""
+    called = responded = 0
+    for e in ctx.state.events:
+        kind = e.event_type.value
+        if kind == "llm.called":
+            called += 1
+        elif kind == "llm.responded":
+            responded += 1
+    if called > responded:
+        return True
+    return any(ref() is not None for ref in getattr(ctx, "_open_streams", ()))
+
+
 def _last_activity(handle: _Handle) -> float:
     events = handle.ctx.state.events
     if events:
@@ -270,15 +327,36 @@ def resolve_run(client: "Optional[Dunetrace]", opened_by: str) -> "Optional[RunC
     opened; a bare ``dunetrace.auto.auto_instrument()`` without a client stays
     attach-only, as before.
     """
-    run = _current_run.get()
-    if run is not None and not getattr(run, "_implicit_closed", False):
+    run = active_run()
+    if run is not None:
         return run
+    # A lazy request boundary (the auto-installed middleware): the first LLM
+    # call inside the request opens its run; later ones reuse it, even from a
+    # copied context (a sync endpoint on a thread pool).
+    pending = _pending_entry.get()
+    if pending is not None:
+        return _open_pending(pending)
     if client is None:
         return None
     manager = getattr(client, "_implicit", None)
     if manager is None:
         return None
     return manager.open(opened_by)
+
+
+def _open_pending(pending) -> "Optional[RunContext]":
+    if pending.ctx is not None:
+        return None if getattr(pending.ctx, "_closed", False) else pending.ctx
+    try:
+        cm = pending.client.run(
+            pending.agent_id, user_input=pending.user_input, _opened_by=pending.opened_by
+        )
+        ctx = cm.__enter__()
+    except Exception:
+        logger.debug("Dunetrace: could not open the request run", exc_info=True)
+        return None
+    pending.cm, pending.ctx = cm, ctx
+    return ctx
 
 
 # ── Crash hooks ──────────────────────────────────────────────────────────────
@@ -310,7 +388,9 @@ def record_crash(exc: BaseException, where: str) -> int:
         if manager is None:
             continue
         try:
-            run = _current_run.get()
+            # A closed implicit run left in the context counts as no run: the
+            # crash gets a one-event run instead of being lost.
+            run = active_run()
             if run is not None and getattr(run, "implicit", False):
                 if manager.close(run.run_id, exc=exc):
                     closed += 1
@@ -369,6 +449,8 @@ def _reset_for_tests() -> None:
 
 __all__: List[str] = [
     "DEFAULT_IDLE_S",
+    "DEFAULT_MAX_AGE_S",
+    "DEFAULT_MAX_EVENTS",
     "ImplicitRunManager",
     "env_bool",
     "install_crash_hooks",

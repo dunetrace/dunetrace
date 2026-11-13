@@ -187,7 +187,7 @@ class TestImplicitRuns(_Base):
             done = _by_type(events, EventType.RUN_COMPLETED)
             self.assertEqual(len(done), 1)
             self.assertEqual(done[0].payload["exit_reason"], "idle")
-            self.assertTrue(run._implicit_closed)
+            self.assertTrue(run._closed)
             # The stale context variable reads as no run: a new call opens a new one.
             again = c._resolve_run("x")
             self.assertIsNot(again, run)
@@ -201,6 +201,7 @@ class TestImplicitRuns(_Base):
             run = c._resolve_run("x")
             t0 = c._implicit._open[run.run_id].opened_at
             run.llm_called("gpt-4o", prompt_tokens=1)
+            run.llm_responded(completion_tokens=1, finish_reason="stop")
             run.state.events[-1].timestamp = t0 + 4  # activity just before the deadline
             self.assertEqual(c._implicit.sweep(now=t0 + 6), 0)
             self.assertEqual(c._implicit.sweep(now=t0 + 9), 1)
@@ -444,19 +445,23 @@ class TestWebFrameworkMiddleware(_Base):
     """FastAPI and Flask are not test dependencies, so the constructor patches
     are exercised against minimal stand-ins registered in sys.modules."""
 
+    def setUp(self):
+        super().setUp()
+        # Another test file's dt.init() may have patched the real framework.
+        for name in ("fastapi", "flask"):
+            _PATCHED.discard(name)
+
     def tearDown(self):
         super().tearDown()
         for name in ("fastapi", "flask"):
             sys.modules.pop(name, None)
             _PATCHED.discard(name)
 
-    def test_fastapi_apps_get_the_asgi_middleware(self):
-        from dunetrace.middleware import DunetraceASGIMiddleware
-
+    def _fastapi(self):
         mod = _FakeModule("fastapi")
 
         class FastAPI:
-            def __init__(self, title="API"):
+            def __init__(self, title="FastAPI"):
                 self.title = title
                 self.added = []
 
@@ -465,20 +470,45 @@ class TestWebFrameworkMiddleware(_Base):
 
         mod.FastAPI = FastAPI
         sys.modules["fastapi"] = mod
+        return FastAPI
+
+    def test_fastapi_apps_get_a_lazy_boundary(self):
+        from dunetrace.middleware import LazyRunASGIMiddleware
+
+        FastAPI = self._fastapi()
         c = _client()
         try:
             _patch_fastapi(client=c, default_agent_id="")
             app = FastAPI(title="billing-api")
             self.assertEqual(len(app.added), 1)
             cls, options = app.added[0]
-            self.assertIs(cls, DunetraceASGIMiddleware)
+            self.assertIs(cls, LazyRunASGIMiddleware)
             self.assertIs(options["dt"], c)
             self.assertEqual(options["agent_id"], "billing-api")
         finally:
             c.shutdown(timeout=1)
 
-    def test_flask_apps_get_the_wsgi_middleware(self):
-        from dunetrace.middleware import DunetraceWSGIMiddleware
+    def test_configured_agent_id_beats_the_framework_name(self):
+        """dt.init(agent_id=...) used to be replaced by FastAPI's title."""
+        FastAPI = self._fastapi()
+        c = _client()
+        try:
+            _patch_fastapi(client=c, default_agent_id="support-bot")
+            self.assertEqual(FastAPI(title="billing-api").added[0][1]["agent_id"], "support-bot")
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_default_fastapi_title_is_not_an_agent_id(self):
+        FastAPI = self._fastapi()
+        c = _client()
+        try:
+            _patch_fastapi(client=c, default_agent_id="")
+            self.assertEqual(FastAPI().added[0][1]["agent_id"], "fastapi")
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_flask_apps_get_a_lazy_boundary_and_never_their_import_name(self):
+        from dunetrace.middleware import LazyRunWSGIMiddleware
 
         mod = _FakeModule("flask")
 
@@ -492,8 +522,9 @@ class TestWebFrameworkMiddleware(_Base):
         c = _client()
         try:
             _patch_flask(client=c, default_agent_id="")
-            app = Flask("shop")
-            self.assertIsInstance(app.wsgi_app, DunetraceWSGIMiddleware)
+            app = Flask("app")
+            self.assertIsInstance(app.wsgi_app, LazyRunWSGIMiddleware)
+            self.assertEqual(app.wsgi_app.agent_id, "flask")
         finally:
             c.shutdown(timeout=1)
 
@@ -514,6 +545,163 @@ class TestWebFrameworkMiddleware(_Base):
         FastAPI()
         self.assertEqual(calls, [1])
         self.assertNotIn("fastapi", _PATCHED)
+
+
+class TestLazyRequestBoundary(_Base):
+    """A request is a run only once it calls a model."""
+
+    def _call(self, mw, app_body):
+        import asyncio
+
+        async def app(scope, receive, send):
+            app_body()
+
+        mw.app = app
+        asyncio.run(mw({"type": "http", "method": "GET", "path": "/x"}, None, None))
+
+    def test_a_request_without_llm_calls_opens_no_run(self):
+        from dunetrace.middleware import LazyRunASGIMiddleware
+
+        c = _client()
+        events = _capture(c)
+        try:
+            self._call(LazyRunASGIMiddleware(None, dt=c, agent_id="api"), lambda: None)
+            self.assertEqual(_by_type(events, EventType.RUN_STARTED), [])
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_the_first_llm_call_opens_one_run_closed_at_the_end(self):
+        from dunetrace.middleware import LazyRunASGIMiddleware
+
+        c = _client()
+        events = _capture(c)
+        try:
+
+            def body():
+                a = c._resolve_run("openai.chat.completions.create")
+                b = c._resolve_run("openai.chat.completions.create")
+                self.assertIs(a, b)
+                self.assertFalse(a.implicit)
+
+            self._call(LazyRunASGIMiddleware(None, dt=c, agent_id="api"), body)
+            started = _by_type(events, EventType.RUN_STARTED)
+            self.assertEqual(len(started), 1)
+            self.assertEqual(started[0].payload.get("opened_by"), "http.request")
+            self.assertEqual(len(_by_type(events, EventType.RUN_COMPLETED)), 1)
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_steps_aside_for_a_run_the_user_already_opened(self):
+        from dunetrace.middleware import LazyRunASGIMiddleware
+
+        c = _client()
+        events = _capture(c)
+        try:
+            with c.run("manual") as outer:
+
+                def body():
+                    self.assertIs(c._resolve_run("x"), outer)
+
+                self._call(LazyRunASGIMiddleware(None, dt=c, agent_id="api"), body)
+            self.assertEqual(len(_by_type(events, EventType.RUN_STARTED)), 1)
+        finally:
+            c.shutdown(timeout=1)
+
+
+class TestImplicitRunGuards(_Base):
+    def test_policies_never_act_on_an_implicit_run(self):
+        from dunetrace.policies import PolicyAction, PolicyCondition
+
+        c = _client()
+        try:
+            c.add_policy(
+                "stop-everything",
+                PolicyCondition(trigger="step_count", operator="gte", value=1),
+                PolicyAction(type="stop"),
+            )
+            run = c._resolve_run("openai.chat.completions.create")
+            for _ in range(3):  # would raise PolicyViolation on an explicit run
+                run.llm_called("gpt-4o", prompt_tokens=1)
+                run.llm_responded(completion_tokens=1, finish_reason="stop")
+            c._implicit.close_all()
+
+            # The same policy does stop an explicit run, so the above is not vacuous.
+            from dunetrace.policies import PolicyViolation
+
+            with self.assertRaises(PolicyViolation):
+                with c.run("explicit") as real:
+                    for _ in range(3):
+                        real.llm_called("gpt-4o", prompt_tokens=1)
+                        real.llm_responded(completion_tokens=1, finish_reason="stop")
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_an_in_flight_call_is_not_idle(self):
+        c = _client(implicit_run_idle_s=5)
+        try:
+            run = c._resolve_run("x")
+            t0 = c._implicit._open[run.run_id].opened_at
+            run.llm_called("o1", prompt_tokens=1)  # slow reasoning call, no response yet
+            run.state.events[-1].timestamp = t0
+            self.assertEqual(c._implicit.sweep(now=t0 + 60), 0)
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_max_age_closes_even_a_busy_run(self):
+        c = _client(implicit_run_idle_s=5)
+        events = _capture(c)
+        try:
+            run = c._resolve_run("x")
+            t0 = c._implicit._open[run.run_id].opened_at
+            run.llm_called("o1", prompt_tokens=1)
+            self.assertEqual(c._implicit.sweep(now=t0 + c._implicit.max_age_s + 1), 1)
+            self.assertEqual(
+                _by_type(events, EventType.RUN_COMPLETED)[0].payload["exit_reason"], "max_age"
+            )
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_events_after_close_are_dropped(self):
+        c = _client(implicit_run_idle_s=5)
+        events = _capture(c)
+        try:
+            run = c._resolve_run("x")
+            c._implicit.close(run.run_id)
+            before = len(events)
+            run.llm_called("gpt-4o", prompt_tokens=1)
+            self.assertEqual(len(events), before)
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_keyboard_interrupt_still_ends_the_run(self):
+        c = _client()
+        events = _capture(c)
+        try:
+            run = c._resolve_run("x")
+            c._implicit.close(run.run_id, exc=KeyboardInterrupt())
+            done = _by_type(events, EventType.RUN_COMPLETED)
+            self.assertEqual(len(done), 1)
+            self.assertEqual(done[0].payload["exit_reason"], "KeyboardInterrupt")
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_malformed_idle_env_falls_back_instead_of_crashing(self):
+        os.environ["DUNETRACE_IMPLICIT_RUN_IDLE_S"] = "30s"
+        c = _client()
+        try:
+            self.assertEqual(c._implicit.idle_s, impl.DEFAULT_IDLE_S)
+        finally:
+            c.shutdown(timeout=1)
+
+    def test_crewai_opens_its_exact_run_over_an_implicit_one(self):
+        from dunetrace.context import explicit_run
+
+        c = _client()
+        try:
+            c._resolve_run("x")
+            self.assertIsNone(explicit_run())
+        finally:
+            c.shutdown(timeout=1)
 
 
 if __name__ == "__main__":

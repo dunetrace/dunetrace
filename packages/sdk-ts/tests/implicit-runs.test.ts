@@ -326,3 +326,91 @@ describe("Vercel AI entry points", () => {
     await dt.shutdown();
   });
 });
+
+// ── Review fixes ─────────────────────────────────────────────────────────────
+
+describe("implicit-run review fixes", () => {
+  it("a crash is delivered synchronously when the emitter can", () => {
+    const shipped: AgentEvent[][] = [];
+    const emitter = Object.assign(new NoopBatchEmitter(), {
+      shipSync: (batch: AgentEvent[]) => { shipped.push(batch); return true; },
+    });
+    const { dt } = client({ emitter });
+    dt._recordCrash(new Error("boom"));
+    expect(shipped).toHaveLength(1);
+    const types = shipped[0]!.map((e) => e.event_type);
+    expect(types).toContain("run.errored");
+  });
+
+  it("a slow call in flight is not idle", async () => {
+    const { dt, events } = client({ implicitRunIdleS: 0.02 });
+    let release!: () => void;
+    const slow = new Promise<void>((r) => { release = r; });
+    const run = dt._openImplicitRun("openai.chat.completions.create")!;
+    run._trackCall(slow);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(completed(events)).toHaveLength(0); // still open under the call
+    release();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(completed(events)).toHaveLength(1);
+    expect(completed(events)[0]!.payload["exit_reason"]).toBe("idle");
+    await dt.shutdown();
+  });
+
+  it("shutdown clears the opener, so a stopped client opens nothing", async () => {
+    const { dt, events } = client();
+    await dt.shutdown();
+    expect(resolveRun("x")).toBeNull();
+    expect(started(events)).toHaveLength(0);
+  });
+
+  it("the most recent client wins, including an opt-out", async () => {
+    const a = client();
+    const b = client({ implicitRuns: false });
+    expect(resolveRun("x")).toBeNull();
+    expect(started(a.events)).toHaveLength(0);
+    await a.dt.shutdown();
+    await b.dt.shutdown();
+  });
+
+  it("an entry run nobody finished is closed at shutdown", async () => {
+    const { dt, events } = client();
+    const handle = openEntryRun("ai.streamText")!;
+    expect(handle).not.toBeNull();
+    await dt.shutdown();
+    expect(completed(events).map((e) => e.run_id)).toContain(handle.run.runId);
+  });
+
+  it("the configured agent id wins over the entry point's name", async () => {
+    const { dt, events } = client({ defaultAgentId: "support-bot" });
+    const handle = openEntryRun("ai.generateText", "something-else")!;
+    handle.finish();
+    expect(started(events)[0]!.agent_id).toBe("support-bot");
+    await dt.shutdown();
+  });
+
+  it("wrapStreamText keeps the default error logging and closes on a sync throw", async () => {
+    const { dt, events } = client();
+    const errors: unknown[] = [];
+    const orig = console.error;
+    console.error = (e: unknown) => { errors.push(e); };
+    try {
+      type Opts = { onError?: (e: unknown) => unknown };
+      const failing = wrapStreamText(((opts: Opts) => {
+        void opts.onError?.({ error: new Error("401") });
+        return {} as never;
+      }) as never);
+      (failing as unknown as (o: object) => unknown)({});
+      await new Promise((r) => setTimeout(r, 10));
+      expect(errors).toHaveLength(1);
+      expect(errored(events)).toHaveLength(1);
+
+      const throwing = wrapStreamText((() => { throw new Error("bad options"); }) as never);
+      expect(() => (throwing as unknown as (o: object) => unknown)({})).toThrow("bad options");
+      expect(errored(events)).toHaveLength(2);
+    } finally {
+      console.error = orig;
+      await dt.shutdown();
+    }
+  });
+});

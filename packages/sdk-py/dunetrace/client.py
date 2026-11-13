@@ -219,6 +219,25 @@ def _coerce_text(value: Any) -> str:
         return ""
 
 
+def _env_seconds(name: str, default: float) -> float:
+    """A positive number of seconds from the environment. A malformed value
+    ("30s", "1m") logs a warning and falls back instead of raising out of
+    Dunetrace() and crashing the host application at startup."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if not (0 < value < float("inf")):
+        logger.warning(
+            "Dunetrace: %s=%r is not a positive number of seconds; using %s", name, raw, default
+        )
+        return default
+    return value
+
+
 class Dunetrace:
     """
     Non-blocking observability client.
@@ -379,7 +398,7 @@ class Dunetrace:
             idle_s=(
                 implicit_run_idle_s
                 if implicit_run_idle_s is not None
-                else float(os.environ.get("DUNETRACE_IMPLICIT_RUN_IDLE_S") or DEFAULT_IDLE_S)
+                else _env_seconds("DUNETRACE_IMPLICIT_RUN_IDLE_S", DEFAULT_IDLE_S)
             ),
         )
 
@@ -564,7 +583,7 @@ class Dunetrace:
                 _manager.close_current("explicit_run_opened")
         if parent_run_id is None:
             _active_run = _current_run.get()
-            if _active_run is not None and not getattr(_active_run, "_implicit_closed", False):
+            if _active_run is not None and not getattr(_active_run, "_closed", False):
                 parent_run_id = _active_run.run_id
 
         # Content caps (dunetrace.redaction). Applied after the version hash,
@@ -880,12 +899,10 @@ class Dunetrace:
         ``"requests"``, ``"langchain"`` (covers LangGraph), ``"crewai"``.
         Uninstalled frameworks are silently skipped.
 
-        ``langchain`` specifically requires the top-level call to be wrapped
-        in ``dt.run(...)`` too — unlike the other frameworks here, it can only
-        attach to an already-open run, never open its own. See
-        ``docs/integrations/auto-instrumentation.md``. ``crewai`` and the rest
-        don't have this requirement; wrapping in ``dt.run()`` is optional for
-        them (it only changes which agent_id the run gets attributed to).
+        Runs: LangGraph graphs, CrewAI kickoffs and FastAPI/Flask requests open
+        exact runs; a patched LLM call outside any run opens an implicit
+        (shadowed, record-only) run. Plain LangChain chains attach to whatever
+        run is open. See ``docs/integrations/auto-instrumentation.md``.
 
         :param frameworks: Subset to patch. ``None`` patches all installed ones.
 

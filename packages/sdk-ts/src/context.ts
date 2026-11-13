@@ -70,10 +70,23 @@ export interface RunOpener {
 }
 
 let _opener: RunOpener | null = null;
+let _openerOwner: object | null = null;
 
-/** Called by the client constructor; the most recent client wins. */
-export function setRunOpener(opener: RunOpener | null): void {
+/** Called by the client constructor; the most recent client wins, in both
+ *  directions: a client built with implicitRuns:false clears the opener, so
+ *  the last configuration an app wrote is the one that applies. */
+export function setRunOpener(opener: RunOpener | null, owner: object | null = null): void {
   _opener = opener;
+  _openerOwner = opener ? owner : null;
+}
+
+/** Called from a client's shutdown(): drop the opener if it is still that
+ *  client's, so a stopped client never opens runs whose events nobody drains. */
+export function clearRunOpener(owner: object): void {
+  if (_openerOwner === owner) {
+    _opener = null;
+    _openerOwner = null;
+  }
 }
 
 /** The active run when there is a live one, else an implicit run opened by

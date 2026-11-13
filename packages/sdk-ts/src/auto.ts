@@ -479,13 +479,14 @@ function instrumentCreate(
     // readers below and the calls that follow find it with getCurrentRun().
     // With no client, or implicit runs off, this is null and the call is
     // simply forwarded, as before.
-    resolveRun(openedBy);
+    const resolved = resolveRun(openedBy);
 
     // The SDK issues its request through fetch; suppress HTTP instrumentation for
     // the duration so one LLM call doesn't also register as a tool call.
     let ret: unknown;
     try {
       ret = httpSuppression.run(true, () => orig.apply(this, args));
+      resolved?._trackCall(ret);
     } catch (err) {
       // A method that throws synchronously rather than returning a rejected
       // promise. The async wrapper this replaced turned that into a rejection;

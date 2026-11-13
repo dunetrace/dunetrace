@@ -40,6 +40,53 @@ _in_framework_call: ContextVar[bool] = ContextVar("dunetrace_in_framework_call",
 _http_suppressed: ContextVar[bool] = ContextVar("dunetrace_http_suppressed", default=False)
 
 
+def active_run() -> "Optional[RunContext]":
+    """The run events in this context should attach to, or None.
+
+    An implicit run (dunetrace.implicit) can be closed from another thread -- the
+    idle sweeper -- while this context still points at it. A closed run reads as
+    no run, everywhere, so nothing attaches events to it after its terminal
+    event.
+    """
+    run = _current_run.get()
+    if run is None or getattr(run, "_closed", False):
+        return None
+    return run
+
+
+def explicit_run() -> "Optional[RunContext]":
+    """The active run if the agent or a framework opened it, None if the only
+    thing active is an implicit (guessed) run. Integrations that open an exact
+    run of their own (CrewAI kickoff, a LangGraph invoke) use this to decide:
+    an implicit run must not stop them, and client.run() closes it for them."""
+    run = active_run()
+    if run is None or getattr(run, "implicit", False):
+        return None
+    return run
+
+
+class PendingEntry:
+    """A run boundary that opens lazily (see dunetrace.middleware's auto-installed
+    request boundary). The run is opened by the first patched LLM call inside it,
+    so a request that never calls a model -- a health check, a static file --
+    produces no run at all."""
+
+    __slots__ = ("client", "agent_id", "opened_by", "user_input", "cm", "ctx")
+
+    def __init__(self, client, agent_id: str, opened_by: str, user_input: str = "") -> None:
+        self.client = client
+        self.agent_id = agent_id
+        self.opened_by = opened_by
+        self.user_input = user_input
+        self.cm = None
+        self.ctx = None
+
+
+_pending_entry: ContextVar[Optional[PendingEntry]] = ContextVar(
+    "dunetrace_pending_entry", default=None
+)
+
+
 def get_current_run() -> "Optional[RunContext]":
     """
     Return the active :class:`~dunetrace.run_context.RunContext` for the
@@ -54,4 +101,4 @@ def get_current_run() -> "Optional[RunContext]":
         if run:
             run.tool_called("db_query", {"table": "users"})
     """
-    return _current_run.get()
+    return active_run()

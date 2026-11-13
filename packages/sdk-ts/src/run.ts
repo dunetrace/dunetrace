@@ -46,6 +46,34 @@ export class DunetraceRun {
   closed = false;
   /** The call that opened the run when the SDK, not the caller, opened it. */
   openedBy: string | null = null;
+  /** LLM requests started on this run and not yet resolved. A non-streaming
+   *  call emits nothing until it resolves, so without this an implicit run
+   *  idled out under a slow call before its first event. @internal */
+  _inflight = 0;
+
+  /** Count `pending` as in flight until it settles. @internal */
+  _trackCall(pending: unknown): void {
+    this._inflight += 1;
+    let done = false;
+    const settle = (): void => {
+      if (done) return;
+      done = true;
+      this._inflight -= 1;
+    };
+    Promise.resolve(pending).then(settle, settle);
+  }
+
+  /** True while a request is unresolved or a stream is still being read. @internal */
+  _busy(): boolean {
+    if (this._inflight > 0) return true;
+    let called = 0;
+    let responded = 0;
+    for (const e of this.getEvents()) {
+      if (e.event_type === "llm.called") called += 1;
+      else if (e.event_type === "llm.responded") responded += 1;
+    }
+    return called > responded;
+  }
   /** OTel correlation ids, deterministic from runId, so a customer can jump
    *  from an OTel backend to the Dunetrace run and back. Set by the client
    *  only when OTel export is active; null otherwise.

@@ -38,7 +38,7 @@ usage-only chunk with an empty ``choices`` list and break callers doing
                   long-term, and entity memory become memory.* events.
 
 The memory patches (LangGraph ``BaseStore``, CrewAI memory) only ever attach to an
-already-open ``dt.run()`` — like the openai/anthropic patches — and emit
+already-open run -- they never open one, unlike the openai/anthropic patches -- and emit
 ``memory.*`` annotation events (they don't advance the step counter). Framework
 memory APIs don't expose the *provenance* of a written value, so auto-captured
 writes carry no ``source``; use the manual ``run.memory_written(..., source=...)``
@@ -94,7 +94,13 @@ import sys
 import time
 from typing import TYPE_CHECKING, List, Optional
 
-from dunetrace.context import _current_run, _http_suppressed, _in_framework_call
+from dunetrace.context import (
+    _current_run,
+    _http_suppressed,
+    _in_framework_call,
+    active_run,
+    explicit_run,
+)
 from dunetrace.implicit import resolve_run
 from dunetrace.policies import ApprovalDenied, PolicyViolation
 
@@ -225,7 +231,7 @@ def _http_run():
     up the stack is already recording this call."""
     if _in_framework_call.get() or _http_suppressed.get():
         return None
-    return _current_run.get()
+    return active_run()
 
 
 # ── Streaming ─────────────────────────────────────────────────────────────────
@@ -2241,7 +2247,7 @@ def _patch_crewai(
 
     @functools.wraps(_orig_crew_kickoff)
     def _patched_crew_kickoff(self, inputs=None, **kwargs):
-        if _current_run.get() is not None:
+        if explicit_run() is not None:
             return _orig_crew_kickoff(self, inputs, **kwargs)
         agent_id = _crew_agent_id(self, inputs)
         with client.run(agent_id, user_input=str((inputs or {}).get("topic", ""))) as run:
@@ -2260,7 +2266,7 @@ def _patch_crewai(
 
         @functools.wraps(_orig_crew_kickoff_async)
         async def _patched_crew_kickoff_async(self, inputs=None, **kwargs):
-            if _current_run.get() is not None:
+            if explicit_run() is not None:
                 return await _orig_crew_kickoff_async(self, inputs, **kwargs)
             agent_id = _crew_agent_id(self, inputs)
             with client.run(agent_id, user_input=str((inputs or {}).get("topic", ""))) as run:
@@ -2280,7 +2286,7 @@ def _patch_crewai(
 
         @functools.wraps(_orig_agent_kickoff)
         def _patched_agent_kickoff(self, messages, *args, **kwargs):
-            if _current_run.get() is not None:
+            if active_run() is not None:
                 return _orig_agent_kickoff(self, messages, *args, **kwargs)
             agent_id = resolve_agent_id(
                 framework_native_agent_id=getattr(self, "role", None),
@@ -2303,7 +2309,7 @@ def _patch_crewai(
 
         @functools.wraps(_orig_agent_kickoff_async)
         async def _patched_agent_kickoff_async(self, messages, *args, **kwargs):
-            if _current_run.get() is not None:
+            if active_run() is not None:
                 return await _orig_agent_kickoff_async(self, messages, *args, **kwargs)
             agent_id = resolve_agent_id(
                 framework_native_agent_id=getattr(self, "role", None),
@@ -2388,7 +2394,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_put)
     def _patched_put(self, namespace, key, value, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_written(_store_key(namespace, key), _mem_text(value)))
         return _orig_put(self, namespace, key, value, *args, **kwargs)
@@ -2399,7 +2405,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_get)
     def _patched_get(self, namespace, key, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_read(_store_key(namespace, key)))
         return _orig_get(self, namespace, key, *args, **kwargs)
@@ -2410,7 +2416,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_delete)
     def _patched_delete(self, namespace, key, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_cleared(_store_key(namespace, key)))
         return _orig_delete(self, namespace, key, *args, **kwargs)
@@ -2421,7 +2427,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_aput)
     async def _patched_aput(self, namespace, key, value, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_written(_store_key(namespace, key), _mem_text(value)))
         return await _orig_aput(self, namespace, key, value, *args, **kwargs)
@@ -2432,7 +2438,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_aget)
     async def _patched_aget(self, namespace, key, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_read(_store_key(namespace, key)))
         return await _orig_aget(self, namespace, key, *args, **kwargs)
@@ -2443,7 +2449,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_adelete)
     async def _patched_adelete(self, namespace, key, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_cleared(_store_key(namespace, key)))
         return await _orig_adelete(self, namespace, key, *args, **kwargs)
@@ -2476,7 +2482,7 @@ def _wrap_crewai_memory_class(cls, mem_key: str) -> bool:
 
         @functools.wraps(_orig_save)
         def _patched_save(self, *args, _orig=_orig_save, _k=mem_key, **kwargs):
-            run = _current_run.get()
+            run = active_run()
             if run is not None:
                 val = args[0] if args else kwargs.get("value", kwargs.get("item"))
                 _safe_memory(lambda: run.memory_written(_k, _mem_text(val)))
@@ -2490,7 +2496,7 @@ def _wrap_crewai_memory_class(cls, mem_key: str) -> bool:
 
         @functools.wraps(_orig_search)
         def _patched_search(self, *args, _orig=_orig_search, **kwargs):
-            run = _current_run.get()
+            run = active_run()
             if run is not None:
                 q = args[0] if args else kwargs.get("query", kwargs.get("task"))
                 if q:
@@ -2505,7 +2511,7 @@ def _wrap_crewai_memory_class(cls, mem_key: str) -> bool:
 
         @functools.wraps(_orig_reset)
         def _patched_reset(self, *args, _orig=_orig_reset, **kwargs):
-            run = _current_run.get()
+            run = active_run()
             if run is not None:
                 _safe_memory(lambda: run.memory_cleared(None))
             return _orig(self, *args, **kwargs)
@@ -2562,28 +2568,27 @@ def _estimate_tokens(messages) -> int:
 
 
 def _entry_agent_id(client, default_agent_id, framework_name, fallback: str) -> str:
+    """The agent_id for an entry-point run. What the user configured
+    (``dt.init(agent_id=...)``, ``auto_instrument(agent_id=...)``,
+    DUNETRACE_AGENT_ID) always wins; a framework-supplied name is only used
+    when nothing was configured, and only a deliberate one (callers pass None
+    for a framework default such as FastAPI's "FastAPI" title)."""
+    configured = (
+        default_agent_id
+        or getattr(client, "_default_agent_id", "")
+        or os.environ.get("DUNETRACE_AGENT_ID", "")
+    )
+    if configured:
+        return configured
     if isinstance(framework_name, str) and framework_name.strip():
         return framework_name.strip()
-    if default_agent_id:
-        return default_agent_id
-    return (
-        getattr(client, "_default_agent_id", "")
-        or os.environ.get("DUNETRACE_AGENT_ID", "")
-        or fallback
-    )
+    return fallback
 
 
 def _entry_run(client, agent_id: str, opened_by: str):
     """A context manager for an entry-point run, or None when one should not
     open: no client to open it with, or a real run is already active."""
-    if client is None:
-        return None
-    active = _current_run.get()
-    if (
-        active is not None
-        and not getattr(active, "implicit", False)
-        and not getattr(active, "_implicit_closed", False)
-    ):
+    if client is None or explicit_run() is not None:
         return None
     # An implicit run active here is closed by client.run() itself.
     return client.run(agent_id, _opened_by=opened_by)
@@ -2655,8 +2660,18 @@ def _patch_langgraph_entry(
         if cm is None:
             yield from _orig_stream(self, *args, **kwargs)
             return
+        inner = _orig_stream(self, *args, **kwargs)
         with cm as run:
-            yield from _orig_stream(self, *args, **kwargs)
+            try:
+                yield from inner
+            except GeneratorExit:
+                # The consumer stopped early (break, or close()). GeneratorExit
+                # is a BaseException client.run() does not handle, so without
+                # this the run never got its terminal event. Close the graph's
+                # own stream and end the run normally.
+                inner.close()
+                run.exit_reason = run.exit_reason or "consumer_stopped"
+                return
             run.final_answer()
 
     _orig_astream = Pregel.astream
@@ -2668,9 +2683,17 @@ def _patch_langgraph_entry(
             async for chunk in _orig_astream(self, *args, **kwargs):
                 yield chunk
             return
+        inner = _orig_astream(self, *args, **kwargs)
         with cm as run:
-            async for chunk in _orig_astream(self, *args, **kwargs):
-                yield chunk
+            try:
+                async for chunk in inner:
+                    yield chunk
+            except GeneratorExit:
+                # aclose() from the consumer: close LangGraph's own generator
+                # now rather than at garbage collection, and end the run.
+                await inner.aclose()
+                run.exit_reason = run.exit_reason or "consumer_stopped"
+                return
             run.final_answer()
 
     Pregel.invoke = _invoke
@@ -2685,9 +2708,10 @@ def _patch_langgraph_entry(
 def _patch_fastapi(
     client: "Optional[Dunetrace]" = None, default_agent_id: Optional[str] = None
 ) -> None:
-    """Install DunetraceASGIMiddleware on every FastAPI app constructed after
-    this point, so each HTTP request is one run. Apps built before dt.init()
-    are not touched: call init() before constructing the app."""
+    """Install a lazy request boundary (LazyRunASGIMiddleware) on every FastAPI
+    app constructed after this point: a request becomes a run at its first LLM
+    call, and requests that never call a model produce none. Apps built before
+    dt.init() are not touched: call init() before constructing the app."""
     if "fastapi" in _PATCHED:
         return
     try:
@@ -2697,7 +2721,7 @@ def _patch_fastapi(
         return
     if client is None:
         return
-    from dunetrace.middleware import DunetraceASGIMiddleware
+    from dunetrace.middleware import LazyRunASGIMiddleware
 
     _orig_init = FastAPI.__init__
 
@@ -2705,10 +2729,11 @@ def _patch_fastapi(
     def _patched_init(self, *args, **kwargs):
         _orig_init(self, *args, **kwargs)
         try:
+            title = getattr(self, "title", None)
             agent_id = _entry_agent_id(
-                client, default_agent_id, getattr(self, "title", None), "fastapi"
+                client, default_agent_id, None if title == "FastAPI" else title, "fastapi"
             )
-            self.add_middleware(DunetraceASGIMiddleware, dt=client, agent_id=agent_id)
+            self.add_middleware(LazyRunASGIMiddleware, dt=client, agent_id=agent_id)
         except Exception:
             logger.debug("Dunetrace: could not install the FastAPI middleware", exc_info=True)
 
@@ -2721,8 +2746,9 @@ def _patch_fastapi(
 def _patch_flask(
     client: "Optional[Dunetrace]" = None, default_agent_id: Optional[str] = None
 ) -> None:
-    """Wrap ``wsgi_app`` of every Flask app constructed after this point with
-    DunetraceWSGIMiddleware, so each HTTP request is one run."""
+    """Wrap ``wsgi_app`` of every Flask app constructed after this point with a
+    lazy request boundary (LazyRunWSGIMiddleware): a request becomes a run at its
+    first LLM call, and requests that never call a model produce none."""
     if "flask" in _PATCHED:
         return
     try:
@@ -2732,7 +2758,7 @@ def _patch_flask(
         return
     if client is None:
         return
-    from dunetrace.middleware import DunetraceWSGIMiddleware
+    from dunetrace.middleware import LazyRunWSGIMiddleware
 
     _orig_init = Flask.__init__
 
@@ -2740,10 +2766,10 @@ def _patch_flask(
     def _patched_init(self, *args, **kwargs):
         _orig_init(self, *args, **kwargs)
         try:
-            agent_id = _entry_agent_id(
-                client, default_agent_id, getattr(self, "name", None), "flask"
-            )
-            self.wsgi_app = DunetraceWSGIMiddleware(self.wsgi_app, dt=client, agent_id=agent_id)
+            # Flask's name is the import name ("app", "__main__"), not a
+            # deliberate service name, so it is never used as the agent id.
+            agent_id = _entry_agent_id(client, default_agent_id, None, "flask")
+            self.wsgi_app = LazyRunWSGIMiddleware(self.wsgi_app, dt=client, agent_id=agent_id)
         except Exception:
             logger.debug("Dunetrace: could not install the Flask middleware", exc_info=True)
 
@@ -2779,10 +2805,10 @@ def auto_instrument(
 
     :param frameworks: List of framework names to patch. ``None`` patches all
                        detected installed frameworks.
-    :param client: Required for ``langchain``/``crewai`` — those integrations
-                   can open their own run when no ``dt.run()`` is active, and
-                   need a client to do it with. Unused by the other four
-                   frameworks, which only ever attach to an already-open run.
+    :param client: The client runs are opened with: by the framework entry
+                   points (langgraph, crewai, fastapi, flask) and, for patched
+                   LLM calls outside any run, as implicit runs. Without one,
+                   every patch is attach-only.
     :param default_agent_id: Fallback agent_id for runs ``langchain``/``crewai``
                        open themselves. Normally set via ``dt.init(agent_id=...)``
                        or the ``DUNETRACE_AGENT_ID`` environment variable rather

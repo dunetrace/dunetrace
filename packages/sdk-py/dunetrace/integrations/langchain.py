@@ -55,7 +55,7 @@ except ImportError:
     _LANGCHAIN_AVAILABLE = False
     BaseCallbackHandler = object  # type: ignore[assignment,misc]
 
-from dunetrace.context import _current_run
+from dunetrace.context import _current_run, active_run
 from dunetrace.models import agent_version as calc_version
 from dunetrace.policies import PolicyViolation
 
@@ -203,7 +203,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 root = self._lc_parent.get(lc_id) or (lc_id if lc_id in self._runs else None)
                 if root and root in self._runs:
                     return self._runs[root]
-        ambient = _current_run.get()
+        ambient = active_run()
         if ambient is not None and not getattr(ambient, "_dt_langchain_handler_owned", False):
             return _RunCtx(
                 run_id=ambient.run_id, dt_ctx=ambient, agent_id=ambient.agent_id, owns_run=False
@@ -308,7 +308,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             # that doesn't call it, or an interrupted invocation elsewhere in
             # the same thread) can never be mistaken for an ambient wrap by
             # some *other* invocation that happens to run next.
-            ambient_run = _current_run.get()
+            ambient_run = active_run()
             if ambient_run is not None and not getattr(
                 ambient_run, "_dt_langchain_handler_owned", False
             ):

@@ -126,10 +126,15 @@ export function wrapStreamText(streamTextFn: typeof streamText): typeof streamTe
   return ((opts: StreamTextOptions) => {
     const handle = openEntryRun("ai.streamText");
     if (!handle) return streamTextFn(instrumentStreamTextOptions(opts));
-    // The natural end of a stream is its `onFinish` (or `onError`). Chain
-    // ours after the caller's so the run closes when the stream does. A
-    // stream the caller never consumes is closed at process exit instead.
-    type Hooks = { onFinish?: (e: unknown) => unknown; onError?: (e: unknown) => unknown };
+    // The natural end of a stream is its `onFinish`, `onError` or `onAbort`.
+    // Chain ours after the caller's so the run closes when the stream does. A
+    // stream that never reaches any of them (never consumed, the process is
+    // exiting) is tracked by the client and closed at shutdown / exit.
+    type Hooks = {
+      onFinish?: (e: unknown) => unknown;
+      onError?: (e: unknown) => unknown;
+      onAbort?: (e: unknown) => unknown;
+    };
     const user = opts as unknown as Hooks;
     const chained = {
       ...opts,
@@ -138,11 +143,32 @@ export function wrapStreamText(streamTextFn: typeof streamText): typeof streamTe
         finally { handle.run.finalAnswer(); handle.finish(); }
       },
       onError: async (event: unknown) => {
-        try { if (user.onError) await user.onError(event); }
-        finally { handle.finish((event as { error?: unknown })?.error ?? event); }
+        try {
+          if (user.onError) await user.onError(event);
+          // Installing an onError replaces the AI SDK's default, which logs the
+          // error. Keep that behaviour when the caller did not supply their own,
+          // so a stream failure is not silenced by instrumentation.
+          // eslint-disable-next-line no-console
+          else console.error((event as { error?: unknown })?.error ?? event);
+        } finally {
+          handle.finish((event as { error?: unknown })?.error ?? event);
+        }
+      },
+      onAbort: async (event: unknown) => {
+        try { if (user.onAbort) await user.onAbort(event); }
+        finally {
+          handle.run._setExitReasonIfUnset("aborted");
+          handle.finish();
+        }
       },
     } as unknown as StreamTextOptions;
-    return runStorage.run(handle.run, () => streamTextFn(instrumentStreamTextOptions(chained)));
+    try {
+      return runStorage.run(handle.run, () => streamTextFn(instrumentStreamTextOptions(chained)));
+    } catch (err) {
+      // streamText throwing synchronously (bad options): no callback will fire.
+      handle.finish(err);
+      throw err;
+    }
   }) as typeof streamText;
 }
 
