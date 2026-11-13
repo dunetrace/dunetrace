@@ -21,7 +21,10 @@ Config (all optional except when enabling):
   DUNETRACE_OTEL_HEADERS         "k1=v1,k2=v2" auth headers (e.g. "DD-API-KEY=xxx").
   DUNETRACE_OTEL_PROTOCOL        "grpc" (default) or "http/protobuf".
   DUNETRACE_OTEL_SERVICE_NAME    service.name resource attr. Default "dunetrace".
-  DUNETRACE_OTEL_SAMPLING_RATIO  0.0-1.0 head sampling ratio. Default 1.0.
+  DUNETRACE_OTEL_SAMPLING_RATIO  0.0-1.0 share of runs exported. Default 1.0.
+                                 Decided per run (run_sampled), so a run is
+                                 exported whole or not at all, and the
+                                 detector's signal spans follow the same call.
   DUNETRACE_ORG_ID               optional dunetrace.org_id resource attr. The
                                  authoritative org is resolved server-side from
                                  the API key; this is only a convenience label.
@@ -32,7 +35,9 @@ INSECURE for plaintext gRPC to a local collector) still apply on top of this.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 import os
 import threading
 import time
@@ -111,9 +116,37 @@ def _parse_ratio(raw: Optional[str], default: float = 1.0) -> float:
     try:
         ratio = float(raw)
     except (TypeError, ValueError):
+        ratio = math.nan
+    if not math.isfinite(ratio):
+        # max(0.0, nan) is 0.0, so without this a templated "nan" silently
+        # turned export off while "abc" kept it fully on.
         logger.warning("DUNETRACE_OTEL_SAMPLING_RATIO=%r is not a number, using %s", raw, default)
         return default
     return min(1.0, max(0.0, ratio))
+
+
+def run_sampled(run_id: str, ratio: float) -> bool:
+    """Whether a run's spans are exported at this sampling ratio.
+
+    A pure function of ``run_id``, so every process that asks gets the same
+    answer: the SDK deciding whether to export the run, and the detector
+    deciding whether to export that run's signal spans. ``SHA-256(run_id)``'s
+    first 8 bytes compared against ``ratio * 2**64``.
+
+    Hashed, not read off the trace id: the trace id is the run UUID's integer,
+    and the low 64 bits OTel's ``TraceIdRatioBased`` compares start with the
+    fixed UUID variant bits ``10``. Every UUID lands in [0.5, 0.75) of the
+    range, so ratio 0.5 kept nothing and 0.8 kept everything. A hash is
+    uniform whatever the run_id looks like, which matters because run_id is
+    caller-supplied. The TS SDK implements the same function, so both SDKs
+    and the server agree on every run.
+    """
+    if ratio >= 1.0:
+        return True
+    if ratio <= 0.0:
+        return False
+    digest = hashlib.sha256(run_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") < int(ratio * 2**64)
 
 
 # ── Config ──────────────────────────────────────────────────────────────────────
@@ -324,6 +357,11 @@ def build_tracer_provider(config: OTelConfig) -> Optional[object]:
         )
         provider = TracerProvider(
             resource=_build_resource(config),
+            # Dunetrace's own run spans are sampled per run by the exporter
+            # (run_sampled) and parented on a sampled synthetic root, so this
+            # sampler keeps exactly what the exporter chose to emit. The ratio
+            # here only governs root spans a caller opens on get_tracer() with
+            # no parent; children follow their parent, per standard OTel.
             sampler=ParentBased(root=TraceIdRatioBased(config.sampling_ratio)),
         )
         provider.add_span_processor(processor)

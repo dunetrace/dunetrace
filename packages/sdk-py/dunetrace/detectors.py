@@ -1054,6 +1054,41 @@ class ContextBloatDetector(BaseDetector):
 # ── SLOW_STEP ──────────────────────────────────────────────────────────────────
 
 
+def tool_name_by_step(state: RunState) -> Dict[int, str]:
+    """Tool name of each step whose initiating event is ``tool.called``.
+
+    First-write-wins over the agent's own events (``external.signal`` shares
+    the step_index of the event it annotates and must not claim the step) —
+    the same rule run_builder uses for ``step_durations_ms`` and SlowStep uses
+    for a step's type. The per-run baseline metric reads this too
+    (detector_svc/baseline_metrics.py), so the per-tool baseline and the
+    per-tool threshold are computed over exactly the same steps.
+
+    A non-string or empty ``tool_name`` is dropped: ``payload`` validates
+    nothing inside itself, and a list here would be unhashable downstream.
+    """
+    first_type: Dict[int, str] = {}
+    names: Dict[int, str] = {}
+    for e in state.events:
+        if e.event_type is EventType.EXTERNAL_SIGNAL or e.step_index in first_type:
+            continue
+        first_type[e.step_index] = e.event_type.value
+        if e.event_type is EventType.TOOL_CALLED:
+            name = e.payload.get("tool_name")
+            if isinstance(name, str) and name:
+                names[e.step_index] = name
+    return names
+
+
+def _valid_latency(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value == value  # not NaN
+        and 0 <= value < float("inf")
+    )
+
+
 class SlowStepDetector(BaseDetector):
     """
     Any single step takes longer than a type-specific threshold. Thresholds are set by what
@@ -1068,7 +1103,14 @@ class SlowStepDetector(BaseDetector):
     agent whose historical calls are all near-instant (e.g. mocked tools in a demo agent) learns
     a P75 baseline of a few ms, and any real call — even a fast, unremarkable 300ms one — reads
     as a huge multiple of that baseline and fires. The floor keeps the threshold meaningful in
-    absolute terms regardless of how degenerate the learned baseline is.
+    absolute terms regardless of how degenerate the learned baseline is. It applies to every
+    baseline-derived threshold: per-tool, agent-wide tool, and LLM.
+
+    Baselines, when history exists: a tool step uses that tool's own P75
+    (``baseline_p75_latency_by_tool``) when the tool has enough history, else the agent-wide
+    tool P75 (``baseline_p75_latency_tool``). A fast lookup tool and a slow report generator
+    would otherwise share one threshold that is too loose for the first and too tight for the
+    second. Evidence ``baseline_scope`` says which one judged the worst step.
     """
 
     name = "SLOW_STEP"
@@ -1084,24 +1126,37 @@ class SlowStepDetector(BaseDetector):
     INFLATION_FACTOR = 2.0  # multiplier over P75 baseline when history is available
     MIN_THRESHOLD_MS = 500  # floor for baseline-derived thresholds — see class docstring
 
-    def _threshold_for(self, event_type: str, state: Optional[RunState] = None) -> tuple[int, str]:
+    def _tool_baseline(
+        self, state: RunState, tool_name: Optional[str]
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """(P75 ms, scope) for a tool step: the tool's own baseline when it has one,
+        else the agent-wide tool baseline. (None, None) when neither exists."""
+        by_tool = state.baseline_p75_latency_by_tool
+        if tool_name and isinstance(by_tool, dict):
+            p75 = by_tool.get(tool_name)
+            if p75 is not None and _valid_latency(p75):
+                return float(p75), "tool"
+        if state.baseline_p75_latency_tool is not None:
+            return state.baseline_p75_latency_tool, "agent"
+        return None, None
+
+    def _threshold_for(
+        self,
+        event_type: str,
+        state: Optional[RunState] = None,
+        tool_name: Optional[str] = None,
+    ) -> Tuple[int, str]:
         for prefix, static_ms, label in self.THRESHOLDS:
             if not prefix or event_type.startswith(prefix):
                 if state is not None:
-                    if prefix == "tool.called" and state.baseline_p75_latency_tool is not None:
+                    p75: Optional[float] = None
+                    if prefix == "tool.called":
+                        p75, _ = self._tool_baseline(state, tool_name)
+                    elif prefix == "llm.called":
+                        p75 = state.baseline_p75_latency_llm
+                    if p75 is not None:
                         return (
-                            max(
-                                int(state.baseline_p75_latency_tool * self.INFLATION_FACTOR),
-                                self.MIN_THRESHOLD_MS,
-                            ),
-                            label,
-                        )
-                    if prefix == "llm.called" and state.baseline_p75_latency_llm is not None:
-                        return (
-                            max(
-                                int(state.baseline_p75_latency_llm * self.INFLATION_FACTOR),
-                                self.MIN_THRESHOLD_MS,
-                            ),
+                            max(int(p75 * self.INFLATION_FACTOR), self.MIN_THRESHOLD_MS),
                             label,
                         )
                 return static_ms, label
@@ -1129,10 +1184,15 @@ class SlowStepDetector(BaseDetector):
             if e.step_index not in step_event_type:
                 step_event_type[e.step_index] = e.event_type.value
                 step_timestamp[e.step_index] = e.timestamp
+        step_tool_name = tool_name_by_step(state)
 
+        step_threshold: dict[int, int] = {}
         for step_idx, duration_ms in state.step_durations_ms.items():
             event_type = step_event_type.get(step_idx, "")
-            threshold_ms, label = self._threshold_for(event_type, state)
+            threshold_ms, label = self._threshold_for(
+                event_type, state, step_tool_name.get(step_idx)
+            )
+            step_threshold[step_idx] = threshold_ms
 
             if duration_ms > threshold_ms:
                 ratio = duration_ms / threshold_ms
@@ -1161,18 +1221,17 @@ class SlowStepDetector(BaseDetector):
             "step_label": worst_label,
             "ratio": round(ratio, 1),
             "all_slow_steps": {
-                k: v
-                for k, v in state.step_durations_ms.items()
-                if v > self._threshold_for(step_event_type.get(k, ""), state)[0]
+                k: v for k, v in state.step_durations_ms.items() if v > step_threshold[k]
             },
         }
 
-        # Include the raw P75 baseline so dashboards can show what normal looks like.
-        if (
-            worst_event_type.startswith("tool.called")
-            and state.baseline_p75_latency_tool is not None
-        ):
-            evidence["baseline_p75"] = round(state.baseline_p75_latency_tool, 1)
+        # Include the raw P75 baseline so dashboards can show what normal looks like,
+        # and which baseline it was: this tool's own, or the agent-wide tool one.
+        if worst_event_type.startswith("tool.called"):
+            p75, scope = self._tool_baseline(state, step_tool_name.get(worst_step_idx))
+            if p75 is not None:
+                evidence["baseline_p75"] = round(p75, 1)
+                evidence["baseline_scope"] = scope
         elif (
             worst_event_type.startswith("llm.called") and state.baseline_p75_latency_llm is not None
         ):

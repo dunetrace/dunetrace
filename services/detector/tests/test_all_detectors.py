@@ -711,6 +711,87 @@ class TestSlowStepDetector(unittest.TestCase):
         self.assertIsNotNone(sig)
         self.assertEqual(sig.evidence["threshold_ms"], 500)
 
+    # ── per-tool baselines ────────────────────────────────────────────────────
+
+    def _tool_steps(self, steps):
+        """steps: list of (tool_name, duration_ms) — one tool.called per step."""
+        state = base_state()
+        state.events = [
+            make_event(EventType.TOOL_CALLED, i + 1, payload={"tool_name": name})
+            for i, (name, _) in enumerate(steps)
+        ]
+        state.step_durations_ms = {i + 1: dur for i, (_, dur) in enumerate(steps)}
+        state.current_step = len(steps)
+        return state
+
+    def test_per_tool_baseline_judges_its_own_tool(self):
+        # Agent-wide P75 is 10s (a slow report tool dominates), so 3s on the
+        # fast lookup tool passes the agent-wide threshold but is 15x its own.
+        state = self._tool_steps([("lookup", 3_000)])
+        state.baseline_p75_latency_tool = 10_000.0
+        state.baseline_p75_latency_by_tool = {"lookup": 100.0, "report": 10_000.0}
+        sig = self.d.on_run_completion(state)
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.evidence["threshold_ms"], 500)  # 100*2 floored to 500
+        self.assertEqual(sig.evidence["baseline_p75"], 100.0)
+        self.assertEqual(sig.evidence["baseline_scope"], "tool")
+
+    def test_per_tool_baseline_loosens_a_slow_tool(self):
+        # 25s is slow against the agent-wide 2s baseline, normal for this tool.
+        state = self._tool_steps([("report", 25_000)])
+        state.baseline_p75_latency_tool = 2_000.0
+        state.baseline_p75_latency_by_tool = {"report": 15_000.0}
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_tool_without_its_own_baseline_uses_agent_wide(self):
+        state = self._tool_steps([("rare_tool", 5_000)])
+        state.baseline_p75_latency_tool = 1_000.0
+        state.baseline_p75_latency_by_tool = {"lookup": 100.0}
+        sig = self.d.on_run_completion(state)
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.evidence["threshold_ms"], 2_000)
+        self.assertEqual(sig.evidence["baseline_scope"], "agent")
+
+    def test_per_tool_threshold_keeps_the_floor(self):
+        # Mocked tool with a 2ms history: an ordinary 300ms call must not fire.
+        state = self._tool_steps([("cached", 300)])
+        state.baseline_p75_latency_by_tool = {"cached": 2.0}
+        self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_zero_agent_wide_baseline_does_not_divide_by_zero(self):
+        # gap_p75_tool_ms of 0.0 (instant tools, integer-ms gaps) used to give
+        # threshold 0 and a ZeroDivisionError that disabled SLOW_STEP entirely.
+        state = self._tool_steps([("t", 600)])
+        state.baseline_p75_latency_tool = 0.0
+        sig = self.d.on_run_completion(state)
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.evidence["threshold_ms"], 500)
+
+    def test_non_string_tool_name_falls_back_instead_of_raising(self):
+        # payload validates nothing inside itself; an unhashable tool_name used
+        # to raise inside the detector, which run_detectors swallowed silently.
+        state = base_state()
+        state.events = [make_event(EventType.TOOL_CALLED, 1, payload={"tool_name": ["x"]})]
+        state.step_durations_ms = {1: 5_000}
+        state.baseline_p75_latency_tool = 1_000.0
+        state.baseline_p75_latency_by_tool = {"x": 10_000.0}
+        sig = self.d.on_run_completion(state)
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig.evidence["baseline_scope"], "agent")
+
+    def test_garbage_per_tool_values_are_ignored(self):
+        state = self._tool_steps([("t", 5_000)])
+        state.baseline_p75_latency_tool = 1_000.0
+        state.baseline_p75_latency_by_tool = {"t": "fast"}
+        sig = self.d.on_run_completion(state)
+        self.assertEqual(sig.evidence["baseline_scope"], "agent")
+
+    def test_all_slow_steps_uses_each_steps_own_threshold(self):
+        state = self._tool_steps([("lookup", 800), ("report", 12_000)])
+        state.baseline_p75_latency_by_tool = {"lookup": 100.0, "report": 10_000.0}
+        sig = self.d.on_run_completion(state)
+        self.assertEqual(sig.evidence["all_slow_steps"], {1: 800})
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 10. RETRY_STORM

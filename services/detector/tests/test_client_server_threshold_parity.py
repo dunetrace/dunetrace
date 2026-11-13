@@ -200,6 +200,14 @@ class TestOneMap(ParityCase):
         for attr in BASELINE_FIELDS.values():
             self.assertTrue(hasattr(state, attr), attr)
 
+    def test_per_tool_baseline_key_matches_what_ingest_serves(self):
+        from dunetrace.detector_config import PER_TOOL_BASELINE_FIELD
+        from dunetrace_schemas.baselines import PER_TOOL_LATENCY_RESPONSE_KEY
+
+        key, attr = PER_TOOL_BASELINE_FIELD
+        self.assertEqual(key, PER_TOOL_LATENCY_RESPONSE_KEY)
+        self.assertTrue(hasattr(RunState(run_id="r", agent_id="a", agent_version="v"), attr))
+
 
 class TestTunableParity(ParityCase):
     def _pairs(self, agent_id: str):

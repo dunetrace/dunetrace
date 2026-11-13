@@ -6,6 +6,7 @@ runs all detectors, and stores any signals found.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -37,6 +38,7 @@ from detector_svc.db import (
     fetch_destination_baseline,
     fetch_duration_baseline,
     fetch_latency_baseline,
+    fetch_per_tool_latency_baselines,
     fetch_memory_writes,
     fetch_llm_tool_ratio_baseline,
     fetch_run_events,
@@ -452,6 +454,32 @@ async def _apply_ungrounded_destination_cross_run(
         await upsert_destination_baseline(org_id, agent_id, [(d, t) for d, t, _h in grounded])
 
 
+def _otel_run_sampled(run_id: str, events: list, ratio: float) -> bool:
+    """Whether the SDK exported this run's spans, so its signal and policy spans
+    belong in the backend too.
+
+    The SDK records its decision on run.started as ``otel_sampled``; that wins,
+    so one detector serving many customers follows each SDK's own ratio and
+    never parents a signal span on a run that was dropped. A run without the
+    key (OTel off in the SDK, an older SDK, OTLP ingestion) falls back to the
+    same deterministic function the SDK uses, on this service's own ratio.
+    """
+    started = next((e for e in events if e.get("event_type") == "run.started"), None)
+    payload = (started or {}).get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = {}
+    recorded = payload.get("otel_sampled") if isinstance(payload, dict) else None
+    if isinstance(recorded, bool):
+        return recorded
+    from dunetrace.otel import run_sampled
+
+    parent = next((e.get("parent_run_id") for e in events if e.get("parent_run_id")), None)
+    return run_sampled(parent or run_id, ratio)
+
+
 def _emit_otel_findings(
     run_id: str,
     org_id: str,
@@ -475,6 +503,8 @@ def _emit_otel_findings(
         from dunetrace.integrations.otel import emit_run_findings
 
         cfg = _otel.active_config()
+        if not _otel_run_sampled(run_id, events, getattr(cfg, "sampling_ratio", 1.0)):
+            return
         policy_events = (
             [] if is_reprocess else [e for e in events if e.get("event_type") == "policy.triggered"]
         )
@@ -543,6 +573,11 @@ async def _handle_processing_failure(
     return 0
 
 
+async def _none() -> None:
+    """Awaitable placeholder for a skipped gather() slot."""
+    return None
+
+
 async def process_run(
     run_id: str,
     agent_id: str,
@@ -588,6 +623,7 @@ async def process_run(
             state.baseline_p75_llm_tool_ratio,
             state.baseline_p75_total_tokens,
             state.baseline_p75_duration_s,
+            state.baseline_p75_latency_by_tool,
         ) = await asyncio.gather(
             fetch_step_count_baseline(org_id, agent_id, agent_version, run_id),
             fetch_latency_baseline(org_id, agent_id, agent_version, run_id, "tool.called"),
@@ -596,6 +632,11 @@ async def process_run(
             fetch_llm_tool_ratio_baseline(org_id, agent_id, agent_version, run_id),
             fetch_total_tokens_baseline(org_id, agent_id, agent_version, run_id),
             fetch_duration_baseline(org_id, agent_id, agent_version, run_id),
+            # Only SLOW_STEP's tool steps read it — a run with no tool calls
+            # does not pay for the query.
+            fetch_per_tool_latency_baselines(org_id, agent_id, agent_version, run_id)
+            if state.tool_calls
+            else _none(),
         )
         detectors = await get_detectors(agent_id, org_id)
         signals = run_detectors(state, detectors=detectors)
