@@ -34,6 +34,9 @@ export DUNETRACE_OTEL_ENDPOINT=https://ingest.<region>.signoz.cloud:443
 export DUNETRACE_OTEL_HEADERS="signoz-ingestion-key=<your-key>"
 ```
 
+With `http/protobuf`, a base URL with no path gets the standard `/v1/traces`
+appended, in both SDKs; an endpoint that already has a path is used as-is.
+
 ## Where to look in Signoz
 
 - **Traces**: filter by `service.name = dunetrace`, or search the

@@ -37,6 +37,17 @@ function omitLlmOutputText(): boolean {
 
 export class DunetraceRun {
   readonly runId: string;
+  /** OTel correlation ids, deterministic from runId, so a customer can jump
+   *  from an OTel backend to the Dunetrace run and back. Set by the client
+   *  only when OTel export is active; null otherwise.
+   *
+   *  `otelTraceId` is the trace every span of this run lands in, and is the
+   *  id to look a run up by. `otelParentSpanId` is the id of the synthetic,
+   *  never-exported parent the `dunetrace.run` span is started under; the run
+   *  span's own id is assigned by the OpenTelemetry SDK and is not known
+   *  here. In a backend, the run span is the one whose parent is this id. */
+  otelTraceId:      string | null = null;
+  otelParentSpanId: string | null = null;
 
   private _agentId:    string;
   private _version:    string;

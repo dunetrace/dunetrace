@@ -306,7 +306,9 @@ def _build_span_exporter(config: OTelConfig) -> object:
             OTLPSpanExporter as HTTPSpanExporter,
         )
 
-        return HTTPSpanExporter(endpoint=config.endpoint, headers=config.headers or None)
+        return HTTPSpanExporter(
+            endpoint=_http_traces_url(config.endpoint), headers=config.headers or None
+        )
 
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
         OTLPSpanExporter as GRPCSpanExporter,
@@ -315,10 +317,30 @@ def _build_span_exporter(config: OTelConfig) -> object:
     return GRPCSpanExporter(endpoint=config.endpoint, headers=config.headers or None)
 
 
+def _http_traces_url(endpoint: str) -> str:
+    """The OTLP/HTTP traces URL for an endpoint. The exporter posts to an
+    explicit ``endpoint`` verbatim, so a bare collector or vendor base URL (no
+    path) gets the standard ``/v1/traces``, as OTEL_EXPORTER_OTLP_ENDPOINT
+    would. An endpoint that already has a path is left alone. Same rule as the
+    TS SDK's httpTracesUrl."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(endpoint)
+    except ValueError:
+        return endpoint
+    if parts.scheme and parts.netloc and parts.path in ("", "/"):
+        return urlunsplit(parts._replace(path="/v1/traces"))
+    return endpoint
+
+
 def _build_resource(config: OTelConfig) -> "Resource":
     attrs: Dict[str, str] = {
         "service.name": config.service_name,
-        "service.version": config.service_version,
+        # The SDK's version, not the customer's service version: service.version
+        # belongs to whoever names the service (DUNETRACE_OTEL_SERVICE_NAME is
+        # often the customer's own service). Same as the TS SDK.
+        "dunetrace.sdk.version": config.service_version,
     }
     if config.org_id:
         attrs["dunetrace.org_id"] = config.org_id

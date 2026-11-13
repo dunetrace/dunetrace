@@ -77,24 +77,8 @@ function hrTime(tsSeconds: number): HrTime {
   return [seconds, nanos];
 }
 
-/** True when s is a usable 32-hex-char trace id (not the all-zero invalid one). */
-function isTraceIdHex(s: string): boolean {
-  return /^[0-9a-f]{32}$/.test(s) && s !== "00000000000000000000000000000000";
-}
-
-/** 32-hex-char trace ID for run_id (W3C traceparent format). A Dunetrace run UUID
- *  maps to a stable trace both a backend and the dashboard can address. Returns
- *  "" when run_id is not UUID-shaped. */
-export function traceIdHex(runId: string): string {
-  const hex = runId.replace(/-/g, "").toLowerCase();
-  return isTraceIdHex(hex) ? hex : "";
-}
-
-/** 16-hex-char root span ID for run_id (its lower 64 bits). "" when not UUID-shaped. */
-export function rootSpanIdHex(runId: string): string {
-  const hex = traceIdHex(runId);
-  return hex ? hex.slice(16) : "";
-}
+export { traceIdHex, rootSpanIdHex, runSampled } from "../otel-ids.js";
+import { runSampled, traceIdHex } from "../otel-ids.js";
 
 /** Deterministic SpanContext for a run's root span. Seeds a run's own trace and
  *  links a child run to its parent. Returns null when run_id is not UUID-shaped,
@@ -239,6 +223,26 @@ export interface DunetraceOtelExporterOptions {
   /** When false, drop content-bearing attributes (tool args, request URL,
    *  retrieval query) from spans. Default true. */
   captureContent?: boolean;
+  /** Share of runs to export, 0.0-1.0. Defaults to
+   *  DUNETRACE_OTEL_SAMPLING_RATIO (1.0 when unset). Decided once per run with
+   *  runSampled, so a run is exported whole or not at all, a child run follows
+   *  its parent, and the detector's signal spans follow the same decision.
+   *  Applies whatever tracer you pass: the run's synthetic parent is flagged
+   *  sampled, so a ParentBased sampler on your provider never re-decides. */
+  samplingRatio?: number;
+}
+
+/** runId -> sampled, for every run between run.started and its end, kept or
+ *  not. Process-wide, not per exporter: each Dunetrace client builds its own
+ *  sink, and a child run opened by one client under a run another client
+ *  started must inherit that run's decision rather than re-hash its id. */
+const _sampledRuns = new Map<string, boolean>();
+
+function ratioFromEnv(): number {
+  const raw = process.env["DUNETRACE_OTEL_SAMPLING_RATIO"];
+  if (raw === undefined || raw.trim() === "") return 1;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 1;
 }
 
 // ── Exporter ─────────────────────────────────────────────────────────────────
@@ -249,11 +253,15 @@ export interface DunetraceOtelExporterOptions {
  * naturally sequential per run.
  */
 export class DunetraceOtelExporter {
+  /** See EventSink.exportsOtelSpans. */
+  readonly exportsOtelSpans = true;
   private readonly _tracer: Tracer;
   private readonly _captureContent: boolean;
   private readonly _runs = new Map<string, RunSpans>();
+  private readonly _samplingRatio: number;
 
   constructor(opts: DunetraceOtelExporterOptions = {}) {
+    this._samplingRatio = opts.samplingRatio ?? ratioFromEnv();
     if (opts.tracer) {
       this._tracer = opts.tracer;
     } else {
@@ -261,6 +269,19 @@ export class DunetraceOtelExporter {
       this._tracer = tp.getTracer(opts.tracerName ?? "dunetrace");
     }
     this._captureContent = opts.captureContent ?? true;
+  }
+
+  /** Whether runId's spans will be exported. Stable for the life of the run.
+   *  A child inherits an open parent's decision; a child whose parent ran in
+   *  another process is decided on the parent's runId, which matches the
+   *  parent's own decision whenever that parent was the tree's root. */
+  shouldSample(runId: string, parentRunId: string | null = null): boolean {
+    const known = _sampledRuns.get(runId);
+    if (known !== undefined) return known;
+    const inherited = parentRunId ? _sampledRuns.get(parentRunId) : undefined;
+    const decision = inherited ?? runSampled(parentRunId || runId, this._samplingRatio);
+    _sampledRuns.set(runId, decision);
+    return decision;
   }
 
   /** Route one AgentEvent to its span operation. Never throws: an export failure
@@ -294,6 +315,9 @@ export class DunetraceOtelExporter {
   // ── Run span ───────────────────────────────────────────────────────────────
 
   private _onRunStarted(event: AgentEvent): void {
+    // A dropped run registers no spans, so every later handler for it returns
+    // at its `!rs` guard and costs nothing.
+    if (!this.shouldSample(event.run_id, event.parent_run_id ?? null)) return;
     const parentCtx = parentCtxForRun(event.run_id);
 
     const attrs: Attributes = {
@@ -339,6 +363,7 @@ export class DunetraceOtelExporter {
   }
 
   private _onRunEnded(event: AgentEvent): void {
+    _sampledRuns.delete(event.run_id);
     const rs = this._runs.get(event.run_id);
     if (!rs) return;
     this._runs.delete(event.run_id);
