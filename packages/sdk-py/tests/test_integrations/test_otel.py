@@ -805,3 +805,135 @@ class TestClientIntegration:
         root = _named(mem.get_finished_spans(), "dunetrace.run")
         assert root.attributes["dunetrace.run.status"] == "failed"
         assert root.attributes["dunetrace.run.error_type"] == "ValueError"
+
+
+# ── Per-run sampling ──────────────────────────────────────────────────────────
+
+
+def _ids_by_decision(ratio: float):
+    """A run id that run_sampled keeps at `ratio`, and one it drops."""
+    import uuid as _uuid
+
+    from dunetrace.otel import run_sampled
+
+    kept = dropped = None
+    while kept is None or dropped is None:
+        rid = str(_uuid.uuid4())
+        if run_sampled(rid, ratio):
+            kept = kept or rid
+        else:
+            dropped = dropped or rid
+    return kept, dropped
+
+
+def _sampled_exporter(ratio: float):
+    mem = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(mem))
+    return DunetraceOTelExporter(tracer_provider=provider, sampling_ratio=ratio), mem
+
+
+class TestPerRunSampling:
+    def test_dropped_run_exports_nothing_and_registers_nothing(self):
+        exp, mem = _sampled_exporter(0.5)
+        _, dropped = _ids_by_decision(0.5)
+        exp.handle(_event(EventType.RUN_STARTED, dropped))
+        exp.handle(_event(EventType.TOOL_CALLED, dropped, payload={"tool_name": "t", "args": "{}"}))
+        exp.handle(_run_completed(dropped))
+        assert mem.get_finished_spans() == ()
+        assert exp._runs == {} and exp._sampled == {}
+
+    def test_kept_run_exports(self):
+        exp, mem = _sampled_exporter(0.5)
+        kept, _ = _ids_by_decision(0.5)
+        exp.handle(_event(EventType.RUN_STARTED, kept))
+        exp.handle(_run_completed(kept))
+        assert [s.name for s in mem.get_finished_spans()] == ["dunetrace.run"]
+
+    def test_nested_child_inherits_the_parents_decision(self):
+        exp, mem = _sampled_exporter(0.5)
+        kept, dropped = _ids_by_decision(0.5)
+        # Each parent gets a child whose own hash says the opposite.
+        exp.handle(_event(EventType.RUN_STARTED, kept))
+        exp.handle(_event(EventType.RUN_STARTED, dropped, parent_run_id=kept))
+        exp.handle(_run_completed(dropped))
+        exp.handle(_run_completed(kept))
+        assert len(mem.get_finished_spans()) == 2, "child of a kept run is kept"
+
+        exp2, mem2 = _sampled_exporter(0.5)
+        exp2.handle(_event(EventType.RUN_STARTED, dropped))
+        exp2.handle(_event(EventType.RUN_STARTED, kept, parent_run_id=dropped))
+        exp2.handle(_run_completed(kept))
+        exp2.handle(_run_completed(dropped))
+        assert mem2.get_finished_spans() == (), "child of a dropped run is dropped"
+
+    def test_cross_process_child_is_decided_on_its_parents_id(self):
+        exp, mem = _sampled_exporter(0.5)
+        kept, dropped = _ids_by_decision(0.5)
+        # Parent ran elsewhere; this process only sees the child.
+        assert exp.should_sample(dropped, parent_run_id=kept) is True
+
+    def test_should_sample_is_stable_for_the_run(self):
+        exp, _ = _sampled_exporter(0.5)
+        kept, dropped = _ids_by_decision(0.5)
+        assert exp.should_sample(kept) is exp.should_sample(kept) is True
+        assert exp.should_sample(dropped) is exp.should_sample(dropped) is False
+
+    def test_ratio_defaults_to_env(self, monkeypatch=None):
+        import os
+
+        old = os.environ.get("DUNETRACE_OTEL_SAMPLING_RATIO")
+        os.environ["DUNETRACE_OTEL_SAMPLING_RATIO"] = "0"
+        try:
+            exp, mem = _make_exporter()
+            exp.handle(_event(EventType.RUN_STARTED, "11111111-1111-4111-8111-111111111111"))
+            exp.handle(_run_completed("11111111-1111-4111-8111-111111111111"))
+            assert mem.get_finished_spans() == ()
+        finally:
+            if old is None:
+                os.environ.pop("DUNETRACE_OTEL_SAMPLING_RATIO", None)
+            else:
+                os.environ["DUNETRACE_OTEL_SAMPLING_RATIO"] = old
+
+
+class TestClientSamplingIntegration:
+    def _client(self, ratio):
+        from dunetrace import Dunetrace
+        from dunetrace.emitters import NoopBatchingEmitter
+
+        exp, mem = _sampled_exporter(ratio)
+        seen = []
+        real = exp.handle
+
+        def spy(event):
+            seen.append(event)
+            real(event)
+
+        exp.handle = spy
+        self.seen = seen
+        return Dunetrace(emitter=NoopBatchingEmitter(), otel_exporter=exp), mem
+
+    def _started_payload(self):
+        return next(e for e in self.seen if e.event_type is EventType.RUN_STARTED).payload
+
+    def test_dropped_run_gets_no_trace_id_and_records_the_decision(self):
+        dt, mem = self._client(0.0)
+        try:
+            with dt.run("checkout", user_input="hi", model="gpt-4o") as run:
+                assert run.otel_trace_id is None
+                assert run.otel_span_id is None
+                assert self._started_payload()["otel_sampled"] is False
+                run.final_answer()
+        finally:
+            dt.shutdown()
+        assert mem.get_finished_spans() == ()
+
+    def test_kept_run_gets_trace_id_and_records_the_decision(self):
+        dt, _ = self._client(1.0)
+        try:
+            with dt.run("checkout", user_input="hi", model="gpt-4o") as run:
+                assert run.otel_trace_id == trace_id_hex(run.run_id)
+                assert self._started_payload()["otel_sampled"] is True
+                run.final_answer()
+        finally:
+            dt.shutdown()
