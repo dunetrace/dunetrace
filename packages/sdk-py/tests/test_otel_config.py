@@ -458,6 +458,8 @@ class TestHttpTracesUrl:
 
     def test_non_url_is_left_for_the_exporter(self):
         assert otel._http_traces_url("collector:4318") == "collector:4318"
+
+
 # ── run_sampled: the per-run decision both SDKs and the detector share ───────
 
 
