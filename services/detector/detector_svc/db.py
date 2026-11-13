@@ -19,6 +19,12 @@ except ImportError:
     _ASYNCPG = False
 
 from detector_svc.config import settings
+from dunetrace_schemas.baselines import (
+    MAX_TOOLS_PER_BASELINE,
+    PER_TOOL_LATENCY_COLUMN,
+    per_tool_from_rows,
+    per_tool_latency_baselines_sql,
+)
 
 logger = logging.getLogger("dunetrace.detector.db")
 
@@ -212,9 +218,14 @@ CREATE TABLE IF NOT EXISTS run_baseline_metrics (
     llm_tool_ratio  DOUBLE PRECISION,
     total_tokens    DOUBLE PRECISION,
     duration_s      DOUBLE PRECISION,
+    gap_p75_by_tool_ms JSONB,
     recorded_at     TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
     PRIMARY KEY (org_id, run_id)
 );
+-- {tool_name: this run's P75 step latency in ms} for SLOW_STEP's per-tool
+-- thresholds. A map rather than a column per tool; capped at
+-- dunetrace_schemas.baselines.MAX_TOOLS_PER_BASELINE entries per run.
+ALTER TABLE run_baseline_metrics ADD COLUMN IF NOT EXISTS gap_p75_by_tool_ms JSONB;
 -- Partial on `clean`: every baseline read filters to clean runs, so the dirty
 -- ones are dead weight in the index.
 CREATE INDEX IF NOT EXISTS idx_rbm_agent_clean
@@ -530,14 +541,15 @@ async def write_baseline_metrics(
     """
     if not _pool:
         return
+    by_tool = metrics.get(PER_TOOL_LATENCY_COLUMN)
     async with _pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO run_baseline_metrics
                 (org_id, run_id, agent_id, agent_version, clean, step_count,
                  gap_p75_tool_ms, gap_p75_llm_ms, token_growth, llm_tool_ratio,
-                 total_tokens, duration_s)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                 total_tokens, duration_s, gap_p75_by_tool_ms)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
             ON CONFLICT (org_id, run_id) DO UPDATE SET
                 clean           = EXCLUDED.clean,
                 step_count      = EXCLUDED.step_count,
@@ -547,6 +559,7 @@ async def write_baseline_metrics(
                 llm_tool_ratio  = EXCLUDED.llm_tool_ratio,
                 total_tokens    = EXCLUDED.total_tokens,
                 duration_s      = EXCLUDED.duration_s,
+                gap_p75_by_tool_ms = EXCLUDED.gap_p75_by_tool_ms,
                 recorded_at     = NOW()
             """,
             org_id,
@@ -561,6 +574,7 @@ async def write_baseline_metrics(
             metrics.get("llm_tool_ratio"),
             metrics.get("total_tokens"),
             metrics.get("duration_s"),
+            json.dumps(by_tool) if by_tool else None,
         )
 
 
@@ -724,78 +738,39 @@ async def _legacy_latency_baseline(
         return None
     return float(row["p75"]) if row["p75"] is not None else None
 
+
 async def fetch_per_tool_latency_baselines(
+    org_id: str,
     agent_id: str,
     agent_version: str,
     exclude_run_id: str,
     min_runs: int = _MIN_BASELINE_RUNS,
     lookback: int = 50,
 ) -> "Optional[dict[str, float]]":
-    """
-    P75 wall-clock gap (ms) that follows each 'tool.called' event, grouped by tool name.
+    """{tool_name: P75 step latency in ms} over recent clean runs, for
+    SLOW_STEP's per-tool thresholds. None when no tool has `min_runs` samples.
+
+    Reads the per-run maps write_baseline_metrics stores (built from the same
+    RunState the detector judges, so the statistic cannot drift from it), with
+    the same org scoping and clean-run filter as every other baseline. There is
+    no legacy events-derived fallback: a tool without enough stored history
+    simply uses the agent-wide tool baseline, which is what SLOW_STEP did
+    before per-tool baselines existed.
     """
     if not _pool:
         return None
-
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
-            """
-            WITH recent AS (
-                SELECT pr.run_id
-                FROM processed_runs pr
-                WHERE pr.agent_id      = $1
-                  AND pr.agent_version = $2
-                  AND pr.run_id       != $3
-                  AND EXISTS (
-                      SELECT 1 FROM events e
-                      WHERE e.run_id = pr.run_id
-                        AND e.event_type = 'run.completed'
-                  )
-                ORDER BY pr.processed_at DESC
-                LIMIT $4
-            ),
-            event_sequence AS (
-                SELECT
-                    e.run_id,
-                    e.event_type,
-                    e.payload->>'tool_name' as tool_name,
-                    (LEAD(e.timestamp) OVER (
-                        PARTITION BY e.run_id
-                        ORDER BY e.step_index, e.timestamp
-                    ) - e.timestamp) * 1000.0 AS gap_ms
-                FROM events e
-                WHERE e.run_id IN (SELECT run_id FROM recent)
-            ),
-            event_gaps AS (
-                SELECT run_id, tool_name, gap_ms
-                FROM event_sequence
-                WHERE event_type = 'tool.called'
-            ),
-            stats AS (
-                SELECT
-                    tool_name,
-                    COUNT(DISTINCT run_id) AS sample_size,
-                    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY gap_ms) AS p75
-                FROM event_gaps
-                WHERE gap_ms >= 0
-                  AND gap_ms IS NOT NULL
-                  AND tool_name IS NOT NULL
-                GROUP BY tool_name
-            )
-            SELECT tool_name, p75
-            FROM stats
-            WHERE sample_size >= $5
-            """,
+            per_tool_latency_baselines_sql(),
+            org_id,
             agent_id,
             agent_version,
             exclude_run_id,
             lookback,
             min_runs,
+            MAX_TOOLS_PER_BASELINE,
         )
-
-    if not rows:
-        return None
-    return {r["tool_name"]: float(r["p75"]) for r in rows if r["p75"] is not None}
+    return per_tool_from_rows(rows)
 
 
 async def _legacy_token_growth_baseline(

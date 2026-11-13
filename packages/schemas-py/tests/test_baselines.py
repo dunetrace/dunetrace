@@ -129,5 +129,36 @@ class TestBaselinesFromRow(unittest.TestCase):
         self.assertEqual(baselines_from_row(row, min_runs=3)["p75_steps"], 9.0)
 
 
+class TestPerToolLatency(unittest.TestCase):
+    def test_sql_is_org_scoped_clean_and_capped(self):
+        from dunetrace_schemas.baselines import per_tool_latency_baselines_sql
+
+        sql = _norm(per_tool_latency_baselines_sql())
+        for needle in (
+            "org_id = $1",
+            "agent_id = $2",
+            "agent_version = $3",
+            "run_id != $4",
+            "AND clean",
+            "LIMIT $5",
+            "HAVING COUNT(*) >= $6",
+            "LIMIT $7",
+            "FROM run_baseline_metrics",
+        ):
+            self.assertIn(needle, sql)
+
+    def test_rows_map_to_tool_names_and_skip_nulls(self):
+        from dunetrace_schemas.baselines import per_tool_from_rows
+
+        rows = [
+            {"tool_name": "a", "p75": 10},
+            {"tool_name": "b", "p75": None},
+            {"tool_name": None, "p75": 3.0},
+        ]
+        self.assertEqual(per_tool_from_rows(rows), {"a": 10.0})
+        self.assertIsNone(per_tool_from_rows([]))
+        self.assertIsNone(per_tool_from_rows(None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
