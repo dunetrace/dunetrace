@@ -7,11 +7,11 @@ i.e. no code changes required.
 
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
-> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **31**
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **32**
 > detectors the SDK can evaluate during runtime event collection. The other
 > three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
 > need raw input or a second run's data and are handled separately. The detector
-> worker runs all 34 regardless — see
+> worker runs all 35 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -1539,16 +1539,24 @@ score is more than 30% below the early-half average. This is a relative trend
 signal, unlike `RAG_EMPTY_RETRIEVAL` (absolute relevance) and
 `EXCESSIVE_RETRIEVAL` (volume). Severity: MEDIUM; ships in shadow mode.
 
-Requires at least three finite, nonnegative scored retrievals **per index**;
-missing/invalid scores are ignored. Calls are ordered by step_index. For an odd
-count, the middle call belongs to the late half. Zero early averages do not
-fire. Different indexes are not compared because score scales can differ.
-This assumes higher scores mean better relevance; convert distance metrics
-before instrumentation. Changing query intent or scoring models can also cause
+Requires at least three finite, nonnegative scored, **non-empty** retrievals
+**per index**; missing or invalid scores are ignored, numeric strings and numpy
+scalars are accepted, and a retrieval that returned nothing (`result_count` 0)
+is left to `RAG_EMPTY_RETRIEVAL` rather than read as a decline. Calls are
+ordered by step_index. For an odd count, the middle call belongs to the late
+half. Zero early averages do not fire, and a drop of exactly the threshold does
+not fire. Different indexes are not compared because score scales can differ;
+when `retrieval.responded` carries no `index_name`, the one on the matching
+`retrieval.called` is used (LangChain names the retriever only there). This
+assumes higher scores mean better relevance; convert distance metrics before
+instrumentation. Changing query intent or scoring models can also cause
 legitimate drops: this heuristic cannot establish answer quality or root cause.
 
-Config: `min_retrievals` (default 3; minimum effective value 3),
-`drop_threshold` (default 0.3, relative fraction). Evidence includes
+Config: `min_retrievals` (default 3, minimum 3: a value below 3 is rejected and
+the detector keeps its defaults), `drop_threshold` (default 0.3, a relative
+fraction in (0, 1]). Alerting, once promoted, is frequency-based (3 runs in
+10), like `RAG_EMPTY_RETRIEVAL`. The `fix_rag_retrieval` replay modification
+resolves it. Evidence includes
 `early_avg_score`, `late_avg_score`, `drop_pct`, `retrieval_count`, index and
 step range. Confidence increases with drop magnitude. See the synthetic
 [calibration report](../scripts/calibration/rag_quality_degradation_calibration.md).

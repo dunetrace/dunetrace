@@ -7,7 +7,7 @@ No network, models, or infrastructure are required.
 
 16 hand-labeled traces: TP 4, FP 3, FN 1, TN 8; recall 80.0%, false-positive rate 27.3%, precision 57.1%.
 
-The labels describe intended query scenarios, not information available to the detector. Both a legitimate intent change and a three-call benign mixed-query trace fire. The low-score benign trace [0.15, 0.10, 0.05] also fires: a 0.05 absolute gap becomes a 50% relative drop. Constant low scores cannot reveal this boundary. A noisy but flat three-call high-score trace does not. A gradual decline below the default threshold is missed. These fixed hand-assigned scores are boundary checks, not a representative scorer population or production precision estimate.
+The labels describe intended query scenarios, not information available to the detector, so some benign traces are indistinguishable from degradation by score alone. Benign traces that fired: *low-score benign query mix* [0.15, 0.1, 0.05], *three benign mixed queries* [0.9, 0.3, 0.8], *intent legitimately changed* [0.9, 0.9, 0.4, 0.4]. Degradations missed: *gradual degradation below default* [0.8, 0.75, 0.65, 0.6]. These fixed hand-assigned scores are boundary checks, not a representative scorer population or production precision estimate.
 
 ## Stationary benign-distribution stress test
 

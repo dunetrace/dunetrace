@@ -60,6 +60,15 @@ def sensitivity(detector, trials, seed):
     return "\n".join(rows)
 
 
+def _rate(num: int, den: int) -> str:
+    """A percentage, or "n/a" when nothing was in the denominator."""
+    return f"{num / den:.1%}" if den else "n/a"
+
+
+def _names(items) -> str:
+    return ", ".join(f"*{name}* {scores}" for name, scores in items) or "none"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trials", type=int, default=2000)
@@ -70,16 +79,21 @@ def main():
         parser.error("--trials must be positive")
     detector = RagQualityDegradationDetector()
     tp = fp = fn = tn = 0
+    false_positives: list = []
+    misses: list = []
     for name, scores, positive in CORPUS:
         fired = fires(detector, name, scores)
         tp += fired and positive
         fp += fired and not positive
         fn += not fired and positive
         tn += not fired and not positive
+        if fired and not positive:
+            false_positives.append((name, scores))
+        if positive and not fired:
+            misses.append((name, scores))
         print(f"{name}: label={positive} fired={fired}")
-    print(
-        f"TP={tp} FP={fp} FN={fn} TN={tn}; recall={tp / (tp + fn):.1%}; FP rate={fp / (fp + tn):.1%}"
-    )
+    recall, fp_rate, precision = _rate(tp, tp + fn), _rate(fp, fp + tn), _rate(tp, tp + fp)
+    print(f"TP={tp} FP={fp} FN={fn} TN={tn}; recall={recall}; FP rate={fp_rate}")
     table = sensitivity(detector, args.trials, args.seed)
     print(table)
     if args.report:
@@ -89,15 +103,14 @@ def main():
             "--report scripts/calibration/rag_quality_degradation_calibration.md`.\n"
             "No network, models, or infrastructure are required.\n\n"
             f"## Fixed boundary corpus\n\n{len(CORPUS)} hand-labeled traces: "
-            f"TP {tp}, FP {fp}, FN {fn}, TN {tn}; recall {tp / (tp + fn):.1%}, "
-            f"false-positive rate {fp / (fp + tn):.1%}, precision {tp / (tp + fp):.1%}.\n\n"
-            "The labels describe intended query scenarios, not information available to the detector. "
-            "Both a legitimate intent change and a three-call benign mixed-query trace fire. "
-            "The low-score benign trace [0.15, 0.10, 0.05] also fires: a 0.05 absolute gap "
-            "becomes a 50% relative drop. Constant low scores cannot reveal this boundary. "
-            "A noisy but flat three-call high-score trace does not. A gradual decline below "
-            "the default threshold is missed. These fixed hand-assigned scores are boundary checks, "
-            "not a representative scorer population or production precision estimate.\n\n"
+            f"TP {tp}, FP {fp}, FN {fn}, TN {tn}; recall {recall}, "
+            f"false-positive rate {fp_rate}, precision {precision}.\n\n"
+            "The labels describe intended query scenarios, not information available to the "
+            "detector, so some benign traces are indistinguishable from degradation by score "
+            f"alone. Benign traces that fired: {_names(false_positives)}. "
+            f"Degradations missed: {_names(misses)}. These fixed hand-assigned scores are "
+            "boundary checks, not a representative scorer population or production precision "
+            "estimate.\n\n"
             f"## Stationary benign-distribution stress test\n\nSeed {args.seed}; "
             f"{args.trials} independent traces per cell; default threshold 0.3. "
             "Each cell invokes the actual detector on IID scores with no temporal degradation. "

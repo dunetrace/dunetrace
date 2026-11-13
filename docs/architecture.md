@@ -129,7 +129,7 @@ per step      │    run_detectors(state, detectors=<per-agent list>,    │
                                           ▼
               ┌──────────────────────────────────────────────────────┐
 PATH 2        │  Server-side pass                                      │
-server-side,  │  all 34 built-ins + packs + custom detectors           │
+server-side,  │  all 35 built-ins + packs + custom detectors           │
 after         │  detectors.yml thresholds + P75 baselines              │
 ingestion     │  → failure_signals → alerts, dashboard, issues,        │
               │    OTel signal spans (emit_signal_span)                │
@@ -140,7 +140,7 @@ ingestion     │  → failure_signals → alerts, dashboard, issues,        │
 |---|---|---|
 | Where it runs | Inside the agent process, `run_context.py` | Detector worker, after ingestion |
 | When | After each step, **only while a `trigger="signal"` policy is active** for the agent; otherwise never | On the next 5s poll after the run completes or stalls |
-| Detectors | The per-agent list from `GET /v1/detector-config` (`dunetrace/detector_config.py::build_detectors`), narrowed to the failure types the active signal policies name; `TIER1_DETECTORS` (31) before the first fetch. Never `PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP` | All 34 (`_DETECTOR_CLASSES`, an alias of the SDK's `DETECTOR_KEYS`) + registered plugins + enabled packs + JSON custom detectors |
+| Detectors | The per-agent list from `GET /v1/detector-config` (`dunetrace/detector_config.py::build_detectors`), narrowed to the failure types the active signal policies name; `TIER1_DETECTORS` (32) before the first fetch. Never `PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP` | All 35 (`_DETECTOR_CLASSES`, an alias of the SDK's `DETECTOR_KEYS`) + registered plugins + enabled packs + JSON custom detectors |
 | Thresholds | `detectors.yml` `default` + agent-category overrides, as served by ingest; in-path scan caps can only be lowered | `detectors.yml`, loaded at worker startup |
 | Baselines | `baselines` from the same response, copied onto `RunState.baseline_*` before the pass | Computed from `run_baseline_metrics` per run |
 | Output | A policy decision — nothing is written to `failure_signals` | `failure_signals` rows |

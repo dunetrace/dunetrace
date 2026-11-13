@@ -51,14 +51,6 @@
 #                              # protection). Must be <= evaluation_budget_ms.
 
 default:
-  rag_quality_degradation:
-    min_retrievals: 3
-    drop_threshold: 0.3
-    alert_policy:
-      mode: immediate
-      threshold: 1
-      window_runs: 1
-
 
   instrumentation_degraded:
     min_calls: 2      # runs with fewer LLM calls are left to EMPTY_LLM_RESPONSE
@@ -135,6 +127,16 @@ default:
 
   excessive_retrieval:
     max_retrievals: 8  # fire when a run makes at least this many retrieval calls
+
+  rag_quality_degradation:
+    min_retrievals: 3     # scored, non-empty retrievals from one index; minimum 3
+    drop_threshold: 0.3   # relative drop, late half vs early half; in (0, 1]
+    # Calibration measured 17-30% false positives on benign score
+    # distributions, so alert on recurrence, not on the first occurrence.
+    alert_policy:
+      mode: frequency
+      threshold: 3
+      window_runs: 10
 
   llm_truncation_loop:
     threshold: 2      # number of finish_reason=length events to trigger

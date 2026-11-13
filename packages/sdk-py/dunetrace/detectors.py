@@ -39,7 +39,6 @@ from dunetrace.models import (
     FailureSignal,
     FailureType,
     LlmCall,
-    RetrievalResult,
     RunState,
     Severity,
     ToolCall,
@@ -763,17 +762,37 @@ class RagEmptyRetrievalDetector(BaseDetector):
         )
 
 
-# ── EXCESSIVE_RETRIEVAL ───────────────────────────────────────────────────────
+# ── RAG_QUALITY_DEGRADATION ───────────────────────────────────────────────────
+
+
+def _relevance_score(value: Any) -> Optional[float]:
+    """A retrieval's top_score as a finite, non-negative float, or None.
+
+    Accepts anything numeric (numpy scalars from FAISS / sentence-transformers,
+    and the numeric strings json.dumps(default=str) and OTLP stringValue turn
+    them into). Rejects bools, NaN, infinities and negatives.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) and score >= 0 else None
 
 
 class RagQualityDegradationDetector(BaseDetector):
-    """Detect declining relevance within one index during a run.
+    """Retrieval relevance declines within one index during a run.
 
-    Compare early and late halves of at least MIN_RETRIEVALS scored calls.
-    For odd counts, the late half includes the middle call. Scores must be
-    finite, nonnegative, higher-is-better relevance values. Distance metrics
-    must be converted by the caller. Different indexes are never compared.
-    Tunable: MIN_RETRIEVALS (3), DROP_THRESHOLD (0.3, a relative fraction).
+    Splits at least MIN_RETRIEVALS scored, non-empty retrievals from the same index
+    into an early and a late half (for odd counts the late half takes the middle
+    call) and fires when the late average is more than DROP_THRESHOLD below the
+    early one, relatively. Scores must be higher-is-better relevance; convert
+    distance metrics before instrumenting. Different indexes are never compared.
+    Empty retrievals (result_count 0) are RAG_EMPTY_RETRIEVAL's, not a decline.
+
+    Tunable: MIN_RETRIEVALS (default 3, minimum 3: two calls have no trend),
+    DROP_THRESHOLD (default 0.3, a relative fraction in (0, 1]).
     """
 
     name = "RAG_QUALITY_DEGRADATION"
@@ -781,72 +800,76 @@ class RagQualityDegradationDetector(BaseDetector):
     MIN_RETRIEVALS = 3
     DROP_THRESHOLD = 0.3
 
+    # A computed drop is compared after rounding, so a decline of exactly the
+    # threshold (1.0 -> 0.7 computes as 0.30000000000000004) does not fire.
+    _DROP_PRECISION = 9
+
     def __init__(self, **overrides):
         super().__init__(**overrides)
         if (
             isinstance(self.MIN_RETRIEVALS, bool)
             or not isinstance(self.MIN_RETRIEVALS, int)
-            or self.MIN_RETRIEVALS <= 0
+            or self.MIN_RETRIEVALS < 3
         ):
-            raise ValueError("MIN_RETRIEVALS must be a positive integer")
+            raise ValueError("MIN_RETRIEVALS must be an integer >= 3")
         if (
             isinstance(self.DROP_THRESHOLD, bool)
             or not isinstance(self.DROP_THRESHOLD, (int, float))
-            or not 0 <= self.DROP_THRESHOLD <= 1
+            or not 0 < self.DROP_THRESHOLD <= 1
         ):
-            raise ValueError("DROP_THRESHOLD must be a finite number between 0 and 1")
+            raise ValueError("DROP_THRESHOLD must be a number in (0, 1]")
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
-        groups: Dict[str, List[RetrievalResult]] = {}
+        groups: Dict[str, List[Tuple[int, float]]] = {}
         for retrieval in state.retrievals:
-            score = retrieval.top_score
-            if (
-                isinstance(score, (int, float))
-                and not isinstance(score, bool)
-                and math.isfinite(score)
-                and score >= 0
-            ):
-                groups.setdefault(retrieval.index_name, []).append(retrieval)
-
-        worst = None
-        for index_name, retrievals in groups.items():
-            if len(retrievals) < max(3, self.MIN_RETRIEVALS):
+            score = _relevance_score(retrieval.top_score)
+            if score is None or (retrieval.result_count or 0) <= 0:
                 continue
-            retrievals.sort(key=lambda r: r.step_index)
-            scores = [r.top_score for r in retrievals if r.top_score is not None]
+            key = retrieval.index_name if isinstance(retrieval.index_name, str) else "unknown"
+            groups.setdefault(key, []).append((retrieval.step_index, score))
+
+        worst: Optional[Tuple[float, str, List[Tuple[int, float]], float, float]] = None
+        for index_name, scored in groups.items():
+            if len(scored) < self.MIN_RETRIEVALS:
+                continue
+            scored.sort(key=lambda pair: pair[0])
+            scores = [score for _, score in scored]
             middle = len(scores) // 2
             early = sum(scores[:middle]) / middle
             late = sum(scores[middle:]) / (len(scores) - middle)
             if early <= 0:
                 continue
-            drop = (early - late) / early
+            drop = round((early - late) / early, self._DROP_PRECISION)
             if drop <= self.DROP_THRESHOLD:
                 continue
             if worst is None or drop > worst[0]:
-                worst = (drop, index_name, retrievals, early, late)
+                worst = (drop, index_name, scored, early, late)
 
         if worst is None:
             return None
-        drop, index_name, retrievals, early, late = worst
+        drop, index_name, scored, early, late = worst
         return FailureSignal(
             failure_type=FailureType.RAG_QUALITY_DEGRADATION,
             severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
-            step_index=retrievals[-1].step_index,
-            confidence=min(0.95, 0.5 + 0.45 * drop),
+            step_index=scored[-1][0],
+            confidence=_scale_confidence(drop / self.DROP_THRESHOLD),
             evidence={
                 "index_name": index_name,
-                "early_avg_score": early,
-                "late_avg_score": late,
-                "drop_pct": drop * 100,
-                "retrieval_count": len(retrievals),
+                "early_avg_score": round(early, 3),
+                "late_avg_score": round(late, 3),
+                "drop_pct": round(drop * 100, 1),
+                "retrieval_count": len(scored),
                 "drop_threshold": self.DROP_THRESHOLD,
-                "first_step": retrievals[0].step_index,
-                "last_step": retrievals[-1].step_index,
+                "first_step": scored[0][0],
+                "last_step": scored[-1][0],
             },
         )
+
+
+# ── EXCESSIVE_RETRIEVAL ───────────────────────────────────────────────────────
 
 
 class ExcessiveRetrievalDetector(BaseDetector):

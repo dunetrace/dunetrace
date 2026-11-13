@@ -1782,30 +1782,53 @@ def explain_session_latency(signal: FailureSignal) -> Explanation:
     )
 
 
-# EXCESSIVE_RETRIEVAL
+# RAG_QUALITY_DEGRADATION
+
+
+def _num(value: object, fmt: str) -> str:
+    """Format a numeric evidence value, or '?' when it is missing or not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "?"
+    return format(value, fmt)
 
 
 def explain_rag_quality_degradation(signal: FailureSignal) -> Explanation:
     ev = signal.evidence
-    early = ev.get("early_avg_score", "?")
-    late = ev.get("late_avg_score", "?")
-    drop = ev.get("drop_pct", "?")
-    count = ev.get("retrieval_count", "?")
-    index = ev.get("index_name", "unknown")
+    early = _num(ev.get("early_avg_score"), ".2f")
+    late = _num(ev.get("late_avg_score"), ".2f")
+    drop = _num(ev.get("drop_pct"), ".1f")
+    count = _num(ev.get("retrieval_count"), "d")
+    index = ev.get("index_name") or "unknown"
     return Explanation(
         **_base(signal),
         title="Retrieval relevance declined during the run",
-        what=f"Index {index}: average relevance declined from {early} to {late} across {count} scored retrievals ({drop}% drop).",
-        why_it_matters="Repeated query reformulation may be retrieving less useful context. A score decline is a heuristic, not proof that the final answer is incorrect.",
-        evidence_summary=f"Early average: {early}; late average: {late}; relative drop: {drop}%; scored calls: {count}.",
+        what=(
+            f"Index {index}: average relevance fell from {early} to {late} "
+            f"across {count} scored retrievals ({drop}% drop)."
+        ),
+        why_it_matters=(
+            "Repeated query reformulation may be retrieving less useful context. A score "
+            "decline is a heuristic, not proof that the final answer is incorrect."
+        ),
+        evidence_summary=(
+            f"Early average: {early}; late average: {late}; relative drop: {drop}%; "
+            f"scored calls: {count}."
+        ),
         suggested_fixes=[
             CodeFix(
                 description="Inspect query changes and the retrieved documents before changing thresholds",
                 language="text",
-                code="Check whether query intent changed, whether the same scoring model was used, and whether the index contains the requested information. Convert distance metrics to higher-is-better relevance before instrumentation.",
+                code=(
+                    "Check whether query intent changed, whether the same scoring model was used, "
+                    "and whether the index contains the requested information. Convert distance "
+                    "metrics to higher-is-better relevance before instrumentation."
+                ),
             )
         ],
     )
+
+
+# EXCESSIVE_RETRIEVAL
 
 
 def explain_excessive_retrieval(signal: FailureSignal) -> Explanation:
