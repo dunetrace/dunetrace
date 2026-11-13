@@ -71,11 +71,6 @@ _COUNT_SCAN_GLOBS = _SCAN_GLOBS + [
     "CLAUDE.md",
     "docs/architecture.md",
     "docs/dashboard.md",
-    "docs/policies.md",
-    "docs/quickstart.md",
-    "docs/integrate-langdock.md",
-    "packages/sdk-py/README.md",
-    "packages/sdk-ts/README.md",
 ]
 
 # All-caps-snake tokens that appear in the scanned docs but are legitimately NOT
@@ -112,7 +107,7 @@ _ALLOWLIST = {
     "SHADOW",
     # SDK constants that name *collections of* detectors, or detector tunables —
     # all defined in packages/sdk-py/dunetrace/detectors.py.
-    "TIER1_DETECTORS",  # the 31-detector in-path battery, not a detector itself
+    "TIER1_DETECTORS",  # the in-path battery, not a detector itself
     "SCAN_HEAD_CHARS",  # injection scan window bound
     "SCAN_TAIL_CHARS",  # injection scan window bound
     # Custom-detector translator vocabulary (detector_svc/custom_detector.py and
@@ -203,24 +198,31 @@ def validate(
 
 
 # Counts the docs assert. Every one of these was wrong somewhere at the 2026-09
-# audit — "Runs 29 detectors", "the 15 checks", "35 structural detectors,
+# audit — "Runs 29 detectors", "the 15 checks", "34 structural detectors,
 # in-path" — and NONE was caught, because this script validated NAMES and never
 # numbers, and because the files carrying them were outside _SCAN_GLOBS.
-_TOTAL_DETECTORS = 35  # detector classes / _DETECTOR_CLASSES / detectors.yml sections
-_IN_PATH_DETECTORS = 32  # TIER1_DETECTORS — the SDK's client-side subset
+#
+# Counted from the code, not written down: a hand-kept constant here was one
+# more thing every new detector had to remember to bump, and two detector PRs
+# open at once both bumped it to the same number.
+from dunetrace.detectors import DETECTOR_KEYS as _DETECTOR_KEYS  # noqa: E402
+from dunetrace.detectors import TIER1_DETECTORS as _TIER1  # noqa: E402
+
+_TOTAL_DETECTORS = len(_DETECTOR_KEYS)  # detector classes / _DETECTOR_CLASSES / yml sections
+_IN_PATH_DETECTORS = len(_TIER1)  # TIER1_DETECTORS — the SDK's client-side subset
 # Below this, a number is counting something other than the battery (a table
 # row, a pack, a single detector), not asserting how many exist.
 _MIN_BATTERY_CLAIM = 10
 
 # "<n> detectors" / "<n> structural detectors" / "<n> zero-LLM detectors".
 _COUNT_CLAIM = re.compile(r"\b(\d{1,3})\s+(?:[a-z-]+\s+){0,3}detectors?\b", re.IGNORECASE)
-# Phrases that mean the sentence is talking about the in-path subset, not all 35.
+# Phrases that mean the sentence is talking about the in-path subset, not all of them.
 _IN_PATH_MARKERS = ("in-path", "in path", "tier1_detectors", "client-side", "in the sdk")
 
 
 def check_counts(globs: list[str] | None = None) -> list[str]:
-    """Every "<n> detectors" claim must be 35, or 32 when the sentence says
-    in-path. Returns one message per bad claim."""
+    """Every "<n> detectors" claim must be the total, or the in-path count when
+    the sentence says in-path. Returns one message per bad claim."""
     problems: list[str] = []
     for glob in globs or _SCAN_GLOBS:
         for path in sorted(_REPO.glob(glob)):
@@ -236,12 +238,12 @@ def check_counts(globs: list[str] | None = None) -> list[str]:
                     # A window, not the whole line: CLAUDE.md writes a whole
                     # paragraph on one line, so scanning it entire matched
                     # "client-side" from a different sentence and read a correct
-                    # "runs all 35 structural detectors" as an in-path claim.
+                    # "runs all 34 structural detectors" as an in-path claim.
                     window = line[max(0, m.start() - 120) : m.end() + 120].lower()
                     if "pack" in window:
                         continue
                     # The correct, fully-qualified phrasing names BOTH numbers:
-                    # "35 zero-LLM detectors (32 of them in-path)". That is the
+                    # "34 zero-LLM detectors (31 of them in-path)". That is the
                     # shape CLAUDE.md asks for — say which one you mean — so it
                     # passes whichever of the two the regex happened to match.
                     if str(_TOTAL_DETECTORS) in window and str(_IN_PATH_DETECTORS) in window:

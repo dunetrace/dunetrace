@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -773,6 +774,113 @@ class RagEmptyRetrievalDetector(BaseDetector):
                 "result_count": worst.result_count,
                 "top_score": worst.top_score,
                 "bad_retrievals": len(bad_retrievals),
+            },
+        )
+
+
+# ── RAG_QUALITY_DEGRADATION ───────────────────────────────────────────────────
+
+
+def _relevance_score(value: Any) -> Optional[float]:
+    """A retrieval's top_score as a finite, non-negative float, or None.
+
+    Accepts anything numeric (numpy scalars from FAISS / sentence-transformers,
+    and the numeric strings json.dumps(default=str) and OTLP stringValue turn
+    them into). Rejects bools, NaN, infinities and negatives.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) and score >= 0 else None
+
+
+class RagQualityDegradationDetector(BaseDetector):
+    """Retrieval relevance declines within one index during a run.
+
+    Splits at least MIN_RETRIEVALS scored, non-empty retrievals from the same index
+    into an early and a late half (for odd counts the late half takes the middle
+    call) and fires when the late average is more than DROP_THRESHOLD below the
+    early one, relatively. Scores must be higher-is-better relevance; convert
+    distance metrics before instrumenting. Different indexes are never compared.
+    Empty retrievals (result_count 0) are RAG_EMPTY_RETRIEVAL's, not a decline.
+
+    Tunable: MIN_RETRIEVALS (default 3, minimum 3: two calls have no trend),
+    DROP_THRESHOLD (default 0.3, a relative fraction in (0, 1]).
+    """
+
+    name = "RAG_QUALITY_DEGRADATION"
+    SEVERITY = Severity.MEDIUM
+    MIN_RETRIEVALS = 3
+    DROP_THRESHOLD = 0.3
+
+    # A computed drop is compared after rounding, so a decline of exactly the
+    # threshold (1.0 -> 0.7 computes as 0.30000000000000004) does not fire.
+    _DROP_PRECISION = 9
+
+    def __init__(self, **overrides):
+        super().__init__(**overrides)
+        if (
+            isinstance(self.MIN_RETRIEVALS, bool)
+            or not isinstance(self.MIN_RETRIEVALS, int)
+            or self.MIN_RETRIEVALS < 3
+        ):
+            raise ValueError("MIN_RETRIEVALS must be an integer >= 3")
+        if (
+            isinstance(self.DROP_THRESHOLD, bool)
+            or not isinstance(self.DROP_THRESHOLD, (int, float))
+            or not 0 < self.DROP_THRESHOLD <= 1
+        ):
+            raise ValueError("DROP_THRESHOLD must be a number in (0, 1]")
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        groups: Dict[str, List[Tuple[int, float]]] = {}
+        for retrieval in state.retrievals:
+            score = _relevance_score(retrieval.top_score)
+            if score is None or (retrieval.result_count or 0) <= 0:
+                continue
+            key = retrieval.index_name if isinstance(retrieval.index_name, str) else "unknown"
+            groups.setdefault(key, []).append((retrieval.step_index, score))
+
+        worst: Optional[Tuple[float, str, List[Tuple[int, float]], float, float]] = None
+        for index_name, scored in groups.items():
+            if len(scored) < self.MIN_RETRIEVALS:
+                continue
+            scored.sort(key=lambda pair: pair[0])
+            scores = [score for _, score in scored]
+            middle = len(scores) // 2
+            early = sum(scores[:middle]) / middle
+            late = sum(scores[middle:]) / (len(scores) - middle)
+            if early <= 0:
+                continue
+            drop = round((early - late) / early, self._DROP_PRECISION)
+            if drop <= self.DROP_THRESHOLD:
+                continue
+            if worst is None or drop > worst[0]:
+                worst = (drop, index_name, scored, early, late)
+
+        if worst is None:
+            return None
+        drop, index_name, scored, early, late = worst
+        return FailureSignal(
+            failure_type=FailureType.RAG_QUALITY_DEGRADATION,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=scored[-1][0],
+            confidence=_scale_confidence(drop / self.DROP_THRESHOLD),
+            evidence={
+                "index_name": index_name,
+                "early_avg_score": round(early, 3),
+                "late_avg_score": round(late, 3),
+                "drop_pct": round(drop * 100, 1),
+                "retrieval_count": len(scored),
+                "drop_threshold": self.DROP_THRESHOLD,
+                "first_step": scored[0][0],
+                "last_step": scored[-1][0],
             },
         )
 
@@ -5172,6 +5280,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     GoalAbandonmentDetector(),
     RagEmptyRetrievalDetector(),
     ExcessiveRetrievalDetector(),
+    RagQualityDegradationDetector(),
     LlmTruncationLoopDetector(),
     SilentTruncationDetector(),
     ContextBloatDetector(),
@@ -5225,7 +5334,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
 
 # detectors.yml section key → detector class, one entry per built-in detector
-# (all 35). The single source of that mapping: the server-side worker's
+# (all 36). The single source of that mapping: the server-side worker's
 # ``detector_svc.detectors._DETECTOR_CLASSES`` is an alias of this dict, and
 # the SDK's ``dunetrace.detector_config.build_detectors`` reads the server's
 # ``GET /v1/detector-config`` response through it, so a threshold keyed by
@@ -5242,6 +5351,7 @@ DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
     "prompt_injection_signal": PromptInjectionDetector,
     "rag_empty_retrieval": RagEmptyRetrievalDetector,
     "excessive_retrieval": ExcessiveRetrievalDetector,
+    "rag_quality_degradation": RagQualityDegradationDetector,
     "llm_truncation_loop": LlmTruncationLoopDetector,
     "silent_truncation": SilentTruncationDetector,
     "context_bloat": ContextBloatDetector,

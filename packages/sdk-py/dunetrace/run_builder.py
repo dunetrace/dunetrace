@@ -110,6 +110,7 @@ def build_run_state(events: list[dict]) -> RunState:
     _pending_by_id: dict[int, int] = {}  # call_id -> index into state.llm_calls
     _pending_order: list[int] = []  # indices awaiting a response, oldest first
 
+    last_retrieval_index: Any = None  # see retrieval.called below
     for raw in events:
         event_type = raw["event_type"]
         payload = raw.get("payload") or {}
@@ -250,11 +251,25 @@ def build_run_state(events: list[dict]) -> RunState:
                             tc.output_length = len(tc.output) if tc.output else 0
                         break
 
+        # retrieval.called carries the index name for integrations that only
+        # know it when the retriever starts (LangChain's on_retriever_start);
+        # remember it for the matching retrieval.responded.
+        elif event_type == "retrieval.called":
+            called_index = payload.get("index_name")
+            if called_index:
+                last_retrieval_index = called_index
+
         # retrieval.responded - append to retrievals list
         elif event_type == "retrieval.responded":
+            index_name = payload.get("index_name") or last_retrieval_index or "unknown"
+            if not isinstance(index_name, str):
+                # payload validates nothing inside itself: an OTLP arrayValue or
+                # a hand-rolled dict here would be unhashable for every detector
+                # that groups by index.
+                index_name = str(index_name)
             state.retrievals.append(
                 RetrievalResult(
-                    index_name=payload.get("index_name", "unknown"),
+                    index_name=index_name,
                     result_count=payload.get("result_count", 0),
                     top_score=payload.get("top_score"),
                     step_index=step_index,

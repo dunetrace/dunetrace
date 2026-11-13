@@ -181,7 +181,7 @@ default:
 
     def test_builtin_keys_cover_every_param_map_entry(self):
         self.assertTrue(set(_PARAM_MAP) <= BUILTIN_DETECTOR_KEYS)
-        self.assertEqual(len(BUILTIN_DETECTOR_KEYS), 35)
+        self.assertEqual(len(BUILTIN_DETECTOR_KEYS), 36)
 
 
 class TestSeverityOverride(unittest.TestCase):

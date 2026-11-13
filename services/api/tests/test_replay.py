@@ -167,5 +167,65 @@ class TestFixModelDowngrade(unittest.TestCase):
         self.assertEqual(_apply_modifications(events, ["fix_model_downgrade"]), events)
 
 
+class TestFixRagRetrievalNeverManufacturesADecline(unittest.TestCase):
+    """Raising only the low scores turned [0.1, 0.1, 0.32, 0.32] (improving)
+    into [0.5, 0.5, 0.32, 0.32], a 36% RAG_QUALITY_DEGRADATION that the
+    "fix" itself created."""
+
+    def _run(self, scores):
+        events = [_ev("run.started", 0, model="m", tools=[])]
+        for i, score in enumerate(scores, start=1):
+            events.append(_ev("retrieval.called", i, index_name="kb", query="q"))
+            events.append(_ev("retrieval.responded", i, result_count=3, top_score=score))
+        events.append(_ev("run.completed", len(scores) + 1))
+        return events
+
+    def test_improving_run_stays_clear(self):
+        fixed = _apply_modifications(self._run([0.1, 0.1, 0.32, 0.32]), ["fix_rag_retrieval"])
+        fired = _fired(fixed)
+        self.assertNotIn("RAG_QUALITY_DEGRADATION", fired)
+        self.assertNotIn("RAG_EMPTY_RETRIEVAL", fired)
+
+    def test_a_real_decline_is_repaired(self):
+        events = self._run([0.95, 0.9, 0.5, 0.45])
+        self.assertIn("RAG_QUALITY_DEGRADATION", _fired(events))
+        self.assertNotIn(
+            "RAG_QUALITY_DEGRADATION", _fired(_apply_modifications(events, ["fix_rag_retrieval"]))
+        )
+
+
+class TestReplayComparesLikeWithLike(unittest.IsolatedAsyncioTestCase):
+    """Replay re-runs every detector, shadow ones included. A shadow detector
+    that fired on the original run used to come back as "new" in every replay."""
+
+    async def test_shadow_original_is_not_reported_as_new(self):
+        from unittest.mock import AsyncMock, patch
+
+        import api_svc.routers.replay as replay
+
+        events = TestFixRagRetrievalNeverManufacturesADecline()._run([0.95, 0.9, 0.5, 0.45])
+        originals = [
+            {
+                "failure_type": "RAG_QUALITY_DEGRADATION",
+                "severity": "MEDIUM",
+                "step_index": 4,
+                "confidence": 0.9,
+                "shadow": True,
+            }
+        ]
+        with (
+            patch.object(replay, "_fetch_events", AsyncMock(return_value=events)),
+            patch.object(replay, "_fetch_signals", AsyncMock(return_value=originals)),
+        ):
+            out = await replay.replay_run(
+                "r1", replay.ReplayRequest(modifications=[]), org_id="org"
+            )
+        self.assertEqual(out["new"], [])
+        self.assertEqual(out["original_signals"], [])
+        self.assertNotIn(
+            "RAG_QUALITY_DEGRADATION", {s["failure_type"] for s in out["replay_signals"]}
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
