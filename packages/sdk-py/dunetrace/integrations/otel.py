@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -235,6 +236,15 @@ class DunetraceOTelExporter:
     :param capture_content: When False, drop content-bearing attributes (tool
                             args, request URL, retrieval query) from spans. The
                             env-driven wiring passes the resolved config value.
+    :param sampling_ratio:  Share of runs to export, 0.0-1.0. Defaults to
+                            DUNETRACE_OTEL_SAMPLING_RATIO (1.0 when unset).
+                            Decided once per run with dunetrace.otel.run_sampled,
+                            so a run is exported whole or not at all, a child
+                            run follows its parent, and the detector's signal
+                            spans follow the same decision. Applies whatever
+                            TracerProvider you pass: the run's synthetic parent
+                            is marked sampled, so a ParentBased sampler on your
+                            provider never re-decides.
     """
 
     def __init__(
@@ -244,6 +254,7 @@ class DunetraceOTelExporter:
         tracer_provider: Any = None,
         tracer_name: str = "dunetrace",
         capture_content: bool = True,
+        sampling_ratio: Optional[float] = None,
     ) -> None:
         if not _OTEL_AVAILABLE:
             raise ImportError("opentelemetry is not installed. Run: pip install 'dunetrace[otel]'")
@@ -253,8 +264,41 @@ class DunetraceOTelExporter:
             tp = tracer_provider or trace.get_tracer_provider()
             self._tracer = tp.get_tracer(tracer_name)
         self._capture_content = capture_content
+        if sampling_ratio is None:
+            from dunetrace.otel import _parse_ratio
+
+            sampling_ratio = _parse_ratio(os.environ.get("DUNETRACE_OTEL_SAMPLING_RATIO"))
+        self._sampling_ratio = float(sampling_ratio)
         self._runs: Dict[str, _RunSpans] = {}
+        # run_id -> sampled, for every run between run.started and its end, kept
+        # or not, so a nested child run can inherit its parent's decision.
+        self._sampled: Dict[str, bool] = {}
         self._lock = Lock()
+
+    # ── Sampling ───────────────────────────────────────────────────────────────
+
+    def should_sample(self, run_id: str, parent_run_id: Optional[str] = None) -> bool:
+        """Whether ``run_id``'s spans will be exported. Stable for the life of
+        the run: the client asks before building run.started (to decide whether
+        to hand out an OTel trace id), and the run.started handler asks again.
+
+        A child run inherits an open parent's decision, so a delegation tree in
+        one process is exported whole or not at all. A child whose parent ran in
+        another process is decided on the parent's run_id, which matches the
+        parent's own decision whenever that parent was the tree's root.
+        """
+        with self._lock:
+            known = self._sampled.get(run_id)
+            if known is not None:
+                return known
+            if parent_run_id and parent_run_id in self._sampled:
+                decision = self._sampled[parent_run_id]
+            else:
+                from dunetrace.otel import run_sampled
+
+                decision = run_sampled(parent_run_id or run_id, self._sampling_ratio)
+            self._sampled[run_id] = decision
+            return decision
 
     # ── Client entry point ─────────────────────────────────────────────────────
 
@@ -277,6 +321,12 @@ class DunetraceOTelExporter:
     # ── Run span ───────────────────────────────────────────────────────────────
 
     def _on_run_started(self, event: AgentEvent) -> None:
+        # A dropped run registers no spans, so every later handler for it
+        # returns at its `rs is None` guard: no span building, no arg parsing,
+        # no cost lookups on the agent thread for telemetry nobody exports.
+        if not self.should_sample(event.run_id, event.parent_run_id):
+            return
+
         # Seed the trace with a deterministic trace ID derived from run_id. The
         # parent is a synthetic NonRecordingSpan carrying only the trace ID, so
         # it doesn't show up as a real span in the backend.
@@ -322,6 +372,7 @@ class DunetraceOTelExporter:
     def _on_run_ended(self, event: AgentEvent) -> None:
         with self._lock:
             rs = self._runs.pop(event.run_id, None)
+            self._sampled.pop(event.run_id, None)
         if rs is None:
             return
 

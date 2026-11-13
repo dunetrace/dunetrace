@@ -341,6 +341,7 @@ class Dunetrace:
                     otel_exporter = DunetraceOTelExporter(
                         tracer=_otel.get_tracer(),
                         capture_content=(_cfg.capture_content if _cfg else True),
+                        sampling_ratio=(_cfg.sampling_ratio if _cfg else None),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -528,12 +529,19 @@ class Dunetrace:
 
         # Stamp the run with its OTel correlation ids (deterministic from run_id)
         # so a customer can jump from an OTel backend to the Dunetrace run and
-        # back. Set only when OTel export is active; None otherwise.
+        # back. Set only when OTel export is active AND this run is sampled: an
+        # id for a dropped run is a deep-link to a trace that exists nowhere.
+        # The decision also rides on run.started so the detector exports this
+        # run's signal spans exactly when the SDK exported the run.
+        otel_sampled: Optional[bool] = None
         if self._otel_exporter is not None:
             from dunetrace.integrations.otel import root_span_id_hex, trace_id_hex
 
-            ctx.otel_trace_id = trace_id_hex(ctx.run_id)
-            ctx.otel_span_id = root_span_id_hex(ctx.run_id)
+            should_sample = getattr(self._otel_exporter, "should_sample", None)
+            otel_sampled = bool(should_sample(ctx.run_id, parent_run_id)) if should_sample else True
+            if otel_sampled:
+                ctx.otel_trace_id = trace_id_hex(ctx.run_id)
+                ctx.otel_span_id = root_span_id_hex(ctx.run_id)
 
         # In-process content inspection: the injection detector runs here, against
         # raw user_input, before the run.started event is built. Only the match
@@ -582,6 +590,11 @@ class Dunetrace:
         _source_file = _capture_caller_source_file()
         if _source_file:
             payload["source_file"] = _source_file
+        # Only when OTel export is active, so a run.started without OTel is
+        # unchanged. The detector reads it to decide whether this run's signal
+        # spans belong in the backend.
+        if otel_sampled is not None:
+            payload["otel_sampled"] = otel_sampled
 
         # _emit() guards itself, but the AgentEvent construction around it does
         # not — and nothing on the run-start path may stop the caller's run from

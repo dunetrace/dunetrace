@@ -41,13 +41,38 @@ setting an endpoint.
 | `DUNETRACE_OTEL_PROTOCOL` | `grpc` | `grpc` or `http/protobuf`. |
 | `DUNETRACE_OTEL_HEADERS` | (none) | Auth headers, `k1=v1,k2=v2` (e.g. `DD-API-KEY=xxx`). |
 | `DUNETRACE_OTEL_SERVICE_NAME` | `dunetrace` | `service.name` on every span. |
-| `DUNETRACE_OTEL_SAMPLING_RATIO` | `1.0` | Head sampling ratio, 0.0 to 1.0. |
+| `DUNETRACE_OTEL_SAMPLING_RATIO` | `1.0` | Share of runs exported, 0.0 to 1.0. See Sampling below. |
 | `DUNETRACE_OTEL_CAPTURE_CONTENT` | `true` | Include content attributes (see PII below). |
 | `DUNETRACE_ORG_ID` | (none) | Optional `dunetrace.org_id` resource label. |
 
 The standard `OTEL_*` env vars the OTLP exporter reads natively still apply on
 top of these, e.g. `OTEL_EXPORTER_OTLP_INSECURE=true` to talk plaintext gRPC to
 a local collector.
+
+### Sampling
+
+`DUNETRACE_OTEL_SAMPLING_RATIO` is decided **once per run**, from a SHA-256
+hash of the `run_id` (`dunetrace.otel.run_sampled`). A run is exported whole or
+not at all, and the same `run_id` gets the same answer in every process:
+
+- **Delegation trees stay together.** A child run started inside a kept run is
+  kept; inside a dropped run, dropped. A child whose parent ran in another
+  process is decided on the parent's `run_id`.
+- **Signal and policy spans follow the run.** The SDK records its decision on
+  `run.started` (`otel_sampled`) and the detector exports a run's signal spans
+  only when the SDK exported the run, so there are no orphan signal spans and
+  the detector's own ratio doesn't need to match each agent's. Runs without
+  that field (OTLP-ingested, or from an SDK with export off) fall back to the
+  same hash on the detector's ratio.
+- **`run.otel_trace_id` is set only for kept runs**, so a deep-link you log next
+  to it always points at a trace that exists.
+- **A dropped run costs nothing**: no spans are built for it.
+
+The decision is made in `DunetraceOTelExporter`, so it applies whichever
+`TracerProvider` you pass (`DunetraceOTelExporter(sampling_ratio=...)`,
+defaulting to the env var). Up to v0.5.7 this setting had no effect on run
+spans; a deployment that already set it below `1.0` will start dropping runs
+on upgrade.
 
 ## What gets exported
 
