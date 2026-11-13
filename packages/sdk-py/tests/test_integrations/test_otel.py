@@ -841,7 +841,9 @@ class TestPerRunSampling:
         exp.handle(_event(EventType.TOOL_CALLED, dropped, payload={"tool_name": "t", "args": "{}"}))
         exp.handle(_run_completed(dropped))
         assert mem.get_finished_spans() == ()
-        assert exp._runs == {} and exp._sampled == {}
+        from dunetrace.integrations import otel as otel_mod
+
+        assert exp._runs == {} and dropped not in otel_mod._SAMPLED_RUNS
 
     def test_kept_run_exports(self):
         exp, mem = _sampled_exporter(0.5)
@@ -937,3 +939,38 @@ class TestClientSamplingIntegration:
                 run.final_answer()
         finally:
             dt.shutdown()
+
+
+class TestSamplingHookIsolation:
+    def test_a_throwing_should_sample_never_stops_the_run(self):
+        from dunetrace import Dunetrace
+        from dunetrace.emitters import NoopBatchingEmitter
+
+        seen = []
+
+        class BadSink:
+            def should_sample(self, run_id, parent_run_id=None):
+                raise RuntimeError("sink bug")
+
+            def handle(self, event):
+                seen.append(event)
+
+        dt = Dunetrace(emitter=NoopBatchingEmitter(), otel_exporter=BadSink())
+        ran = False
+        try:
+            with dt.run("agent", user_input="hi", model="m") as run:
+                ran = True
+                assert run.otel_trace_id is None
+                run.final_answer()
+        finally:
+            dt.shutdown()
+        assert ran
+        started = next(e for e in seen if e.event_type is EventType.RUN_STARTED)
+        assert "otel_sampled" not in started.payload
+
+    def test_a_child_on_another_exporter_inherits_the_parents_decision(self):
+        a, _ = _sampled_exporter(0.5)
+        b, _ = _sampled_exporter(0.5)
+        kept, dropped = _ids_by_decision(0.5)
+        assert a.should_sample(dropped) is False
+        assert b.should_sample(kept, parent_run_id=dropped) is False

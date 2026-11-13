@@ -603,7 +603,15 @@ class Dunetrace:
             from dunetrace.integrations.otel import root_span_id_hex, trace_id_hex
 
             should_sample = getattr(self._otel_exporter, "should_sample", None)
-            otel_sampled = bool(should_sample(ctx.run_id, parent_run_id)) if should_sample else True
+            try:
+                otel_sampled = (
+                    bool(should_sample(ctx.run_id, parent_run_id)) if should_sample else True
+                )
+            except Exception:
+                # The exporter is telemetry: a throwing hook must never stop the
+                # caller's run. No decision means no ids and no otel_sampled.
+                logger.debug("Dunetrace: OTel should_sample failed", exc_info=True)
+                otel_sampled = None
             if otel_sampled:
                 ctx.otel_trace_id = trace_id_hex(ctx.run_id)
                 ctx.otel_span_id = root_span_id_hex(ctx.run_id)

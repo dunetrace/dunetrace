@@ -221,6 +221,13 @@ class _RunSpans:
 
 # ── Exporter ─────────────────────────────────────────────────────────────────────
 
+# run_id -> sampled, for every run between run.started and its end, kept or not.
+# Process-wide, not per exporter: a child run whose exporter differs from its
+# parent's (two Dunetrace clients in one process) must inherit the parent's
+# decision rather than re-hash its id. Same as the TS SDK.
+_SAMPLED_RUNS: Dict[str, bool] = {}
+_SAMPLED_LOCK = Lock()
+
 
 class DunetraceOTelExporter:
     """
@@ -270,9 +277,6 @@ class DunetraceOTelExporter:
             sampling_ratio = _parse_ratio(os.environ.get("DUNETRACE_OTEL_SAMPLING_RATIO"))
         self._sampling_ratio = float(sampling_ratio)
         self._runs: Dict[str, _RunSpans] = {}
-        # run_id -> sampled, for every run between run.started and its end, kept
-        # or not, so a nested child run can inherit its parent's decision.
-        self._sampled: Dict[str, bool] = {}
         self._lock = Lock()
 
     # ── Sampling ───────────────────────────────────────────────────────────────
@@ -287,17 +291,17 @@ class DunetraceOTelExporter:
         another process is decided on the parent's run_id, which matches the
         parent's own decision whenever that parent was the tree's root.
         """
-        with self._lock:
-            known = self._sampled.get(run_id)
+        with _SAMPLED_LOCK:
+            known = _SAMPLED_RUNS.get(run_id)
             if known is not None:
                 return known
-            if parent_run_id and parent_run_id in self._sampled:
-                decision = self._sampled[parent_run_id]
+            if parent_run_id and parent_run_id in _SAMPLED_RUNS:
+                decision = _SAMPLED_RUNS[parent_run_id]
             else:
                 from dunetrace.otel import run_sampled
 
                 decision = run_sampled(parent_run_id or run_id, self._sampling_ratio)
-            self._sampled[run_id] = decision
+            _SAMPLED_RUNS[run_id] = decision
             return decision
 
     # ── Client entry point ─────────────────────────────────────────────────────
@@ -372,7 +376,8 @@ class DunetraceOTelExporter:
     def _on_run_ended(self, event: AgentEvent) -> None:
         with self._lock:
             rs = self._runs.pop(event.run_id, None)
-            self._sampled.pop(event.run_id, None)
+        with _SAMPLED_LOCK:
+            _SAMPLED_RUNS.pop(event.run_id, None)
         if rs is None:
             return
 

@@ -413,6 +413,14 @@ guessing off. The full set of rules, in the order they apply, is in
 [auto-instrumentation.md](integrations/auto-instrumentation.md#runs-that-open-themselves).
 `DUNETRACE_DSN=https://<api_key>@host` configures endpoint and key in one value.
 
+### OpenTelemetry export
+
+Set `DUNETRACE_OTEL_ENABLED=1` and `DUNETRACE_OTEL_ENDPOINT` and the client
+sends every run to your OTLP backend as spans, next to its own ingest. Needs
+the `@opentelemetry/*` packages installed; see
+[OpenTelemetry export](integrations/opentelemetry.md) for the full variable
+list, or pass your own `DunetraceOtelExporter` as the `exporter` option.
+
 ### Grafana / Loki (no HTTP ingest)
 
 ```typescript

@@ -17,6 +17,8 @@ import { HttpBatchEmitter, type BatchEmitter } from "./emitters.js";
 import { runStorage as _runStorage, getCurrentRun, setRunOpener, type EntryRunHandle } from "./context.js";
 import { parseDsn, dsnHost } from "./dsn.js";
 import { registerOwnEndpoint, wrapAnthropicClient, wrapOpenAIClient } from "./auto.js";
+import * as otel from "./otel.js";
+import { rootSpanIdHex, traceIdHex } from "./otel-ids.js";
 import type { AgentEvent, ClientOptions, EventSink, RunOptions } from "./models.js";
 
 export { getCurrentRun };
@@ -64,7 +66,7 @@ function _installExitFlushHook(): void {
   _exitHookInstalled = true;
   process.on("beforeExit", () => {
     for (const ref of _liveClients) {
-      ref.deref()?._flushBeforeExit();
+      void ref.deref()?._flushBeforeExit();
     }
   });
 }
@@ -181,7 +183,11 @@ export class Dunetrace {
       denylist:      compileDenylist(opts.redactKeys),
     };
     this._emitter    = opts.emitter ?? new HttpBatchEmitter(base, this._apiKey, this._timeoutMs);
-    this._exporter   = opts.exporter ?? null;
+    // OTel export (opt-in via DUNETRACE_OTEL_* env). When enabled and the
+    // caller didn't wire an exporter explicitly, build one on the shared tracer.
+    // otel.init() never throws and returns false when unconfigured, so this is
+    // a no-op for anyone not using OTel.
+    this._exporter   = opts.exporter ?? (otel.init() ? otel.createEventSink() : null);
 
     // Runs that open themselves. See _openImplicitRun for the rules on when
     // they end. The most recent client is the one instrumentation asks.
@@ -277,6 +283,27 @@ export class Dunetrace {
     const parent = active && !active.closed && !active.implicit ? active : null;
     const parentRunId = opts.parentRunId ?? parent?.runId ?? null;
 
+    // Only a sink that actually produces OTel spans gets the correlation ids,
+    // and only for a run it will export: an id for a dropped run is a
+    // deep-link to a trace that exists nowhere. The decision rides on
+    // run.started so the detector exports this run's signal spans exactly
+    // when this SDK exported the run.
+    let otelSampled: boolean | null = null;
+    const sink = this._exporter;
+    if (sink?.exportsOtelSpans === true) {
+      try {
+        otelSampled = sink.shouldSample ? sink.shouldSample(run.runId, parentRunId) === true : true;
+      } catch {
+        // A sink is telemetry: a throwing hook must never stop the agent's run.
+        // No decision means no ids and no otel_sampled on run.started.
+        otelSampled = null;
+      }
+      if (otelSampled) {
+        run.otelTraceId      = traceIdHex(run.runId) || null;
+        run.otelParentSpanId = rootSpanIdHex(run.runId) || null;
+      }
+    }
+
     // Content caps, applied AFTER the version hash above so grouping stays
     // stable however long the prompt is. Markers only when a cut happened, so
     // an ordinary run.started is byte-identical to before.
@@ -301,6 +328,7 @@ export class Dunetrace {
     // detector reads `implicit` and holds the run's signals in shadow.
     if (run.openedBy) startedPayload["opened_by"] = run.openedBy;
     if (run.implicit) startedPayload["implicit"]  = true;
+    if (otelSampled !== null) startedPayload["otel_sampled"] = otelSampled;
 
     _safeEmit(() => { this._emit({
       event_type:    "run.started",
@@ -610,6 +638,11 @@ export class Dunetrace {
     while (this._buffer.length > 0 && Date.now() < deadline) {
       await this.flush();
     }
+    // Push any spans still sitting in the OTel batch processor, within
+    // whatever is left of the caller's deadline. The pipeline itself stays up
+    // (another client may share it); otel.shutdown() tears it down. A no-op
+    // when export is off.
+    await otel.forceFlush(Math.max(0, deadline - Date.now()));
   }
 
   // ── Internal ───────────────────────────────────────────────────────────────
@@ -682,13 +715,20 @@ export class Dunetrace {
    *
    * @internal — public only because the module-level listener calls it.
    */
-  _flushBeforeExit(): void {
-    if (this._exitFlushing) return;
+  _flushBeforeExit(): Promise<void> {
+    if (this._exitFlushing) return Promise.resolve();
+    // Terminal events for runs this client opened on its own go out in the
+    // same flush.
     this._closeImplicitRuns("process_exit");
-    if (this._buffer.length === 0) return;
+    // The OTel batch processor has no exit hook of its own, so a short-lived
+    // process would otherwise leave its last spans in the queue. Concurrent
+    // callers (one per client) share the flush in flight; it never rejects and
+    // is bounded, so a silent collector cannot hold the exit.
+    const spans = otel.flushForExit();
+    if (this._buffer.length === 0 && spans === null) return Promise.resolve();
     this._exitFlushing = true;
-    void this.flush()
-      .catch(() => {})
+    return Promise.all([this.flush().catch(() => {}), spans])
+      .then(() => undefined)
       .finally(() => { this._exitFlushing = false; });
   }
 

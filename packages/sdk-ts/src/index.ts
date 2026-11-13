@@ -11,6 +11,10 @@ export {
 } from "./auto.js";
 export { DunetraceRun } from "./run.js";
 export { agentVersion } from "./hash.js";
+// The OTel bootstrap (init/shutdown/isEnabled/forceFlush) is the "dunetrace/otel"
+// subpath, not re-exported here: its declarations reference @opentelemetry/*
+// types, which a core-only consumer does not have installed.
+export { traceIdHex, rootSpanIdHex, runSampled } from "./otel-ids.js";
 export {
   HttpBatchEmitter,
   NoopBatchEmitter,
