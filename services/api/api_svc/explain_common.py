@@ -23,6 +23,8 @@ _STEP_RANGE_FIELDS: Dict[str, tuple] = {
     "GOAL_ABANDONMENT": ("last_tool_step", "current_step"),
     "FIRST_STEP_FAILURE": ("failed_step", "failed_step"),
     "SLOW_STEP": ("step_index", "step_index"),
+    # The decline is defined by the early retrievals as much as the late ones.
+    "RAG_QUALITY_DEGRADATION": ("first_step", "last_step"),
 }
 
 

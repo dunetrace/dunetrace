@@ -283,6 +283,13 @@
       "enriches": [],
       "why": "`if not state.tool_calls: return None`, then builds the grounding surface from input_text and system_prompt. With neither, every argument reads as ungrounded."
     },
+    "MALFORMED_TOOL_CALL": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [],
+      "why": "Checks each ToolCall.args value that begins with `{` or `[` and fires only when neither JSON nor a Python literal can parse it."
+    },
     "RETRIEVED_CONTENT_INJECTION": {
       "requires": [
         [
@@ -384,6 +391,13 @@
         "external"
       ],
       "why": "`if not self.IRREVERSIBLE_TOOLS or not state.tool_calls: return None`. IRREVERSIBLE_TOOLS defaults to [], so this is inert until an operator declares which tools are irreversible in detectors.yml."
+    },
+    "RAG_QUALITY_DEGRADATION": {
+      "requires": [
+        "retrieval"
+      ],
+      "enriches": [],
+      "why": "Needs at least three finite nonnegative top_score observations from the same index."
     }
   }
 }

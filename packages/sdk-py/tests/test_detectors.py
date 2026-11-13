@@ -1016,9 +1016,6 @@ class TestMemoryGrowthPatternDetector(unittest.TestCase):
         assert signal.evidence["write_count"] == 3
         assert signal.evidence["read_count"] == 1
         assert signal.evidence["ratio"] == 3.0
-        assert signal.evidence["signal_source"] == "memory_events"
-        assert signal.evidence["write_tools"] == []
-        assert signal.evidence["read_tools"] == []
         assert signal.evidence["write_keys"] == ["notes"]
         assert signal.evidence["read_keys"] == ["notes"]
         assert signal.step_index == 4
@@ -1039,66 +1036,61 @@ class TestMemoryGrowthPatternDetector(unittest.TestCase):
         assert signal.evidence["write_count"] == 3
         assert signal.evidence["read_count"] == 0
         assert signal.evidence["ratio"] is None
-        assert signal.evidence["signal_source"] == "memory_events"
 
-    def test_nonempty_memory_events_do_not_fall_through_to_tool_names(self):
-        """One memory write is under MIN_WRITES. Three save_* calls would fire the fallback."""
-        suppressed = make_state()
-        suppressed.memory_events = [make_memory("written", "notes", 1)]
-        suppressed.tool_calls = [make_tool_call("save_note", step=i) for i in range(1, 4)]
-        assert self.detector.on_run_completion(suppressed) is None
+    def test_never_reading_scores_at_least_as_high_as_reading_once(self):
+        """The strongest form of the pattern used to score lowest: with a ratio
+        of 5, three writes and no reads came out at 0.34."""
+        never = make_state()
+        never.memory_events = [make_memory("written", "n", i) for i in range(1, 6)]
+        once = make_state()
+        once.memory_events = [make_memory("written", "n", i) for i in range(1, 6)]
+        once.memory_events.append(make_memory("read", "n", 7))
+        d = MemoryGrowthPatternDetector(WRITE_READ_RATIO=5)
+        s_never, s_once = d.on_run_completion(never), d.on_run_completion(once)
+        assert s_never.confidence >= 0.5 and s_once.confidence >= 0.5
+        assert s_never.confidence > s_once.confidence
 
-        # Memory writes fire even when every tool name is a read marker.
-        fired = make_state()
-        fired.memory_events = [make_memory("written", "notes", i) for i in range(1, 4)]
-        fired.tool_calls = [make_tool_call("search_note", step=i) for i in range(1, 5)]
-        signal = self.detector.on_run_completion(fired)
-        assert signal is not None
-        assert signal.evidence["signal_source"] == "memory_events"
-        assert signal.evidence["write_count"] == 3
-        assert signal.evidence["read_count"] == 0
-        assert signal.evidence["write_tools"] == []
-
-    def test_empty_memory_events_use_tool_name_fallback(self):
+    def test_tool_names_are_never_consulted(self):
+        """Substring matching read add_numbers / lookup_address as memory writes."""
         state = make_state()
-        state.tool_calls = [make_tool_call("SAVE_NOTE", step=i) for i in range(1, 4)]
-        state.tool_calls.append(make_tool_call("Search_Docs", step=4))
-        signal = self.detector.on_run_completion(state)
-        assert signal is not None
-        assert signal.failure_type == FailureType.MEMORY_GROWTH_PATTERN
-        assert signal.evidence["signal_source"] == "tool_names"
-        assert signal.evidence["write_count"] == 3
-        assert signal.evidence["read_count"] == 1
-        assert signal.evidence["ratio"] == 3.0
-        assert signal.evidence["write_tools"] == ["SAVE_NOTE"]
-        assert signal.evidence["read_tools"] == ["Search_Docs"]
-        assert signal.evidence["write_keys"] == []
-
-    def test_approval_blocked_write_tools_do_not_fire(self):
-        """Three denied save_note calls would fire the fallback if they had run."""
-        state = make_state()
-        state.tool_calls = [make_tool_call("save_note", step=i, success=None) for i in (1, 2, 3)]
-        state.events = [
-            AgentEvent(
-                event_type=EventType.APPROVAL_DENIED,
-                run_id=state.run_id,
-                agent_id=state.agent_id,
-                agent_version=state.agent_version,
-                step_index=i + 1,
-                payload={"tool_name": "save_note"},
+        state.tool_calls = [
+            make_tool_call(n, step=i)
+            for i, n in enumerate(
+                ["add_numbers", "lookup_address", "restore_backup", "save_note"], start=1
             )
-            for i in (1, 2, 3)
         ]
         assert self.detector.on_run_completion(state) is None
 
-        executed = make_state()
-        executed.tool_calls = [make_tool_call("save_note", step=i, success=True) for i in (1, 2, 3)]
-        signal = self.detector.on_run_completion(executed)
+    def test_mixed_and_unhashable_keys_do_not_raise(self):
+        state = make_state()
+        state.memory_events = [
+            make_memory("written", 42, 1),
+            make_memory("written", "notes", 2),
+            make_memory("written", 7.5, 3),
+        ]
+        signal = self.detector.on_run_completion(state)
         assert signal is not None
-        assert signal.evidence["signal_source"] == "tool_names"
-        assert signal.evidence["write_count"] == 3
-        assert signal.evidence["read_count"] == 0
-        assert signal.evidence["write_tools"] == ["save_note"]
+        assert signal.evidence["write_keys"] == ["42", "notes", "7.5"]
+
+    def test_evidence_keys_are_capped(self):
+        state = make_state()
+        state.memory_events = [make_memory("written", f"k{i}", i) for i in range(1, 200)]
+        signal = self.detector.on_run_completion(state)
+        assert len(signal.evidence["write_keys"]) == MemoryGrowthPatternDetector.MAX_EVIDENCE_KEYS
+        assert signal.evidence["write_count"] == 199
+
+    def test_invalid_min_writes_is_rejected(self):
+        for bad in (None, "3", 0, -1, True, 2.5):
+            with self.assertRaises(ValueError):
+                MemoryGrowthPatternDetector(MIN_WRITES=bad)
+
+    def test_not_in_the_in_path_battery(self):
+        """Whole-run totals: a signal policy evaluating it per step would fire
+        after the third write, before a read the agent was about to make."""
+        from dunetrace.detectors import DETECTOR_KEYS, TIER1_DETECTORS
+
+        assert DETECTOR_KEYS["memory_growth_pattern"] is MemoryGrowthPatternDetector
+        assert not any(isinstance(d, MemoryGrowthPatternDetector) for d in TIER1_DETECTORS)
 
     def test_nonpositive_write_read_ratio_is_rejected(self):
         assert MemoryGrowthPatternDetector().WRITE_READ_RATIO == 3

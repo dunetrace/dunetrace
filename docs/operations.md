@@ -575,7 +575,8 @@ But a signal's `evidence` dict embeds excerpts of the same raw agent content the
 | `destination`, `destination_host` | `UNGROUNDED_DESTINATION` | An email address or URL |
 | `tool_error` | `PREMATURE_TERMINATION`, `UNREAD_TOOL_ERROR` | Raw tool error text |
 | `output_snippet` | `PREMATURE_TERMINATION` | LLM output excerpt |
-| `args_snippet` | `TOOL_ARGUMENT_FABRICATION`, `UNGROUNDED_DESTINATION` | Tool argument excerpt |
+| `args_snippet` | `TOOL_ARGUMENT_FABRICATION`, `UNGROUNDED_DESTINATION`, `MALFORMED_TOOL_CALL` | Tool argument excerpt |
+| `write_keys`, `read_keys` | `MEMORY_GROWTH_PATTERN` | Memory keys the agent wrote / read (caller-chosen, often user or tenant ids) |
 | `content_snippet` | `RETRIEVED_CONTENT_INJECTION` | Retrieved text excerpt |
 | `value_snippet` | `MEMORY_POISONING` | Memory value excerpt |
 | `fabricated_entity` | `TOOL_ARGUMENT_FABRICATION` | The fabricated value itself |

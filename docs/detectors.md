@@ -1,17 +1,18 @@
 # Detectors
 
-Dunetrace runs 35 structural detectors against every completed agent run. All of
-them are listed in the table below; the thirteen newest get a full write-up in
+Dunetrace runs 37 structural detectors against every completed agent run. All of
+them are listed in the table below; the newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
 
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
-> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **32**
-> detectors the SDK can evaluate during runtime event collection. The other
-> three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
-> need raw input or a second run's data and are handled separately. The detector
-> worker runs all 35 regardless — see
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **33**
+> detectors the SDK can evaluate during runtime event collection. Of the other
+> four, three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
+> need raw input or a second run's data and are handled separately, and
+> `MEMORY_GROWTH_PATTERN` compares whole-run totals, so it is server-side only by
+> design. The detector worker runs all 37 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -43,6 +44,7 @@ Semantic findings never trigger a policy — see
 | `SLOW_STEP` | Step duration exceeds threshold — 2× P75 baseline ¹ or static fallback (tool >15s, LLM >30s) | MEDIUM/HIGH |
 | `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
 | `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
+| `RAG_QUALITY_DEGRADATION` | Late retrieval relevance drops >30% from the early average within one index | MEDIUM |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM |
 | `EXCESSIVE_RETRIEVAL` | Run made at least 8 retrieval calls — high retrieval volume, indicating inefficient grounding | MEDIUM |
 | `CONTEXT_BLOAT` | Prompt tokens grow beyond 2× P75 baseline ¹ or static fallback (3× from first to last call) | MEDIUM |
@@ -67,6 +69,7 @@ Semantic findings never trigger a policy — see
 | `PREMATURE_TERMINATION` | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
 | `UNREAD_TOOL_ERROR` | Tool failed, agent's next action doesn't acknowledge it | MEDIUM/HIGH |
 | `TOOL_ARGUMENT_FABRICATION` | Tool call argument references an entity not present anywhere in prior context | HIGH/CRITICAL |
+| `MALFORMED_TOOL_CALL` | Tool args look structured but cannot be parsed as JSON or a Python literal | HIGH |
 | `RETRIEVED_CONTENT_INJECTION` | Retrieved or fetched content contains text directed at the agent as an instruction | HIGH/CRITICAL |
 | `HANDOFF_CONTEXT_LOSS` | Multi-agent handoff loses a large chunk of the parent agent's context | HIGH |
 | `AGENT_HANDOFF_FAILURE` | A handoff-named tool call fails or returns an empty/insufficient payload | HIGH |
@@ -207,10 +210,9 @@ docker compose restart detector ingest
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`). Five are not:
+Most built-in detectors are live (`shadow = false`). Seven are not:
 `INSTRUMENTATION_DEGRADED`, `OVERSIZED_TOOL_ARGUMENTS`,
-`SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY`, and
-`MEMORY_GROWTH_PATTERN` remain shadowed by default
+`SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY`, `RAG_QUALITY_DEGRADATION`, `MALFORMED_TOOL_CALL` and `MEMORY_GROWTH_PATTERN` remain shadowed by default
 until their precision is checked against real traffic. A new built-in detector should be added to
 `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
 `services/detector/detector_svc/db.py` once validated; leaving it out of
@@ -726,6 +728,38 @@ Same shape as a fabrication case — a specific ID passed to a second tool call 
 
 ---
 
+### MALFORMED_TOOL_CALL
+
+#### What it catches
+
+A tool call whose `args` is a JSON attempt that is not valid JSON: trailing commas, single quotes, Python's `True`/`None`, bare `NaN`, bad escapes, unterminated objects. These are the mistakes an LLM makes writing tool calls, and the JSON-reading tool on the other end rejects every one of them. Plain text is never judged, whatever bracket it starts with: a GraphQL query, a `[INFO]` log line, a markdown link, a `{name}` template or a shell test like `[ -f x ]` are not JSON attempts. The SDKs record structured arguments as JSON (Hermes and Haystack included), so Dunetrace's own encoding never fires it; a caller who passes `str(some_dict)` as the args string does.
+
+#### Signal
+
+For each tool call, in step order: if `args` opens like JSON (an object starting with a key or `}`, or an array starting with a value or `]`), it is parsed with strict `json.loads` (`NaN`/`Infinity` rejected). LangChain's `{"input": "<tool input>"}` wrapper is looked through, so a malformed inner payload is judged rather than its valid wrapper. Arguments recorded truncated (`args_length` larger than what arrived) and arguments over `max_args_chars` (default 32,768) are skipped, which also bounds the in-path cost; parse results are cached because a signal policy re-reads every earlier call at each step. One signal for the first malformed call, with the tool name, step, and a capped argument snippet. A calibration corpus and report ship with it: `scripts/calibrate_malformed_tool_call.py`.
+
+#### Severity and rollout
+
+**HIGH · Shadow by default.** The syntax error is unambiguous, but the operational consequence is framework-specific: some frameworks reject it loudly while others coerce, retry, or pass it downstream. Validate the observed fire rate and handling behavior before adding it to `LIVE_DETECTORS`.
+
+#### Example — fires on:
+
+```json
+{"tool_name": "create_ticket", "step_index": 4, "args": "{\"title\": }"}
+```
+
+#### Example — does NOT fire on:
+
+```json
+{"tool_name": "search_docs", "step_index": 1, "args": "refund policy"}
+```
+
+#### Related detectors
+
+- `TOOL_ARGUMENT_FABRICATION` — validates whether structured arguments are grounded in prior context; this detector validates only whether a structured-looking payload is parseable.
+
+---
+
 ### RETRIEVED_CONTENT_INJECTION
 
 #### What it catches
@@ -1030,26 +1064,29 @@ writes and never reads.
 
 #### How it decides
 
-The primary signal is `state.memory_events`. Each event with `op == "written"`
-counts as a write and each `op == "read"` counts as a read. `cleared` counts
-as neither. A non-empty `memory_events` list is the whole signal: tool names
-are not consulted, even when the counts miss the thresholds.
-
-Tool names are the fallback only when `memory_events` is empty. Matching is
-the issue's case-insensitive substring lists, with no token boundary:
-
-- write markers: write, store, save, append, add, insert
-- read markers: read, retrieve, recall, search, query, fetch, get
-
-A name that contains both kinds of marker counts once as each.
+It counts `state.memory_events`: each `op == "written"` is a write, each
+`op == "read"` a read, and `cleared` is neither. Only real memory events count.
+Tool names are never consulted: substring matching on names (`add`, `get`,
+`store`) read `add_numbers` and `lookup_address` as memory writes. A run without
+memory instrumentation never fires; instrument memory with
+`run.memory_written()` / `run.memory_read()`, or let the LangGraph and CrewAI
+auto-instrumentation do it. LangGraph's `store.search` / `asearch` count as
+reads, keyed by the namespace searched.
 
 It fires when writes are at least `min_writes` (default 3) and writes are at
 least `write_read_ratio` times the reads (default 3). Equality at a ratio of
 3 fires. A ratio of 2 with three or more writes does not. Zero reads stays
 defined, because the comparison multiplies instead of dividing: three or more
-writes and no reads fires, and the evidence ratio is null rather than a
-stand-in such as writes divided by one. The explainer says "no reads" in that
-case.
+writes and no reads fires, and the evidence ratio is null. Confidence treats
+zero reads as the strongest case (scored as half a read), so it is never below
+a run with the same writes and one read.
+
+**Server-side only.** It is not in the SDK's in-path battery
+(`TIER1_DETECTORS`): it compares whole-run totals, and a `trigger="signal"`
+policy evaluating it after each step would fire on the third write, before a
+read the agent was about to make. Evidence lists at most 10 keys per side
+(`write_keys`, `read_keys`); those keys are caller-chosen and often carry user
+or tenant ids, so they expire with the run's events (`CONTENT_EVIDENCE_KEYS`).
 
 #### How this one is different
 
@@ -1059,36 +1096,17 @@ counts operations, including a write whose value is empty. One poisoned write
 does not fire here. A clean key rewritten many times, with almost no reads,
 does not fire `MEMORY_POISONING`.
 
-#### Shadow
+#### Shadow and the within-run limitation
 
-Not in `LIVE_DETECTORS`. Signals are stored with `shadow = true`. On the
-synthetic calibration corpus the memory-event path separates cleanly. The
-fallback does not, and the issue requires that fallback, so the detector
-stays shadow-only regardless of how the memory-event slice scores.
-
-#### Known limitation
-
-On an empty `memory_events` list — the common case for an agent that does not
-instrument memory — ordinary tool names collide with the substring lists.
-`write_file` counts as a write. `read_file`, `web_search`, `get_weather`, and
-`fetch_url` count as reads. Three `write_file` calls and no read-marker call
-is a false positive, and so is three `write_file` plus one of those read
-names (ratio exactly 3). Those read names alone do not fire. The same read
-markers can hide a real memory-write run: three `save_memory` calls plus two
-`web_search` calls is a false negative at ratio 1.5.
-
-Those numbers are synthetic calibration results, not production estimates.
-On the 45-run synthetic corpus the boundary slice (memory events and
-memory-tool names, including ratio-just-below-3 negatives that clear the
-write floor) is 100% precision, 100% recall, and 0% false-positive rate.
-The collision slice is what exposes the substring-fallback weakness. Overall
-synthetic precision is 71.4% (15/21), recall is 93.8% (15/16), and the
-false-positive rate is 20.7% (6/29): 15 true positives, 6 false positives,
-1 false negative, and 23 true negatives. All six false positives and the
-one false negative are in the 13-run collision slice (false-positive rate
-50%). The marker lists were not changed to improve these numbers, and the
-detector remains shadow-only. Full table:
-`scripts/calibration/memory_growth_pattern_calibration.md`.
+Not in `LIVE_DETECTORS`. Signals are stored with `shadow = true`. The detector
+compares writes and reads **within one run**, so two healthy shapes fire: a
+background extraction run that only writes, and an agent that saves facts in
+one run and reads them in a later one. The calibration report
+(`scripts/calibration/memory_growth_pattern_calibration.md`, generated by
+`scripts/calibrate_memory_growth_pattern.py`) keeps those in a "realistic"
+slice next to the rule's own boundary cases. Those boundary cases check the
+rule against itself and are a regression gate, not a precision estimate. Measure
+the fire rate on real traffic per agent before promoting it.
 
 ---
 
@@ -1280,7 +1298,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 35 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 37 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`
@@ -1606,3 +1624,36 @@ alert, because the human is the only party who knows the intent.
 **Tunable**: `min_candidates`, `irreversible_tools`, `warrant_surfaces`,
 `min_token_len`, `max_candidates_per_run`, `max_scan_ns`, `max_output_chars`,
 `max_depth`, `user_turn_signals`, `user_turn_text_keys`.
+
+## RAG_QUALITY_DEGRADATION
+
+A single run's retrieval relevance deteriorates: the late-half average top
+score is more than 30% below the early-half average. This is a relative trend
+signal, unlike `RAG_EMPTY_RETRIEVAL` (absolute relevance) and
+`EXCESSIVE_RETRIEVAL` (volume). Severity: MEDIUM; ships in shadow mode.
+
+Requires at least three finite, nonnegative scored, **non-empty** retrievals
+**per index**; missing or invalid scores are ignored, numeric strings and numpy
+scalars are accepted, and a retrieval that returned nothing (`result_count` 0)
+is left to `RAG_EMPTY_RETRIEVAL` rather than read as a decline. Calls are
+ordered by step_index. For an odd count, the middle call belongs to the late
+half. Zero early averages do not fire, and a drop of exactly the threshold does
+not fire. Different indexes are not compared because score scales can differ;
+when `retrieval.responded` carries no `index_name`, the one on the matching
+`retrieval.called` is used (LangChain names the retriever only there). This
+assumes higher scores mean better relevance; convert distance metrics before
+instrumentation. Changing query intent or scoring models can also cause
+legitimate drops: this heuristic cannot establish answer quality or root cause.
+
+Config: `min_retrievals` (default 3, minimum 3: a value below 3 is rejected and
+the detector keeps its defaults), `drop_threshold` (default 0.3, a relative
+fraction in (0, 1]). Alerting, once promoted, is frequency-based (3 runs in
+10), like `RAG_EMPTY_RETRIEVAL`. The `fix_rag_retrieval` replay modification
+resolves it. Evidence includes
+`early_avg_score`, `late_avg_score`, `drop_pct`, `retrieval_count`, index and
+step range. Confidence increases with drop magnitude. See the synthetic
+[calibration report](../scripts/calibration/rag_quality_degradation_calibration.md).
+The default 0.3 threshold is heuristic: stationary benign score distributions
+can produce substantially different false-positive rates, especially at three
+retrievals. Keep it shadow-only until the index/scorer and query mix have been
+evaluated on labeled real traffic; increasing sample count alone is insufficient.

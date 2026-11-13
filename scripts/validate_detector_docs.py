@@ -78,6 +78,7 @@ _COUNT_SCAN_GLOBS = _SCAN_GLOBS + [
 # signals). When a new one shows up the check fails loudly; add it here after
 # confirming it isn't a mistyped or unbuilt detector name.
 _ALLOWLIST = {
+    "CONTENT_EVIDENCE_KEYS",
     "DUNETRACE_API_URL",
     "DUNETRACE_CUSTOM_DETECTORS_PATH",
     "SEMANTIC_LLM_PROVIDER",
@@ -107,7 +108,7 @@ _ALLOWLIST = {
     "SHADOW",
     # SDK constants that name *collections of* detectors, or detector tunables —
     # all defined in packages/sdk-py/dunetrace/detectors.py.
-    "TIER1_DETECTORS",  # the 32-detector in-path battery, not a detector itself
+    "TIER1_DETECTORS",  # the in-path battery, not a detector itself
     "SCAN_HEAD_CHARS",  # injection scan window bound
     "SCAN_TAIL_CHARS",  # injection scan window bound
     # Custom-detector translator vocabulary (detector_svc/custom_detector.py and
@@ -141,12 +142,7 @@ def code_names() -> set[str]:
     import pkgutil
 
     import dunetrace.packs as packs_pkg
-    from dunetrace.detectors import (
-        DelegationLoopDetector,
-        HandoffContextLossDetector,
-        PROMPT_INJECTION_DETECTOR,
-        TIER1_DETECTORS,
-    )
+    from dunetrace.detectors import DETECTOR_KEYS
     from dunetrace.packs.base import PACK_REGISTRY
 
     # Import every pack module so it registers itself (voice today, plus any
@@ -155,10 +151,10 @@ def code_names() -> set[str]:
         if mod.name != "base":
             importlib.import_module(f"dunetrace.packs.{mod.name}")
 
-    names = {d.name for d in TIER1_DETECTORS}
-    names.add(PROMPT_INJECTION_DETECTOR.name)
-    names.add(HandoffContextLossDetector().name)
-    names.add(DelegationLoopDetector().name)
+    # Every built-in, in-path or not: DETECTOR_KEYS is the one map the worker
+    # and the SDK both build from (a server-only detector is absent from
+    # TIER1_DETECTORS by design).
+    names = {cls.name for cls in DETECTOR_KEYS.values()}
     for pack in PACK_REGISTRY.values():
         for cls in pack.detectors:
             names.add(cls.name)
@@ -201,21 +197,28 @@ def validate(
 # audit — "Runs 29 detectors", "the 15 checks", "34 structural detectors,
 # in-path" — and NONE was caught, because this script validated NAMES and never
 # numbers, and because the files carrying them were outside _SCAN_GLOBS.
-_TOTAL_DETECTORS = 35  # detector classes / _DETECTOR_CLASSES / detectors.yml sections
-_IN_PATH_DETECTORS = 32  # TIER1_DETECTORS — the SDK's client-side subset
+#
+# Counted from the code, not written down: a hand-kept constant here was one
+# more thing every new detector had to remember to bump, and two detector PRs
+# open at once both bumped it to the same number.
+from dunetrace.detectors import DETECTOR_KEYS as _DETECTOR_KEYS  # noqa: E402
+from dunetrace.detectors import TIER1_DETECTORS as _TIER1  # noqa: E402
+
+_TOTAL_DETECTORS = len(_DETECTOR_KEYS)  # detector classes / _DETECTOR_CLASSES / yml sections
+_IN_PATH_DETECTORS = len(_TIER1)  # TIER1_DETECTORS — the SDK's client-side subset
 # Below this, a number is counting something other than the battery (a table
 # row, a pack, a single detector), not asserting how many exist.
 _MIN_BATTERY_CLAIM = 10
 
 # "<n> detectors" / "<n> structural detectors" / "<n> zero-LLM detectors".
 _COUNT_CLAIM = re.compile(r"\b(\d{1,3})\s+(?:[a-z-]+\s+){0,3}detectors?\b", re.IGNORECASE)
-# Phrases that mean the sentence is talking about the in-path subset, not all 35.
+# Phrases that mean the sentence is talking about the in-path subset, not all of them.
 _IN_PATH_MARKERS = ("in-path", "in path", "tier1_detectors", "client-side", "in the sdk")
 
 
 def check_counts(globs: list[str] | None = None) -> list[str]:
-    """Every "<n> detectors" claim must be 35, or 32 when the sentence says
-    in-path. Returns one message per bad claim."""
+    """Every "<n> detectors" claim must be the total, or the in-path count when
+    the sentence says in-path. Returns one message per bad claim."""
     problems: list[str] = []
     for glob in globs or _SCAN_GLOBS:
         for path in sorted(_REPO.glob(glob)):

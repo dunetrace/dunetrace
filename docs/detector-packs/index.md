@@ -15,13 +15,14 @@ false-positive cost of detectors that don't apply to them.
 
 There are three kinds of detector in Dunetrace; packs are the middle one:
 
-- **Built-in detectors** — the always-on battery (35 of them) that runs for
+- **Built-in detectors** — the always-on battery (37 of them) that runs for
   every org on every completed run. Packs never change these; they always run.
-  Thirty-two also belong to the SDK's runtime `TIER1_DETECTORS` battery; the
+  Thirty-three also belong to the SDK's runtime `TIER1_DETECTORS` battery; the
   raw-input `PROMPT_INJECTION_SIGNAL` scan is the separate pre-run, in-path
   check. Thirty are live for customer alerts; `INSTRUMENTATION_DEGRADED`,
-  `OVERSIZED_TOOL_ARGUMENTS`, `SCATTERSHOT_TOOL_USE`,
-  `UNRESOLVED_AMBIGUITY`, and `MEMORY_GROWTH_PATTERN` remain in shadow mode.
+  `OVERSIZED_TOOL_ARGUMENTS`, `SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY`,
+  `RAG_QUALITY_DEGRADATION`, `MALFORMED_TOOL_CALL` and `MEMORY_GROWTH_PATTERN`
+  remain in shadow mode.
   See [detectors.md](../detectors.md).
 - **Pack detectors** — first-party, Dunetrace-owned, activated per org as a
   whole. This page.

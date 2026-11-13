@@ -614,7 +614,9 @@ async def prune_old_events(retention_days: int = 90) -> int:
 # type names), `destination_type` ("email" | "url"), and every *_length integer.
 CONTENT_EVIDENCE_KEYS: tuple[str, ...] = (
     "args",  # TOOL_LOOP — untruncated args of every call in the loop
-    "args_snippet",  # TOOL_ARGUMENT_FABRICATION, UNGROUNDED_DESTINATION
+    "args_snippet",  # TOOL_ARGUMENT_FABRICATION, UNGROUNDED_DESTINATION, MALFORMED_TOOL_CALL
+    "write_keys",  # MEMORY_GROWTH_PATTERN -- caller memory keys (often user/tenant ids)
+    "read_keys",  # MEMORY_GROWTH_PATTERN
     "content_snippet",  # RETRIEVED_CONTENT_INJECTION — retrieved text
     "value_snippet",  # MEMORY_POISONING — memory value
     "fabricated_entity",  # TOOL_ARGUMENT_FABRICATION — the entity itself

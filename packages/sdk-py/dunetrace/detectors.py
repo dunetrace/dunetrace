@@ -23,8 +23,10 @@ Tuned values belong in the detector service config, not here.
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -757,6 +759,113 @@ class RagEmptyRetrievalDetector(BaseDetector):
                 "result_count": worst.result_count,
                 "top_score": worst.top_score,
                 "bad_retrievals": len(bad_retrievals),
+            },
+        )
+
+
+# ── RAG_QUALITY_DEGRADATION ───────────────────────────────────────────────────
+
+
+def _relevance_score(value: Any) -> Optional[float]:
+    """A retrieval's top_score as a finite, non-negative float, or None.
+
+    Accepts anything numeric (numpy scalars from FAISS / sentence-transformers,
+    and the numeric strings json.dumps(default=str) and OTLP stringValue turn
+    them into). Rejects bools, NaN, infinities and negatives.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) and score >= 0 else None
+
+
+class RagQualityDegradationDetector(BaseDetector):
+    """Retrieval relevance declines within one index during a run.
+
+    Splits at least MIN_RETRIEVALS scored, non-empty retrievals from the same index
+    into an early and a late half (for odd counts the late half takes the middle
+    call) and fires when the late average is more than DROP_THRESHOLD below the
+    early one, relatively. Scores must be higher-is-better relevance; convert
+    distance metrics before instrumenting. Different indexes are never compared.
+    Empty retrievals (result_count 0) are RAG_EMPTY_RETRIEVAL's, not a decline.
+
+    Tunable: MIN_RETRIEVALS (default 3, minimum 3: two calls have no trend),
+    DROP_THRESHOLD (default 0.3, a relative fraction in (0, 1]).
+    """
+
+    name = "RAG_QUALITY_DEGRADATION"
+    SEVERITY = Severity.MEDIUM
+    MIN_RETRIEVALS = 3
+    DROP_THRESHOLD = 0.3
+
+    # A computed drop is compared after rounding, so a decline of exactly the
+    # threshold (1.0 -> 0.7 computes as 0.30000000000000004) does not fire.
+    _DROP_PRECISION = 9
+
+    def __init__(self, **overrides):
+        super().__init__(**overrides)
+        if (
+            isinstance(self.MIN_RETRIEVALS, bool)
+            or not isinstance(self.MIN_RETRIEVALS, int)
+            or self.MIN_RETRIEVALS < 3
+        ):
+            raise ValueError("MIN_RETRIEVALS must be an integer >= 3")
+        if (
+            isinstance(self.DROP_THRESHOLD, bool)
+            or not isinstance(self.DROP_THRESHOLD, (int, float))
+            or not 0 < self.DROP_THRESHOLD <= 1
+        ):
+            raise ValueError("DROP_THRESHOLD must be a number in (0, 1]")
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        groups: Dict[str, List[Tuple[int, float]]] = {}
+        for retrieval in state.retrievals:
+            score = _relevance_score(retrieval.top_score)
+            if score is None or (retrieval.result_count or 0) <= 0:
+                continue
+            key = retrieval.index_name if isinstance(retrieval.index_name, str) else "unknown"
+            groups.setdefault(key, []).append((retrieval.step_index, score))
+
+        worst: Optional[Tuple[float, str, List[Tuple[int, float]], float, float]] = None
+        for index_name, scored in groups.items():
+            if len(scored) < self.MIN_RETRIEVALS:
+                continue
+            scored.sort(key=lambda pair: pair[0])
+            scores = [score for _, score in scored]
+            middle = len(scores) // 2
+            early = sum(scores[:middle]) / middle
+            late = sum(scores[middle:]) / (len(scores) - middle)
+            if early <= 0:
+                continue
+            drop = round((early - late) / early, self._DROP_PRECISION)
+            if drop <= self.DROP_THRESHOLD:
+                continue
+            if worst is None or drop > worst[0]:
+                worst = (drop, index_name, scored, early, late)
+
+        if worst is None:
+            return None
+        drop, index_name, scored, early, late = worst
+        return FailureSignal(
+            failure_type=FailureType.RAG_QUALITY_DEGRADATION,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=scored[-1][0],
+            confidence=_scale_confidence(drop / self.DROP_THRESHOLD),
+            evidence={
+                "index_name": index_name,
+                "early_avg_score": round(early, 3),
+                "late_avg_score": round(late, 3),
+                "drop_pct": round(drop * 100, 1),
+                "retrieval_count": len(scored),
+                "drop_threshold": self.DROP_THRESHOLD,
+                "first_step": scored[0][0],
+                "last_step": scored[-1][0],
             },
         )
 
@@ -2414,6 +2523,99 @@ class ToolArgumentFabricationDetector(BaseDetector):
         return None
 
 
+# ── MALFORMED_TOOL_CALL ───────────────────────────────────────────────────────
+
+
+# A JSON value's opening: an object whose first token is a key or its close,
+# or an array whose first token is a value or its close. Text that merely
+# starts with a bracket -- a GraphQL query `{ user(id: 1) ... }`, a `[INFO]` log
+# line, a markdown link, a `{name}` template, `[ -f x ]` in a shell command, the
+# `[object Object]` a failed JS stringify leaves -- is not a JSON attempt and is
+# not judged. A single-quoted key IS (the commonest LLM JSON mistake).
+_JSON_ATTEMPT = re.compile(r"""\A\s*(?:\{\s*["'}]|\[\s*(?:["'{\[\]]|-?\d|true\b|false\b|null\b))""")
+
+
+def _reject_constant(name: str) -> Any:
+    # NaN / Infinity / -Infinity: Python's json accepts them, JSON does not.
+    raise ValueError(name)
+
+
+@functools.lru_cache(maxsize=512)
+def _json_malformed(text: str) -> bool:
+    """True when a JSON-shaped string fails strict JSON parsing. Cached: under a
+    signal policy the in-path pass re-reads every earlier call's args at each
+    step, and the same strings come back each time."""
+    try:
+        parsed = json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        return True
+    # LangChain wraps every tool input as {"input": <tool_input>} before
+    # encoding it, so a malformed payload arrives as a valid JSON string inside
+    # a valid wrapper. Judge the inner value when it is itself a JSON attempt.
+    if isinstance(parsed, dict) and len(parsed) == 1 and isinstance(parsed.get("input"), str):
+        inner = parsed["input"]
+        if len(inner) <= MalformedToolCallDetector.MAX_ARGS_CHARS and _JSON_ATTEMPT.match(inner):
+            return _json_malformed(inner)
+    return False
+
+
+class MalformedToolCallDetector(BaseDetector):
+    """A tool was called with JSON-shaped arguments that are not valid JSON.
+
+    Only a JSON attempt is judged: an object opening with a key, or an array
+    opening with a value (see _JSON_ATTEMPT), parsed strictly -- trailing
+    commas, single quotes, Python's True/None, bare NaN and bad escapes all
+    fire, because the JSON-reading tool on the other end rejects every one of
+    them. Plain text is never judged, whatever bracket it starts with. The
+    SDK's own encodings are JSON (the Python SDK serialises structured args with
+    json.dumps, Hermes and Haystack included), so Dunetrace's recording never
+    trips it; a caller who passes ``str(some_dict)`` as the args string does.
+
+    Arguments recorded truncated (args_length beyond what arrived) are skipped:
+    a cut-off prefix of valid JSON is indistinguishable from malformed JSON.
+    So are arguments over MAX_ARGS_CHARS, which bounds the in-path cost.
+
+    Fires once per run, on the first malformed call. Shadow by default.
+    Tunable: MAX_ARGS_CHARS (default 32768).
+    """
+
+    name = "MALFORMED_TOOL_CALL"
+    SEVERITY = Severity.HIGH
+    MAX_ARGS_CHARS = 32_768
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        blocked: Optional[set] = None
+        for tc_index, tc in enumerate(state.tool_calls):
+            args = tc.args
+            if not isinstance(args, str) or len(args) > self.MAX_ARGS_CHARS:
+                continue
+            # A capped prefix of a valid payload is indistinguishable from a
+            # malformed payload. Only classify arguments we have in full.
+            if tc.args_length is not None and tc.args_length > len(args):
+                continue
+            if not _JSON_ATTEMPT.match(args) or not _json_malformed(args.strip()):
+                continue
+            if blocked is None:  # only computed once there is a candidate
+                blocked = _approval_blocked_calls(state)
+            if tc_index in blocked:
+                continue
+            return FailureSignal(
+                failure_type=FailureType.MALFORMED_TOOL_CALL,
+                severity=self.SEVERITY,
+                run_id=state.run_id,
+                agent_id=state.agent_id,
+                agent_version=state.agent_version,
+                step_index=tc.step_index,
+                confidence=0.9,
+                evidence={
+                    "tool_name": tc.tool_name,
+                    "tool_step": tc.step_index,
+                    "args_snippet": args.strip()[:200],
+                },
+            )
+        return None
+
+
 # ── RETRIEVED_CONTENT_INJECTION ───────────────────────────────────────────────
 
 
@@ -3193,134 +3395,93 @@ class MemoryPoisonedDetector(BaseDetector):
 
 
 class MemoryGrowthPatternDetector(BaseDetector):
-    """An agent writes to memory far more than it reads that memory back.
+    """An agent writes to memory far more than it reads that memory back, within
+    one run.
 
-    Primary signal is ``state.memory_events``: count ``op == "written"`` against
-    ``op == "read"``. ``cleared`` counts as neither. A non-empty ``memory_events``
-    list is the whole signal — tool names are not consulted, even when the counts
-    miss the thresholds.
-
-    When ``memory_events`` is empty, fall back to case-insensitive tool-name
-    substrings. A call is a write when its name contains write, store, save,
-    append, add, or insert, and a read when it contains read, retrieve, recall,
-    search, query, fetch, or get. A name that contains both kinds of marker
-    counts once as each.
+    Counts ``state.memory_events``: ``op == "written"`` against ``op == "read"``
+    (``cleared`` is neither). Only real memory events count -- runs without
+    memory instrumentation never fire. Tool names are not consulted: substring
+    matching on names ("add", "get", "store") misread ``add_numbers`` and
+    ``lookup_address`` as memory writes.
 
     Fires when ``write_count >= MIN_WRITES`` and
-    ``write_count >= read_count * WRITE_READ_RATIO``. The comparison multiplies,
-    so it stays defined at zero reads: three or more writes and no reads fires,
-    and evidence ``ratio`` is None rather than a fabricated finite ratio.
+    ``write_count >= read_count * WRITE_READ_RATIO``. Multiplying keeps the rule
+    defined at zero reads, and evidence ``ratio`` is None there rather than a
+    fabricated finite number.
 
-    Tunable: WRITE_READ_RATIO (default 3), MIN_WRITES (default 3).
+    Server-side only: it is not in TIER1_DETECTORS. It compares whole-run totals,
+    so evaluating it on a partial run at each step (what a signal policy does)
+    would fire after the third write, before a read the agent was about to make.
+    It is also a within-run view: an agent that writes in one run and reads in a
+    later one fires here, which is why it ships in shadow.
+
+    Tunable: WRITE_READ_RATIO (default 3, > 0), MIN_WRITES (default 3, >= 1).
     """
 
     name = "MEMORY_GROWTH_PATTERN"
     SEVERITY = Severity.MEDIUM
     WRITE_READ_RATIO = 3
     MIN_WRITES = 3
+    # Evidence lists a sample of keys, not every key: an agent writing hundreds
+    # of UUID-keyed memories would otherwise store tens of KB per signal.
+    MAX_EVIDENCE_KEYS = 10
 
     def __init__(self, **overrides: object) -> None:
         super().__init__(**overrides)
         ratio = self.WRITE_READ_RATIO
         # A ratio of 0 or below makes `writes >= reads * ratio` true for every
         # run that clears MIN_WRITES, including a balanced one.
-        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or ratio <= 0:
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not ratio > 0:
             raise ValueError("WRITE_READ_RATIO must be a number > 0")
+        minimum = self.MIN_WRITES
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+            raise ValueError("MIN_WRITES must be an integer >= 1")
 
-    def _count_tool_names(
-        self, state: RunState
-    ) -> Tuple[int, int, List[str], List[str], List[int]]:
-        # Issue #24's documented substrings, not a token or memory-noun gate.
-        write_markers = ("write", "store", "save", "append", "add", "insert")
-        read_markers = ("read", "retrieve", "recall", "search", "query", "fetch", "get")
-        write_count = 0
-        read_count = 0
-        write_tools: set[str] = set()
-        read_tools: set[str] = set()
-        steps: List[int] = []
-        # A denied or timed-out call is still in tool_calls, with success left
-        # unset. Counting it reports a write the approval gate stopped.
-        blocked = _approval_blocked_calls(state)
-        for index, call in enumerate(state.tool_calls):
-            if index in blocked:
+    def _key_sample(self, events: List[Any]) -> List[str]:
+        # Keys are caller-supplied: str() them (an int and a str key used to make
+        # sorted() raise, which run_detectors swallowed), dedupe in order.
+        seen: Dict[str, None] = {}
+        for m in events:
+            if m.key is None or m.key == "":
                 continue
-            raw = call.tool_name or ""
-            name = raw.lower()
-            is_write = any(marker in name for marker in write_markers)
-            is_read = any(marker in name for marker in read_markers)
-            if not is_write and not is_read:
-                continue
-            if is_write:
-                write_count += 1
-                if raw:
-                    write_tools.add(raw)
-            if is_read:
-                read_count += 1
-                if raw:
-                    read_tools.add(raw)
-            steps.append(call.step_index)
-        return write_count, read_count, sorted(write_tools), sorted(read_tools), steps
+            seen.setdefault(m.key if isinstance(m.key, str) else str(m.key), None)
+            if len(seen) >= self.MAX_EVIDENCE_KEYS:
+                break
+        return list(seen)
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
-        if state.memory_events:
-            writes = [m for m in state.memory_events if m.op == "written"]
-            reads = [m for m in state.memory_events if m.op == "read"]
-            write_count = len(writes)
-            read_count = len(reads)
-            signal_source = "memory_events"
-            write_tools: List[str] = []
-            read_tools: List[str] = []
-            write_keys = sorted({m.key for m in writes if m.key})
-            read_keys = sorted({m.key for m in reads if m.key})
-            steps = [m.step_index for m in writes + reads]
-        else:
-            write_count, read_count, write_tools, read_tools, steps = self._count_tool_names(state)
-            signal_source = "tool_names"
-            write_keys = []
-            read_keys = []
-
-        if write_count == 0 and read_count == 0:
-            return None
-        if write_count < self.MIN_WRITES:
-            return None
-        # Multiply so read_count == 0 is ``write_count >= 0``, not a division.
-        if write_count < read_count * self.WRITE_READ_RATIO:
+        writes = [m for m in state.memory_events if m.op == "written"]
+        reads = [m for m in state.memory_events if m.op == "read"]
+        write_count, read_count = len(writes), len(reads)
+        if write_count < self.MIN_WRITES or write_count < read_count * self.WRITE_READ_RATIO:
             return None
 
-        ratio = round(write_count / read_count, 2) if read_count else None
-        try:
-            magnitude = (write_count / read_count) if read_count else float(write_count)
-            confidence = _scale_confidence(magnitude / self.WRITE_READ_RATIO)
-        except (TypeError, ZeroDivisionError):
-            confidence = 0.5
+        # How far past the trigger: writes per read against the ratio. A run
+        # that never read anything is the strongest form of the pattern, so it
+        # is scored as if it had half a read -- above any run with the same
+        # writes and one read, and never under the 0.5 "barely fires" floor.
+        effective = write_count / (read_count if read_count else 0.5)
+        confidence = _scale_confidence(max(1.0, effective / self.WRITE_READ_RATIO))
 
-        if steps:
-            first_step = min(steps)
-            last_step = max(steps)
-        else:
-            first_step = last_step = state.current_step
-
+        steps = [m.step_index for m in writes + reads]
         return FailureSignal(
             failure_type=FailureType.MEMORY_GROWTH_PATTERN,
             severity=self.SEVERITY,
             run_id=state.run_id,
             agent_id=state.agent_id,
             agent_version=state.agent_version,
-            step_index=last_step,
+            step_index=max(steps),
             confidence=confidence,
             evidence={
                 "write_count": write_count,
                 "read_count": read_count,
-                "ratio": ratio,
-                "write_tools": write_tools,
-                "read_tools": read_tools,
-                "write_keys": write_keys,
-                "read_keys": read_keys,
-                "signal_source": signal_source,
+                "ratio": round(write_count / read_count, 2) if read_count else None,
+                "write_keys": self._key_sample(writes),
+                "read_keys": self._key_sample(reads),
                 "write_read_ratio": self.WRITE_READ_RATIO,
                 "min_writes": self.MIN_WRITES,
-                "first_step": first_step,
-                "last_step": last_step,
+                "first_step": min(steps),
+                "last_step": max(steps),
             },
         )
 
@@ -5242,6 +5403,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     GoalAbandonmentDetector(),
     RagEmptyRetrievalDetector(),
     ExcessiveRetrievalDetector(),
+    RagQualityDegradationDetector(),
     LlmTruncationLoopDetector(),
     SilentTruncationDetector(),
     ContextBloatDetector(),
@@ -5257,12 +5419,12 @@ TIER1_DETECTORS: List[BaseDetector] = [
     PrematureTerminationDetector(),
     UnreadToolErrorDetector(),
     ToolArgumentFabricationDetector(),
+    MalformedToolCallDetector(),
     RetrievedContentInjectionDetector(),
     AgentHandoffFailureDetector(),
     RunawayIterationDetector(),
     ModelFallbackDriftDetector(),
     MemoryPoisonedDetector(),
-    MemoryGrowthPatternDetector(),
     # In-path instance, deliberately NOT the class defaults. Benchmarking against
     # realistic payloads (100KB+ tool outputs, 8-level nesting, 400 candidates in
     # one arg) put unscoped scanning 6–9x over MAX_COST_NS, and the cost is
@@ -5295,7 +5457,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
 
 # detectors.yml section key → detector class, one entry per built-in detector
-# (all 35). The single source of that mapping: the server-side worker's
+# (all 37). The single source of that mapping: the server-side worker's
 # ``detector_svc.detectors._DETECTOR_CLASSES`` is an alias of this dict, and
 # the SDK's ``dunetrace.detector_config.build_detectors`` reads the server's
 # ``GET /v1/detector-config`` response through it, so a threshold keyed by
@@ -5312,6 +5474,7 @@ DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
     "prompt_injection_signal": PromptInjectionDetector,
     "rag_empty_retrieval": RagEmptyRetrievalDetector,
     "excessive_retrieval": ExcessiveRetrievalDetector,
+    "rag_quality_degradation": RagQualityDegradationDetector,
     "llm_truncation_loop": LlmTruncationLoopDetector,
     "silent_truncation": SilentTruncationDetector,
     "context_bloat": ContextBloatDetector,
@@ -5327,6 +5490,7 @@ DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
     "premature_termination": PrematureTerminationDetector,
     "unread_tool_error": UnreadToolErrorDetector,
     "tool_argument_fabrication": ToolArgumentFabricationDetector,
+    "malformed_tool_call": MalformedToolCallDetector,
     "retrieved_content_injection": RetrievedContentInjectionDetector,
     "agent_handoff_failure": AgentHandoffFailureDetector,
     "handoff_context_loss": HandoffContextLossDetector,

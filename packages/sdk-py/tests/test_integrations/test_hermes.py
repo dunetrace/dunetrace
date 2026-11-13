@@ -197,6 +197,13 @@ class TestHermesEventSequence(unittest.TestCase):
         tc = [e for e in events if e.event_type == EventType.TOOL_CALLED][0]
         self.assertIn("args", tc.payload)
 
+    def test_tool_args_are_json_not_python_repr(self):
+        import json as _json
+
+        events = self._run_happy()
+        tc = [e for e in events if e.event_type == EventType.TOOL_CALLED][0]
+        self.assertEqual(_json.loads(tc.payload["args"]), {"expr": "2+2"})
+
     def test_tool_responded_success_true(self):
         events = self._run_happy()
         tr = [e for e in events if e.event_type == EventType.TOOL_RESPONDED][0]

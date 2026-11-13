@@ -39,7 +39,7 @@ MOD_TARGETS: dict[str, list[str]] = {
     "fix_truncation": ["LLM_TRUNCATION_LOOP"],
     "fix_tool_failures": ["RETRY_STORM", "CASCADING_TOOL_FAILURE"],
     "reduce_context": ["CONTEXT_BLOAT"],
-    "fix_rag_retrieval": ["RAG_EMPTY_RETRIEVAL"],
+    "fix_rag_retrieval": ["RAG_EMPTY_RETRIEVAL", "RAG_QUALITY_DEGRADATION"],
     "add_final_answer": ["GOAL_ABANDONMENT"],
     "fix_model_downgrade": ["MODEL_FALLBACK_DRIFT"],
     "truncate_at_step": [],
@@ -140,6 +140,12 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
             # top_score 0.0, not null, which is still under the threshold — the
             # same shape of bug as reduce_context and break_tool_loop above,
             # where the modification did not actually move its own detector.
+            #
+            # Every retrieval gets the SAME good score: raising only the low ones
+            # could manufacture a RAG_QUALITY_DEGRADATION ([0.1, 0.1, 0.32, 0.32]
+            # became [0.5, 0.5, 0.32, 0.32], a 36% "decline"). A repaired
+            # retriever is consistently relevant, so a flat profile is the right
+            # simulation for both RAG detectors.
             from dunetrace.detectors import RagEmptyRetrievalDetector  # noqa: PLC0415
 
             min_results = max(1, RagEmptyRetrievalDetector.MIN_RESULTS)
@@ -147,11 +153,15 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
             for e in events:
                 if e["event_type"] == "retrieval.responded":
                     p = e.get("payload") or {}
+                    score = p.get("top_score")
+                    if isinstance(score, (int, float)) and not isinstance(score, bool):
+                        good_score = max(good_score, float(score))
+            for e in events:
+                if e["event_type"] == "retrieval.responded":
+                    p = e.get("payload") or {}
                     if (p.get("result_count") or 0) < min_results:
                         p["result_count"] = min_results + 4
-                    score = p.get("top_score")
-                    if score is None or score < RagEmptyRetrievalDetector.MIN_SCORE:
-                        p["top_score"] = good_score
+                    p["top_score"] = good_score
 
         elif mod_type == "add_final_answer":
             has_terminal = any(e["event_type"] in ("run.completed", "run.errored") for e in events)
@@ -271,9 +281,9 @@ async def _fetch_signals(org_id: str, run_id: str) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT failure_type, severity, step_index, confidence
+            SELECT failure_type, severity, step_index, confidence, shadow
             FROM failure_signals
-            WHERE run_id = $1 AND org_id = $2 AND shadow = FALSE
+            WHERE run_id = $1 AND org_id = $2
             ORDER BY step_index ASC
             """,
             run_id,
@@ -313,7 +323,15 @@ async def replay_run(
     if not events:
         raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found or has no events.")
 
-    original_signals = await _fetch_signals(org_id, run_id)
+    all_original = await _fetch_signals(org_id, run_id)
+    # Live originals are what the response reports; shadow ones are kept only
+    # to compare like with like. Replay re-runs every detector, shadow ones
+    # included, so without them a shadow detector that fired on the original
+    # run showed up as "new" in every replay.
+    original_signals = [
+        {k: v for k, v in s.items() if k != "shadow"} for s in all_original if not s.get("shadow")
+    ]
+    shadow_types = {s["failure_type"] for s in all_original if s.get("shadow")}
     modified_events = _apply_modifications(events, body.modifications)
 
     try:
@@ -353,6 +371,12 @@ async def replay_run(
             replay_signal_list.append(dict(orig_inj))
 
     orig_types = {s["failure_type"] for s in original_signals}
+    # A type that was shadow on the original run and still fires is neither
+    # resolved nor new: it is out of the live comparison on both sides.
+    unchanged_shadow = shadow_types - orig_types
+    replay_signal_list = [
+        s for s in replay_signal_list if s["failure_type"] not in unchanged_shadow
+    ]
     replay_types = {s["failure_type"] for s in replay_signal_list}
 
     return {

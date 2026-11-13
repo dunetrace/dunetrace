@@ -3,21 +3,26 @@
 
 Structural and deterministic: no LLM, API key, network, or third-party package.
 
-The corpus has two jobs, and they are reported separately so one cannot hide
-the other:
+Three slices, reported separately so one cannot hide another:
 
-  * Boundary cases (memory events, and the tool-name fallback used on names
-    that really are memory tools) must be separated by the ratio and the
-    write floor. Negatives here clear MIN_WRITES whenever the claim is about
-    the ratio, so a miss is a miss of the condition itself.
-  * Collision cases use the issue's substring lists on ordinary tool names
-    (write_file, read_file, web_search, get_weather, fetch_url). Those names
-    are labeled negative — a coding or lookup agent is not growing memory —
-    except one dilution case labeled positive. The heuristic is not adjusted
-    to make this slice look better.
+  * boundary -- memory-event runs that check the ratio and the write floor.
+    These test the rule against itself (labels follow the rule), so they are a
+    regression gate, not a precision estimate. The script exits non-zero on a
+    boundary miss.
+  * realistic -- memory-event shapes from real agents, labeled by whether the
+    agent is actually misbehaving: LangGraph agents that read with
+    store.search, a background extraction run that only writes, an agent that
+    writes now and reads in a later run. The last two are false positives by
+    construction: the detector compares within one run. They are why it ships
+    in shadow.
+  * uninstrumented -- tool calls with no memory events. The detector does not
+    consult tool names (substring matching misread add_numbers and
+    lookup_address as writes), so nothing here fires, including real
+    memory-heavy runs. Coverage needs memory instrumentation.
 
 Usage:
-    PYTHONPATH=packages/sdk-py python scripts/calibrate_memory_growth_pattern.py
+    PYTHONPATH=packages/sdk-py python scripts/calibrate_memory_growth_pattern.py \
+        --report scripts/calibration/memory_growth_pattern_calibration.md
 """
 
 from __future__ import annotations
@@ -174,6 +179,46 @@ _CASES = [
 ]
 
 
+# Realistic memory-event shapes (labels: is the agent actually misbehaving?).
+# store.search is a read since LangGraph's BaseStore.search is instrumented.
+_CASES += [
+    (
+        "realistic",
+        "LangGraph: 3 puts, 3 store.search reads",
+        False,
+        [("written", "user/1:prefs")] * 3 + [("read", "user/1:*")] * 3,
+        [],
+    ),
+    (
+        "realistic",
+        "LangGraph: 4 puts, 2 store.search reads",
+        False,
+        [("written", "user/1:prefs")] * 4 + [("read", "user/1:*")] * 2,
+        [],
+    ),
+    (
+        "realistic",
+        "write-only loop: 12 saves of one fact, no reads",
+        True,
+        [("written", "notes")] * 12,
+        [],
+    ),
+    (
+        "realistic",
+        "background extraction run: 5 writes, reads elsewhere",
+        False,
+        [("written", f"fact:{i}") for i in range(5)],
+        [],
+    ),
+    ("realistic", "writes now, reads in the next run", False, [("written", "todo")] * 3, []),
+]
+
+
+def _slice(slice_name: str, ops: list) -> str:
+    # A run with no memory events is uninstrumented, whatever it was filed as.
+    return slice_name if ops else "uninstrumented"
+
+
 def _state(ops: list[tuple[str, str]], tools: list[str]) -> RunState:
     state = RunState(run_id="r", agent_id="a", agent_version="v")
     state.memory_events = [
@@ -217,26 +262,53 @@ def _fmt(title: str, scores: dict[str, float]) -> None:
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--report", type=pathlib.Path)
+    args = parser.parse_args()
+
     detector = MemoryGrowthPatternDetector()
     evaluated = []
-    print(f"{'slice':<10} {'label':<5} {'fired':<5} name")
+    print(f"{'slice':<15} {'label':<5} {'fired':<5} name")
     for slice_name, name, label, ops, tools in _CASES:
+        slice_name = _slice(slice_name, ops)
         fired = detector.on_run_completion(_state(ops, tools)) is not None
         evaluated.append((slice_name, name, label, fired))
         flag = "OK" if fired == label else "MISS"
-        print(f"{slice_name:<10} {str(label):<5} {str(fired):<5} {flag:<4} {name}")
+        print(f"{slice_name:<15} {str(label):<5} {str(fired):<5} {flag:<4} {name}")
 
     print()
-    all_rows = [(label, fired) for _, _, label, fired in evaluated]
-    boundary = [
-        (label, fired) for slice_name, _, label, fired in evaluated if slice_name == "boundary"
-    ]
-    collision = [
-        (label, fired) for slice_name, _, label, fired in evaluated if slice_name == "collision"
-    ]
-    _fmt("all", _scores(all_rows))
-    _fmt("boundary", _scores(boundary))
-    _fmt("collision", _scores(collision))
+    lines = []
+    for slice_name in ("boundary", "realistic", "uninstrumented"):
+        rows = [(lab, f) for sl, _, lab, f in evaluated if sl == slice_name]
+        sc = _scores(rows)
+        _fmt(slice_name, sc)
+        misses = [n for sl, n, lab, f in evaluated if sl == slice_name and f != lab]
+        lines.append(
+            f"| {slice_name} | {sc['n']} | {sc['tp']} | {sc['fp']} | {sc['fn']} | {sc['tn']} | "
+            f"{'; '.join(misses) or '-'} |"
+        )
+
+    if args.report:
+        args.report.write_text(
+            "# MEMORY_GROWTH_PATTERN: calibration\n\n"
+            "Generated by `PYTHONPATH=packages/sdk-py python "
+            "scripts/calibrate_memory_growth_pattern.py --report "
+            "scripts/calibration/memory_growth_pattern_calibration.md`. Deterministic, offline.\n\n"
+            "| slice | n | TP | FP | FN | TN | disagreements |\n|---|---:|---:|---:|---:|---:|---|\n"
+            + "\n".join(lines)
+            + "\n\n"
+            "**boundary** checks the rule against itself (its labels follow the rule), so it "
+            "is a regression gate, not evidence of precision. **realistic** labels runs by "
+            "whether the agent is misbehaving: the false positives there are the within-run "
+            "limitation (a background extraction run, an agent that reads in a later run), "
+            "and they are why the detector ships in shadow. **uninstrumented** runs have no "
+            "memory events and never fire: tool names are not consulted.\n\n"
+            "No production precision estimate exists yet. Measure the fire rate on real "
+            "traffic, per agent, before adding it to LIVE_DETECTORS.\n",
+            encoding="utf-8",
+        )
 
     boundary_misses = [
         name

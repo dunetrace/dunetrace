@@ -128,6 +128,16 @@ default:
   excessive_retrieval:
     max_retrievals: 8  # fire when a run makes at least this many retrieval calls
 
+  rag_quality_degradation:
+    min_retrievals: 3     # scored, non-empty retrievals from one index; minimum 3
+    drop_threshold: 0.3   # relative drop, late half vs early half; in (0, 1]
+    # Calibration measured 17-30% false positives on benign score
+    # distributions, so alert on recurrence, not on the first occurrence.
+    alert_policy:
+      mode: frequency
+      threshold: 3
+      window_runs: 10
+
   llm_truncation_loop:
     threshold: 2      # number of finish_reason=length events to trigger
     alert_policy:
@@ -281,6 +291,15 @@ default:
       threshold: 1
       window_runs: 1
 
+  malformed_tool_call:
+    # Shadow by default: malformed structured args are a concrete syntax
+    # failure, but the operational impact depends on the receiving framework.
+    max_args_chars: 32768  # args longer than this are not parsed (bounds in-path cost)
+    alert_policy:
+      mode: immediate
+      threshold: 1
+      window_runs: 1
+
   retrieved_content_injection:
     case_sensitive: false
     detect_behavior_deviation: true
@@ -362,9 +381,10 @@ default:
     write_read_ratio: 3   # fire when writes are at least this many times the reads
     min_writes: 3         # ignore runs with only trivial memory use
     # Shadow by default (not in LIVE_DETECTORS) pending real-traffic validation.
-    # Counts memory.written vs memory.read. Tool-name substrings are used only
-    # when the run recorded no memory events. Distinct from memory_poisoning,
-    # which checks what was written rather than how often.
+    # Counts memory.written vs memory.read events within one run; runs without
+    # memory instrumentation never fire. Server-side only (not in the SDK's
+    # in-path battery). Distinct from memory_poisoning, which checks what was
+    # written rather than how often.
     alert_policy:
       mode: frequency     # one write-heavy run is counted; alert when it recurs
       threshold: 3

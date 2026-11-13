@@ -1782,6 +1782,52 @@ def explain_session_latency(signal: FailureSignal) -> Explanation:
     )
 
 
+# RAG_QUALITY_DEGRADATION
+
+
+def _num(value: object, fmt: str) -> str:
+    """Format a numeric evidence value, or '?' when it is missing or not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "?"
+    return format(value, fmt)
+
+
+def explain_rag_quality_degradation(signal: FailureSignal) -> Explanation:
+    ev = signal.evidence
+    early = _num(ev.get("early_avg_score"), ".2f")
+    late = _num(ev.get("late_avg_score"), ".2f")
+    drop = _num(ev.get("drop_pct"), ".1f")
+    count = _num(ev.get("retrieval_count"), "d")
+    index = ev.get("index_name") or "unknown"
+    return Explanation(
+        **_base(signal),
+        title="Retrieval relevance declined during the run",
+        what=(
+            f"Index {index}: average relevance fell from {early} to {late} "
+            f"across {count} scored retrievals ({drop}% drop)."
+        ),
+        why_it_matters=(
+            "Repeated query reformulation may be retrieving less useful context. A score "
+            "decline is a heuristic, not proof that the final answer is incorrect."
+        ),
+        evidence_summary=(
+            f"Early average: {early}; late average: {late}; relative drop: {drop}%; "
+            f"scored calls: {count}."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description="Inspect query changes and the retrieved documents before changing thresholds",
+                language="text",
+                code=(
+                    "Check whether query intent changed, whether the same scoring model was used, "
+                    "and whether the index contains the requested information. Convert distance "
+                    "metrics to higher-is-better relevance before instrumentation."
+                ),
+            )
+        ],
+    )
+
+
 # EXCESSIVE_RETRIEVAL
 
 
@@ -2208,6 +2254,51 @@ def explain_tool_argument_fabrication(signal: FailureSignal) -> Explanation:
                     "))"
                 ),
             ),
+        ],
+    )
+
+
+# MALFORMED_TOOL_CALL
+
+
+def explain_malformed_tool_call(signal: FailureSignal) -> Explanation:
+    ev = signal.evidence
+    tool = ev.get("tool_name", "a tool")
+    step = ev.get("tool_step", signal.step_index)
+    args_snippet = ev.get("args_snippet")
+
+    return Explanation(
+        **_base(signal),
+        title=f"Malformed structured arguments passed to `{tool}`",
+        what=(
+            f"At step {step} the agent called `{tool}` with arguments that were written "
+            "as JSON but are not valid JSON. The receiving tool may have been given "
+            "unusable input."
+        ),
+        why_it_matters=(
+            "Malformed arguments can be silently retried, ignored, or coerced by a "
+            "framework, leaving an agent to continue as if the intended tool action "
+            "had succeeded. Validate the payload before dispatching the tool."
+        ),
+        evidence_summary=(
+            f"Tool `{tool}` at step {step}. "
+            + (f"Arguments: `{args_snippet}`. " if args_snippet else "")
+            + f"Confidence: {int(signal.confidence * 100)}%."
+        ),
+        suggested_fixes=[
+            CodeFix(
+                description="Reject malformed structured arguments before calling the tool",
+                language="python",
+                code=(
+                    "import json\n\n"
+                    "def parse_tool_args(args_text: str) -> object:\n"
+                    "    try:\n"
+                    "        return json.loads(args_text)\n"
+                    "    except (ValueError, RecursionError) as exc:\n"
+                    "        # Ask the model to re-emit the call rather than guessing.\n"
+                    "        raise ValueError(f'Invalid tool arguments: {exc}') from exc\n"
+                ),
+            )
         ],
     )
 
@@ -2935,29 +3026,21 @@ def explain_memory_growth_pattern(signal: FailureSignal) -> Explanation:
         title = "Memory growth: writes far outnumber reads"
         balance = "The agent wrote to memory far more than it read that memory back."
 
-    source = ev.get("signal_source")
-    if source == "memory_events":
-        source_txt = "The counts come from memory events on this run."
-    elif source == "tool_names":
-        source_txt = (
-            "This run recorded no memory events, so the counts were inferred from tool names."
-        )
-    else:
-        source_txt = ""
-
-    write_tools = _memory_growth_names(ev, "write_tools")
-    read_tools = _memory_growth_names(ev, "read_tools")
-    tool_bits = []
-    if write_tools:
-        tool_bits.append("write tools " + ", ".join(f"`{name}`" for name in write_tools))
-    if read_tools:
-        tool_bits.append("read tools " + ", ".join(f"`{name}`" for name in read_tools))
-    tools_txt = ("Matched " + " and ".join(tool_bits) + ".") if tool_bits else ""
+    write_keys = _memory_growth_names(ev, "write_keys")
+    keys_txt = (
+        "Keys written include " + ", ".join(f"`{k}`" for k in write_keys[:5]) + "."
+        if write_keys
+        else ""
+    )
+    scope_txt = (
+        "This compares writes and reads within one run; an agent that saves facts now "
+        "and reads them in a later run also matches."
+    )
 
     threshold_txt = (
         f" The write-to-read threshold is {threshold:g}×." if threshold is not None else ""
     )
-    what = " ".join(part for part in (balance, source_txt, tools_txt) if part) + threshold_txt
+    what = " ".join(part for part in (balance, keys_txt, scope_txt) if part) + threshold_txt
 
     try:
         confidence_pct = int(signal.confidence * 100)
@@ -3000,17 +3083,19 @@ def explain_memory_growth_pattern(signal: FailureSignal) -> Explanation:
                 ),
             ),
             CodeFix(
-                description="Cap writes per run and prefer an update of one key over a new key",
+                description="Cap writes per run, counted on the run, not the process",
                 language="python",
                 code=(
-                    "MAX_WRITES = 3\n"
-                    "writes = 0\n\n"
-                    "def remember(key, value):\n"
-                    "    global writes\n"
-                    "    if writes >= MAX_WRITES:\n"
+                    "MAX_WRITES_PER_RUN = 3\n\n"
+                    "def remember(run_state: dict, key, value):\n"
+                    "    # run_state is created fresh for each run (e.g. your graph state),\n"
+                    "    # so the cap resets per run instead of silently dropping every\n"
+                    "    # write once the process has made three.\n"
+                    '    writes = run_state.setdefault("memory_writes", 0)\n'
+                    "    if writes >= MAX_WRITES_PER_RUN:\n"
                     "        return\n"
                     "    memory.write(key, value)\n"
-                    "    writes += 1"
+                    '    run_state["memory_writes"] = writes + 1'
                 ),
             ),
         ],
@@ -3313,10 +3398,12 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.COST_SPIKE: explain_cost_spike,
     FailureType.SESSION_LATENCY: explain_session_latency,
     FailureType.EXCESSIVE_RETRIEVAL: explain_excessive_retrieval,
+    FailureType.RAG_QUALITY_DEGRADATION: explain_rag_quality_degradation,
     FailureType.SILENT_TRUNCATION: explain_silent_truncation,
     FailureType.PREMATURE_TERMINATION: explain_premature_termination,
     FailureType.UNREAD_TOOL_ERROR: explain_unread_tool_error,
     FailureType.TOOL_ARGUMENT_FABRICATION: explain_tool_argument_fabrication,
+    FailureType.MALFORMED_TOOL_CALL: explain_malformed_tool_call,
     FailureType.RETRIEVED_CONTENT_INJECTION: explain_retrieved_content_injection,
     FailureType.HANDOFF_CONTEXT_LOSS: explain_handoff_context_loss,
     FailureType.AGENT_HANDOFF_FAILURE: explain_agent_handoff_failure,

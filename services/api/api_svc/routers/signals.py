@@ -40,6 +40,8 @@ router = APIRouter(tags=["Signals"])
 # fixes it directly), so this set no longer needs to cover it.
 _CODE_CHANGE_TYPES = frozenset(
     {
+        # The fix is code: validate the payload before dispatching the tool.
+        "MALFORMED_TOOL_CALL",
         "CONTEXT_BLOAT",
         "RAG_EMPTY_RETRIEVAL",
         "SLOW_STEP",

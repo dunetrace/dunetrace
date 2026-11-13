@@ -268,6 +268,16 @@ class TestCapping(unittest.TestCase):
         parsed = json.loads(text)
         self.assertEqual(parsed, {"when": "2026-09-10 12:00:00", "obj": "<thing>", "n": 1})
 
+    def test_serialize_capped_non_string_keys_and_nan_stay_json(self):
+        """A UUID key used to drop the whole dict to Python's repr, and a NaN
+        value serialised as the invalid token NaN -- either way the wire carried
+        something no JSON parser (or MALFORMED_TOOL_CALL) accepts."""
+        import uuid
+
+        key = uuid.UUID(int=7)
+        text, _, _ = serialize_capped({key: float("nan"), "xs": [float("inf"), 1.5]}, 0)
+        self.assertEqual(json.loads(text), {str(key): "nan", "xs": ["inf", 1.5]})
+
     def test_serialize_capped_keeps_unicode(self):
         text, _, _ = serialize_capped({"q": "café ☕"}, 0)
         self.assertIn("café ☕", text)

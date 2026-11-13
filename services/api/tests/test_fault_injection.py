@@ -40,20 +40,28 @@ import unittest
 
 from api_svc.routers.replay import _VALID_MODS, _apply_modifications
 from api_svc.run_builder import build_run_state
-from dunetrace.detectors import run_detectors
+from dunetrace.detectors import DETECTOR_KEYS, run_detectors
 
 from fault_injection import INJECTORS, clean_run, inject_tool_loop
 
+# Every built-in that is a function of one RunState -- what the worker runs on
+# a run, minus the three that need more than a synthetic stream can offer:
+# PROMPT_INJECTION_SIGNAL reads the raw run.started input, and
+# HANDOFF_CONTEXT_LOSS / DELEGATION_LOOP are evaluated against a cross-run
+# delegation graph. Wider than TIER1_DETECTORS on purpose: a server-only
+# detector (MEMORY_GROWTH_PATTERN) belongs in the corpus too.
+_NEEDS_MORE_THAN_ONE_RUN = {"prompt_injection_signal", "handoff_context_loss", "delegation_loop"}
+_SINGLE_RUN_BATTERY = [
+    cls() for key, cls in DETECTOR_KEYS.items() if key not in _NEEDS_MORE_THAN_ONE_RUN
+]
+
 
 def fired(events: list) -> set:
-    """Failure types the in-path battery produces for these events.
-
-    TIER1_DETECTORS (32), not the worker's 35: PROMPT_INJECTION_SIGNAL reads
-    the raw run.started input, and HANDOFF_CONTEXT_LOSS / DELEGATION_LOOP are
-    evaluated against a cross-run delegation graph — none of the three is a
-    function of one RunState, which is all a synthetic stream can offer.
-    """
-    return {s.failure_type.value for s in run_detectors(build_run_state(events))}
+    """Failure types the worker's single-run battery produces for these events."""
+    return {
+        s.failure_type.value
+        for s in run_detectors(build_run_state(events), detectors=_SINGLE_RUN_BATTERY)
+    }
 
 
 class TestBaselineIsClean(unittest.TestCase):

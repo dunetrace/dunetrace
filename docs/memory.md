@@ -12,8 +12,16 @@ memory, so Dunetrace can see that content and flag poisoning. It's opt-in and
 purely additive: an agent that never touches the channel is unaffected, and older
 event streams (recorded before the channel existed) still ingest cleanly.
 
-The [`MEMORY_POISONING`](detectors.md#memory_poisoning) detector consumes this
-channel.
+Two detectors consume this channel:
+
+- [`MEMORY_POISONING`](detectors.md#memory_poisoning) checks *what* was written:
+  an injection or override phrase persisted from an untrusted source.
+- [`MEMORY_GROWTH_PATTERN`](detectors.md#memory_growth_pattern) (shadow,
+  server-side) checks *how often*: a run that writes to memory at least 3× as
+  often as it reads it back. It counts only these events, so **instrument reads
+  as well as writes**: an agent that records `memory_written` but not
+  `memory_read` looks like it never reads anything and fires it. LangGraph's
+  `store.get` and `store.search` are recorded as reads automatically.
 
 ---
 

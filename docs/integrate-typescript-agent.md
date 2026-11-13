@@ -75,7 +75,7 @@ it opens and closes its own run.
 
 ## What this does
 
-Wrap your agent's entry point in `dt.run(...)`. Everything called inside that callback — LLM calls, tool calls — is auto-traced and shipped to the backend in the background. Dunetrace detects structural failures (tool loops, retry storms, cost spikes, and 32 more) within ~15 seconds — no other code changes.
+Wrap your agent's entry point in `dt.run(...)`. Everything called inside that callback — LLM calls, tool calls — is auto-traced and shipped to the backend in the background. Dunetrace detects structural failures (tool loops, retry storms, cost spikes, and 34 more) within ~15 seconds — no other code changes.
 
 ## Recommended usage pattern
 
