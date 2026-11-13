@@ -71,6 +71,9 @@ _COUNT_SCAN_GLOBS = _SCAN_GLOBS + [
     "CLAUDE.md",
     "docs/architecture.md",
     "docs/dashboard.md",
+    # The MCP server's instructions and doc-resource text are what an assistant
+    # reads about Dunetrace; they said 18, 17 and 16 detectors while there were 37.
+    "packages/mcp-server/dunetrace_mcp/server.py",
 ]
 
 # All-caps-snake tokens that appear in the scanned docs but are legitimately NOT

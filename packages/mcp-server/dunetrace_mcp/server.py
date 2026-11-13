@@ -69,7 +69,8 @@ mcp = FastMCP(
     "dunetrace",
     instructions=textwrap.dedent("""
         Dunetrace monitors AI agents in production and detects structural failures
-        (tool loops, cost spikes, context bloat, goal abandonment, and 14 more).
+        with 37 structural detectors (tool loops, cost spikes, context bloat, goal
+        abandonment, retrieval degradation, malformed tool calls, and the rest).
 
         Use these tools to answer questions like:
         - "Is my agent healthy?"
@@ -1912,8 +1913,9 @@ def doc_integrate_langchain() -> str:
 
 @mcp.resource("dunetrace://docs/integrate-typescript")
 def doc_integrate_typescript() -> str:
-    """Full guide: instrument a TypeScript / Node.js agent by posting events
-    directly to the Dunetrace ingest HTTP endpoint."""
+    """Full guide: instrument a TypeScript / Node.js agent with the `dunetrace`
+    npm package (autoInstrument, wrapped clients, dt.run, Vercel AI wrappers,
+    implicit runs, OTel export)."""
     return _read_doc("integrate-typescript-agent.md")
 
 
@@ -1942,7 +1944,7 @@ def doc_integrate_langdock() -> str:
 
 @mcp.resource("dunetrace://docs/detectors")
 def doc_detectors() -> str:
-    """Reference: all 17 detectors, thresholds, evidence fields, and tuning."""
+    """Reference: all 37 structural detectors, thresholds, evidence fields, and tuning."""
     return _read_doc("detectors.md")
 
 
@@ -2444,7 +2446,7 @@ _GUIDES: dict[str, str] = {
         | tool.name attribute or name contains tool/function_call | tool.called + tool.responded |
         | vector_db.* / retrieval.* attributes or name contains pinecone/rag/search | retrieval.called + retrieval.responded |
 
-        All 16 detectors activate automatically on each completed trace.
+        All 37 structural detectors run automatically on each completed trace.
 
         ## Agent identity
 
