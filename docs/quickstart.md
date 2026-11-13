@@ -205,7 +205,7 @@ environment. The TypeScript SDK reads neither, so pass them to the constructor.
 
 ## Next
 
-- [All 34 detectors](detectors.md)
+- [All 35 detectors](detectors.md)
 - [Runtime policies](policies.md), for stopping a failure rather than reporting it
 - [Alerts](alerts.md), Slack and webhooks
 - [MCP server](mcp-server.md), query your agents from your editor

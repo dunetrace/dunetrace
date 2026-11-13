@@ -374,6 +374,13 @@
         "external"
       ],
       "why": "`if not self.IRREVERSIBLE_TOOLS or not state.tool_calls: return None`. IRREVERSIBLE_TOOLS defaults to [], so this is inert until an operator declares which tools are irreversible in detectors.yml."
+    },
+    "RAG_QUALITY_DEGRADATION": {
+      "requires": [
+        "retrieval"
+      ],
+      "enriches": [],
+      "why": "Needs at least three finite nonnegative top_score observations from the same index."
     }
   }
 }

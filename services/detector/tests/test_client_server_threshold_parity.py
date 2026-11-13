@@ -186,7 +186,7 @@ class TestOneMap(ParityCase):
     def test_worker_map_is_the_sdk_map(self):
         self.assertIs(det_module._DETECTOR_CLASSES, DETECTOR_KEYS)
         self.assertEqual(set(DETECTOR_KEYS), set(BUILTIN_DETECTOR_KEYS))
-        self.assertEqual(len(DETECTOR_KEYS), 34)
+        self.assertEqual(len(DETECTOR_KEYS), 35)
 
     def test_both_parsers_see_the_same_overrides(self):
         for category in ("default", GOLDEN_AGENT):

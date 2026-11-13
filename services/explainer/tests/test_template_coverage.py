@@ -67,6 +67,16 @@ REAL_EVIDENCE = {
         "arg_length": 42_318,
         "threshold": 10_000,
     },
+    FailureType.RAG_QUALITY_DEGRADATION: {
+        "index_name": "kb-support",
+        "early_avg_score": 0.867,
+        "late_avg_score": 0.267,
+        "drop_pct": 69.2,
+        "retrieval_count": 6,
+        "drop_threshold": 0.3,
+        "first_step": 2,
+        "last_step": 14,
+    },
     FailureType.EXCESSIVE_RETRIEVAL: {
         "retrieval_count": 9,
         "threshold": 5,
@@ -231,6 +241,7 @@ class TestTemplatesRunOnRealEvidence(unittest.TestCase):
             FailureType.DELEGATION_LOOP: "planner",
             FailureType.AGENT_HANDOFF_FAILURE: "delegate_to_researcher",
             FailureType.EXCESSIVE_RETRIEVAL: "kb-main",
+            FailureType.RAG_QUALITY_DEGRADATION: "kb-support",
             FailureType.SILENT_TRUNCATION: "gpt-4o-mini",
             FailureType.OVERSIZED_TOOL_ARGUMENTS: "summarise_document",
         }

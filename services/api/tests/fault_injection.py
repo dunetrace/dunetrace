@@ -291,6 +291,22 @@ def inject_empty_retrieval(events: List[Event], count: int = 2) -> List[Event]:
     return _splice(events, extra)
 
 
+def inject_rag_quality_degradation(events: List[Event], count: int = 4) -> List[Event]:
+    """Relevance sliding within one index as the agent keeps reformulating its
+    query — every retrieval returns something, but each is less relevant than
+    the last. → RAG_QUALITY_DEGRADATION."""
+    start = _last_step(_without_terminal(events)) + 1
+    scores = [0.95, 0.9, 0.5, 0.45, 0.4, 0.35][:count]  # all above RAG_EMPTY_RETRIEVAL's 0.3
+    extra: List[Event] = []
+    for i, score in enumerate(scores):
+        step = start + i
+        extra.append(_ev("retrieval.called", step, index_name="kb", query=f"refund policy v{i}"))
+        extra.append(
+            _ev("retrieval.responded", step, result_count=3, top_score=score, content="doc")
+        )
+    return _splice(events, extra)
+
+
 def inject_context_growth(events: List[Event], factor: float = 9.0) -> List[Event]:
     """Prompt tokens climbing `factor`x across the run — history accumulating
     unbounded. Rewrites the existing calls rather than appending, since
@@ -390,6 +406,11 @@ INJECTORS = {
     "truncation_loop": (inject_truncation_loop, "LLM_TRUNCATION_LOOP", "fix_truncation"),
     "silent_truncation": (inject_silent_truncation, "SILENT_TRUNCATION", "fix_truncation"),
     "empty_retrieval": (inject_empty_retrieval, "RAG_EMPTY_RETRIEVAL", "fix_rag_retrieval"),
+    "rag_quality_degradation": (
+        inject_rag_quality_degradation,
+        "RAG_QUALITY_DEGRADATION",
+        "fix_rag_retrieval",
+    ),
     "context_growth": (inject_context_growth, "CONTEXT_BLOAT", "reduce_context"),
     "model_downgrade": (inject_model_downgrade, "MODEL_FALLBACK_DRIFT", "fix_model_downgrade"),
     "first_step_failure": (inject_first_step_failure, "FIRST_STEP_FAILURE", None),

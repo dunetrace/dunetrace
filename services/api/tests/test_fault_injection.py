@@ -48,7 +48,7 @@ from fault_injection import INJECTORS, clean_run, inject_tool_loop
 def fired(events: list) -> set:
     """Failure types the in-path battery produces for these events.
 
-    TIER1_DETECTORS (31), not the worker's 34: PROMPT_INJECTION_SIGNAL reads
+    TIER1_DETECTORS (32), not the worker's 35: PROMPT_INJECTION_SIGNAL reads
     the raw run.started input, and HANDOFF_CONTEXT_LOSS / DELEGATION_LOOP are
     evaluated against a cross-run delegation graph — none of the three is a
     function of one RunState, which is all a synthetic stream can offer.

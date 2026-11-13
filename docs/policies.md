@@ -34,7 +34,7 @@ below) can only ever match a **structural** detector signal — never a
 choice enforced by a check somewhere; it's true by construction: `trigger="signal"`
 runs the SDK's own in-process detector battery
 (`dunetrace.detectors.run_detectors` over the per-agent list built from
-`GET /v1/detector-config` — the 31 in-path detectors of the 34 in
+`GET /v1/detector-config` — the 32 in-path detectors of the 35 in
 [docs/detectors.md](detectors.md), with the server's `detectors.yml`
 thresholds, packs and P75 baselines applied, or the `TIER1_DETECTORS` class
 defaults until that first fetch succeeds) synchronously, inside your
