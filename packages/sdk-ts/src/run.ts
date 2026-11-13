@@ -438,6 +438,10 @@ export class DunetraceRun {
   }
 
   private _emit(type: EventType, payload: Record<string, unknown>, advance = true): void {
+    // A run the SDK closed for the caller (an implicit run that idled out) can
+    // still sit in the async context: never attach events after its terminal
+    // event. Same rule as the Python SDK's RunContext._emit.
+    if (this.closed) return;
     if (advance) this._step++;
     const event: AgentEvent = {
       event_type:    type,

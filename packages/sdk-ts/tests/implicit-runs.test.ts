@@ -414,3 +414,18 @@ describe("implicit-run review fixes", () => {
     }
   });
 });
+
+describe("closed runs", () => {
+  it("dt.tool and run methods never attach events to a closed implicit run", async () => {
+    const { dt, events } = client({ implicitRunIdleS: 30 });
+    const run = dt._openImplicitRun("openai.chat.completions.create")!;
+    dt._closeImplicitRuns("idle");
+    const before = events.length;
+    const search = dt.tool(async (q: string) => `r:${q}`, "search");
+    await runStorage.run(run, () => search("x"));
+    run.llmCalled("gpt-4o", 1);
+    expect(events.length).toBe(before);
+    await dt.shutdown();
+  });
+});
+
