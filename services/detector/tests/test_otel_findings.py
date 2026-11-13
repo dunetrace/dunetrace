@@ -110,3 +110,58 @@ def test_reprocess_skips_policy_but_keeps_signals(monkeypatch):
     names = {s.name for s in mem.get_finished_spans()}
     assert "dunetrace.signal.TOOL_LOOP" in names
     assert "dunetrace.policy.stop" not in names  # policies not re-emitted on reprocess
+
+
+# ── Sampling: signal spans follow the SDK's per-run decision ─────────────────
+
+
+def _started(run_id: str, **payload) -> dict:
+    return {"event_type": "run.started", "run_id": run_id, "payload": payload}
+
+
+class _HalfCfg:
+    capture_content = True
+    sampling_ratio = 0.5
+
+
+def test_skips_signal_spans_for_a_run_the_sdk_dropped(monkeypatch):
+    tracer, mem = _tracer()
+    monkeypatch.setattr("dunetrace.otel.get_tracer", lambda name="dunetrace": tracer)
+    monkeypatch.setattr("dunetrace.otel.active_config", lambda: _Cfg())
+    run_id = str(uuid.uuid4())
+    worker._emit_otel_findings(
+        run_id, "org_1", [_signal(run_id)], [_started(run_id, otel_sampled=False)], False
+    )
+    assert mem.get_finished_spans() == ()
+
+
+def test_sdk_decision_wins_over_the_detectors_own_ratio(monkeypatch):
+    """One detector serves many SDKs with different ratios; a kept run keeps its
+    signal spans even when this service's ratio would have dropped it."""
+    tracer, mem = _tracer()
+    monkeypatch.setattr("dunetrace.otel.get_tracer", lambda name="dunetrace": tracer)
+    cfg = _Cfg()
+    cfg.sampling_ratio = 0.0
+    monkeypatch.setattr("dunetrace.otel.active_config", lambda: cfg)
+    run_id = str(uuid.uuid4())
+    worker._emit_otel_findings(
+        run_id, "org_1", [_signal(run_id)], [_started(run_id, otel_sampled=True)], False
+    )
+    assert {s.name for s in mem.get_finished_spans()} == {"dunetrace.signal.TOOL_LOOP"}
+
+
+def test_without_a_recorded_decision_uses_the_same_hash_as_the_sdk(monkeypatch):
+    from dunetrace.otel import run_sampled
+
+    monkeypatch.setattr("dunetrace.otel.active_config", lambda: _HalfCfg())
+    kept = dropped = 0
+    for _ in range(40):
+        tracer, mem = _tracer()
+        monkeypatch.setattr("dunetrace.otel.get_tracer", lambda name="dunetrace", t=tracer: t)
+        run_id = str(uuid.uuid4())
+        worker._emit_otel_findings(run_id, "org_1", [_signal(run_id)], [_started(run_id)], False)
+        emitted = len(mem.get_finished_spans()) == 1
+        assert emitted == run_sampled(run_id, 0.5)
+        kept += emitted
+        dropped += not emitted
+    assert kept and dropped
