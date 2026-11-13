@@ -34,6 +34,9 @@ CORPUS = [
     ("Python True", '{"done": True}', True),
     ("Python None", '{"assignee": None}', True),
     ("bare NaN", '{"score": NaN}', True),
+    ("NaN array", "[NaN]", True),
+    ("Infinity array", "[Infinity]", True),
+    ("negative Infinity array", "[-Infinity]", True),
     ("set-like object", '{"title", "body"}', True),
     ("invalid escape", '{"pattern": "\\d+"}', True),
     ("missing value", '{"title": }', True),
@@ -49,6 +52,8 @@ CORPUS = [
     ("template", "{name}, your order shipped", False),
     ("shell test", "[ -f /tmp/x ] && cat /tmp/x", False),
     ("failed JS stringify", "[object Object]", False),
+    ("bracketed NaN-like text", "[NaNish]", False),
+    ("bracketed Infinity-like text", "[InfinityPool]", False),
     ("free text", "refund policy for damaged goods", False),
     # Valid payloads, including the SDKs' own encodings.
     ("valid object", '{"query": "refunds", "limit": 5}', False),

@@ -2024,6 +2024,9 @@ class TestMalformedToolCallDetector(unittest.TestCase):
             '{"title", "body"}',
             "[1, 2,]",
             '{"x": NaN}',
+            "[NaN]",
+            "[ Infinity ]",
+            "[-Infinity]",
         ):
             with self.subTest(args=bad):
                 sig = self.d.on_run_completion(self._state([make_tool_call("t", 1, args=bad)]))
@@ -2038,6 +2041,9 @@ class TestMalformedToolCallDetector(unittest.TestCase):
             "{name} please",
             "[ -f /tmp/x ] && ls",
             "[object Object]",
+            "[NaNish]",
+            "[InfinityPool]",
+            "[-InfinityPool]",
         ):
             with self.subTest(args=text):
                 self.assertIsNone(
@@ -2069,6 +2075,20 @@ class TestMalformedToolCallDetector(unittest.TestCase):
             )
         ]
         self.assertIsNone(self.d.on_run_completion(state))
+
+    def test_fires_for_first_unblocked_malformed_call(self):
+        for terminal in (EventType.APPROVAL_DENIED, EventType.APPROVAL_TIMEOUT):
+            with self.subTest(terminal=terminal):
+                state = self._state(
+                    [
+                        make_tool_call("create_ticket", 1, args='{"title": }'),
+                        make_tool_call("create_ticket", 3, args='{"title": }'),
+                    ]
+                )
+                state.events = [make_event(terminal, 2, payload={"tool_name": "create_ticket"})]
+                signal = self.d.on_run_completion(state)
+                self.assertIsNotNone(signal)
+                self.assertEqual(signal.step_index, 3)
 
     def test_does_not_fire_for_transport_truncated_arguments(self):
         args = '{"title": "partially stored'

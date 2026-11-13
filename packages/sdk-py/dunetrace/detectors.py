@@ -2532,7 +2532,9 @@ class ToolArgumentFabricationDetector(BaseDetector):
 # line, a markdown link, a `{name}` template, `[ -f x ]` in a shell command, the
 # `[object Object]` a failed JS stringify leaves -- is not a JSON attempt and is
 # not judged. A single-quoted key IS (the commonest LLM JSON mistake).
-_JSON_ATTEMPT = re.compile(r"""\A\s*(?:\{\s*["'}]|\[\s*(?:["'{\[\]]|-?\d|true\b|false\b|null\b))""")
+_JSON_ATTEMPT = re.compile(
+    r"""\A\s*(?:\{\s*["'}]|\[\s*(?:["'{\[\]]|-?\d|true\b|false\b|null\b|NaN\b|-?Infinity\b))"""
+)
 
 
 def _reject_constant(name: str) -> Any:
@@ -2557,9 +2559,10 @@ class MalformedToolCallDetector(BaseDetector):
 
     Only a JSON attempt is judged: an object opening with a key, or an array
     opening with a value (see _JSON_ATTEMPT), parsed strictly -- trailing
-    commas, single quotes, Python's True/None, bare NaN and bad escapes all
-    fire, because the JSON-reading tool on the other end rejects every one of
-    them. Plain text is never judged, whatever bracket it starts with. The
+    commas, single quotes, Python's True/None, bare NaN and bad escapes fire
+    when the arguments pass that opening check. Arrays opening with True/None
+    are not judged; NaN and signed Infinity are recognized as invalid JSON
+    constants. Plain text outside the opening check is never judged. The
     SDK's own encodings are JSON (the Python SDK serialises structured args with
     json.dumps, Hermes and Haystack included), so Dunetrace's recording never
     trips it; a caller who passes ``str(some_dict)`` as the args string does.
@@ -2568,7 +2571,8 @@ class MalformedToolCallDetector(BaseDetector):
     a cut-off prefix of valid JSON is indistinguishable from malformed JSON.
     So are arguments over MAX_ARGS_CHARS, which bounds the in-path cost.
 
-    Fires once per run, on the first malformed call. Shadow by default.
+    Approval-denied and timed-out calls are skipped because they never ran.
+    Fires once per run, on the first eligible malformed call. Shadow by default.
     Tunable: MAX_ARGS_CHARS (default 32768).
     """
 
