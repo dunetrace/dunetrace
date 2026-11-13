@@ -232,6 +232,12 @@ export interface DunetraceOtelExporterOptions {
   samplingRatio?: number;
 }
 
+/** runId -> sampled, for every run between run.started and its end, kept or
+ *  not. Process-wide, not per exporter: each Dunetrace client builds its own
+ *  sink, and a child run opened by one client under a run another client
+ *  started must inherit that run's decision rather than re-hash its id. */
+const _sampledRuns = new Map<string, boolean>();
+
 function ratioFromEnv(): number {
   const raw = process.env["DUNETRACE_OTEL_SAMPLING_RATIO"];
   if (raw === undefined || raw.trim() === "") return 1;
@@ -253,9 +259,6 @@ export class DunetraceOtelExporter {
   private readonly _captureContent: boolean;
   private readonly _runs = new Map<string, RunSpans>();
   private readonly _samplingRatio: number;
-  /** runId -> sampled, for every run between run.started and its end, kept or
-   *  not, so a nested child run can inherit its parent's decision. */
-  private readonly _sampled = new Map<string, boolean>();
 
   constructor(opts: DunetraceOtelExporterOptions = {}) {
     this._samplingRatio = opts.samplingRatio ?? ratioFromEnv();
@@ -273,11 +276,11 @@ export class DunetraceOtelExporter {
    *  another process is decided on the parent's runId, which matches the
    *  parent's own decision whenever that parent was the tree's root. */
   shouldSample(runId: string, parentRunId: string | null = null): boolean {
-    const known = this._sampled.get(runId);
+    const known = _sampledRuns.get(runId);
     if (known !== undefined) return known;
-    const inherited = parentRunId ? this._sampled.get(parentRunId) : undefined;
+    const inherited = parentRunId ? _sampledRuns.get(parentRunId) : undefined;
     const decision = inherited ?? runSampled(parentRunId || runId, this._samplingRatio);
-    this._sampled.set(runId, decision);
+    _sampledRuns.set(runId, decision);
     return decision;
   }
 
@@ -360,7 +363,7 @@ export class DunetraceOtelExporter {
   }
 
   private _onRunEnded(event: AgentEvent): void {
-    this._sampled.delete(event.run_id);
+    _sampledRuns.delete(event.run_id);
     const rs = this._runs.get(event.run_id);
     if (!rs) return;
     this._runs.delete(event.run_id);

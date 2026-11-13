@@ -686,3 +686,35 @@ describe("httpTracesUrl", () => {
   });
 });
 
+describe("Greptile review: sampling hook isolation and cross-client trees", () => {
+  it("a throwing shouldSample never stops the run", async () => {
+    const seen: AgentEvent[] = [];
+    const sink = {
+      exportsOtelSpans: true as const,
+      shouldSample: () => { throw new Error("sink bug"); },
+      handle: (e: AgentEvent) => { seen.push(e); },
+    };
+    const dt = new Dunetrace({ emitter: new NoopBatchEmitter(), flushOnExit: false, exporter: sink });
+    let ran = false;
+    await dt.run("agent", { model: "m" }, async (run) => {
+      ran = true;
+      expect(run.otelTraceId).toBeNull();
+      run.finalAnswer();
+    });
+    await dt.shutdown();
+    expect(ran).toBe(true);
+    const started = seen.find((e) => e.event_type === "run.started")!;
+    expect("otel_sampled" in started.payload).toBe(false);
+  });
+
+  it("a child opened by another client's exporter inherits the parent's decision", () => {
+    const a = new otelIntegration.DunetraceOtelExporter({ tracer: undefined, samplingRatio: 0.5 });
+    const b = new otelIntegration.DunetraceOtelExporter({ tracer: undefined, samplingRatio: 0.5 });
+    const { kept, dropped } = idsByDecision(0.5);
+    // Root decided by client A; the child B opens under it re-hashes nothing.
+    expect(a.shouldSample(dropped)).toBe(false);
+    expect(b.shouldSample(kept, dropped)).toBe(false);
+    a.handle(runEvent("run.completed", {}));
+  });
+});
+

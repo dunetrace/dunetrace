@@ -167,7 +167,13 @@ export class Dunetrace {
     let otelSampled: boolean | null = null;
     const sink = this._exporter;
     if (sink?.exportsOtelSpans === true) {
-      otelSampled = sink.shouldSample ? sink.shouldSample(run.runId, parentRunId) : true;
+      try {
+        otelSampled = sink.shouldSample ? sink.shouldSample(run.runId, parentRunId) === true : true;
+      } catch {
+        // A sink is telemetry: a throwing hook must never stop the agent's run.
+        // No decision means no ids and no otel_sampled on run.started.
+        otelSampled = null;
+      }
       if (otelSampled) {
         run.otelTraceId      = traceIdHex(run.runId) || null;
         run.otelParentSpanId = rootSpanIdHex(run.runId) || null;
