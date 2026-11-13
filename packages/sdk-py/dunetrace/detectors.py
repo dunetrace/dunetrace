@@ -23,6 +23,7 @@ Tuned values belong in the detector service config, not here.
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import logging
 import math
@@ -69,22 +70,6 @@ def _is_unmeasurable(call: "LlmCall") -> bool:
     fabricated defaults that used to be substituted.
     """
     return getattr(call, "instrumentation_degraded", None) is not None
-
-
-def _try_parse_tool_args(args_text: str) -> object | None:
-    """Parse the two structured argument encodings emitted by the SDKs.
-
-    Python instrumentation commonly records ``str(dict)`` while TypeScript
-    instrumentation records JSON. This deliberately reports no parse detail:
-    callers only need to distinguish a usable structured payload from one that
-    is malformed.
-    """
-    for parser in (json.loads, ast.literal_eval):
-        try:
-            return parser(args_text)
-        except Exception:
-            continue
-    return None
 
 
 # The shape a call takes when instrumentation is silently broken: nothing was
@@ -2390,6 +2375,14 @@ class ToolArgumentFabricationDetector(BaseDetector):
     # query terms — are legitimately agent-generated and must NOT be flagged.
     MIN_OPAQUE_LEN = 12
 
+    def _try_parse_args(self, args_text: str):
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                return parser(args_text)
+            except Exception:
+                continue
+        return None
+
     def _collect_leaf_texts(self, value) -> List[Tuple[str, bool]]:
         """Walk a parsed args structure to its leaves. Returns (text,
         is_string_value) pairs — is_string_value gates the whole-value
@@ -2423,7 +2416,7 @@ class ToolArgumentFabricationDetector(BaseDetector):
         return len(s) >= self.MIN_OPAQUE_LEN
 
     def _extract_entities(self, args_text: str) -> List[str]:
-        parsed = _try_parse_tool_args(args_text)
+        parsed = self._try_parse_args(args_text)
         leaves = self._collect_leaf_texts(parsed) if parsed is not None else [(args_text, False)]
 
         candidates: List[str] = []
@@ -2533,41 +2526,78 @@ class ToolArgumentFabricationDetector(BaseDetector):
 # ── MALFORMED_TOOL_CALL ───────────────────────────────────────────────────────
 
 
+# A JSON value's opening: an object whose first token is a key or its close,
+# or an array whose first token is a value or its close. Text that merely
+# starts with a bracket -- a GraphQL query `{ user(id: 1) ... }`, a `[INFO]` log
+# line, a markdown link, a `{name}` template, `[ -f x ]` in a shell command, the
+# `[object Object]` a failed JS stringify leaves -- is not a JSON attempt and is
+# not judged. A single-quoted key IS (the commonest LLM JSON mistake).
+_JSON_ATTEMPT = re.compile(r"""\A\s*(?:\{\s*["'}]|\[\s*(?:["'{\[\]]|-?\d|true\b|false\b|null\b))""")
+
+
+def _reject_constant(name: str) -> Any:
+    # NaN / Infinity / -Infinity: Python's json accepts them, JSON does not.
+    raise ValueError(name)
+
+
+@functools.lru_cache(maxsize=512)
+def _json_malformed(text: str) -> bool:
+    """True when a JSON-shaped string fails strict JSON parsing. Cached: under a
+    signal policy the in-path pass re-reads every earlier call's args at each
+    step, and the same strings come back each time."""
+    try:
+        parsed = json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        return True
+    # LangChain wraps every tool input as {"input": <tool_input>} before
+    # encoding it, so a malformed payload arrives as a valid JSON string inside
+    # a valid wrapper. Judge the inner value when it is itself a JSON attempt.
+    if isinstance(parsed, dict) and len(parsed) == 1 and isinstance(parsed.get("input"), str):
+        inner = parsed["input"]
+        if len(inner) <= MalformedToolCallDetector.MAX_ARGS_CHARS and _JSON_ATTEMPT.match(inner):
+            return _json_malformed(inner)
+    return False
+
+
 class MalformedToolCallDetector(BaseDetector):
-    """Detect structured-looking tool arguments that cannot be parsed.
+    """A tool was called with JSON-shaped arguments that are not valid JSON.
 
-    A model can emit a JSON-shaped tool payload that a framework forwards as a
-    string, or recover from by passing malformed text to a downstream tool. In
-    either case the run can appear successful while the tool receives unusable
-    arguments. Plain-text arguments are legitimate for many tools, so only
-    values beginning with ``{`` or ``[`` are considered structured candidates.
+    Only a JSON attempt is judged: an object opening with a key, or an array
+    opening with a value (see _JSON_ATTEMPT), parsed strictly -- trailing
+    commas, single quotes, Python's True/None, bare NaN and bad escapes all
+    fire, because the JSON-reading tool on the other end rejects every one of
+    them. Plain text is never judged, whatever bracket it starts with. The
+    SDK's own encodings are JSON (the Python SDK serialises structured args with
+    json.dumps, Hermes and Haystack included), so Dunetrace's recording never
+    trips it; a caller who passes ``str(some_dict)`` as the args string does.
 
-    JSON is tried first, followed by Python literals because the Python SDK's
-    own ``tool_called`` serialisation commonly produces ``str(dict)``. The
-    parser is shared with ``ToolArgumentFabricationDetector`` to keep those two
-    interpretations of tool arguments consistent.
+    Arguments recorded truncated (args_length beyond what arrived) are skipped:
+    a cut-off prefix of valid JSON is indistinguishable from malformed JSON.
+    So are arguments over MAX_ARGS_CHARS, which bounds the in-path cost.
 
-    Fires once per run, on the first malformed structured argument. This is a
-    new, shadow-only detector; malformed input is concrete, but its operational
-    impact depends on how the receiving framework handles it.
+    Fires once per run, on the first malformed call. Shadow by default.
+    Tunable: MAX_ARGS_CHARS (default 32768).
     """
 
     name = "MALFORMED_TOOL_CALL"
     SEVERITY = Severity.HIGH
+    MAX_ARGS_CHARS = 32_768
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
-        blocked = _approval_blocked_calls(state)
+        blocked: Optional[set] = None
         for tc_index, tc in enumerate(state.tool_calls):
-            if tc_index in blocked:
+            args = tc.args
+            if not isinstance(args, str) or len(args) > self.MAX_ARGS_CHARS:
                 continue
             # A capped prefix of a valid payload is indistinguishable from a
             # malformed payload. Only classify arguments we have in full.
-            if tc.args_length is not None and tc.args_length > len(tc.args):
+            if tc.args_length is not None and tc.args_length > len(args):
                 continue
-            args = tc.args.strip()
-            if not args.startswith(("{", "[")):
+            if not _JSON_ATTEMPT.match(args) or not _json_malformed(args.strip()):
                 continue
-            if _try_parse_tool_args(args) is not None:
+            if blocked is None:  # only computed once there is a candidate
+                blocked = _approval_blocked_calls(state)
+            if tc_index in blocked:
                 continue
             return FailureSignal(
                 failure_type=FailureType.MALFORMED_TOOL_CALL,
@@ -2580,7 +2610,7 @@ class MalformedToolCallDetector(BaseDetector):
                 evidence={
                     "tool_name": tc.tool_name,
                     "tool_step": tc.step_index,
-                    "args_snippet": args[:200],
+                    "args_snippet": args.strip()[:200],
                 },
             )
         return None
@@ -3550,12 +3580,10 @@ def _approval_notes(state: "RunState") -> List[Tuple[int, str]]:
 # ── UNGROUNDED_DESTINATION ────────────────────────────────────────────────────
 #
 # Shared extraction helpers. These deliberately do NOT replace
-# ToolArgumentFabricationDetector's own _collect_leaf_texts, even though their
-# recursive extraction overlaps: that detector is calibrated and live, and
+# ToolArgumentFabricationDetector's own _try_parse_args/_collect_leaf_texts, even
+# though the parsing half overlaps: that detector is calibrated and live, and
 # re-pointing it at shared code — however behaviour-preserving it looks — is a
-# regression risk taken for style. The duplication is bounded. Structured-args
-# parsing is the exception: `_try_parse_tool_args` is shared by two detectors so
-# both recognize the same JSON and Python-literal encodings.
+# regression risk taken for style. The duplication is ~20 lines and bounded.
 
 # Multi-label public suffixes. The real Public Suffix List has ~9,000 entries and
 # needs periodic refreshes; the core SDK has zero required dependencies, so it

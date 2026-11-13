@@ -307,6 +307,18 @@ def inject_rag_quality_degradation(events: List[Event], count: int = 4) -> List[
     return _splice(events, extra)
 
 
+def inject_malformed_tool_call(events: List[Event]) -> List[Event]:
+    """The model writes a tool call that is not valid JSON -- a trailing
+    comma -- and the framework forwards it anyway. → MALFORMED_TOOL_CALL."""
+    step = _last_step(_without_terminal(events)) + 1
+    args = '{"title": "Refund request", "priority": "high",}'
+    extra = [
+        _ev("tool.called", step, tool_name="create_ticket", args=args, args_length=len(args)),
+        _ev("tool.responded", step, tool_name="create_ticket", success=True, output_length=12),
+    ]
+    return _splice(events, extra)
+
+
 def inject_context_growth(events: List[Event], factor: float = 9.0) -> List[Event]:
     """Prompt tokens climbing `factor`x across the run — history accumulating
     unbounded. Rewrites the existing calls rather than appending, since
@@ -406,6 +418,7 @@ INJECTORS = {
     "truncation_loop": (inject_truncation_loop, "LLM_TRUNCATION_LOOP", "fix_truncation"),
     "silent_truncation": (inject_silent_truncation, "SILENT_TRUNCATION", "fix_truncation"),
     "empty_retrieval": (inject_empty_retrieval, "RAG_EMPTY_RETRIEVAL", "fix_rag_retrieval"),
+    "malformed_tool_call": (inject_malformed_tool_call, "MALFORMED_TOOL_CALL", None),
     "rag_quality_degradation": (
         inject_rag_quality_degradation,
         "RAG_QUALITY_DEGRADATION",

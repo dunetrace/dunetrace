@@ -2271,9 +2271,9 @@ def explain_malformed_tool_call(signal: FailureSignal) -> Explanation:
         **_base(signal),
         title=f"Malformed structured arguments passed to `{tool}`",
         what=(
-            f"At step {step} the agent called `{tool}` with arguments that started "
-            "like a JSON object or list but could not be parsed as JSON or a Python "
-            "literal. The receiving tool may have been given unusable input."
+            f"At step {step} the agent called `{tool}` with arguments that were written "
+            "as JSON but are not valid JSON. The receiving tool may have been given "
+            "unusable input."
         ),
         why_it_matters=(
             "Malformed arguments can be silently retried, ignored, or coerced by a "
@@ -2290,18 +2290,13 @@ def explain_malformed_tool_call(signal: FailureSignal) -> Explanation:
                 description="Reject malformed structured arguments before calling the tool",
                 language="python",
                 code=(
-                    "import ast\n"
                     "import json\n\n"
                     "def parse_tool_args(args_text: str) -> object:\n"
-                    "    text = args_text.strip()\n"
-                    "    if not text.startswith(('{', '[')):\n"
-                    "        return text\n"
-                    "    for parser in (json.loads, ast.literal_eval):\n"
-                    "        try:\n"
-                    "            return parser(text)\n"
-                    "        except (json.JSONDecodeError, SyntaxError, ValueError):\n"
-                    "            pass\n"
-                    "    raise ValueError('Invalid structured tool arguments')\n"
+                    "    try:\n"
+                    "        return json.loads(args_text)\n"
+                    "    except (ValueError, RecursionError) as exc:\n"
+                    "        # Ask the model to re-emit the call rather than guessing.\n"
+                    "        raise ValueError(f'Invalid tool arguments: {exc}') from exc\n"
                 ),
             )
         ],

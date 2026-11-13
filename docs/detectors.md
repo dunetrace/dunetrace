@@ -730,11 +730,11 @@ Same shape as a fabrication case — a specific ID passed to a second tool call 
 
 #### What it catches
 
-A tool call whose `args` begins like a structured JSON object or list but cannot be parsed as JSON or as the Python-literal form emitted by the Python SDK. Plain-text arguments are ignored: many tools intentionally accept a free-text query or instruction.
+A tool call whose `args` is a JSON attempt that is not valid JSON: trailing commas, single quotes, Python's `True`/`None`, bare `NaN`, bad escapes, unterminated objects. These are the mistakes an LLM makes writing tool calls, and the JSON-reading tool on the other end rejects every one of them. Plain text is never judged, whatever bracket it starts with: a GraphQL query, a `[INFO]` log line, a markdown link, a `{name}` template or a shell test like `[ -f x ]` are not JSON attempts. The SDKs record structured arguments as JSON (Hermes and Haystack included), so Dunetrace's own encoding never fires it; a caller who passes `str(some_dict)` as the args string does.
 
 #### Signal
 
-For each tool call, in step order, Dunetrace trims `args`. If the first character is `{` or `[`, it tries `json.loads` and then `ast.literal_eval`. If both fail, it emits one signal for the first malformed call with the tool name, step, and a capped argument snippet.
+For each tool call, in step order: if `args` opens like JSON (an object starting with a key or `}`, or an array starting with a value or `]`), it is parsed with strict `json.loads` (`NaN`/`Infinity` rejected). LangChain's `{"input": "<tool input>"}` wrapper is looked through, so a malformed inner payload is judged rather than its valid wrapper. Arguments recorded truncated (`args_length` larger than what arrived) and arguments over `max_args_chars` (default 32,768) are skipped, which also bounds the in-path cost; parse results are cached because a signal policy re-reads every earlier call at each step. One signal for the first malformed call, with the tool name, step, and a capped argument snippet. A calibration corpus and report ship with it: `scripts/calibrate_malformed_tool_call.py`.
 
 #### Severity and rollout
 

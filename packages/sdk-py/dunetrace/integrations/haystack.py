@@ -75,6 +75,15 @@ _WRAPPER_KEYWORDS = (
 )
 
 
+def _args_json(args) -> str:
+    """Tool arguments as JSON (str(dict) is not parseable server-side)."""
+    if isinstance(args, str):
+        return args
+    from dunetrace.redaction import serialize_capped
+
+    return serialize_capped(args, None)[0]
+
+
 def _classify_component(comp_type: str) -> str:
     """Return 'llm', 'retrieval', 'tool', or 'other'."""
     for kw in _WRAPPER_KEYWORDS:
@@ -132,7 +141,7 @@ def _extract_tool_calls(inp: Any, output: Any, exc_type: Any) -> List[tuple]:
                 name = getattr(origin, "tool_name", "unknown")
                 args = getattr(origin, "arguments", {})
                 ok = not getattr(tcr, "error", True)
-                results.append((name, str(args), ok))
+                results.append((name, _args_json(args), ok))
 
     if results:
         return results
@@ -145,7 +154,7 @@ def _extract_tool_calls(inp: Any, output: Any, exc_type: Any) -> List[tuple]:
         for tc in getattr(msg, "tool_calls", None) or []:
             name = getattr(tc, "tool_name", "unknown")
             args = getattr(tc, "arguments", {})
-            results.append((name, str(args), exc_type is None))
+            results.append((name, _args_json(args), exc_type is None))
 
     return results
 

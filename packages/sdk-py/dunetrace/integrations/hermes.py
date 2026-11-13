@@ -216,7 +216,16 @@ class DunetraceHermesPlugin:
             step = ctx.step
             ctx.tool_starts[tool_call_id] = time.time()
 
-        args_str = str(args) if args else ""
+        # JSON, like the rest of the SDK: str(dict) is not parseable by the
+        # server-side detectors that read structured args.
+        if not args:
+            args_str = ""
+        elif isinstance(args, str):
+            args_str = args
+        else:
+            from dunetrace.redaction import serialize_capped
+
+            args_str = serialize_capped(args, None)[0]
         self._safe_emit(
             EventType.TOOL_CALLED,
             ctx,
