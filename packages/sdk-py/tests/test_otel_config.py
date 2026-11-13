@@ -216,7 +216,8 @@ class TestBuildProvider:
         try:
             attrs = provider.resource.attributes
             assert attrs["service.name"] == "checkout-agent"
-            assert attrs["service.version"] == "9.9.9"
+            assert attrs["dunetrace.sdk.version"] == "9.9.9"
+            assert "service.version" not in attrs
         finally:
             provider.shutdown()
 
@@ -387,3 +388,19 @@ class TestBackwardCompat:
             dt.shutdown()
         # OTel stayed disabled throughout.
         assert otel.is_enabled() is False
+
+
+class TestHttpTracesUrl:
+    def test_bare_base_url_gets_the_traces_path(self):
+        assert (
+            otel._http_traces_url("https://ingest.eu.signoz.cloud:443")
+            == "https://ingest.eu.signoz.cloud:443/v1/traces"
+        )
+        assert otel._http_traces_url("http://collector:4318/") == "http://collector:4318/v1/traces"
+
+    def test_explicit_path_is_kept(self):
+        assert otel._http_traces_url("http://c:4318/v1/traces") == "http://c:4318/v1/traces"
+        assert otel._http_traces_url("https://x/otlp/v1/traces") == "https://x/otlp/v1/traces"
+
+    def test_non_url_is_left_for_the_exporter(self):
+        assert otel._http_traces_url("collector:4318") == "collector:4318"

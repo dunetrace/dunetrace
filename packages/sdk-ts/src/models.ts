@@ -166,6 +166,11 @@ export interface EventSink {
    *  stamps run.otelTraceId / run.otelParentSpanId only for such sinks, so a
    *  sink that does something else never advertises OTel correlation ids. */
   readonly exportsOtelSpans?: boolean;
+  /** Whether this run's spans will be exported (per-run sampling). Asked once
+   *  per run before run.started is built; a sink without it exports every
+   *  run. The client stamps OTel ids only for sampled runs and records the
+   *  decision on run.started as `otel_sampled`, which the detector follows. */
+  shouldSample?(runId: string, parentRunId: string | null): boolean;
 }
 
 export interface ClientOptions {

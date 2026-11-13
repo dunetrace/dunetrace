@@ -26,7 +26,9 @@
  *   DUNETRACE_OTEL_HEADERS          "k1=v1,k2=v2" auth headers (e.g. "DD-API-KEY=xxx").
  *   DUNETRACE_OTEL_PROTOCOL         "grpc" (default) or "http/protobuf".
  *   DUNETRACE_OTEL_SERVICE_NAME     service.name resource attr. Default "dunetrace".
- *   DUNETRACE_OTEL_SAMPLING_RATIO   0.0-1.0 head sampling ratio. Default 1.0.
+ *   DUNETRACE_OTEL_SAMPLING_RATIO   0.0-1.0 share of runs exported. Default 1.0.
+ *                                   Decided per run (runSampled), the same
+ *                                   function as the Python SDK.
  *   DUNETRACE_OTEL_CAPTURE_CONTENT  "false" to drop content attributes. Default on.
  *   DUNETRACE_ORG_ID                optional dunetrace.org_id resource attr. The
  *                                   authoritative org is resolved server-side from
@@ -36,14 +38,14 @@
  * INSECURE for plaintext gRPC to a local collector) still apply on top of this.
  */
 
+import { createRequire } from "node:module";
 import type { Tracer } from "@opentelemetry/api";
-import type { ExportResult } from "@opentelemetry/core";
 import type {
   BasicTracerProvider,
   ReadableSpan,
   SpanExporter,
 } from "@opentelemetry/sdk-trace-base";
-import type { EventSink } from "./models.js";
+import type { AgentEvent, EventSink } from "./models.js";
 
 const DEFAULT_SERVICE_NAME = "dunetrace";
 const VALID_PROTOCOLS = ["grpc", "http/protobuf"] as const;
@@ -64,6 +66,13 @@ const EXPORT_TIMEOUT_MS = 5_000;
 // does not import the package at load time; a test pins them to the enum.
 const EXPORT_SUCCESS = 0;
 const EXPORT_FAILED = 1;
+
+/** Structural ExportResult, so this module's declarations never reference
+ *  @opentelemetry/core (not a declared peer). */
+export interface ExportResult {
+  code: number;
+  error?: Error;
+}
 
 export type OtelProtocol = (typeof VALID_PROTOCOLS)[number];
 
@@ -149,7 +158,7 @@ export function parseRatio(raw: string | undefined, fallback = 1.0): number {
   if (raw === undefined || raw.trim() === "") return fallback;
   const ratio = Number(raw);
   if (!Number.isFinite(ratio)) {
-    warn(`DUNETRACE_OTEL_SAMPLING_RATIO=${JSON.stringify(raw)} is not a number, using ${fallback}`);
+    warnOnce(`DUNETRACE_OTEL_SAMPLING_RATIO=${JSON.stringify(raw)} is not a number, using ${fallback}`);
     return fallback;
   }
   return Math.min(1.0, Math.max(0.0, ratio));
@@ -165,7 +174,7 @@ export function configFromEnv(
 ): OtelConfig {
   let protocol = (env.DUNETRACE_OTEL_PROTOCOL ?? "grpc").trim().toLowerCase();
   if (!(VALID_PROTOCOLS as readonly string[]).includes(protocol)) {
-    warn(
+    warnOnce(
       `DUNETRACE_OTEL_PROTOCOL=${JSON.stringify(protocol)} not one of ${VALID_PROTOCOLS.join(", ")}, using 'grpc'`,
     );
     protocol = "grpc";
@@ -205,7 +214,9 @@ export class CircuitBreakerExporter implements SpanExporter {
   private readonly _now: () => number;
   private _failures: number[] = [];
   private _openUntil = 0;
-  private _lastWarn = 0;
+  // -Infinity, not 0: performance.now() starts near 0 at process start, so a
+  // 0 here silenced every failure in a short-lived process's first minute.
+  private _lastWarn = -Infinity;
 
   constructor(wrapped: SpanExporter, now: () => number = () => performance.now()) {
     this._wrapped = wrapped;
@@ -237,8 +248,8 @@ export class CircuitBreakerExporter implements SpanExporter {
     try {
       this._wrapped.export(spans, done);
     } catch (err) {
-      // A throwing exporter must not reach agent code.
-      this._recordFailure(now, String(err));
+      // A throwing exporter must not reach agent code. done() records the
+      // failure (once), and is a no-op if the exporter already called back.
       done({ code: EXPORT_FAILED, error: err instanceof Error ? err : new Error(String(err)) });
     }
   }
@@ -287,23 +298,62 @@ const INSTALL_HINT =
 /** Construct the OTLP exporter for the configured protocol. Throws on a
  *  genuinely broken setup (missing exporter package); the caller turns that into
  *  "OTel disabled", never a crash in agent code. */
+/** The OTLP/HTTP traces URL for an endpoint. The JS exporter posts to `url`
+ *  verbatim, so a bare collector or vendor base URL (no path) gets the
+ *  standard `/v1/traces` path, as OTEL_EXPORTER_OTLP_ENDPOINT would. An
+ *  endpoint that already has a path is left alone. */
+export function httpTracesUrl(endpoint: string): string {
+  try {
+    const url = new URL(endpoint);
+    if (url.pathname === "" || url.pathname === "/") {
+      url.pathname = "/v1/traces";
+      return url.toString();
+    }
+  } catch {
+    // Not a URL; let the exporter report it.
+  }
+  return endpoint;
+}
+
 function buildSpanExporter(config: OtelConfig): SpanExporter {
   if (config.protocol === "http/protobuf") {
     const { OTLPTraceExporter } = require("@opentelemetry/exporter-trace-otlp-proto") as
       typeof import("@opentelemetry/exporter-trace-otlp-proto");
-    return new OTLPTraceExporter({ url: config.endpoint, headers: config.headers, timeoutMillis: EXPORT_TIMEOUT_MS });
+    return new OTLPTraceExporter({
+      url: httpTracesUrl(config.endpoint),
+      headers: config.headers,
+      timeoutMillis: EXPORT_TIMEOUT_MS,
+    });
   }
   const { OTLPTraceExporter } = require("@opentelemetry/exporter-trace-otlp-grpc") as
     typeof import("@opentelemetry/exporter-trace-otlp-grpc");
   let metadata: import("@grpc/grpc-js").Metadata | undefined;
   if (Object.keys(config.headers).length > 0) {
-    // @grpc/grpc-js is a dependency of the gRPC exporter, so it is present
-    // whenever the require above succeeded.
-    const { Metadata } = require("@grpc/grpc-js") as typeof import("@grpc/grpc-js");
+    // @grpc/grpc-js is the gRPC exporter's dependency, not ours: resolve it
+    // from the exporter's location, so strict layouts (pnpm, Yarn PnP) find
+    // it and we use the same copy the exporter does.
+    const fromExporter = createRequire(require.resolve("@opentelemetry/exporter-trace-otlp-grpc"));
+    const { Metadata } = fromExporter("@grpc/grpc-js") as typeof import("@grpc/grpc-js");
     metadata = new Metadata();
     for (const [key, value] of Object.entries(config.headers)) metadata.set(key, value);
   }
   return new OTLPTraceExporter({ url: config.endpoint, metadata, timeoutMillis: EXPORT_TIMEOUT_MS });
+}
+
+/** A Resource on either OpenTelemetry line: 2.x removed the `Resource` class
+ *  in favour of `resourceFromAttributes` / `defaultResource`. Taking the module
+ *  as an argument keeps one code path testable against both shapes. */
+export function buildResource(resources: unknown, attrs: Record<string, string>): unknown {
+  const r = resources as {
+    resourceFromAttributes?: (a: Record<string, string>) => { merge(o: unknown): unknown };
+    defaultResource?: () => { merge(o: unknown): unknown };
+    Resource?: { new (a: Record<string, string>): unknown; default(): { merge(o: unknown): unknown } };
+  };
+  if (typeof r.resourceFromAttributes === "function" && typeof r.defaultResource === "function") {
+    return r.defaultResource().merge(r.resourceFromAttributes(attrs));
+  }
+  if (r.Resource) return r.Resource.default().merge(new r.Resource(attrs));
+  throw new Error("unrecognised @opentelemetry/resources API");
 }
 
 /**
@@ -342,18 +392,23 @@ export function buildTracerProvider(
     );
     const attrs: Record<string, string> = {
       "service.name": config.serviceName,
-      "service.version": config.serviceVersion,
+      // The SDK's version, not the customer's service version: service.version
+      // belongs to whoever names the service. It also rides on the tracer's
+      // instrumentation scope.
+      "dunetrace.sdk.version": config.serviceVersion,
     };
     if (config.orgId) attrs["dunetrace.org_id"] = config.orgId;
-    // TraceIdRatioBasedSampler on its own, deliberately not wrapped in
-    // ParentBasedSampler. Every dunetrace.run span is started under a synthetic
-    // remote parent that already carries the sampled flag (see
-    // integrations/otel.ts), and ParentBasedSampler would honour that flag and
-    // never consult the ratio. The ratio sampler decides from the trace id
-    // alone, so a run's whole trace is still kept or dropped together.
+    // Dunetrace's own run spans are sampled per run by the exporter
+    // (runSampled) and parented on a sampled synthetic root, so this sampler
+    // keeps exactly what the exporter chose to emit. The ratio here only
+    // governs root spans opened with no parent; children follow their parent,
+    // per standard OTel. Same as the Python SDK.
     const provider = new sdk.BasicTracerProvider({
-      resource: resources.Resource.default().merge(new resources.Resource(attrs)),
-      sampler: new sdk.TraceIdRatioBasedSampler(config.samplingRatio),
+      resource: buildResource(resources, attrs) as
+        import("@opentelemetry/sdk-trace-base").TracerConfig["resource"],
+      sampler: new sdk.ParentBasedSampler({
+        root: new sdk.TraceIdRatioBasedSampler(config.samplingRatio),
+      }),
       spanProcessors: [
         new sdk.BatchSpanProcessor(exporter, {
           maxQueueSize: MAX_QUEUE_SIZE,
@@ -379,8 +434,15 @@ export function buildTracerProvider(
 let _provider: BasicTracerProvider | null = null;
 let _tracer: Tracer | null = null;
 let _config: OtelConfig | null = null;
-/** Set once flushForExit() has run for the current provider. */
-let _exitFlushed = false;
+/** Bumped by shutdown(). A sink built for an earlier pipeline goes inert, so a
+ *  client that outlives otel.shutdown() stops stamping OTel ids and emitting
+ *  into a provider that drops everything. */
+let _generation = 0;
+/** An env-driven init that already failed. Env does not change under a
+ *  running process, so every later client construction skips the retry (and
+ *  its filesystem probes for missing packages). An explicit config always
+ *  retries. */
+let _envInitFailed = false;
 
 /**
  * Idempotent bootstrap of the process-global tracer. Returns true when OTel
@@ -392,6 +454,7 @@ let _exitFlushed = false;
  */
 export function init(config?: OtelConfig, opts: InitOptions = {}): boolean {
   if (_provider !== null) return true;
+  if (config === undefined && _envInitFailed) return false;
   let cfg: OtelConfig;
   try {
     cfg = config ?? configFromEnv();
@@ -400,11 +463,13 @@ export function init(config?: OtelConfig, opts: InitOptions = {}): boolean {
     return false;
   }
   const provider = buildTracerProvider(cfg, opts);
-  if (provider === null) return false;
+  if (provider === null) {
+    if (config === undefined) _envInitFailed = true;
+    return false;
+  }
   _provider = provider;
   _tracer = provider.getTracer(DEFAULT_SERVICE_NAME, cfg.serviceVersion);
   _config = cfg;
-  _exitFlushed = false;
   return true;
 }
 
@@ -451,18 +516,23 @@ export function forceFlush(timeoutMs = EXPORT_TIMEOUT_MS): Promise<void> {
 }
 
 /**
- * The flush the client runs from Node's `beforeExit`, once per process.
+ * The flush the client runs from Node's `beforeExit`.
  *
- * The provider is shared by every client in the process, so this is one
- * flush for all of them, not one per client: a flush is pending work that
- * fires `beforeExit` again, and a second client repeating it would only add
- * another bounded wait. Returns null when export is off or the flush has
- * already run, so the caller can tell whether it started anything.
+ * Runs on every `beforeExit`, not once per process: work done after the
+ * first exit event (a listener that starts another run) produces spans the
+ * first flush never saw. Flushing an empty batch queue schedules no I/O, so
+ * this does not keep the loop alive. Concurrent callers (one per client)
+ * share the flush already in flight. Returns null when export is off.
  */
+let _exitFlush: Promise<void> | null = null;
 export function flushForExit(): Promise<void> | null {
-  if (_provider === null || _exitFlushed) return null;
-  _exitFlushed = true;
-  return forceFlush();
+  if (_provider === null) return null;
+  if (_exitFlush === null) {
+    _exitFlush = forceFlush().finally(() => {
+      _exitFlush = null;
+    });
+  }
+  return _exitFlush;
 }
 
 /** Flush and tear down the export pipeline. Safe to call when disabled. */
@@ -471,7 +541,8 @@ export function shutdown(): Promise<void> {
   _provider = null;
   _tracer = null;
   _config = null;
-  _exitFlushed = false;
+  _envInitFailed = false;
+  _generation += 1;
   if (provider === null) return Promise.resolve();
   return provider.shutdown().catch(() => undefined);
 }
@@ -484,11 +555,13 @@ export function shutdown(): Promise<void> {
 export function createEventSink(): EventSink | null {
   if (_tracer === null) return null;
   try {
-    const mod = _exporterModule ?? (require("./integrations/otel.js") as ExporterModule);
-    return new mod.DunetraceOtelExporter({
+    const mod = _exporterModule ?? (require(EXPORTER_MODULE) as ExporterModule);
+    const inner = new mod.DunetraceOtelExporter({
       tracer: _tracer,
       captureContent: _config?.captureContent ?? true,
+      samplingRatio: _config?.samplingRatio ?? 1,
     });
+    return new PipelineSink(inner, _generation);
   } catch (err) {
     // Without a sink the tracer has no producer, so leaving it up would only
     // make isEnabled() report an export that never happens.
@@ -498,19 +571,58 @@ export function createEventSink(): EventSink | null {
   }
 }
 
+/** Loaded on demand so @opentelemetry/api is only required once export is
+ *  enabled. A test pins this specifier to a real source file, so a rename
+ *  cannot silently turn env-driven export off in the built package. */
+export const EXPORTER_MODULE = "./integrations/otel.js";
+
 interface ExporterModule {
-  DunetraceOtelExporter: new (opts: { tracer: Tracer; captureContent: boolean }) => EventSink;
+  DunetraceOtelExporter: new (opts: {
+    tracer: Tracer;
+    captureContent: boolean;
+    samplingRatio: number;
+  }) => EventSink;
+}
+
+/** The env-built sink, bound to the pipeline generation it was built for.
+ *  After otel.shutdown() it stops forwarding and reports no run as sampled,
+ *  so its client stops stamping OTel ids for spans that would be dropped. A
+ *  client constructed after a re-init gets a new sink on the new pipeline. */
+class PipelineSink implements EventSink {
+  readonly exportsOtelSpans = true;
+  constructor(
+    private readonly _inner: EventSink,
+    private readonly _gen: number,
+  ) {}
+
+  private get _live(): boolean {
+    return this._gen === _generation;
+  }
+
+  shouldSample(runId: string, parentRunId: string | null): boolean {
+    if (!this._live) return false;
+    return this._inner.shouldSample ? this._inner.shouldSample(runId, parentRunId) : true;
+  }
+
+  handle(event: AgentEvent): void {
+    if (this._live) this._inner.handle(event);
+  }
 }
 
 let _exporterModule: ExporterModule | null = null;
 
-/** Drop the global provider/tracer and warning state without flushing the
- *  pipeline. Test hook only. */
+/**
+ * Drop the global provider/tracer and warning state without flushing the
+ * pipeline. Test hook only.
+ * @internal
+ */
 export function _resetForTests(exporterModule: ExporterModule | null = null): void {
   _provider = null;
   _tracer = null;
   _config = null;
-  _exitFlushed = false;
+  _envInitFailed = false;
+  _exitFlush = null;
+  _generation += 1;
   _warned.clear();
   _exporterModule = exporterModule;
 }

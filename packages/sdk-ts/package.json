@@ -2,7 +2,7 @@
   "name": "dunetrace",
   "version": "0.6.6",
   "description": "The runtime reliability layer for AI agents.",
-  "author": "Dunetrace UG (haftungsbeschr\u00e4nkt) <vikas@dunetrace.com>",
+  "author": "Dunetrace UG (haftungsbeschränkt) <vikas@dunetrace.com>",
   "license": "Apache-2.0",
   "keywords": [
     "ai",
@@ -27,6 +27,11 @@
       "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./otel": {
+      "types": "./dist/otel.d.ts",
+      "require": "./dist/otel.js",
+      "default": "./dist/otel.js"
     },
     "./integrations/otel": {
       "types": "./dist/integrations/otel.d.ts",
@@ -53,12 +58,12 @@
   },
   "peerDependencies": {
     "@opentelemetry/api": ">=1.9.0",
-    "@opentelemetry/exporter-trace-otlp-grpc": ">=0.57.0 <0.200.0",
-    "@opentelemetry/resources": ">=1.30.0 <2",
-    "@opentelemetry/sdk-trace-base": ">=1.30.0 <2",
+    "@opentelemetry/exporter-trace-otlp-grpc": ">=0.57.0",
+    "@opentelemetry/resources": ">=1.30.0",
+    "@opentelemetry/sdk-trace-base": ">=1.30.0",
     "ai": ">=7.0.0",
     "better-sqlite3": ">=11.0.0",
-    "@opentelemetry/exporter-trace-otlp-proto": ">=0.57.0 <0.200.0"
+    "@opentelemetry/exporter-trace-otlp-proto": ">=0.57.0"
   },
   "peerDependenciesMeta": {
     "ai": {

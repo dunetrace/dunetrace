@@ -60,7 +60,11 @@ an explicit exporter always wins over the env bootstrap. The Node batch
 processor has no exit hook, so call `await dt.shutdown()` before a short-lived
 process ends, or rely on the SDK's own exit flush, which pushes the last spans
 too. Both waits are bounded, so an unresponsive collector cannot hold the
-process. `otel.shutdown()` from the package root tears the pipeline down.
+process. `DUNETRACE_OTEL_SAMPLING_RATIO` is decided once per run with the same
+hash as the Python SDK (`runSampled`), so a run is exported whole or not at
+all and both SDKs agree on it. `shutdown()` from `dunetrace/otel` tears the pipeline down; a client
+constructed afterwards builds a new pipeline, and clients built before it stop
+exporting.
 
 ### Configuration
 
@@ -176,7 +180,7 @@ a dead or slow collector is not retried on every batch. A missing
 **Nothing shows up.** Confirm `DUNETRACE_OTEL_ENABLED` and
 `DUNETRACE_OTEL_ENDPOINT` are set in the process actually running the agent. Turn
 on `logging.getLogger("dunetrace.otel").setLevel(logging.DEBUG)` to see whether
-the provider built. In TypeScript, `otel.isEnabled()` from the package root
+the provider built. In TypeScript, `isEnabled()` from `dunetrace/otel`
 answers the same question, and a missing package is reported once on stderr
 with the install command. A quick check: point at a local collector with a
 debug exporter (see `otel/` in the repo) and watch the spans print.

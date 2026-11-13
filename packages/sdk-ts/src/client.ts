@@ -148,13 +148,6 @@ export class Dunetrace {
     const tools   = opts.tools        ?? [];
     const version = agentVersion(opts.systemPrompt ?? "", model, tools);
     const run     = new DunetraceRun(agentId, version, this, opts.runId);
-    // Only a sink that actually produces OTel spans gets the correlation ids;
-    // an arbitrary EventSink would otherwise advertise a trace that exists
-    // nowhere.
-    if (this._exporter?.exportsOtelSpans === true) {
-      run.otelTraceId      = traceIdHex(run.runId) || null;
-      run.otelParentSpanId = rootSpanIdHex(run.runId) || null;
-    }
 
     // Auto-thread parent_run_id: if this run opens while another run is already
     // active (this call is nested inside an enclosing run's fn, so
@@ -165,6 +158,21 @@ export class Dunetrace {
     // An explicit parentRunId always wins. Propagation follows AsyncLocalStorage,
     // so it survives awaits within the same async context.
     const parentRunId = opts.parentRunId ?? _runStorage.getStore()?.runId ?? null;
+
+    // Only a sink that actually produces OTel spans gets the correlation ids,
+    // and only for a run it will export: an id for a dropped run is a
+    // deep-link to a trace that exists nowhere. The decision rides on
+    // run.started so the detector exports this run's signal spans exactly
+    // when this SDK exported the run.
+    let otelSampled: boolean | null = null;
+    const sink = this._exporter;
+    if (sink?.exportsOtelSpans === true) {
+      otelSampled = sink.shouldSample ? sink.shouldSample(run.runId, parentRunId) : true;
+      if (otelSampled) {
+        run.otelTraceId      = traceIdHex(run.runId) || null;
+        run.otelParentSpanId = rootSpanIdHex(run.runId) || null;
+      }
+    }
 
     // Content caps, applied AFTER the version hash above so grouping stays
     // stable however long the prompt is. Markers only when a cut happened, so
@@ -186,6 +194,7 @@ export class Dunetrace {
       startedPayload["system_prompt_truncated"]       = true;
       startedPayload["system_prompt_original_length"] = prompt.originalLength;
     }
+    if (otelSampled !== null) startedPayload["otel_sampled"] = otelSampled;
 
     _safeEmit(() => { this._emit({
       event_type:    "run.started",

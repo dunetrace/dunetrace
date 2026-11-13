@@ -195,7 +195,7 @@ timeout and a circuit breaker, so a dead or silent collector never touches the
 agent. To use a tracer you already have, pass
 `new DunetraceOtelExporter({ tracer })` from `dunetrace/integrations/otel` as
 the `exporter` option. `dt.shutdown()` flushes pending spans;
-`otel.shutdown()` from the package root tears the pipeline down. All variables
+`shutdown()` from `dunetrace/otel` tears the pipeline down. All variables
 are listed in [docs/integrations/opentelemetry.md](../../docs/integrations/opentelemetry.md).
 
 ## Output modes

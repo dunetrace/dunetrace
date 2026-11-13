@@ -77,8 +77,8 @@ function hrTime(tsSeconds: number): HrTime {
   return [seconds, nanos];
 }
 
-export { traceIdHex, rootSpanIdHex } from "../otel-ids.js";
-import { traceIdHex } from "../otel-ids.js";
+export { traceIdHex, rootSpanIdHex, runSampled } from "../otel-ids.js";
+import { runSampled, traceIdHex } from "../otel-ids.js";
 
 /** Deterministic SpanContext for a run's root span. Seeds a run's own trace and
  *  links a child run to its parent. Returns null when run_id is not UUID-shaped,
@@ -223,6 +223,20 @@ export interface DunetraceOtelExporterOptions {
   /** When false, drop content-bearing attributes (tool args, request URL,
    *  retrieval query) from spans. Default true. */
   captureContent?: boolean;
+  /** Share of runs to export, 0.0-1.0. Defaults to
+   *  DUNETRACE_OTEL_SAMPLING_RATIO (1.0 when unset). Decided once per run with
+   *  runSampled, so a run is exported whole or not at all, a child run follows
+   *  its parent, and the detector's signal spans follow the same decision.
+   *  Applies whatever tracer you pass: the run's synthetic parent is flagged
+   *  sampled, so a ParentBased sampler on your provider never re-decides. */
+  samplingRatio?: number;
+}
+
+function ratioFromEnv(): number {
+  const raw = process.env["DUNETRACE_OTEL_SAMPLING_RATIO"];
+  if (raw === undefined || raw.trim() === "") return 1;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 1;
 }
 
 // ── Exporter ─────────────────────────────────────────────────────────────────
@@ -238,8 +252,13 @@ export class DunetraceOtelExporter {
   private readonly _tracer: Tracer;
   private readonly _captureContent: boolean;
   private readonly _runs = new Map<string, RunSpans>();
+  private readonly _samplingRatio: number;
+  /** runId -> sampled, for every run between run.started and its end, kept or
+   *  not, so a nested child run can inherit its parent's decision. */
+  private readonly _sampled = new Map<string, boolean>();
 
   constructor(opts: DunetraceOtelExporterOptions = {}) {
+    this._samplingRatio = opts.samplingRatio ?? ratioFromEnv();
     if (opts.tracer) {
       this._tracer = opts.tracer;
     } else {
@@ -247,6 +266,19 @@ export class DunetraceOtelExporter {
       this._tracer = tp.getTracer(opts.tracerName ?? "dunetrace");
     }
     this._captureContent = opts.captureContent ?? true;
+  }
+
+  /** Whether runId's spans will be exported. Stable for the life of the run.
+   *  A child inherits an open parent's decision; a child whose parent ran in
+   *  another process is decided on the parent's runId, which matches the
+   *  parent's own decision whenever that parent was the tree's root. */
+  shouldSample(runId: string, parentRunId: string | null = null): boolean {
+    const known = this._sampled.get(runId);
+    if (known !== undefined) return known;
+    const inherited = parentRunId ? this._sampled.get(parentRunId) : undefined;
+    const decision = inherited ?? runSampled(parentRunId || runId, this._samplingRatio);
+    this._sampled.set(runId, decision);
+    return decision;
   }
 
   /** Route one AgentEvent to its span operation. Never throws: an export failure
@@ -280,6 +312,9 @@ export class DunetraceOtelExporter {
   // ── Run span ───────────────────────────────────────────────────────────────
 
   private _onRunStarted(event: AgentEvent): void {
+    // A dropped run registers no spans, so every later handler for it returns
+    // at its `!rs` guard and costs nothing.
+    if (!this.shouldSample(event.run_id, event.parent_run_id ?? null)) return;
     const parentCtx = parentCtxForRun(event.run_id);
 
     const attrs: Attributes = {
@@ -325,6 +360,7 @@ export class DunetraceOtelExporter {
   }
 
   private _onRunEnded(event: AgentEvent): void {
+    this._sampled.delete(event.run_id);
     const rs = this._runs.get(event.run_id);
     if (!rs) return;
     this._runs.delete(event.run_id);

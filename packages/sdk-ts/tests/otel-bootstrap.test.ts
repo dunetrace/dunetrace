@@ -16,6 +16,8 @@ import * as otelIntegration from "../src/integrations/otel.js";
 import { Dunetrace } from "../src/client.js";
 import { NoopBatchEmitter } from "../src/emitters.js";
 import type { AgentEvent, EventType } from "../src/models.js";
+import { runSampled } from "../src/otel-ids.js";
+import { randomUUID } from "node:crypto";
 
 const ENV_KEYS = [
   "DUNETRACE_OTEL_ENABLED",
@@ -175,7 +177,10 @@ describe("buildTracerProvider / init", () => {
     const attrs = otel.getTracerProvider()!.resource.attributes;
     expect(attrs["service.name"]).toBe("svc");
     expect(attrs["dunetrace.org_id"]).toBe("org-9");
-    expect(String(attrs["service.version"])).toMatch(/^\d+\.\d+\.\d+/);
+    // The SDK's own version, not service.version: that belongs to whoever
+    // names the service, often the customer via DUNETRACE_OTEL_SERVICE_NAME.
+    expect(String(attrs["dunetrace.sdk.version"])).toMatch(/^\d+\.\d+\.\d+/);
+    expect(attrs["service.version"]).toBeUndefined();
   });
 
   it("applies the sampling ratio to run spans, whose synthetic parent is already flagged sampled", async () => {
@@ -344,6 +349,34 @@ describe("CircuitBreakerExporter", () => {
     expect(breaker.isOpen()).toBe(false);
   });
 
+  it("counts a throwing exporter's failure once, so it trips at the threshold", () => {
+    const inner = new ScriptedExporter(() => new Error("exporter bug"));
+    const breaker = new otel.CircuitBreakerExporter(inner, now);
+    for (let i = 0; i < otel.CircuitBreakerExporter.FAILURE_THRESHOLD - 1; i++) attempt(breaker);
+    expect(breaker.isOpen()).toBe(false); // used to open after 3 of 5
+    attempt(breaker);
+    expect(breaker.isOpen()).toBe(true);
+  });
+
+  it("warns about a failure in the first minute of process uptime", () => {
+    // performance.now() starts near 0; the throttle used to start at 0 too, so
+    // a short-lived process never logged a failing export.
+    tick = 5;
+    const lines: string[] = [];
+    const orig = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    try {
+      const breaker = new otel.CircuitBreakerExporter(
+        new ScriptedExporter(() => ({ code: ExportResultCode.FAILED, error: new Error("refused") })),
+        now,
+      );
+      attempt(breaker);
+    } finally {
+      process.stderr.write = orig;
+    }
+    expect(lines.some((l) => l.includes("span export failed (refused)"))).toBe(true);
+  });
+
   it("turns a throwing exporter into a FAILED result instead of propagating", () => {
     const inner = new ScriptedExporter(() => new Error("exporter bug"));
     const breaker = new otel.CircuitBreakerExporter(inner, now);
@@ -400,7 +433,7 @@ describe("Dunetrace client auto-wiring", () => {
     expect(tool.attributes["server.address"]).toBe("crm.internal");
   });
 
-  it("the exit flush pushes queued spans once and then stays quiet", async () => {
+  it("every exit flush pushes what is queued, including spans from after the first", async () => {
     const memory = new InMemorySpanExporter();
     process.env.DUNETRACE_OTEL_ENABLED = "1";
     process.env.DUNETRACE_OTEL_ENDPOINT = "http://collector:4318/v1/traces";
@@ -410,18 +443,14 @@ describe("Dunetrace client auto-wiring", () => {
     await dt.run("agent", { model: "gpt-4o" }, async (run) => { run.finalAnswer(); });
     expect(memory.getFinishedSpans()).toHaveLength(0); // sitting in the batch queue
 
-    // First beforeExit pass: flushes the OTel queue. Await the flush it
-    // started, and nothing else, so the assertion is about that flush alone.
     await dt._flushBeforeExit();
     expect(memory.getFinishedSpans().map((s) => s.name)).toEqual(["dunetrace.run"]);
 
-    // Later passes must schedule nothing, or Node would never exit. The only
-    // observable is that a second call returns without touching the exporter:
-    // a new span left in the queue stays there.
+    // Work done after the first beforeExit (a listener that starts another
+    // run) used to be lost: the flush only ever ran once per process.
     otel.getTracer()!.startSpan("after-exit").end();
     await dt._flushBeforeExit();
-    await new Promise((r) => setTimeout(r, 20));
-    expect(memory.getFinishedSpans().map((s) => s.name)).toEqual(["dunetrace.run"]);
+    expect(memory.getFinishedSpans().map((s) => s.name)).toEqual(["dunetrace.run", "after-exit"]);
     await dt.shutdown();
   });
 
@@ -499,7 +528,7 @@ describe("Dunetrace client auto-wiring", () => {
     expect(took).toBeLessThan(budgetMs * 3);
   });
 
-  it("the exit flush runs once per process, not once per client", async () => {
+  it("concurrent exit flushes from several clients share one flush", async () => {
     const memory = new InMemorySpanExporter();
     process.env.DUNETRACE_OTEL_ENABLED = "1";
     process.env.DUNETRACE_OTEL_ENDPOINT = "http://collector:4318/v1/traces";
@@ -509,13 +538,151 @@ describe("Dunetrace client auto-wiring", () => {
     await a.run("a", { model: "m" }, async (run) => { run.finalAnswer(); });
     await b.run("b", { model: "m" }, async (run) => { run.finalAnswer(); });
 
-    await a._flushBeforeExit();
-    expect(memory.getFinishedSpans()).toHaveLength(2); // one flush covered both clients
-    otel.getTracer()!.startSpan("late").end();
-    await b._flushBeforeExit(); // must not start a second flush
-    await new Promise((r) => setTimeout(r, 20));
+    const first = otel.flushForExit();
+    expect(otel.flushForExit()).toBe(first); // the second client joins, not repeats
+    await Promise.all([a._flushBeforeExit(), b._flushBeforeExit()]);
     expect(memory.getFinishedSpans()).toHaveLength(2);
     await a.shutdown();
     await b.shutdown();
   });
 });
+
+// ── Per-run sampling, shared with the Python SDK ─────────────────────────────
+
+describe("runSampled", () => {
+  it("matches the Python SDK's known vectors", () => {
+    // Pinned in packages/sdk-py/tests/test_otel_config.py::TestRunSampled.
+    expect(runSampled("00000000-0000-4000-8000-000000000000", 0.5)).toBe(false);
+    expect(runSampled("00000000-0000-4000-8000-000000000001", 0.5)).toBe(true);
+  });
+
+  it("is a real probability over UUID run ids", () => {
+    const ids = Array.from({ length: 4000 }, () => randomUUID());
+    for (const ratio of [0.1, 0.25, 0.5, 0.9]) {
+      const kept = ids.filter((id) => runSampled(id, ratio)).length / ids.length;
+      expect(Math.abs(kept - ratio)).toBeLessThan(0.04);
+    }
+  });
+
+  it("handles the edges", () => {
+    expect(runSampled("x", 1)).toBe(true);
+    expect(runSampled("x", 0)).toBe(false);
+    expect(runSampled("x", Number.NaN)).toBe(false);
+  });
+});
+
+function idsByDecision(ratio: number): { kept: string; dropped: string } {
+  let kept = "";
+  let dropped = "";
+  while (!kept || !dropped) {
+    const id = randomUUID();
+    if (runSampled(id, ratio)) kept ||= id;
+    else dropped ||= id;
+  }
+  return { kept, dropped };
+}
+
+describe("per-run sampling through the client", () => {
+  async function startedPayloadFor(ratio: number, runId: string) {
+    const memory = new InMemorySpanExporter();
+    otel.init(enabledConfig({ samplingRatio: ratio }), { exporterFactory: () => memory });
+    const sink = otel.createEventSink()!;
+    const seen: AgentEvent[] = [];
+    const spy = { exportsOtelSpans: true as const, shouldSample: sink.shouldSample!.bind(sink), handle: (e: AgentEvent) => { seen.push(e); sink.handle(e); } };
+    const dt = new Dunetrace({ emitter: new NoopBatchEmitter(), flushOnExit: false, exporter: spy });
+    let ids: [string | null, string | null] = [null, null];
+    await dt.run("agent", { model: "m", runId }, async (run) => {
+      ids = [run.otelTraceId, run.otelParentSpanId];
+      run.finalAnswer();
+    });
+    await dt.shutdown();
+    const started = seen.find((e) => e.event_type === "run.started")!;
+    return { payload: started.payload, ids, spans: memory.getFinishedSpans() };
+  }
+
+  it("a dropped run gets no trace id, records the decision, and exports nothing", async () => {
+    const { dropped } = idsByDecision(0.5);
+    const r = await startedPayloadFor(0.5, dropped);
+    expect(r.payload["otel_sampled"]).toBe(false);
+    expect(r.ids).toEqual([null, null]);
+    expect(r.spans).toHaveLength(0);
+  });
+
+  it("a kept run gets its trace id and records the decision", async () => {
+    const { kept } = idsByDecision(0.5);
+    const r = await startedPayloadFor(0.5, kept);
+    expect(r.payload["otel_sampled"]).toBe(true);
+    expect(r.ids[0]).toBe(kept.replace(/-/g, ""));
+    expect(r.spans.map((s) => s.name)).toEqual(["dunetrace.run"]);
+  });
+
+  it("a nested child inherits its parent's decision", () => {
+    const exp = new otelIntegration.DunetraceOtelExporter({ tracer: otel.getTracer() ?? undefined, samplingRatio: 0.5 });
+    const { kept, dropped } = idsByDecision(0.5);
+    expect(exp.shouldSample(kept)).toBe(true);
+    expect(exp.shouldSample(dropped, kept)).toBe(true);
+    expect(exp.shouldSample(randomUUID(), dropped)).toBe(true); // dropped is now kept-by-inheritance
+  });
+});
+
+describe("pipeline lifecycle", () => {
+  it("a sink built before shutdown goes inert", async () => {
+    const memory = new InMemorySpanExporter();
+    otel.init(enabledConfig(), { exporterFactory: () => memory });
+    const sink = otel.createEventSink()!;
+    await otel.shutdown();
+    expect(sink.shouldSample!(RUN_ID, null)).toBe(false);
+    sink.handle(runEvent("run.started", { model: "m", tools: [] }));
+    expect(memory.getFinishedSpans()).toHaveLength(0);
+  });
+
+  it("remembers a failed env init instead of retrying it per client", () => {
+    process.env.DUNETRACE_OTEL_ENABLED = "1"; // no endpoint
+    const lines: string[] = [];
+    const orig = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    try {
+      expect(otel.init()).toBe(false);
+      process.env.DUNETRACE_OTEL_ENDPOINT = "http://collector:4318/v1/traces";
+      expect(otel.init()).toBe(false); // remembered; env doesn't change under a process
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+
+  it("the on-demand exporter module specifier names a real source file", async () => {
+    const path = await import("node:path");
+    const fs = await import("node:fs");
+    const src = path.resolve(__dirname, "../src", otel.EXPORTER_MODULE.replace(/\.js$/, ".ts"));
+    expect(fs.existsSync(src)).toBe(true);
+    expect(typeof otelIntegration.DunetraceOtelExporter).toBe("function");
+  });
+});
+
+describe("OpenTelemetry 1.x and 2.x resource APIs", () => {
+  it("uses resourceFromAttributes/defaultResource when present (2.x)", () => {
+    const calls: string[] = [];
+    const fake2x = {
+      defaultResource: () => ({ merge: (o: unknown) => { calls.push("merge"); return o; } }),
+      resourceFromAttributes: (a: Record<string, string>) => { calls.push("fromAttributes"); return a; },
+    };
+    expect(otel.buildResource(fake2x, { "service.name": "s" })).toEqual({ "service.name": "s" });
+    expect(calls).toEqual(["fromAttributes", "merge"]);
+  });
+
+  it("falls back to the Resource class (1.x)", async () => {
+    const resources = await import("@opentelemetry/resources");
+    const r = otel.buildResource(resources, { "service.name": "s" }) as { attributes: Record<string, unknown> };
+    expect(r.attributes["service.name"]).toBe("s");
+  });
+});
+
+describe("httpTracesUrl", () => {
+  it("adds /v1/traces to a bare base URL and keeps an explicit path", () => {
+    expect(otel.httpTracesUrl("https://ingest.eu.signoz.cloud:443")).toBe("https://ingest.eu.signoz.cloud/v1/traces");
+    expect(otel.httpTracesUrl("http://collector:4318/")).toBe("http://collector:4318/v1/traces");
+    expect(otel.httpTracesUrl("http://c:4318/v1/traces")).toBe("http://c:4318/v1/traces");
+    expect(otel.httpTracesUrl("not a url")).toBe("not a url");
+  });
+});
+
