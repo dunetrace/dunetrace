@@ -38,6 +38,7 @@ inside the customer's agent process, on the instrumentation hot path.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, FrozenSet, Iterable, Optional, Tuple
 
@@ -199,15 +200,44 @@ def serialize_capped(value: Any, max_chars: Optional[int]) -> Tuple[str, bool, i
     Serialised with ``json.dumps(default=str, ensure_ascii=False)`` so the wire
     carries JSON — the format the TS SDK already sends and every server-side
     parser tries first — with ``str()`` standing in for anything JSON can't
-    represent natively (datetimes, dataclasses, custom classes). If even that
-    fails (a circular reference, a tuple key) it falls back to ``repr``, and
-    to a type-name placeholder if ``repr`` itself raises.
+    represent natively (datetimes, dataclasses, custom classes). Dict keys JSON
+    cannot take (a UUID, a datetime, a tuple) and non-finite floats (which
+    ``json.dumps`` would write as the invalid tokens ``NaN``/``Infinity``) are
+    stringified too, so the wire always carries valid JSON rather than Python's
+    ``repr`` of the dict. If even that fails (a circular reference) it falls
+    back to ``repr``, and to a type-name placeholder if ``repr`` itself raises.
     """
     try:
-        text = json.dumps(value, default=str, ensure_ascii=False)
+        text = json.dumps(value, default=str, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        try:
+            text = json.dumps(_jsonable(value), default=str, ensure_ascii=False)
+        except Exception:
+            text = _safe_str(value)
     except Exception:
         text = _safe_str(value)
     return cap_text(text, max_chars)
+
+
+_JSON_KEY_TYPES = (str, int, float, bool, type(None))
+
+
+def _jsonable(value: Any, _depth: int = 0) -> Any:
+    """``value`` with every dict key JSON can't represent, and every non-finite
+    float, replaced by its ``str()``. Depth-bounded: a structure nested past 64
+    levels raises and the caller falls back to ``repr``."""
+    if _depth > 64:
+        raise ValueError("too deep")
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {
+            (k if isinstance(k, _JSON_KEY_TYPES) else _safe_str(k)): _jsonable(v, _depth + 1)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v, _depth + 1) for v in value]
+    return value
 
 
 def _safe_str(value: Any) -> str:

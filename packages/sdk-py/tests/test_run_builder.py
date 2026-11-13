@@ -77,6 +77,20 @@ class TestReconstructionFidelity(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_run_state([])
 
+    def test_retrieval_index_is_consumed_and_unnamed_start_clears_it(self):
+        state = build_run_state(
+            [
+                _evt("retrieval.called", 0, {"index_name": "A"}),
+                _evt("retrieval.responded", 1, {"result_count": 1}),
+                _evt("retrieval.called", 2, {}),
+                _evt("retrieval.responded", 3, {"result_count": 1}),
+                _evt("retrieval.called", 4, {"index_name": "B"}),
+                _evt("retrieval.responded", 5, {"result_count": 1}),
+                _evt("retrieval.responded", 6, {"result_count": 1}),
+            ]
+        )
+        self.assertEqual([r.index_name for r in state.retrievals], ["A", "unknown", "B", "unknown"])
+
 
 if __name__ == "__main__":
     unittest.main()

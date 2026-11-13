@@ -23,6 +23,7 @@ Tuned values belong in the detector service config, not here.
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import logging
 import math
@@ -2519,6 +2520,92 @@ class ToolArgumentFabricationDetector(BaseDetector):
             elif tc.success is not None:
                 visibility_complete = False
 
+        return None
+
+
+# ── MALFORMED_TOOL_CALL ───────────────────────────────────────────────────────
+
+
+# A JSON value's opening: an object whose first token is a key or its close,
+# or an array whose first token is a value or its close. Text that merely
+# starts with a bracket -- a GraphQL query `{ user(id: 1) ... }`, a `[INFO]` log
+# line, a markdown link, a `{name}` template, `[ -f x ]` in a shell command, the
+# `[object Object]` a failed JS stringify leaves -- is not a JSON attempt and is
+# not judged. A single-quoted key IS (the commonest LLM JSON mistake).
+_JSON_ATTEMPT = re.compile(r"""\A\s*(?:\{\s*["'}]|\[\s*(?:["'{\[\]]|-?\d|true\b|false\b|null\b))""")
+
+
+def _reject_constant(name: str) -> Any:
+    # NaN / Infinity / -Infinity: Python's json accepts them, JSON does not.
+    raise ValueError(name)
+
+
+@functools.lru_cache(maxsize=512)
+def _json_malformed(text: str) -> bool:
+    """True when a JSON-shaped string fails strict JSON parsing. Cached: under a
+    signal policy the in-path pass re-reads every earlier call's args at each
+    step, and the same strings come back each time."""
+    try:
+        json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        return True
+    return False
+
+
+class MalformedToolCallDetector(BaseDetector):
+    """A tool was called with JSON-shaped arguments that are not valid JSON.
+
+    Only a JSON attempt is judged: an object opening with a key, or an array
+    opening with a value (see _JSON_ATTEMPT), parsed strictly -- trailing
+    commas, single quotes, Python's True/None, bare NaN and bad escapes all
+    fire, because the JSON-reading tool on the other end rejects every one of
+    them. Plain text is never judged, whatever bracket it starts with. The
+    SDK's own encodings are JSON (the Python SDK serialises structured args with
+    json.dumps, Hermes and Haystack included), so Dunetrace's recording never
+    trips it; a caller who passes ``str(some_dict)`` as the args string does.
+
+    Arguments recorded truncated (args_length beyond what arrived) are skipped:
+    a cut-off prefix of valid JSON is indistinguishable from malformed JSON.
+    So are arguments over MAX_ARGS_CHARS, which bounds the in-path cost.
+
+    Fires once per run, on the first malformed call. Shadow by default.
+    Tunable: MAX_ARGS_CHARS (default 32768).
+    """
+
+    name = "MALFORMED_TOOL_CALL"
+    SEVERITY = Severity.HIGH
+    MAX_ARGS_CHARS = 32_768
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        blocked: Optional[set] = None
+        for tc_index, tc in enumerate(state.tool_calls):
+            args = tc.args
+            if not isinstance(args, str) or len(args) > self.MAX_ARGS_CHARS:
+                continue
+            # A capped prefix of a valid payload is indistinguishable from a
+            # malformed payload. Only classify arguments we have in full.
+            if tc.args_length is not None and tc.args_length > len(args):
+                continue
+            if not _JSON_ATTEMPT.match(args) or not _json_malformed(args.strip()):
+                continue
+            if blocked is None:  # only computed once there is a candidate
+                blocked = _approval_blocked_calls(state)
+            if tc_index in blocked:
+                continue
+            return FailureSignal(
+                failure_type=FailureType.MALFORMED_TOOL_CALL,
+                severity=self.SEVERITY,
+                run_id=state.run_id,
+                agent_id=state.agent_id,
+                agent_version=state.agent_version,
+                step_index=tc.step_index,
+                confidence=0.9,
+                evidence={
+                    "tool_name": tc.tool_name,
+                    "tool_step": tc.step_index,
+                    "args_snippet": args.strip()[:200],
+                },
+            )
         return None
 
 
@@ -5230,6 +5317,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
     PrematureTerminationDetector(),
     UnreadToolErrorDetector(),
     ToolArgumentFabricationDetector(),
+    MalformedToolCallDetector(),
     RetrievedContentInjectionDetector(),
     AgentHandoffFailureDetector(),
     RunawayIterationDetector(),
@@ -5267,7 +5355,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
 
 # detectors.yml section key → detector class, one entry per built-in detector
-# (all 35). The single source of that mapping: the server-side worker's
+# (all 36). The single source of that mapping: the server-side worker's
 # ``detector_svc.detectors._DETECTOR_CLASSES`` is an alias of this dict, and
 # the SDK's ``dunetrace.detector_config.build_detectors`` reads the server's
 # ``GET /v1/detector-config`` response through it, so a threshold keyed by
@@ -5300,6 +5388,7 @@ DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
     "premature_termination": PrematureTerminationDetector,
     "unread_tool_error": UnreadToolErrorDetector,
     "tool_argument_fabrication": ToolArgumentFabricationDetector,
+    "malformed_tool_call": MalformedToolCallDetector,
     "retrieved_content_injection": RetrievedContentInjectionDetector,
     "agent_handoff_failure": AgentHandoffFailureDetector,
     "handoff_context_loss": HandoffContextLossDetector,

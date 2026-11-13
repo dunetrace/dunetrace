@@ -355,6 +355,36 @@ class TestToolCallbacks(unittest.TestCase):
 
 
 class TestRetrievalCallbacks(unittest.TestCase):
+    def test_overlapping_retrievers_keep_their_own_indexes(self):
+        from dunetrace.run_builder import build_run_state
+        from dataclasses import asdict
+
+        handler, emitted = _make_handler()
+        handler.on_chain_start({}, {"input": "q"}, run_id="root")
+        handler.on_retriever_start({"name": "A"}, "q", run_id="a", parent_run_id="root")
+        handler.on_retriever_start({"name": "B"}, "q", run_id="b", parent_run_id="root")
+        handler.on_retriever_end([], run_id="a", parent_run_id="root")
+        handler.on_retriever_error(ValueError("down"), run_id="b", parent_run_id="root")
+        state = build_run_state([asdict(e) for e in emitted])
+        self.assertEqual([r.index_name for r in state.retrievals], ["A", "B"])
+        self.assertEqual(handler._ctx({"run_id": "root"}).child_retrieval_indexes, {})
+
+    def test_tool_arguments_are_recorded_without_a_synthetic_wrapper(self):
+        from dataclasses import asdict
+        from dunetrace.detectors import MalformedToolCallDetector
+        from dunetrace.run_builder import build_run_state
+
+        for text, malformed in [('{"title": }', True), ('{"input": "{\'a\': 1}"}', False)]:
+            with self.subTest(text=text):
+                handler, emitted = _make_handler()
+                handler.on_chain_start({}, {"input": "q"}, run_id="root")
+                handler.on_tool_start({"name": "code"}, text, run_id="t", parent_run_id="root")
+                state = build_run_state([asdict(e) for e in emitted])
+                self.assertEqual(state.tool_calls[0].args, text)
+                self.assertEqual(
+                    MalformedToolCallDetector().on_run_completion(state) is not None, malformed
+                )
+
     def test_retriever_start_emits_retrieval_called(self):
         handler, emitted = _make_handler()
         handler.on_chain_start({}, {"input": "q"}, run_id="lc-1")

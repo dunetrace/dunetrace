@@ -82,6 +82,7 @@ BUILTIN_DETECTOR_KEYS: frozenset[str] = frozenset(
         "premature_termination",
         "unread_tool_error",
         "tool_argument_fabrication",
+        "malformed_tool_call",
         "retrieved_content_injection",
         "agent_handoff_failure",
         "handoff_context_loss",
@@ -116,6 +117,7 @@ _PARAM_MAP: dict[str, dict[str, str]] = {
     "goal_abandonment": {"stall_steps": "STALL_STEPS"},
     "rag_empty_retrieval": {"min_score": "MIN_SCORE", "min_results": "MIN_RESULTS"},
     "excessive_retrieval": {"max_retrievals": "MAX_RETRIEVALS"},
+    "malformed_tool_call": {"max_args_chars": "MAX_ARGS_CHARS"},
     "rag_quality_degradation": {
         "min_retrievals": "MIN_RETRIEVALS",
         "drop_threshold": "DROP_THRESHOLD",

@@ -197,6 +197,7 @@ class TestExtractToolCalls(unittest.TestCase):
         calls = _extract_tool_calls({}, output, None)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "web_search")
+        self.assertEqual(calls[0][1], '{"q": "test"}', "JSON, not str(dict)")
 
     def test_failed_tool_has_ok_false(self):
         msg = MagicMock()

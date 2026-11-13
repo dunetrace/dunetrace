@@ -1,0 +1,36 @@
+"""Live detector eligibility shared by signal persistence and replay."""
+
+# Detectors that have graduated out of shadow mode.
+# Add a detector name here ONLY after verifying precision > 80% on real data.
+LIVE_DETECTORS: set[str] = {
+    "PROMPT_INJECTION_SIGNAL",
+    "TOOL_LOOP",
+    "TOOL_THRASHING",
+    "TOOL_AVOIDANCE",
+    "GOAL_ABANDONMENT",
+    "RAG_EMPTY_RETRIEVAL",
+    "LLM_TRUNCATION_LOOP",
+    "CONTEXT_BLOAT",
+    "SLOW_STEP",
+    "RETRY_STORM",
+    "EMPTY_LLM_RESPONSE",
+    "STEP_COUNT_INFLATION",
+    "CASCADING_TOOL_FAILURE",
+    "FIRST_STEP_FAILURE",
+    "REASONING_STALL",
+    "COST_SPIKE",
+    "SESSION_LATENCY",
+    "PREMATURE_TERMINATION",
+    "UNREAD_TOOL_ERROR",
+    "TOOL_ARGUMENT_FABRICATION",
+    "RETRIEVED_CONTENT_INJECTION",
+    "HANDOFF_CONTEXT_LOSS",
+    "RUNAWAY_ITERATION",
+    "EXCESSIVE_RETRIEVAL",
+    "SILENT_TRUNCATION",
+    "AGENT_HANDOFF_FAILURE",
+    "MODEL_FALLBACK_DRIFT",
+    "MEMORY_POISONING",
+    "DELEGATION_LOOP",
+    "UNGROUNDED_DESTINATION",
+}

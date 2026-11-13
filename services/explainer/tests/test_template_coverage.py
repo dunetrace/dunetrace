@@ -121,6 +121,11 @@ REAL_EVIDENCE = {
         "is_destructive_tool": True,
         "args_snippet": '{"account_id": "acct_99213"}',
     },
+    FailureType.MALFORMED_TOOL_CALL: {
+        "tool_name": "create_ticket",
+        "tool_step": 7,
+        "args_snippet": '{"title": }',
+    },
     FailureType.RETRIEVED_CONTENT_INJECTION: {
         "source_type": "retrieved_document",
         "source_name": "policy.pdf",
@@ -199,6 +204,19 @@ def _signal(ft: FailureType, evidence: dict) -> FailureSignal:
 
 
 class TestTemplateCoverage(unittest.TestCase):
+    def test_malformed_tool_fix_rejects_nonstandard_constants(self):
+        explanation = TEMPLATES[FailureType.MALFORMED_TOOL_CALL](
+            _signal(FailureType.MALFORMED_TOOL_CALL, {})
+        )
+        namespace = {}
+        # Execute only the repository-owned example to verify its behavior.
+        exec(explanation.suggested_fixes[0].code, namespace)  # nosec B102
+        parse = namespace["parse_tool_args"]
+        self.assertEqual(parse('{"value": 1}'), {"value": 1})
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant), self.assertRaises(ValueError):
+                parse('{"value": ' + constant + "}")
+
     def test_every_producible_failure_type_has_a_template(self):
         missing = [
             f.name for f in FailureType if f not in TEMPLATES and f not in NO_TEMPLATE_EXPECTED

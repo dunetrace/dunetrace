@@ -1,17 +1,17 @@
 # Detectors
 
-Dunetrace runs 35 structural detectors against every completed agent run. All of
-them are listed in the table below; the twelve newest get a full write-up in
+Dunetrace runs 36 structural detectors against every completed agent run. All of
+them are listed in the table below; the newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
 
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
-> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **32**
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **33**
 > detectors the SDK can evaluate during runtime event collection. The other
 > three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
 > need raw input or a second run's data and are handled separately. The detector
-> worker runs all 35 regardless — see
+> worker runs all 36 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -68,6 +68,7 @@ Semantic findings never trigger a policy — see
 | `PREMATURE_TERMINATION` | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
 | `UNREAD_TOOL_ERROR` | Tool failed, agent's next action doesn't acknowledge it | MEDIUM/HIGH |
 | `TOOL_ARGUMENT_FABRICATION` | Tool call argument references an entity not present anywhere in prior context | HIGH/CRITICAL |
+| `MALFORMED_TOOL_CALL` | Tool args look like JSON but cannot be parsed as strict JSON | HIGH |
 | `RETRIEVED_CONTENT_INJECTION` | Retrieved or fetched content contains text directed at the agent as an instruction | HIGH/CRITICAL |
 | `HANDOFF_CONTEXT_LOSS` | Multi-agent handoff loses a large chunk of the parent agent's context | HIGH |
 | `AGENT_HANDOFF_FAILURE` | A handoff-named tool call fails or returns an empty/insufficient payload | HIGH |
@@ -207,12 +208,12 @@ docker compose restart detector ingest
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`). Five are not:
+Most built-in detectors are live (`shadow = false`). Six are not:
 `INSTRUMENTATION_DEGRADED`, `OVERSIZED_TOOL_ARGUMENTS`,
-`SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY` and `RAG_QUALITY_DEGRADATION` remain shadowed by default
+`SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY`, `RAG_QUALITY_DEGRADATION` and `MALFORMED_TOOL_CALL` remain shadowed by default
 until their precision is checked against real traffic. A new built-in detector should be added to
 `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
-`services/detector/detector_svc/db.py` once validated; leaving it out of
+`packages/schemas-py/dunetrace_schemas/detector_status.py` once validated; leaving it out of
 `LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
 
 User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
@@ -727,6 +728,38 @@ Same shape as a fabrication case — a specific ID passed to a second tool call 
 
 ---
 
+### MALFORMED_TOOL_CALL
+
+#### What it catches
+
+A tool call whose `args` is a JSON attempt that is not valid JSON: trailing commas, single quotes, Python's `True`/`None`, bare `NaN`, bad escapes, unterminated objects. These are the mistakes an LLM makes writing tool calls, and the JSON-reading tool on the other end rejects every one of them. Plain text is never judged, whatever bracket it starts with: a GraphQL query, a `[INFO]` log line, a markdown link, a `{name}` template or a shell test like `[ -f x ]` are not JSON attempts. The SDKs record structured arguments as JSON (Hermes and Haystack included), so Dunetrace's own encoding never fires it; a caller who passes `str(some_dict)` as the args string does.
+
+#### Signal
+
+For each tool call, in step order: if `args` opens like JSON (an object starting with a key or `}`, or an array starting with a value or `]`), it is parsed with strict `json.loads` (`NaN`/`Infinity` rejected). LangChain records the original tool arguments directly. String-valued fields inside valid JSON stay opaque. Arguments recorded truncated (`args_length` larger than what arrived) and arguments over `max_args_chars` (default 32,768) are skipped, which also bounds the in-path cost; parse results are cached because a signal policy re-reads every earlier call at each step. One signal for the first malformed call, with the tool name, step, and a capped argument snippet. A calibration corpus and report ship with it: `scripts/calibrate_malformed_tool_call.py`.
+
+#### Severity and rollout
+
+**HIGH · Shadow by default.** The syntax error is unambiguous, but the operational consequence is framework-specific: some frameworks reject it loudly while others coerce, retry, or pass it downstream. Validate the observed fire rate and handling behavior before adding it to `LIVE_DETECTORS`.
+
+#### Example — fires on:
+
+```json
+{"tool_name": "create_ticket", "step_index": 4, "args": "{\"title\": }"}
+```
+
+#### Example — does NOT fire on:
+
+```json
+{"tool_name": "search_docs", "step_index": 1, "args": "refund policy"}
+```
+
+#### Related detectors
+
+- `TOOL_ARGUMENT_FABRICATION` — validates whether structured arguments are grounded in prior context; this detector validates only whether a structured-looking payload is parseable.
+
+---
+
 ### RETRIEVED_CONTENT_INJECTION
 
 #### What it catches
@@ -1207,7 +1240,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 35 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 36 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`

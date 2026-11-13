@@ -539,12 +539,20 @@ class RunContext:
         args: Optional[Dict[str, Any]] = None,
         *,
         _enforce_approval: bool = True,
+        _input_wrapper: bool = False,
     ) -> None:
         # What leaves the process — and what the in-path detectors read off
         # ToolCall.args — is the redacted, capped serialisation, never the raw
         # dict. Policy evaluation below still sees the raw ``args`` (a policy
         # gating on args.amount needs the real value), but that never ships.
-        args_repr, args_truncated, args_len = self._serialize_args(args)
+        if _input_wrapper and isinstance(args, dict):
+            # LangChain's wrapper is needed by redaction hooks and args.input policies.
+            recorded = _apply_redaction(self._redact_hook, self._redact_denylist, args)
+            args_repr, args_truncated, args_len = _serialize_args(
+                None, self._redact_denylist, recorded.get("input", {}), self._max_chars()
+            )
+        else:
+            args_repr, args_truncated, args_len = self._serialize_args(args)
         self.state.tool_calls.append(
             ToolCall(
                 tool_name=tool_name,

@@ -75,7 +75,7 @@ as one flat run, which is usually not what you want for a single agent.
 
 ## What this does
 
-Wrap your agent's entry point with `@dt.trace` and your tool functions with `@dt.tool`. Dunetrace then auto-traces every tool and LLM call made inside that function, ships the trace to the backend, and detects structural failures (tool loops, retry storms, cost spikes, and 32 more) within ~15 seconds — no other code changes.
+Wrap your agent's entry point with `@dt.trace` and your tool functions with `@dt.tool`. Dunetrace then auto-traces every tool and LLM call made inside that function, ships the trace to the backend, and detects structural failures (tool loops, retry storms, cost spikes, and 33 more) within ~15 seconds — no other code changes.
 
 ## Recommended usage pattern
 
