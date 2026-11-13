@@ -228,6 +228,9 @@ class RunState:
         None  # P75 total tokens (prompt+completion) per run
     )
     baseline_p75_duration_s: Optional[float] = None  # P75 wall-clock run duration in seconds
+    # {tool_name: P75 step latency in ms} — SLOW_STEP's per-tool thresholds.
+    # A tool missing here falls back to baseline_p75_latency_tool.
+    baseline_p75_latency_by_tool: Optional[Dict[str, float]] = None
 
 
 # ── Risk Score ────────────────────────────────────────────────────────────────

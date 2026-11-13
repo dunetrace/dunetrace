@@ -320,6 +320,30 @@ class TestBaselines(unittest.TestCase):
         self.assertIsNone(state.baseline_p75_latency_tool)
         self.assertIsNone(state.baseline_p75_total_tokens)
 
+    def test_apply_seeds_the_per_tool_map_and_drops_garbage(self):
+        state = RunState(run_id="r", agent_id="a", agent_version="v")
+        apply_baselines(
+            state,
+            {
+                "p75_latency_by_tool_ms": {
+                    "search": 120,
+                    "report": 9000.5,
+                    "bad": "slow",
+                    "neg": -1,
+                    "": 5,
+                    "flag": True,
+                }
+            },
+        )
+        self.assertEqual(state.baseline_p75_latency_by_tool, {"search": 120.0, "report": 9000.5})
+
+    def test_apply_keeps_a_caller_set_per_tool_map(self):
+        state = RunState(
+            run_id="r", agent_id="a", agent_version="v", baseline_p75_latency_by_tool={"x": 1.0}
+        )
+        apply_baselines(state, {"p75_latency_by_tool_ms": {"y": 2.0}})
+        self.assertEqual(state.baseline_p75_latency_by_tool, {"x": 1.0})
+
     def test_apply_tolerates_no_baselines(self):
         state = RunState(run_id="r", agent_id="a", agent_version="v")
         apply_baselines(state, None)

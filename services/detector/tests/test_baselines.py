@@ -598,5 +598,150 @@ class TestBaselineFallsBackToEvents(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(column, conn.fetchrow.call_args[0][0])
 
 
+class TestPerToolLatencyBaselines(unittest.IsolatedAsyncioTestCase):
+    """fetch_per_tool_latency_baselines reads the stored per-run maps."""
+
+    def _pool(self, rows):
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=rows)
+        pool = MagicMock()
+        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
+        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+        return pool, conn
+
+    async def test_returns_none_when_no_pool(self):
+        with patch.object(db_module, "_pool", None):
+            self.assertIsNone(await db_module.fetch_per_tool_latency_baselines("o", "a", "v", "r"))
+
+    async def test_returns_none_when_no_tool_has_enough_history(self):
+        pool, _ = self._pool([])
+        with patch.object(db_module, "_pool", pool):
+            self.assertIsNone(await db_module.fetch_per_tool_latency_baselines("o", "a", "v", "r"))
+
+    async def test_maps_rows_to_tool_names(self):
+        rows = [
+            {"tool_name": "search", "sample_size": 30, "p75": 120.0},
+            {"tool_name": "report", "sample_size": 25, "p75": 9000.0},
+        ]
+        pool, _ = self._pool(rows)
+        with patch.object(db_module, "_pool", pool):
+            got = await db_module.fetch_per_tool_latency_baselines("o", "a", "v", "r")
+        self.assertEqual(got, {"search": 120.0, "report": 9000.0})
+
+    async def test_query_is_org_scoped_clean_and_bounded(self):
+        pool, conn = self._pool([])
+        with patch.object(db_module, "_pool", pool):
+            await db_module.fetch_per_tool_latency_baselines("org-1", "a", "v", "r")
+        sql, *args = conn.fetch.call_args[0]
+        self.assertIn("org_id        = $1", sql)
+        self.assertIn("AND clean", sql)
+        self.assertIn("FROM run_baseline_metrics", sql)
+        self.assertNotIn("FROM events", sql, "must not re-derive from raw events")
+        self.assertIn("LIMIT $7", sql)
+        self.assertEqual(args[0], "org-1")
+        self.assertEqual(args[5], db_module._MIN_BASELINE_RUNS)
+
+
+class TestPerToolBaselineMetric(unittest.TestCase):
+    """build_baseline_metrics' per-tool map measures what SLOW_STEP measures."""
+
+    def _state(self, steps):
+        """steps: (step_index, event_type, tool_name, timestamp)"""
+        from dunetrace.run_builder import build_run_state
+
+        events = [
+            {
+                "event_type": et,
+                "run_id": "r1",
+                "agent_id": "a1",
+                "agent_version": "v1",
+                "step_index": step,
+                "timestamp": ts,
+                "payload": {"tool_name": name} if name is not None else {},
+            }
+            for step, et, name, ts in steps
+        ]
+        return build_run_state(events)
+
+    def test_keys_each_tool_steps_latency_by_tool_name(self):
+        from detector_svc.baseline_metrics import build_baseline_metrics
+
+        m = build_baseline_metrics(
+            self._state(
+                [
+                    (1, "tool.called", "search", 0.0),
+                    (1, "tool.responded", "search", 0.25),
+                    (2, "tool.called", "report", 0.25),
+                    (2, "tool.responded", "report", 5.25),
+                    (3, "run.completed", None, 5.25),
+                ]
+            )
+        )
+        self.assertEqual(m["gap_p75_by_tool_ms"], {"search": 250.0, "report": 5000.0})
+
+    def test_parallel_calls_in_one_step_count_once(self):
+        """Two tool.called events at one step give ONE sample: the step's first
+        gap, which is exactly the number SLOW_STEP judges that step by
+        (step_durations_ms). The pooled `_gaps_after` would add a second,
+        different sample the detector never compares against."""
+        from detector_svc.baseline_metrics import build_baseline_metrics
+
+        m = build_baseline_metrics(
+            self._state(
+                [
+                    (1, "tool.called", "search", 0.0),
+                    (1, "tool.called", "search", 0.5),
+                    (1, "tool.responded", "search", 2.0),
+                    (2, "run.completed", None, 2.0),
+                ]
+            )
+        )
+        state_step_ms = 500.0
+        self.assertEqual(m["gap_p75_by_tool_ms"], {"search": state_step_ms})
+
+    def test_none_when_the_run_has_no_tool_steps(self):
+        from detector_svc.baseline_metrics import build_baseline_metrics
+
+        m = build_baseline_metrics(
+            self._state([(1, "llm.called", None, 0.0), (2, "run.completed", None, 1.0)])
+        )
+        self.assertIsNone(m["gap_p75_by_tool_ms"])
+
+    def test_tool_count_is_capped(self):
+        from detector_svc.baseline_metrics import build_baseline_metrics
+        from dunetrace_schemas.baselines import MAX_TOOLS_PER_BASELINE
+
+        steps = []
+        for i in range(MAX_TOOLS_PER_BASELINE + 10):
+            steps.append((i + 1, "tool.called", f"tool_{i}", float(i)))
+        steps.append((len(steps) + 1, "run.completed", None, float(len(steps))))
+        m = build_baseline_metrics(self._state(steps))
+        self.assertEqual(len(m["gap_p75_by_tool_ms"]), MAX_TOOLS_PER_BASELINE)
+
+
+class TestWorkerPassesOrgIdToEveryBaseline(unittest.IsolatedAsyncioTestCase):
+    """The merge that introduced per-tool baselines dropped org_id from all seven
+    existing baseline calls, so every one raised TypeError and every run failed
+    detection. Pin the call shape."""
+
+    async def test_every_baseline_call_carries_org_id_first(self):
+        import inspect
+
+        import detector_svc.worker as worker
+
+        src = inspect.getsource(worker.process_run)
+        for fn in (
+            "fetch_step_count_baseline",
+            "fetch_latency_baseline",
+            "fetch_token_growth_baseline",
+            "fetch_llm_tool_ratio_baseline",
+            "fetch_total_tokens_baseline",
+            "fetch_duration_baseline",
+            "fetch_per_tool_latency_baselines",
+        ):
+            with self.subTest(fn=fn):
+                self.assertIn(f"{fn}(org_id, agent_id, agent_version, run_id", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
