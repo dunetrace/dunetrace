@@ -5,7 +5,7 @@ Shows an AssistantAgent + RoundRobinGroupChat monitored via DunetraceAutoGenObse
 Every LLM call is tracked by wrapping the model client with DunetraceModelClient.
 
 Install:
-    pip install dunetrace autogen-agentchat autogen-ext python-dotenv
+    pip install dunetrace autogen-agentchat 'autogen-ext[openai]' python-dotenv
 
 Run (happy path):
     OPENAI_API_KEY=sk-... python examples/autogen_agent.py
@@ -42,7 +42,7 @@ try:
 except ImportError as exc:
     raise SystemExit(
         f"This example needs AutoGen — {exc.name} is not installed.\n"
-        "  pip install dunetrace autogen-agentchat autogen-ext python-dotenv"
+        "  pip install dunetrace autogen-agentchat 'autogen-ext[openai]' python-dotenv"
     ) from None
 
 from dunetrace import Dunetrace
