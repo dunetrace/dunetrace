@@ -349,6 +349,16 @@
       "enriches": [],
       "why": "`writes = [m for m in state.memory_events if m.op == 'written' and m.value]; if not writes: return None`"
     },
+    "MEMORY_GROWTH_PATTERN": {
+      "requires": [
+        [
+          "memory",
+          "tool"
+        ]
+      ],
+      "enriches": [],
+      "why": "non-empty state.memory_events is counted (op written vs read); when that list is empty, tool_calls names are the fallback. Either channel alone can fire. cleared counts as neither."
+    },
     "DELEGATION_LOOP": {
       "requires": [
         "run",

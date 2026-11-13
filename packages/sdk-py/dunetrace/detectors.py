@@ -3384,6 +3384,101 @@ class MemoryPoisonedDetector(BaseDetector):
         )
 
 
+# ── MEMORY_GROWTH_PATTERN ─────────────────────────────────────────────────────
+
+
+class MemoryGrowthPatternDetector(BaseDetector):
+    """An agent writes to memory far more than it reads that memory back, within
+    one run.
+
+    Counts ``state.memory_events``: ``op == "written"`` against ``op == "read"``
+    (``cleared`` is neither). Only real memory events count -- runs without
+    memory instrumentation never fire. Tool names are not consulted: substring
+    matching on names ("add", "get", "store") misread ``add_numbers`` and
+    ``lookup_address`` as memory writes.
+
+    Fires when ``write_count >= MIN_WRITES`` and
+    ``write_count >= read_count * WRITE_READ_RATIO``. Multiplying keeps the rule
+    defined at zero reads, and evidence ``ratio`` is None there rather than a
+    fabricated finite number.
+
+    Server-side only: it is not in TIER1_DETECTORS. It compares whole-run totals,
+    so evaluating it on a partial run at each step (what a signal policy does)
+    would fire after the third write, before a read the agent was about to make.
+    It is also a within-run view: an agent that writes in one run and reads in a
+    later one fires here, which is why it ships in shadow.
+
+    Tunable: WRITE_READ_RATIO (default 3, > 0), MIN_WRITES (default 3, >= 1).
+    """
+
+    name = "MEMORY_GROWTH_PATTERN"
+    SEVERITY = Severity.MEDIUM
+    WRITE_READ_RATIO = 3
+    MIN_WRITES = 3
+    # Evidence lists a sample of keys, not every key: an agent writing hundreds
+    # of UUID-keyed memories would otherwise store tens of KB per signal.
+    MAX_EVIDENCE_KEYS = 10
+
+    def __init__(self, **overrides: object) -> None:
+        super().__init__(**overrides)
+        ratio = self.WRITE_READ_RATIO
+        # A ratio of 0 or below makes `writes >= reads * ratio` true for every
+        # run that clears MIN_WRITES, including a balanced one.
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not ratio > 0:
+            raise ValueError("WRITE_READ_RATIO must be a number > 0")
+        minimum = self.MIN_WRITES
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+            raise ValueError("MIN_WRITES must be an integer >= 1")
+
+    def _key_sample(self, events: List[Any]) -> List[str]:
+        # Keys are caller-supplied: str() them (an int and a str key used to make
+        # sorted() raise, which run_detectors swallowed), dedupe in order.
+        seen: Dict[str, None] = {}
+        for m in events:
+            if m.key is None or m.key == "":
+                continue
+            seen.setdefault(m.key if isinstance(m.key, str) else str(m.key), None)
+            if len(seen) >= self.MAX_EVIDENCE_KEYS:
+                break
+        return list(seen)
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        writes = [m for m in state.memory_events if m.op == "written"]
+        reads = [m for m in state.memory_events if m.op == "read"]
+        write_count, read_count = len(writes), len(reads)
+        if write_count < self.MIN_WRITES or write_count < read_count * self.WRITE_READ_RATIO:
+            return None
+
+        # How far past the trigger: writes per read against the ratio. A run
+        # that never read anything is the strongest form of the pattern, so it
+        # is scored as if it had half a read -- above any run with the same
+        # writes and one read, and never under the 0.5 "barely fires" floor.
+        effective = write_count / (read_count if read_count else 0.5)
+        confidence = _scale_confidence(max(1.0, effective / self.WRITE_READ_RATIO))
+
+        steps = [m.step_index for m in writes + reads]
+        return FailureSignal(
+            failure_type=FailureType.MEMORY_GROWTH_PATTERN,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=max(steps),
+            confidence=confidence,
+            evidence={
+                "write_count": write_count,
+                "read_count": read_count,
+                "ratio": round(write_count / read_count, 2) if read_count else None,
+                "write_keys": self._key_sample(writes),
+                "read_keys": self._key_sample(reads),
+                "write_read_ratio": self.WRITE_READ_RATIO,
+                "min_writes": self.MIN_WRITES,
+                "first_step": min(steps),
+                "last_step": max(steps),
+            },
+        )
+
+
 # ── DELEGATION_LOOP ───────────────────────────────────────────────────────────
 
 
@@ -5355,7 +5450,7 @@ TIER1_DETECTORS: List[BaseDetector] = [
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
 
 # detectors.yml section key → detector class, one entry per built-in detector
-# (all 36). The single source of that mapping: the server-side worker's
+# (all 37). The single source of that mapping: the server-side worker's
 # ``detector_svc.detectors._DETECTOR_CLASSES`` is an alias of this dict, and
 # the SDK's ``dunetrace.detector_config.build_detectors`` reads the server's
 # ``GET /v1/detector-config`` response through it, so a threshold keyed by
@@ -5395,6 +5490,7 @@ DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
     "runaway_iteration": RunawayIterationDetector,
     "model_fallback_drift": ModelFallbackDriftDetector,
     "memory_poisoning": MemoryPoisonedDetector,
+    "memory_growth_pattern": MemoryGrowthPatternDetector,
     "delegation_loop": DelegationLoopDetector,
     "ungrounded_destination": UngroundedDestinationDetector,
     "unresolved_ambiguity": UnresolvedAmbiguityDetector,

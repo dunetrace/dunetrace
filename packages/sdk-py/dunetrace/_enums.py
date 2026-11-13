@@ -103,5 +103,6 @@ class FailureType(str, Enum):
     # enum so it travels the existing signal pipeline, but it describes the
     # telemetry, not the agent.
     INSTRUMENTATION_DEGRADED = "INSTRUMENTATION_DEGRADED"
+    MEMORY_GROWTH_PATTERN = "MEMORY_GROWTH_PATTERN"
     # Sentinel for user-defined custom detectors.
     CUSTOM = "CUSTOM"

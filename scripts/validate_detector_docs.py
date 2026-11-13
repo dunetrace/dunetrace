@@ -78,6 +78,7 @@ _COUNT_SCAN_GLOBS = _SCAN_GLOBS + [
 # signals). When a new one shows up the check fails loudly; add it here after
 # confirming it isn't a mistyped or unbuilt detector name.
 _ALLOWLIST = {
+    "CONTENT_EVIDENCE_KEYS",
     "DUNETRACE_API_URL",
     "DUNETRACE_CUSTOM_DETECTORS_PATH",
     "SEMANTIC_LLM_PROVIDER",
@@ -141,12 +142,7 @@ def code_names() -> set[str]:
     import pkgutil
 
     import dunetrace.packs as packs_pkg
-    from dunetrace.detectors import (
-        DelegationLoopDetector,
-        HandoffContextLossDetector,
-        PROMPT_INJECTION_DETECTOR,
-        TIER1_DETECTORS,
-    )
+    from dunetrace.detectors import DETECTOR_KEYS
     from dunetrace.packs.base import PACK_REGISTRY
 
     # Import every pack module so it registers itself (voice today, plus any
@@ -155,10 +151,10 @@ def code_names() -> set[str]:
         if mod.name != "base":
             importlib.import_module(f"dunetrace.packs.{mod.name}")
 
-    names = {d.name for d in TIER1_DETECTORS}
-    names.add(PROMPT_INJECTION_DETECTOR.name)
-    names.add(HandoffContextLossDetector().name)
-    names.add(DelegationLoopDetector().name)
+    # Every built-in, in-path or not: DETECTOR_KEYS is the one map the worker
+    # and the SDK both build from (a server-only detector is absent from
+    # TIER1_DETECTORS by design).
+    names = {cls.name for cls in DETECTOR_KEYS.values()}
     for pack in PACK_REGISTRY.values():
         for cls in pack.detectors:
             names.add(cls.name)
@@ -238,12 +234,12 @@ def check_counts(globs: list[str] | None = None) -> list[str]:
                     # A window, not the whole line: CLAUDE.md writes a whole
                     # paragraph on one line, so scanning it entire matched
                     # "client-side" from a different sentence and read a correct
-                    # "runs all 34 structural detectors" as an in-path claim.
+                    # "runs all 35 structural detectors" as an in-path claim.
                     window = line[max(0, m.start() - 120) : m.end() + 120].lower()
                     if "pack" in window:
                         continue
                     # The correct, fully-qualified phrasing names BOTH numbers:
-                    # "34 zero-LLM detectors (31 of them in-path)". That is the
+                    # "35 zero-LLM detectors (32 of them in-path)". That is the
                     # shape CLAUDE.md asks for — say which one you mean — so it
                     # passes whichever of the two the regex happened to match.
                     if str(_TOTAL_DETECTORS) in window and str(_IN_PATH_DETECTORS) in window:

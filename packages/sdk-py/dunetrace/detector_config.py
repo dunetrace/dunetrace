@@ -110,8 +110,9 @@ PER_TOOL_BASELINE_FIELD = ("p75_latency_by_tool_ms", "baseline_p75_latency_by_to
 # The in-path instance per detector class. Only detectors present here are
 # ever built client-side: PromptInjectionDetector, HandoffContextLossDetector
 # and DelegationLoopDetector are absent from TIER1_DETECTORS on purpose (they
-# need raw input or a second run's data), so a server override for them is
-# ignored, not applied to a detector that cannot run here.
+# need raw input or a second run's data), and MemoryGrowthPatternDetector
+# compares whole-run totals, so a server override for any of them is ignored,
+# not applied to a detector that does not run here.
 _INPATH_BY_CLASS: Dict[type, BaseDetector] = {type(d): d for d in TIER1_DETECTORS}
 
 # (yaml key, kwarg) pairs already warned about — one WARNING per pair per

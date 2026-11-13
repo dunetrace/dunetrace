@@ -28,7 +28,7 @@ usage-only chunk with an empty ``choices`` list and break callers doing
 - ``requests``  — Session.send (all outbound HTTP as tool calls)
 - ``langchain`` — BaseChatModel.{invoke,ainvoke,stream,astream} + BaseTool.{run,arun},
                   covers LangGraph too (its nodes call these same base-class methods).
-                  Also patches LangGraph's ``BaseStore.{put,get,delete}`` (+ async) so
+                  Also patches LangGraph's ``BaseStore.{put,get,delete,search}`` (+ async) so
                   long-term memory writes/reads/clears become memory.* events —
                   ``BaseStore`` implements these concretely and delegates to an
                   abstract ``batch``, so one patch covers every store backend.
@@ -2378,8 +2378,8 @@ def _store_key(namespace, key) -> str:
 
 
 def _patch_langgraph_store() -> None:
-    """Patch LangGraph's ``BaseStore.{put,get,delete}`` (+ async) so long-term
-    memory operations become ``memory.*`` events. ``BaseStore`` defines these
+    """Patch LangGraph's ``BaseStore.{put,get,delete,search}`` (+ async) so
+    long-term memory operations become ``memory.*`` events. ``BaseStore`` defines these
     concretely and delegates to an abstract ``batch``/``abatch``, so patching
     the base intercepts every backend (InMemoryStore, PostgresStore, …)."""
     if "langgraph_store" in _PATCHED:
@@ -2455,6 +2455,39 @@ def _patch_langgraph_store() -> None:
         return await _orig_adelete(self, namespace, key, *args, **kwargs)
 
     BaseStore.adelete = _patched_adelete
+
+    # search/asearch are how LangGraph agents usually read long-term memory
+    # (semantic lookup over a namespace), so they are reads too. Without them a
+    # LangGraph agent that writes with put and reads with search looked like it
+    # never read anything back. The key is the namespace searched, not a query:
+    # queries are free text and would put user content in signal evidence.
+    def _search_key(args, kwargs) -> str:
+        prefix = args[0] if args else kwargs.get("namespace_prefix", ())
+        return _store_key(prefix, "*")
+
+    if hasattr(BaseStore, "search"):
+        _orig_search = BaseStore.search
+
+        @functools.wraps(_orig_search)
+        def _patched_search(self, *args, **kwargs):
+            run = _current_run.get()
+            if run is not None:
+                _safe_memory(lambda: run.memory_read(_search_key(args, kwargs)))
+            return _orig_search(self, *args, **kwargs)
+
+        BaseStore.search = _patched_search
+
+    if hasattr(BaseStore, "asearch"):
+        _orig_asearch = BaseStore.asearch
+
+        @functools.wraps(_orig_asearch)
+        async def _patched_asearch(self, *args, **kwargs):
+            run = _current_run.get()
+            if run is not None:
+                _safe_memory(lambda: run.memory_read(_search_key(args, kwargs)))
+            return await _orig_asearch(self, *args, **kwargs)
+
+        BaseStore.asearch = _patched_asearch
 
     _PATCHED.add("langgraph_store")
     logger.debug("langgraph store memory auto-instrumented")

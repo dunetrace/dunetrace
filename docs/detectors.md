@@ -1,6 +1,6 @@
 # Detectors
 
-Dunetrace runs 36 structural detectors against every completed agent run. All of
+Dunetrace runs 37 structural detectors against every completed agent run. All of
 them are listed in the table below; the newest get a full write-up in
 [Additional detectors](#additional-detectors). All thresholds are configurable
 i.e. no code changes required.
@@ -8,10 +8,11 @@ i.e. no code changes required.
 > **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
 > Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
 > the tier with the SDK constant `TIER1_DETECTORS`, which holds the **33**
-> detectors the SDK can evaluate during runtime event collection. The other
-> three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
-> need raw input or a second run's data and are handled separately. The detector
-> worker runs all 36 regardless — see
+> detectors the SDK can evaluate during runtime event collection. Of the other
+> four, three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
+> need raw input or a second run's data and are handled separately, and
+> `MEMORY_GROWTH_PATTERN` compares whole-run totals, so it is server-side only by
+> design. The detector worker runs all 37 regardless — see
 > [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
@@ -74,6 +75,7 @@ Semantic findings never trigger a policy — see
 | `AGENT_HANDOFF_FAILURE` | A handoff-named tool call fails or returns an empty/insufficient payload | HIGH |
 | `RUNAWAY_ITERATION` | Step or cost ceiling crossed with no completion signal | HIGH/CRITICAL |
 | `MEMORY_POISONING` | An injection/override directive was written into the agent's own memory, where it re-steers the agent when read back | HIGH/CRITICAL |
+| `MEMORY_GROWTH_PATTERN` | Writes to memory at least 3× as often as it reads (minimum 3 writes), including a run that writes and never reads | MEDIUM |
 | `DELEGATION_LOOP` | Two or more agents delegate to each other in a cycle that keeps going around instead of converging | HIGH/CRITICAL |
 | `INSTRUMENTATION_DEGRADED` | The SDK could not measure the run's LLM calls — a telemetry fault, not an agent fault ³ | MEDIUM |
 
@@ -208,9 +210,9 @@ docker compose restart detector ingest
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`). Six are not:
+Most built-in detectors are live (`shadow = false`). Seven are not:
 `INSTRUMENTATION_DEGRADED`, `OVERSIZED_TOOL_ARGUMENTS`,
-`SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY`, `RAG_QUALITY_DEGRADATION` and `MALFORMED_TOOL_CALL` remain shadowed by default
+`SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY`, `RAG_QUALITY_DEGRADATION`, `MALFORMED_TOOL_CALL` and `MEMORY_GROWTH_PATTERN` remain shadowed by default
 until their precision is checked against real traffic. A new built-in detector should be added to
 `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
 `packages/schemas-py/dunetrace_schemas/detector_status.py` once validated; leaving it out of
@@ -1052,6 +1054,64 @@ The memory channel is opt-in instrumentation. It's populated either by calling `
 
 ---
 
+### MEMORY_GROWTH_PATTERN
+
+**Signal**: `MEMORY_GROWTH_PATTERN` · **Severity**: MEDIUM · **Shadow by default**
+
+#### What it catches
+
+An agent writes to memory far more often than it reads that memory back. The
+failure is volume, not content: a store that only grows, including a run that
+writes and never reads.
+
+#### How it decides
+
+It counts `state.memory_events`: each `op == "written"` is a write, each
+`op == "read"` a read, and `cleared` is neither. Only real memory events count.
+Tool names are never consulted: substring matching on names (`add`, `get`,
+`store`) read `add_numbers` and `lookup_address` as memory writes. A run without
+memory instrumentation never fires; instrument memory with
+`run.memory_written()` / `run.memory_read()`, or let the LangGraph and CrewAI
+auto-instrumentation do it. LangGraph's `store.search` / `asearch` count as
+reads, keyed by the namespace searched.
+
+It fires when writes are at least `min_writes` (default 3) and writes are at
+least `write_read_ratio` times the reads (default 3). Equality at a ratio of
+3 fires. A ratio of 2 with three or more writes does not. Zero reads stays
+defined, because the comparison multiplies instead of dividing: three or more
+writes and no reads fires, and the evidence ratio is null. Confidence treats
+zero reads as the strongest case (scored as half a read), so it is never below
+a run with the same writes and one read.
+
+**Server-side only.** It is not in the SDK's in-path battery
+(`TIER1_DETECTORS`): it compares whole-run totals, and a `trigger="signal"`
+policy evaluating it after each step would fire on the third write, before a
+read the agent was about to make. Evidence lists at most 10 keys per side
+(`write_keys`, `read_keys`); those keys are caller-chosen and often carry user
+or tenant ids, so they expire with the run's events (`CONTENT_EVIDENCE_KEYS`).
+
+#### How this one is different
+
+`MEMORY_POISONING` inspects the content of a write for an injection or
+override phrase, and it requires a value. This detector ignores content and
+counts operations, including a write whose value is empty. One poisoned write
+does not fire here. A clean key rewritten many times, with almost no reads,
+does not fire `MEMORY_POISONING`.
+
+#### Shadow and the within-run limitation
+
+Not in `LIVE_DETECTORS`. Signals are stored with `shadow = true`. The detector
+compares writes and reads **within one run**, so two healthy shapes fire: a
+background extraction run that only writes, and an agent that saves facts in
+one run and reads them in a later one. The calibration report
+(`scripts/calibration/memory_growth_pattern_calibration.md`, generated by
+`scripts/calibrate_memory_growth_pattern.py`) keeps those in a "realistic"
+slice next to the rule's own boundary cases. Those boundary cases check the
+rule against itself and are a regression gate, not a precision estimate. Measure
+the fire rate on real traffic per agent before promoting it.
+
+---
+
 ### DELEGATION_LOOP
 
 #### What it catches
@@ -1240,7 +1300,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 36 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
+4. Runs all 37 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`

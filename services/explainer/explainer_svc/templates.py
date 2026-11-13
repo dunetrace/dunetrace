@@ -2971,6 +2971,139 @@ def explain_memory_poisoning(signal: FailureSignal) -> Explanation:
     )
 
 
+# MEMORY_GROWTH_PATTERN
+
+
+def _memory_growth_count(ev: dict, key: str) -> int | None:
+    """A count evidence field, or None when it is missing or not numeric.
+
+    Bool is an int subclass, and a True/False count must not render as 1/0.
+    """
+    value = ev.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _memory_growth_names(ev: dict, key: str) -> list[str]:
+    value = ev.get(key)
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(name) for name in value if isinstance(name, str) and name]
+
+
+def explain_memory_growth_pattern(signal: FailureSignal) -> Explanation:
+    ev = signal.evidence if isinstance(signal.evidence, dict) else {}
+    write_count = _memory_growth_count(ev, "write_count")
+    read_count = _memory_growth_count(ev, "read_count")
+    # Keep a fractional ratio (7 writes / 2 reads). A missing or non-numeric
+    # value stays unset so the prose never prints a placeholder.
+    raw_ratio = ev.get("ratio")
+    if isinstance(raw_ratio, bool) or not isinstance(raw_ratio, (int, float)):
+        ratio_value = None
+    else:
+        ratio_value = raw_ratio
+    threshold = ev.get("write_read_ratio")
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+        threshold = None
+
+    if write_count is not None and read_count == 0:
+        title = f"Memory growth: {write_count} writes and no reads"
+        balance = (
+            f"The agent wrote to memory {write_count} times in this run and never "
+            f"read any of it back."
+        )
+    elif write_count is not None and read_count is not None:
+        read_label = "1 read" if read_count == 1 else f"{read_count} reads"
+        read_back = "read it back once" if read_count == 1 else f"read it back {read_count} times"
+        title = f"Memory growth: {write_count} writes against {read_label}"
+        if ratio_value is not None:
+            balance = (
+                f"The agent wrote to memory {write_count} times and {read_back} "
+                f"— {ratio_value:g}× as many writes as reads."
+            )
+        else:
+            balance = f"The agent wrote to memory {write_count} times and {read_back}."
+    else:
+        title = "Memory growth: writes far outnumber reads"
+        balance = "The agent wrote to memory far more than it read that memory back."
+
+    write_keys = _memory_growth_names(ev, "write_keys")
+    keys_txt = (
+        "Keys written include " + ", ".join(f"`{k}`" for k in write_keys[:5]) + "."
+        if write_keys
+        else ""
+    )
+    scope_txt = (
+        "This compares writes and reads within one run; an agent that saves facts now "
+        "and reads them in a later run also matches."
+    )
+
+    threshold_txt = (
+        f" The write-to-read threshold is {threshold:g}×." if threshold is not None else ""
+    )
+    what = " ".join(part for part in (balance, keys_txt, scope_txt) if part) + threshold_txt
+
+    try:
+        confidence_pct = int(signal.confidence * 100)
+    except (TypeError, ValueError):
+        confidence_pct = 0
+
+    summary_bits = []
+    if write_count is not None:
+        summary_bits.append(f"{write_count} writes")
+    if read_count == 0:
+        summary_bits.append("no reads")
+    elif read_count is not None:
+        summary_bits.append(f"{read_count} reads")
+    if ratio_value is not None:
+        summary_bits.append(f"ratio {ratio_value:g}×")
+    summary = ", ".join(summary_bits) if summary_bits else "Write and read counts were not recorded"
+
+    return Explanation(
+        **_base(signal),
+        title=title,
+        what=what,
+        why_it_matters=(
+            "Memory that is written and never read back still has to be stored, "
+            "and it is often copied into later prompts. The store grows on every "
+            "run, token cost rises, and the agent is paying to remember context "
+            "it does not use. A write-only pattern is also how stale or untrusted "
+            "text accumulates until a later run finally loads it."
+        ),
+        evidence_summary=f"{summary}. Confidence: {confidence_pct}%.",
+        suggested_fixes=[
+            CodeFix(
+                description="Read a memory key before writing it again",
+                language="python",
+                code=(
+                    "def remember(key, value):\n"
+                    "    current = memory.read(key)\n"
+                    "    if current == value:\n"
+                    "        return  # already stored; another write only grows the log\n"
+                    "    memory.write(key, value)"
+                ),
+            ),
+            CodeFix(
+                description="Cap writes per run, counted on the run, not the process",
+                language="python",
+                code=(
+                    "MAX_WRITES_PER_RUN = 3\n\n"
+                    "def remember(run_state: dict, key, value):\n"
+                    "    # run_state is created fresh for each run (e.g. your graph state),\n"
+                    "    # so the cap resets per run instead of silently dropping every\n"
+                    "    # write once the process has made three.\n"
+                    '    writes = run_state.setdefault("memory_writes", 0)\n'
+                    "    if writes >= MAX_WRITES_PER_RUN:\n"
+                    "        return\n"
+                    "    memory.write(key, value)\n"
+                    '    run_state["memory_writes"] = writes + 1'
+                ),
+            ),
+        ],
+    )
+
+
 # DELEGATION_LOOP
 
 
@@ -3279,6 +3412,7 @@ TEMPLATES: Dict[FailureType, Callable[[FailureSignal], Explanation]] = {
     FailureType.RUNAWAY_ITERATION: explain_runaway_iteration,
     FailureType.MODEL_FALLBACK_DRIFT: explain_model_fallback_drift,
     FailureType.MEMORY_POISONING: explain_memory_poisoning,
+    FailureType.MEMORY_GROWTH_PATTERN: explain_memory_growth_pattern,
     FailureType.DELEGATION_LOOP: explain_delegation_loop,
     FailureType.UNGROUNDED_DESTINATION: explain_ungrounded_destination,
     FailureType.UNRESOLVED_AMBIGUITY: explain_unresolved_ambiguity,

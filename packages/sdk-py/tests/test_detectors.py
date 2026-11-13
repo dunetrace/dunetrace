@@ -9,7 +9,15 @@ Run: python -m unittest discover -s packages/sdk-py/tests
 import unittest
 import time
 
-from dunetrace.models import RunState, ToolCall, RetrievalResult, FailureType
+from dunetrace.models import (
+    AgentEvent,
+    EventType,
+    RunState,
+    ToolCall,
+    RetrievalResult,
+    FailureType,
+    MemoryEvent,
+)
 from dunetrace.detectors import (
     AgentHandoffFailureDetector,
     ExcessiveRetrievalDetector,
@@ -20,6 +28,7 @@ from dunetrace.detectors import (
     ToolAvoidanceDetector,
     PromptInjectionDetector,
     RagEmptyRetrievalDetector,
+    MemoryGrowthPatternDetector,
 )
 
 
@@ -959,3 +968,166 @@ class TestOversizedToolArgumentsAcrossTransports(unittest.TestCase):
         signal = self.detector.on_run_completion(state)
         assert signal is not None
         assert signal.evidence["arg_length"] == 15_000
+
+
+# ── MemoryGrowthPatternDetector ───────────────────────────────────────────────
+
+
+def make_memory(op: str, key: str, step: int) -> MemoryEvent:
+    return MemoryEvent(op=op, key=key, step_index=step, timestamp=float(step))
+
+
+class TestMemoryGrowthPatternDetector(unittest.TestCase):
+    detector = MemoryGrowthPatternDetector()
+
+    def test_no_memory_usage_returns_none(self):
+        state = make_state()
+        state.tool_calls = [
+            make_tool_call("calculator", step=1),
+            make_tool_call("summarize", step=2),
+        ]
+        assert self.detector.on_run_completion(state) is None
+
+        cleared = make_state()
+        cleared.memory_events = [make_memory("cleared", "scratch", 1)]
+        assert self.detector.on_run_completion(cleared) is None
+
+    def test_below_min_writes_returns_none(self):
+        """Two writes and zero reads would pass the ratio gate, so this isolates MIN_WRITES."""
+        state = make_state()
+        state.memory_events = [
+            make_memory("written", "scratch", 1),
+            make_memory("written", "scratch", 2),
+        ]
+        assert self.detector.on_run_completion(state) is None
+
+    def test_fires_at_ratio_three(self):
+        state = make_state()
+        state.memory_events = [
+            make_memory("written", "notes", 1),
+            make_memory("written", "notes", 2),
+            make_memory("written", "notes", 3),
+            make_memory("read", "notes", 4),
+        ]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.MEMORY_GROWTH_PATTERN
+        assert signal.severity.value == "MEDIUM"
+        assert signal.evidence["write_count"] == 3
+        assert signal.evidence["read_count"] == 1
+        assert signal.evidence["ratio"] == 3.0
+        assert signal.evidence["write_keys"] == ["notes"]
+        assert signal.evidence["read_keys"] == ["notes"]
+        assert signal.step_index == 4
+
+    def test_ratio_two_does_not_fire(self):
+        """Six writes clears MIN_WRITES, so only the 2.0 ratio keeps this quiet."""
+        state = make_state()
+        state.memory_events = [make_memory("written", "notes", i) for i in range(1, 7)]
+        state.memory_events += [make_memory("read", "notes", i) for i in range(7, 10)]
+        assert self.detector.on_run_completion(state) is None
+
+    def test_three_writes_and_zero_reads_fires_with_null_ratio(self):
+        state = make_state()
+        state.memory_events = [make_memory("written", "notes", i) for i in range(1, 4)]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.MEMORY_GROWTH_PATTERN
+        assert signal.evidence["write_count"] == 3
+        assert signal.evidence["read_count"] == 0
+        assert signal.evidence["ratio"] is None
+
+    def test_never_reading_scores_at_least_as_high_as_reading_once(self):
+        """The strongest form of the pattern used to score lowest: with a ratio
+        of 5, three writes and no reads came out at 0.34."""
+        never = make_state()
+        never.memory_events = [make_memory("written", "n", i) for i in range(1, 6)]
+        once = make_state()
+        once.memory_events = [make_memory("written", "n", i) for i in range(1, 6)]
+        once.memory_events.append(make_memory("read", "n", 7))
+        d = MemoryGrowthPatternDetector(WRITE_READ_RATIO=5)
+        s_never, s_once = d.on_run_completion(never), d.on_run_completion(once)
+        assert s_never.confidence >= 0.5 and s_once.confidence >= 0.5
+        assert s_never.confidence > s_once.confidence
+
+    def test_tool_names_are_never_consulted(self):
+        """Substring matching read add_numbers / lookup_address as memory writes."""
+        state = make_state()
+        state.tool_calls = [
+            make_tool_call(n, step=i)
+            for i, n in enumerate(
+                ["add_numbers", "lookup_address", "restore_backup", "save_note"], start=1
+            )
+        ]
+        assert self.detector.on_run_completion(state) is None
+
+    def test_mixed_and_unhashable_keys_do_not_raise(self):
+        state = make_state()
+        state.memory_events = [
+            make_memory("written", 42, 1),
+            make_memory("written", "notes", 2),
+            make_memory("written", 7.5, 3),
+        ]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["write_keys"] == ["42", "notes", "7.5"]
+
+    def test_evidence_keys_are_capped(self):
+        state = make_state()
+        state.memory_events = [make_memory("written", f"k{i}", i) for i in range(1, 200)]
+        signal = self.detector.on_run_completion(state)
+        assert len(signal.evidence["write_keys"]) == MemoryGrowthPatternDetector.MAX_EVIDENCE_KEYS
+        assert signal.evidence["write_count"] == 199
+
+    def test_invalid_min_writes_is_rejected(self):
+        for bad in (None, "3", 0, -1, True, 2.5):
+            with self.assertRaises(ValueError):
+                MemoryGrowthPatternDetector(MIN_WRITES=bad)
+
+    def test_not_in_the_in_path_battery(self):
+        """Whole-run totals: a signal policy evaluating it per step would fire
+        after the third write, before a read the agent was about to make."""
+        from dunetrace.detectors import DETECTOR_KEYS, TIER1_DETECTORS
+
+        assert DETECTOR_KEYS["memory_growth_pattern"] is MemoryGrowthPatternDetector
+        assert not any(isinstance(d, MemoryGrowthPatternDetector) for d in TIER1_DETECTORS)
+
+    def test_nonpositive_write_read_ratio_is_rejected(self):
+        assert MemoryGrowthPatternDetector().WRITE_READ_RATIO == 3
+        with self.assertRaises(ValueError):
+            MemoryGrowthPatternDetector(WRITE_READ_RATIO=0)
+        with self.assertRaises(ValueError):
+            MemoryGrowthPatternDetector(WRITE_READ_RATIO=-1)
+
+    def test_positive_write_read_ratio_override_behaves_normally(self):
+        """Six writes and three reads is ratio 2: the default stays quiet, 2 fires."""
+        state = make_state()
+        state.memory_events = [make_memory("written", "notes", i) for i in range(1, 7)]
+        state.memory_events += [make_memory("read", "notes", i) for i in range(7, 10)]
+        assert MemoryGrowthPatternDetector().on_run_completion(state) is None
+
+        signal = MemoryGrowthPatternDetector(WRITE_READ_RATIO=2).on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["write_count"] == 6
+        assert signal.evidence["read_count"] == 3
+        assert signal.evidence["ratio"] == 2.0
+        assert signal.evidence["write_read_ratio"] == 2
+
+    def test_tunable_overrides_are_respected(self):
+        state = make_state()
+        state.memory_events = [
+            make_memory("written", "notes", 1),
+            make_memory("written", "notes", 2),
+            make_memory("read", "notes", 3),
+        ]
+        assert MemoryGrowthPatternDetector().on_run_completion(state) is None
+
+        signal = MemoryGrowthPatternDetector(MIN_WRITES=2, WRITE_READ_RATIO=2).on_run_completion(
+            state
+        )
+        assert signal is not None
+        assert signal.evidence["write_count"] == 2
+        assert signal.evidence["read_count"] == 1
+        assert signal.evidence["ratio"] == 2.0
+        assert signal.evidence["min_writes"] == 2
+        assert signal.evidence["write_read_ratio"] == 2

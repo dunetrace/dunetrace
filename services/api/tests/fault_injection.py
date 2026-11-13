@@ -319,6 +319,16 @@ def inject_malformed_tool_call(events: List[Event]) -> List[Event]:
     return _splice(events, extra)
 
 
+def inject_memory_growth(events: List[Event], writes: int = 4) -> List[Event]:
+    """The agent saves to long-term memory over and over and never reads any
+    of it back. → MEMORY_GROWTH_PATTERN."""
+    step = _last_step(_without_terminal(events)) + 1
+    extra = [
+        _ev("memory.written", step, key=f"notes:{i}", value=f"fact {i}") for i in range(writes)
+    ]
+    return _splice(events, extra)
+
+
 def inject_context_growth(events: List[Event], factor: float = 9.0) -> List[Event]:
     """Prompt tokens climbing `factor`x across the run — history accumulating
     unbounded. Rewrites the existing calls rather than appending, since
@@ -419,6 +429,7 @@ INJECTORS = {
     "silent_truncation": (inject_silent_truncation, "SILENT_TRUNCATION", "fix_truncation"),
     "empty_retrieval": (inject_empty_retrieval, "RAG_EMPTY_RETRIEVAL", "fix_rag_retrieval"),
     "malformed_tool_call": (inject_malformed_tool_call, "MALFORMED_TOOL_CALL", None),
+    "memory_growth": (inject_memory_growth, "MEMORY_GROWTH_PATTERN", None),
     "rag_quality_degradation": (
         inject_rag_quality_degradation,
         "RAG_QUALITY_DEGRADATION",
