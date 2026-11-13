@@ -17,9 +17,8 @@ Run it against a local stack:
     docker compose up -d
     python examples/memory_agent.py
 
-The signal shows up on the dashboard (shadow by default — enable "Show shadow
-signals" on the run, or promote MEMORY_POISONING in detector_svc's
-LIVE_DETECTORS). See docs/memory.md for the full write-up.
+The signal shows up on the dashboard as a live alert (MEMORY_POISONING is in
+detector_svc's LIVE_DETECTORS). See docs/memory.md for the full write-up.
 """
 
 from __future__ import annotations

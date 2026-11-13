@@ -9,7 +9,7 @@ description = "Canonical Pydantic v2 wire-format schemas shared across Dunetrace
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
-authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]
+authors = [{ name = "Dunetrace UG (haftungsbeschränkt)", email = "vikas@dunetrace.com" }]
 keywords = ["ai", "agents", "observability", "llm", "monitoring"]
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
@@ -28,6 +28,11 @@ classifiers = [
 dependencies = [
     "pydantic>=2.0",
 ]
+
+[project.optional-dependencies]
+# dunetrace_schemas.metrics degrades to no-op metrics without it; the services
+# install it through their own requirements.txt.
+metrics = ["prometheus-client>=0.20"]
 
 [tool.setuptools.packages.find]
 where   = ["."]

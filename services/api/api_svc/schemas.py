@@ -78,6 +78,10 @@ if _PYDANTIC:
         confidence: float
         detected_at: float
         evidence: Dict[str, Any]
+        #: {first_step, last_step} — the span this signal points at. Computed
+        #: server-side from the detector's own evidence keys so the drill-down
+        #: view focuses the right steps without re-deriving the mapping.
+        focus: Dict[str, int] = {}
         shadow: bool = False
         title: str
         what: str
@@ -97,6 +101,9 @@ if _PYDANTIC:
         cost_usd: Optional[float] = None
         events: List[RunEvent]
         signals: List[RunSignal]
+        #: Policies in dry run that WOULD have fired on this run, with the step
+        #: they matched on. Shown beside that step in the drill-down view.
+        dry_run_verdicts: List[Dict[str, Any]] = []
         conversation_id: Optional[int] = None
 
     class ConversationRun(_Model):
@@ -136,6 +143,52 @@ if _PYDANTIC:
         conversations: List[ConversationSummary]
         page: Page
 
+    # ── Calls (voice-focused view over conversations, Phase 2.1) ──
+    class CallSummary(_Model):
+        id: int
+        agent_id: str
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        duration_seconds: float
+        completion_status: str  # natural | dropped | escalated
+        silence_pct: float
+        agent_talk_ms: int
+        caller_talk_ms: int
+        voice_signal_count: int
+        cost_usd: float
+        cost_breakdown: Dict[str, float]  # {stt, llm, tts, telephony}
+        agent_talk_ratio: Optional[float] = None
+        sentiment_trend: Optional[Any] = None  # placeholder until Phase 3
+
+    class CallDetail(_Model):
+        id: int
+        agent_id: str
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        duration_seconds: float
+        completion_status: str
+        silence_pct: float
+        agent_talk_ms: int
+        caller_talk_ms: int
+        voice_signal_count: int
+        cost_usd: float
+        cost_breakdown: Dict[str, float]
+        runs: List[Dict[str, Any]]
+        voice_signals: List[str]
+        timeline: List[Dict[str, Any]]
+        recordings: List[Dict[str, Any]]  # recording.available payloads
+        signal_jumps: List[Dict[str, Any]]  # {failure_type, seconds} deep-links
+        agent_talk_ratio: Optional[float] = None
+        sentiment_trend: Optional[Any] = None
+
+    class CallListResponse(_Model):
+        calls: List[CallSummary]
+        page: Page
+
     class RunListResponse(_Model):
         runs: List[RunSummary]
         page: Page
@@ -165,9 +218,22 @@ if _PYDANTIC:
         page: Page
 
     class HealthResponse(_Model):
+        """GET /health — liveness. No dependency state by design; see
+        ReadyResponse for that."""
+
+        status: str = "ok"
+        version: str = "0.5.0"
+
+    class ReadyResponse(_Model):
+        """GET /ready — readiness, not liveness: 503 body when the DB or the
+        shared schema is not usable. Mirrors dunetrace_schemas.metrics.db_ready."""
+
         status: str = "ok"
         version: str = "0.5.0"
         db: str = "unknown"
+        schema_version: Optional[int] = None
+        required: int = 0
+        pool: Optional[Dict[str, Any]] = None
 
     # Insights models
 
@@ -324,7 +390,20 @@ if _PYDANTIC:
         manually_resolved: bool = False
         affected_runs: List[AffectedRun] = []
         root_cause: Optional[str] = None
+        # Free text, always. A `dunetrace_native` fix is a runtime policy, not
+        # prose, so it arrives here as a human-readable summary of the policy
+        # and machine-readable in `suggested_policy` below — never as a
+        # stringified dict, and never as a dict (which used to 500 this route
+        # on every TOOL_LOOP / RETRY_STORM / CASCADING_TOOL_FAILURE /
+        # STEP_COUNT_INFLATION issue whenever an LLM key was configured).
         suggested_fix: Optional[str] = None
+        # PolicyCreate-shaped body (see routers/policies.py) for a
+        # `dunetrace_native` fix — POST it to /v1/policies unchanged. None for
+        # `customer_code` fixes, which only ever produce a diff.
+        suggested_policy: Optional[Dict[str, Any]] = None
+        # Which of the two fix paths this issue is on: "dunetrace_native" |
+        # "customer_code". None when no root-cause analysis ran.
+        fix_category: Optional[str] = None
         # Phase 4.3 (not yet built) will populate this — always empty for now.
         # See BACKLOG.md's Phase 4.2 entry.
         code_references: List[str] = []
@@ -385,11 +464,28 @@ if _PYDANTIC:
         total_tokens: int
         prompt_tokens: int
         completion_tokens: int
-        wasted_tokens: int
         total_cost_usd: float
+        run_count: int
+        # Attribution: tokens/cost on runs that had ≥1 live signal.
+        failed_run_tokens: int
+        failed_run_cost_usd: float
+        failed_run_count: int
+        failed_pct: float
+        # Avoidable: spend above the healthy baseline on failed runs.
+        excess_tokens: int
+        excess_cost_usd: float
+        baseline_tokens: Optional[int] = None
+        # Prevented: in-path blocks that stopped a run early.
+        prevented_tokens: int
+        prevented_cost_usd: float
+        blocked_run_count: int
+        # Forward projection of avoidable waste over 30 days.
+        projected_monthly_excess_tokens: int
+        projected_monthly_excess_cost_usd: float
+        # Back-compat aliases (== failed_run_* attribution).
+        wasted_tokens: int
         wasted_cost_usd: float
         wasted_pct: float
-        run_count: int
         wasted_run_count: int
 
     class AgentTokenStats(_Model):
@@ -561,6 +657,7 @@ else:
         step_count: int
         events: List[Any]
         signals: List[Any]
+        dry_run_verdicts: List[Any] = _field(default_factory=list)
         conversation_id: Optional[int] = None
 
         def model_dump(self):
@@ -636,6 +733,69 @@ else:
             return dataclasses.asdict(self)
 
     @dataclass
+    class CallSummary:
+        id: int
+        agent_id: str
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        duration_seconds: float
+        completion_status: str
+        silence_pct: float
+        agent_talk_ms: int
+        caller_talk_ms: int
+        voice_signal_count: int
+        cost_usd: float
+        cost_breakdown: dict
+        agent_talk_ratio: Optional[float] = None
+        sentiment_trend: Optional[Any] = None
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class CallDetail:
+        id: int
+        agent_id: str
+        external_id: str
+        first_run_at: float
+        last_run_at: float
+        run_count: int
+        duration_seconds: float
+        completion_status: str
+        silence_pct: float
+        agent_talk_ms: int
+        caller_talk_ms: int
+        voice_signal_count: int
+        cost_usd: float
+        cost_breakdown: dict
+        runs: List[Any]
+        voice_signals: List[Any]
+        timeline: List[Any]
+        recordings: List[Any]
+        signal_jumps: List[Any]
+        agent_talk_ratio: Optional[float] = None
+        sentiment_trend: Optional[Any] = None
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
+    class CallListResponse:
+        calls: List[Any]
+        page: Page
+
+        def model_dump(self):
+            import dataclasses
+
+            return dataclasses.asdict(self)
+
+    @dataclass
     class RunListResponse:
         runs: List[Any]
         page: Page
@@ -685,7 +845,15 @@ else:
     class HealthResponse:
         status: str = "ok"
         version: str = "0.5.0"
+
+    @dataclass
+    class ReadyResponse:
+        status: str = "ok"
+        version: str = "0.5.0"
         db: str = "unknown"
+        schema_version: Optional[int] = None
+        required: int = 0
+        pool: Optional[Dict[str, Any]] = None
 
     @dataclass
     class FailureRatePoint:

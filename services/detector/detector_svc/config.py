@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+from dunetrace_schemas.deploy_guard import assert_safe_deployment
+
 
 def _load_dotenv(path: str = ".env") -> None:
     try:
@@ -28,6 +30,23 @@ class Settings:
         "postgresql://dunetrace:dunetrace@localhost:5432/dunetrace",
     )
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    # Build identity reported by dunetrace_build_info{service="detector"}.
+    # Same convention as ingest_svc/api_svc: APP_VERSION (or GIT_COMMIT) is set
+    # in deploy; the fallback is the package version, so a source checkout is
+    # still identifiable.
+    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
+    # Port for the worker's /metrics, /ready and /health endpoints (served from
+    # a daemon thread by dunetrace_schemas.metrics.start_metrics_server; not
+    # published outside the compose network). 0 disables the server.
+    METRICS_PORT: int = int(os.getenv("METRICS_PORT", "9101"))
+    # Deployment identity — read only by the startup guard at the bottom of
+    # this file. This worker authenticates nothing, so neither value changes
+    # its behaviour; they exist so ENV=prod with AUTH_MODE=dev is refused on
+    # every container, not just the two HTTP services. Same defaults as
+    # ingest_svc/api_svc: ENV is dev unless told otherwise, AUTH_MODE fails
+    # closed to prod.
+    ENV: str = os.getenv("ENV", "dev")
+    AUTH_MODE: str = os.getenv("AUTH_MODE", "prod")
     POLL_INTERVAL: float = float(os.getenv("POLL_INTERVAL", "5"))
     STALL_TIMEOUT_SECS: float = float(os.getenv("STALL_TIMEOUT_SECS", "90"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "100"))
@@ -38,9 +57,27 @@ class Settings:
     SHARD_COUNT: int = int(os.getenv("SHARD_COUNT", "1"))
     SHARD_INDEX: int = int(os.getenv("SHARD_INDEX", "0"))
 
+    # Re-scan overlap for the poll watermark (see db.py::advance_watermark).
+    # Larger = more redundant scanning per poll but a wider safety margin for
+    # late-arriving events still triggering a re-detection. The effective
+    # lookback is up to 2x this, since the watermark is set to NOW() - grace and
+    # the next poll scans everything after it.
+    WATERMARK_GRACE_SECS: float = float(os.getenv("WATERMARK_GRACE_SECS", "3600"))
+
+    # processed_runs is pruned by absence of events, not by age — see
+    # db.py::prune_processed_runs. PROCESSED_RUNS_RETENTION_DAYS used to bound
+    # the scan by processed_at, but that column is refreshed on re-analysis, so
+    # the bound never expired rows whose events had aged out. Removed rather
+    # than left as a no-op knob.
+    PRUNE_BATCH_SIZE: int = int(os.getenv("PRUNE_BATCH_SIZE", "10000"))
+
 
 settings = Settings()
 
+if settings.METRICS_PORT < 0 or settings.METRICS_PORT > 65535:
+    raise ValueError(
+        f"METRICS_PORT must be 0 (disabled) or a TCP port, got {settings.METRICS_PORT}"
+    )
 if settings.SHARD_COUNT < 1:
     raise ValueError(f"SHARD_COUNT must be >= 1, got {settings.SHARD_COUNT}")
 if not (0 <= settings.SHARD_INDEX < settings.SHARD_COUNT):
@@ -48,3 +85,16 @@ if not (0 <= settings.SHARD_INDEX < settings.SHARD_COUNT):
         f"SHARD_INDEX must be in [0, SHARD_COUNT), "
         f"got SHARD_INDEX={settings.SHARD_INDEX} SHARD_COUNT={settings.SHARD_COUNT}"
     )
+# A grace below the stall timeout would let the watermark advance past a run
+# before it has even become stall-eligible, so the stalled-run scan could never
+# see it — the run would sit undetected forever.
+if settings.WATERMARK_GRACE_SECS < settings.STALL_TIMEOUT_SECS:
+    raise ValueError(
+        f"WATERMARK_GRACE_SECS ({settings.WATERMARK_GRACE_SECS}) must be >= "
+        f"STALL_TIMEOUT_SECS ({settings.STALL_TIMEOUT_SECS}) — a smaller grace "
+        f"window can advance the poll watermark past runs before they qualify "
+        f"as stalled, and they would never be detected."
+    )
+
+# ENV=prod with AUTH_MODE=dev never comes up — see dunetrace_schemas.deploy_guard.
+assert_safe_deployment("detector", settings.ENV, settings.AUTH_MODE)

@@ -7,6 +7,7 @@ import logging
 
 import httpx
 
+from api_svc import llm_provider
 from api_svc.config import settings
 
 logger = logging.getLogger("dunetrace.api.custom_detector_translator")
@@ -122,54 +123,10 @@ async def translate_description(description: str) -> dict:
     )
     user = _USER_PROMPT.format(description=description.strip())
 
-    if settings.ANTHROPIC_API_KEY:
-        return await _call_anthropic(system, user)
-    if settings.OPENAI_API_KEY:
-        return await _call_openai(system, user)
-    raise ValueError("No LLM API key configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)")
-
-
-async def _call_anthropic(system: str, user: str) -> dict:
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": settings.ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 512,
-                "system": system,
-                "messages": [{"role": "user", "content": user}],
-            },
-        )
-    resp.raise_for_status()
-    text = resp.json()["content"][0]["text"].strip()
-    return _parse_json(text)
-
-
-async def _call_openai(system: str, user: str) -> dict:
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "max_tokens": 512,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            },
-        )
-    resp.raise_for_status()
-    text = resp.json()["choices"][0]["message"]["content"].strip()
-    return _parse_json(text)
+    if not llm_provider.llm_configured():
+        raise ValueError(llm_provider.missing_key_message())
+    text = await llm_provider.complete(system, user, max_tokens=512)
+    return _parse_json((text or "").strip())
 
 
 def _parse_json(text: str) -> dict:

@@ -1,0 +1,87 @@
+# Build context exclusions. Every image in this repo builds with `context: .`
+# (services/*/Dockerfile and the legacy root Dockerfile), so without this file
+# the whole working tree — host caches, virtualenvs, screenshots and the real
+# .env — is uploaded to the daemon and anything a COPY happens to cover is
+# baked into the published image.
+#
+# Two jobs:
+#
+#   1. Keep the real .env out of the context. No Dockerfile copies it today and
+#      this file is what keeps that true. It matters more than it looks: every
+#      service's config.py calls _load_dotenv(".env") against its WORKDIR at
+#      import time, so a .env that ever reached /app would silently become live
+#      configuration — including whatever credentials the developer had in it.
+#
+#   2. Keep host build junk and tests out of the images. The Dockerfiles COPY
+#      whole directories (packages/sdk-py/, services/<svc>/), which on a local
+#      build drags in the developer's __pycache__ (compiled against a different
+#      interpreter and shadowing the copied sources on import), *.egg-info, and
+#      every service's tests/ — dead weight in a published image.
+#
+# Nothing here excludes a config default: detectors.yml, voice-pricing.yml and
+# docs/config/*.yml are now COPY'd into the images that read them, so each image
+# boots correctly configured and the compose bind mounts of those same paths are
+# genuine overrides rather than the only source of the file. Excluding any of
+# them from this context would silently take that default back out.
+
+# VCS and CI metadata — never copied, and .git is the largest thing in the tree.
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Python bytecode, build output and tool caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+**/*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Virtualenvs. A host .venv is built for the host's OS/arch and is at best dead
+# weight, at worst a broken import path shadowing the image's own site-packages.
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets. .env.example is only documentation, but nothing copies it either.
+.env
+.env.*
+
+# Tests. No runtime import path reaches them and they only inflate the image —
+# ~7.8MB off the api image alone (services/api/tests + packages/sdk-py/tests +
+# packages/schemas-py/tests). services/explainer is the one exception: that
+# image exists solely to run its own suite (its CMD is
+# `pytest services/explainer/tests/`), so excluding them would break it.
+# A .dockerignore is per-CONTEXT, not per-Dockerfile, so this exception also
+# leaves explainer's 344KB of tests in the three images that COPY
+# services/explainer/ (alerts, api, semantic). That is the cheaper half of the
+# trade against breaking the one Dockerfile whose whole purpose is those tests.
+**/tests/
+!services/explainer/tests/
+
+# Node
+node_modules/
+**/node_modules/
+*.tgz
+
+# Local artefacts that are in the tree but in no image: screenshots, the
+# vendored deepeval wheel (services/semantic installs it from PyPI, not here),
+# the audit working directory and the extracted/ scratch tree.
+*.png
+*.whl
+audit/
+extracted/
+.DS_Store
+**/.DS_Store

@@ -1,0 +1,11 @@
+# Auto-provision Tempo as a Grafana datasource so traces are queryable in the
+# Grafana Explore view out of the box at http://localhost:3000 (anonymous admin).
+apiVersion: 1
+datasources:
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    isDefault: true
+    jsonData:
+      httpMethod: GET

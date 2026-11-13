@@ -80,14 +80,25 @@ class RateLimiter:
 
         rpm = self._default_rpm
         try:
+            from dunetrace_schemas.keys import hash_api_key
             from ingest_svc.db.postgres import get_pool
 
             pool = get_pool()
             if pool:
                 async with pool.acquire() as conn:
+                    # Matched on the hash, like verify_api_key. Both key minting
+                    # paths write hash_api_key(key) into BOTH `key` and
+                    # `key_hash` (the `key` column is NOT NULL from the pre-hash
+                    # schema), so comparing the plaintext against `key` matched
+                    # nothing: every lookup silently fell through to
+                    # _default_rpm. A key provisioned above the default was
+                    # throttled to it and one provisioned below it was
+                    # over-permissive, with no error either way — the query
+                    # returned zero rows rather than raising, so even the
+                    # except below never fired.
                     row = await conn.fetchrow(
-                        "SELECT rate_limit_rpm FROM api_keys WHERE key=$1 AND active=TRUE",
-                        api_key,
+                        "SELECT rate_limit_rpm FROM api_keys WHERE key_hash = $1 AND active = TRUE",
+                        hash_api_key(api_key),
                     )
                 if row:
                     rpm = row["rate_limit_rpm"]

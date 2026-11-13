@@ -6,7 +6,7 @@ DunetraceCrewCallback. Hooks into CrewAI 1.x's global LLM/tool hook system —
 no changes to agent or crew definitions needed.
 
 Install:
-    pip install 'dunetrace' crewai python-dotenv
+    pip install dunetrace crewai python-dotenv
 
 Run (happy path):
     OPENAI_API_KEY=sk-... python examples/crewai_agent.py
@@ -20,12 +20,24 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+    # Reads the repo-root .env — including OPENAI_API_KEY. This example makes
+    # real, billable LLM calls, and will pick up a key from there even if you
+    # don't pass one on the command line.
+    load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+except ImportError:
+    pass  # python-dotenv is optional; fall back to the ambient environment.
 
-from crewai import Agent, Crew, Task, Process
-from crewai.tools import tool
+try:
+    from crewai import Agent, Crew, Task, Process
+    from crewai.tools import tool
+except ImportError as exc:
+    raise SystemExit(
+        f"This example needs CrewAI — {exc.name} is not installed.\n"
+        "  pip install dunetrace crewai python-dotenv"
+    ) from None
 
 from dunetrace import Dunetrace
 from dunetrace.integrations.crewai import DunetraceCrewCallback

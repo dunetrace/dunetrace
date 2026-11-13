@@ -6,7 +6,7 @@ coding agents via the [Model Context Protocol](https://modelcontextprotocol.io)
 data without you copy-pasting it in.
 
 This page is a short index; the full reference — install steps for each
-client, all 10 tools with example queries, worked examples, and typical
+client, all 31 tools with example queries, worked examples, and typical
 workflows (investigating a Slack alert, a cross-agent audit, a pre-deploy
 check) — lives in **[docs/mcp-server.md](../mcp-server.md)**. This page isn't
 a duplicate of that content; it exists so `docs/integrations/` has a
@@ -20,13 +20,16 @@ and [auto-instrumentation.md](auto-instrumentation.md)).
 |---|---|
 | **Claude Code** | `pip install dunetrace-mcp` registers it automatically in `~/.claude.json`. Restart Claude Code. |
 | **Cursor** | Add `.cursor/mcp.json` to your project — see [docs/mcp-server.md#cursor](../mcp-server.md#cursor). |
-| **Codex / OpenAI Responses API** | Run `dunetrace-mcp --sse` and point the tool endpoint at it — see [docs/mcp-server.md#codex--sse-clients](../mcp-server.md#codex--sse-clients). |
+| **Codex / OpenAI Responses API** | Run `dunetrace-mcp --sse` (loopback only by default; the SSE server has no auth of its own) and point the tool endpoint at `http://127.0.0.1:8000/sse` — see [docs/mcp-server.md#codex--sse-clients](../mcp-server.md#codex--sse-clients). |
 
 ## What it's for
 
 Ask your editor things a stack trace can't answer: *"is my agent healthy?"*,
 *"what's failed in the last 24 hours?"*, *"is this Tool Loop systemic or a
-one-off?"*, *"walk me through this run step by step."* All 10 tools are
-read-only against your existing Dunetrace deployment — see
-[docs/mcp-server.md](../mcp-server.md) for the full tool reference and
-worked examples.
+one-off?"*, *"walk me through this run step by step."*
+
+Most of the 31 tools read against your existing Dunetrace deployment, but nine
+write to it — policy and custom-detector lifecycle, issue resolution, and
+on-demand root-cause analysis. Policy writes affect **live agent runs**. See
+[docs/mcp-server.md](../mcp-server.md) for the full tool reference (write tools
+are marked ✎) and worked examples.

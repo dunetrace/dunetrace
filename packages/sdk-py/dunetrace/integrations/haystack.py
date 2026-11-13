@@ -249,7 +249,7 @@ class _DunetraceSpan:
         self._tracer = tracer
         self._operation = operation_name
         self._tags: Dict[str, Any] = dict(tags)
-        self._ctags: Dict[str, Any] = {}  # content tags (locally only, never transmitted)
+        self._ctags: Dict[str, Any] = {}  # component I/O scratch, used locally to derive metrics
         self._parent = parent_span
         self._start = time.time()
         # Set by root pipeline spans:
@@ -296,8 +296,23 @@ class _DunetraceSpan:
         except Exception as exc:
             logger.warning("Dunetrace haystack: __exit__ error: %s", exc)
         finally:
+            # Unguarded, this was the one reset in the SDK that could escape
+            # into customer code: it sits outside the except above, so a
+            # "Token was created in a different Context" ValueError would
+            # propagate out of __exit__ and into the Haystack pipeline.
+            # __enter__ and __exit__ are separate methods on a long-lived
+            # object, so nothing structurally guarantees one context.
+            # Same shape as integrations/openai_agents.py::_reset_ctx_token.
             if self._cv_token is not None:
-                _CURRENT_SPAN.reset(self._cv_token)
+                try:
+                    _CURRENT_SPAN.reset(self._cv_token)
+                except ValueError:
+                    # Cross-context token. The var is task-local, so leaving
+                    # the value in place is harmless; breaking the caller's
+                    # pipeline over telemetry bookkeeping is not.
+                    logger.debug("Dunetrace haystack: span token from another context, not reset")
+                finally:
+                    self._cv_token = None
 
     # ── internal helpers ─────────────────────────────────────────────────────
 

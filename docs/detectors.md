@@ -1,6 +1,18 @@
 # Detectors
 
-Dunetrace runs 28 structural detectors against every completed agent run — 18 Tier 1 detectors, prompt injection signal detection, plus the additional detectors below. All thresholds are configurable i.e. no code changes required.
+Dunetrace runs 34 structural detectors against every completed agent run. All of
+them are listed in the table below; the twelve newest get a full write-up in
+[Additional detectors](#additional-detectors). All thresholds are configurable
+i.e. no code changes required.
+
+> **"Tier 1" means structural.** Tier 1 is this page — zero-LLM, always-on.
+> Tier 2 is the [semantic evaluation](semantic-evaluation.md) layer. Don't confuse
+> the tier with the SDK constant `TIER1_DETECTORS`, which holds the **31**
+> detectors the SDK can evaluate during runtime event collection. The other
+> three (`PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP`)
+> need raw input or a second run's data and are handled separately. The detector
+> worker runs all 34 regardless — see
+> [architecture.md](architecture.md#detection-two-independent-paths).
 
 **This page is structural detectors only.** Structural detectors are
 zero-LLM, zero-cost, always-on regex/arithmetic checks — the ones that can
@@ -9,11 +21,15 @@ trigger a [policy](policies.md). Dunetrace also has a separate, LLM-based
 post-hoc — see [docs/semantic-evaluation.md](semantic-evaluation.md)) for
 judgment calls no structural check can make:
 
-| Semantic evaluator | What it catches |
-|---|---|
-| `HALLUCINATION` | Agent stated something as fact its own context doesn't support |
-| `TASK_COMPLETION` | Agent didn't actually do what it was asked, despite a plausible-sounding response |
-| `USER_FRUSTRATION` | Cross-turn conversation signals of user frustration (evaluates a whole conversation, not a single run) |
+| Semantic evaluator | Scope | What it catches |
+|---|---|---|
+| `HALLUCINATION` | run | Agent stated something as fact its own context doesn't support |
+| `TASK_COMPLETION` | run | Agent didn't actually do what it was asked, despite a plausible-sounding response |
+| `TASK_UNDERSTANDING_FAILURE` | run | Agent solved the *wrong* problem — a complete answer to a question nobody asked |
+| `OFF_TOPIC_DRIFT` | run | Response started on the user's topic and wandered off it |
+| `USER_FRUSTRATION` | conversation | Cross-turn signals that the user is getting frustrated |
+| `CONFUSION_LOOP` | conversation | User keeps re-asking the same underlying question |
+| `SYCOPHANCY_SIGNAL` | conversation | Agent flip-flopped its position to agree with the user |
 
 Semantic findings never trigger a policy — see
 [policies.md's "Structural signals only"](policies.md#structural-signals-only).
@@ -28,21 +44,26 @@ Semantic findings never trigger a policy — see
 | `TOOL_AVOIDANCE` | Final answer given without calling available tools | MEDIUM |
 | `GOAL_ABANDONMENT` | Tool use stops, then ≥4 consecutive LLM calls with no exit | MEDIUM |
 | `RAG_EMPTY_RETRIEVAL` | Retrieval returned 0 results or relevance <0.3, but agent answered | MEDIUM |
+| `EXCESSIVE_RETRIEVAL` | Run made at least 8 retrieval calls — high retrieval volume, indicating inefficient grounding | MEDIUM |
 | `CONTEXT_BLOAT` | Prompt tokens grow beyond 2× P75 baseline ¹ or static fallback (3× from first to last call) | MEDIUM |
 | `STEP_COUNT_INFLATION` | Run used >2× the P75 step count for this agent ¹ | MEDIUM |
 | `FIRST_STEP_FAILURE` | Error or empty output at step ≤2 | MEDIUM |
 | `REASONING_STALL` | LLM:tool-call ratio exceeds 2× P75 baseline ¹ or static fallback (≥4×) — MEDIUM if run finished, HIGH if it stalled | MEDIUM/HIGH |
 | `COST_SPIKE` | Total token consumption exceeds 3× P75 baseline ¹ or static fallback (>50,000 tokens) | MEDIUM |
 | `SESSION_LATENCY` | Total wall-clock run duration exceeds 3× P75 baseline ¹ or static fallback (>5 min) | MEDIUM |
+| `OVERSIZED_TOOL_ARGUMENTS` | Tool call arguments exceed maximum character limit (default 10,000) | MEDIUM |
+| `UNGROUNDED_DESTINATION` | A tool call sends to an email/URL/domain that appears nowhere in the run's trusted inputs | HIGH/CRITICAL |
+| `UNRESOLVED_AMBIGUITY` | An irreversible tool acted on 1 of N candidates from an earlier lookup when the request distinguished none of them ⁵ | MEDIUM/HIGH |
 | `TOOL_LOOP` | Same tool called ≥3× in a 5-tool-call window | HIGH |
 | `TOOL_THRASHING` | Agent alternates between exactly two tools | HIGH |
+| `SCATTERSHOT_TOOL_USE` | Run fans out across ≥6 distinct tools, repeats them (≥1.5 calls per tool), and never declares a final answer ⁴ | MEDIUM |
 | `LLM_TRUNCATION_LOOP` | `finish_reason=length` fires ≥2 times | HIGH |
 | `SILENT_TRUNCATION` | A single response was truncated (`finish_reason=length`/`max_tokens`) and the agent used it without retrying | MEDIUM/HIGH |
 | `MODEL_FALLBACK_DRIFT` | The run's LLM model silently switched to a less capable one (e.g. `gpt-4o`→`gpt-4o-mini`), often under rate limiting | MEDIUM |
 | `RETRY_STORM` | Same tool fails 3+ times in a row without subsequent recovery | HIGH |
 | `EMPTY_LLM_RESPONSE` | Model returned zero-length output with `finish_reason=stop` | HIGH |
 | `CASCADING_TOOL_FAILURE` | 3+ consecutive failures across 2+ distinct tools | HIGH |
-| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns | CRITICAL |
+| `PROMPT_INJECTION_SIGNAL` | Input matches known injection / jailbreak patterns ² | CRITICAL |
 | `PREMATURE_TERMINATION` | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
 | `UNREAD_TOOL_ERROR` | Tool failed, agent's next action doesn't acknowledge it | MEDIUM/HIGH |
 | `TOOL_ARGUMENT_FABRICATION` | Tool call argument references an entity not present anywhere in prior context | HIGH/CRITICAL |
@@ -52,8 +73,91 @@ Semantic findings never trigger a policy — see
 | `RUNAWAY_ITERATION` | Step or cost ceiling crossed with no completion signal | HIGH/CRITICAL |
 | `MEMORY_POISONING` | An injection/override directive was written into the agent's own memory, where it re-steers the agent when read back | HIGH/CRITICAL |
 | `DELEGATION_LOOP` | Two or more agents delegate to each other in a cycle that keeps going around instead of converging | HIGH/CRITICAL |
+| `INSTRUMENTATION_DEGRADED` | The SDK could not measure the run's LLM calls — a telemetry fault, not an agent fault ³ | MEDIUM |
 
-¹ **Six detectors use per-agent learned baselines.** `STEP_COUNT_INFLATION`, `SLOW_STEP`, `CONTEXT_BLOAT`, `REASONING_STALL`, `COST_SPIKE`, and `SESSION_LATENCY` compute a P75 from the last 50 successfully completed runs (errored runs excluded) for the same `agent_id` + `agent_version` pair. The threshold fires at **2× that baseline** (3× for COST_SPIKE and SESSION_LATENCY). Each detector falls back to its static threshold until at least **20** historical runs exist — below that the P75 estimate is too sensitive to individual outliers to be useful — then switches to the adaptive baseline automatically. Tune the multiplier per agent category with `inflation_factor` in `detectors.yml`.
+¹ **Six detectors use per-agent learned baselines.** `STEP_COUNT_INFLATION`, `SLOW_STEP`, `CONTEXT_BLOAT`, `REASONING_STALL`, `COST_SPIKE`, and `SESSION_LATENCY` compute a P75 from the last 50 **clean, successfully completed** runs for the same `agent_id` + `agent_version` pair.
+
+A run qualifies only if it (a) reached `run.completed` — errored runs exit at step 1-2 and drag P75 down, causing false `STEP_COUNT_INFLATION` — and (b) produced **no live signal**. A run that fired a live detector records the agent misbehaving, so it cannot also define what normal looks like; without that filter a chronically looping agent raises its own step and token baselines until the loop reads as typical and the detector goes quiet. Shadow signals are deliberately *not* disqualifying — a shadow detector is unvalidated by definition, and letting one shrink the baseline population would mean enabling it for evaluation silently retuned six unrelated live detectors.
+
+**Baselines are computed from stored per-run scalars, not from raw events.** Each run's metrics are written to `run_baseline_metrics` at detection time by `detector_svc/baseline_metrics.py::build_baseline_metrics(state)`, from the same `RunState` the detectors just consumed. Two reasons:
+
+- **Events expire; baselines shouldn't.** `events` is pruned at `EVENT_RETENTION_DAYS` (90 by default). Re-deriving baselines from events meant an agent doing fewer than 20 completed runs inside that window could never mature one — precisely the low-traffic agent an adaptive threshold helps most. The metrics table is bounded by *rank* (newest 200 per `agent_id`+`agent_version`), never by age, so an agent doing four runs a month still reaches the minimum; it just takes months, which is correct.
+- **One implementation can't drift from itself.** The old SQL re-derived each metric independently of the detector, and had drifted: `CONTEXT_BLOAT`'s baseline computed `MAX/MIN` prompt tokens where the detector computed positional `last/first`, and read only `llm.called` where the detector honours `llm.responded`'s override. The effective threshold was not the configured one. A metric computed once, from `RunState`, cannot disagree with the detector reading the same `RunState`.
+
+A `NULL` metric means the run failed that detector's guard (too few LLM calls, context too small) and is skipped by the aggregate — so a run can feed the token baseline while sitting out the growth one.
+
+> **`SLOW_STEP`'s statistic changed.** The old query pooled every step gap from 50 runs into one percentile. A one-row-per-run store can't preserve that, so the stored path takes the P75 of each run's *own* P75 gap. It's more robust — a single 500-step run can no longer dominate the sample — but it is not the same number, and the effective threshold shifts on agents with high within-run latency variance. The other five metrics are unchanged.
+
+Deployments upgrading into this keep their baselines: each read falls back to the legacy events-derived query while `run_baseline_metrics` holds fewer than 20 samples for the agent, so nothing drops to static thresholds during the transition.
+
+**A consequence worth planning for:** an agent that fires a live signal on most runs will not reach 20 clean runs and stays on static thresholds indefinitely. That is the intended behaviour — an unhealthy agent should not learn its own failure as normal — but if a *legitimately* heavy agent trips a static threshold every run (say a research agent that always exceeds 50,000 tokens), it can never accumulate the clean history that would teach `COST_SPIKE` its real baseline. Raise that detector's static threshold for the agent's category in `detectors.yml` to break the deadlock. The threshold fires at **2× that baseline** (3× for COST_SPIKE and SESSION_LATENCY). Each detector falls back to its static threshold until at least **20** historical runs exist — below that the P75 estimate is too sensitive to individual outliers to be useful — then switches to the adaptive baseline automatically. Tune the multiplier per agent category with `inflation_factor` in `detectors.yml`.
+
+³ **`INSTRUMENTATION_DEGRADED` is not a statement about your agent.** It reports
+that Dunetrace could not read the provider's response objects, so the detectors
+keying on completion text or `finish_reason` could not run at all. It exists
+because the detector layer could not previously distinguish *"I looked and found
+nothing wrong"* from *"I could not look"* — both produce no signal, and the
+second silently disables about a third of the battery.
+
+It fires when any LLM call carries an `instrumentation_degraded` marker (an
+extractor could not read the response and said so instead of substituting a
+default), or when every call in a multi-call run is structurally blank — zero
+output, zero completion tokens, non-zero latency. Its evidence names the
+unreadable shape, the affected providers and models, and the detectors whose
+silence must therefore not be read as a clean verdict. It deliberately does
+*not* fire when text is absent only because `DUNETRACE_OMIT_LLM_OUTPUT_TEXT` is
+set — that is an operator choice, not a fault.
+
+**Extraction failures are never given a plausible value.** The extractors return
+`None` rather than `"stop"`/`""`, and the SDK omits `finish_reason` from the wire
+rather than sending null. A fabricated `("", "stop")` pair is byte-for-byte
+`EMPTY_LLM_RESPONSE`'s trigger condition, so a shape mismatch in instrumentation
+used to surface as a HIGH-severity behavioural alert on 100% of runs with nothing
+logged at any level. See [operations.md](operations.md#instrumentation-health)
+for the fleet-wide query.
+
+² **The injection scan is bounded.** `PROMPT_INJECTION_SIGNAL` is the only
+detector that runs **in-path** — the SDK evaluates it inside `dt.run()`, before
+your agent does any work, because the signal has to exist by the time
+`run.started` is emitted. Its cost is therefore your latency, so the scan is
+bounded: inputs up to **32,768** characters are scanned in full, and longer ones
+are scanned as a **16,384**-character head plus a **16,384**-character tail
+(`SCAN_HEAD_CHARS` / `SCAN_TAIL_CHARS` on `PromptInjectionDetector`).
+
+That caps the scan at roughly **10ms** — about 2% of a single 500ms LLM call —
+where an unbounded scan cost ~340ms on a 1 MB input. Most real inputs fall under
+32K characters and are scanned completely, with no gap. Past that, **text between
+the head and tail windows is not scanned**; injections cluster at the edges (a
+prefix override, or a payload appended after legitimate content), so this is
+where the coverage is worth paying for. When an input exceeds the window the
+signal's evidence carries `scan_truncated: true` and `scanned_chars`, so absence
+of a pattern is never mistaken for proof of absence.
+
+Tune the two limits on the class: lower them for latency-critical agents (voice,
+realtime) that take large inputs, raise them if your inputs routinely exceed 32K
+and you want full coverage. Cost is roughly 0.3µs per character scanned. These
+are *not* settable from `detectors.yml` — that file configures the detector
+worker, and this scan runs in the SDK, inside your own process. Treat the signal
+as one input to your defences, not the defence itself.
+
+⁵ **`UNRESOLVED_AMBIGUITY` is inert until you configure it, and that is the
+point.** It is the first detector in a new activation category —
+**declared-scope**, as opposed to the zero-config default suite every other
+detector on this page belongs to. Its `irreversible_tools` list is empty by
+default and is never inferred from tool names, because `delete_draft` and
+`delete_customer` are the same string pattern and only the operator knows which
+one cannot be undone. Until you declare that list, the detector returns on its
+first line.
+
+It is also the first detector of a new **mechanism family**.
+`TOOL_ARGUMENT_FABRICATION` and `UNGROUNDED_DESTINATION` do *grounding* — "where
+did this value come from?" — and go quiet as soon as the value is found somewhere
+in the run.
+This one does **warrant** — "what justified choosing this record over its
+siblings?" — which is a question grounding cannot ask and cannot answer. The
+practical consequence is that the two families need different surfaces: a
+grounding surface rightly includes the system prompt and tool output, and a
+warrant surface must exclude both. See the [full write-up](#unresolved_ambiguity).
 
 ---
 
@@ -86,11 +190,13 @@ web-research:
     inflation_factor: 3.0  # research agents naturally reason more before acting
 ```
 
-Named sections match the `agent_id` and inherit from `default`, overriding only what you specify. Restart the detector to apply:
+Named sections match the `agent_id` and inherit from `default`, overriding only what you specify. Restart the detector to apply — and the ingest service, which serves the same file to SDKs:
 
 ```bash
-docker compose restart detector
+docker compose restart detector ingest
 ```
+
+**Thresholds are server-authoritative.** The SDK's in-path pass (the detectors a `signal`-trigger policy evaluates inside your agent process) pulls the same effective configuration from `GET /v1/detector-config?agent_id=…` on the ingest service — the merged `default` + agent-category overrides mapped to detector constructor kwargs, the packs the org has enabled, and the agent's P75 baselines — with the same 60s TTL and failure backoff as the policy fetch. It overlays that on the detector class defaults, so tuning a threshold here changes both passes; while the fetch is failing the SDK keeps the last configuration it received (or the class defaults) and reports `detector_config_stale` on `policy.evaluated` events. In-path scan budgets (the max_scan_ns / max_surface_chars / max_args_chars / max_output_chars family) can only be lowered by the server, never raised — the agent's request path pays that cost. `detectors.yml` is mounted read-only into `ingest`, `detector` and `alerts`.
 
 ---
 
@@ -98,7 +204,17 @@ docker compose restart detector
 
 Every signal is stored with a `shadow` flag. The alerts worker only delivers signals where `shadow = false`.
 
-Most built-in detectors are live (`shadow = false`) by default. The newest few — `SILENT_TRUNCATION`, `MODEL_FALLBACK_DRIFT`, `MEMORY_POISONING`, `DELEGATION_LOOP`, and `AGENT_HANDOFF_FAILURE` — ship in shadow mode pending real-traffic validation (they're absent from `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`; add them there to promote). User-defined custom detectors also always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
+Most built-in detectors are live (`shadow = false`). Four are not:
+`INSTRUMENTATION_DEGRADED`, `OVERSIZED_TOOL_ARGUMENTS`,
+`SCATTERSHOT_TOOL_USE` and `UNRESOLVED_AMBIGUITY` remain shadowed by default
+until their precision is checked against real traffic. A new built-in detector should be added to
+`_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
+`services/detector/detector_svc/db.py` once validated; leaving it out of
+`LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
+
+User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
+
+**Incomplete runs are always shadow.** When the SDK's outbound buffer overflows it sheds whole runs and stamps `dropped_events: <n>` on that run's `run.completed` / `run.errored` payload (see the SDK drain-thread notes in `docs/architecture.md`). `build_run_state` reads it into `RunState.dropped_events`, and `process_run` treats any run with `dropped_events > 0` as *incomplete*: every signal it produces — built-in, Python-plugin and JSON-config custom alike — is written with `shadow = true` regardless of `LIVE_DETECTORS` or the custom detector's status, its confidence is capped at 0.5, its severity at MEDIUM, and its evidence carries `incomplete_data: {"dropped_events": n, "reason": "sdk_buffer_shed"}`. Such signals never feed the risk engine's hard override or co-occurrence boost, and the run is treated as *unknown* rather than fired or clean: neither `upsert_fired_issues` nor `advance_clean_runs` runs for it (five shed runs in a row must not auto-resolve an issue nobody verified) and it contributes nothing to baselines. The worker logs one INFO line per incomplete run; the signals are still stored and visible with `?include_shadow=true`.
 
 ### Shadow signals in the dashboard
 
@@ -220,7 +336,7 @@ A content condition fires if **any** occurrence of that field within the run mat
 
 **Evaluation budget**: evaluating one custom detector against one run (all its conditions combined) is capped at 10ms by default (`detectors.yml`'s `custom_detectors.evaluation_budget_ms`) — exceeding it aborts that detector's evaluation for this run (treated as not-fired) and logs a rate-limited warning, rather than stalling the shared detector worker for every other org on that shard.
 
-**What still cannot be detected**: multi-run trends, semantic/fuzzy judgment ("the agent sounds frustrated"), and anything outside the fields/metrics above (e.g. raw system prompt text — the SDK doesn't transmit it, see the root-cause analysis docs). The preview endpoint returns `{"requires_content": true, "reason": "..."}` for these and the config cannot be saved; try rephrasing with a specific value to look for instead.
+**What still cannot be detected**: multi-run trends, semantic/fuzzy judgment ("the agent sounds frustrated"), and anything outside the fields/metrics above. The system prompt is the notable example — the SDK *does* transmit it verbatim in the `run.started` payload, and native root-cause analysis reads it from there, but it isn't one of the four `CONTENT_FIELDS` a custom detector can inspect. The preview endpoint returns `{"requires_content": true, "reason": "..."}` for these and the config cannot be saved; try rephrasing with a specific value to look for instead.
 
 ### Shadow stats
 
@@ -334,6 +450,48 @@ Drop the file in the directory `detector_svc` scans at startup — `DUNETRACE_CU
 ## Additional detectors
 
 Silent failures — an agent that fails quietly and reports success anyway — are the dominant failure mode in production agent deployments, ahead of loud crashes and infinite loops. The detectors below target that structurally: no LLM calls, no external ML models, no semantic classification. Every signal is derived from regex, string matching, and arithmetic on structural fields, same as every Tier 1 detector above. Live/shadow status is called out per detector below, since new additions to this set aren't assumed live by default.
+
+### SCATTERSHOT_TOOL_USE
+
+**Signal**: `SCATTERSHOT_TOOL_USE` · **Severity**: MEDIUM · **Shadow by default**
+
+Three conditions, all required, plus one veto:
+
+| Condition | Default | Why |
+|---|---|---|
+| Breadth | ≥ 6 distinct tool names | the fan-out itself |
+| Volume | ≥ 8 total tool calls | short runs are not judgeable |
+| Repetition | total ÷ distinct ≥ 1.5 | separates flailing from a one-pass pipeline |
+| **Veto** | `exit_reason != "final_answer"` | an agent that declared itself done converged |
+
+**Breadth alone is not the signal.** A data pipeline calling
+ingest/validate/transform/enrich/persist/index/notify/audit exactly once each is
+eight distinct tools and is working perfectly. The repetition ratio is what
+excludes it — and it is the condition a total-call floor cannot provide, because
+`distinct ≤ total` always holds, so a floor of 8 total with 6 distinct admits any
+run with two repeats, and admits a run with *zero* repeats once distinct reaches
+8. That pipeline fired under the original thresholds.
+
+Evidence includes `distinct_tool_count`, the sorted `tools` list, `total_calls`,
+`repeat_ratio`, all three thresholds, `first_step`/`last_step`, and
+`scan_truncated`. Distinct from `TOOL_LOOP` (one tool repeated) and
+`TOOL_THRASHING` (an alternating two-tool pattern).
+
+Only the most recent `scan_limit` (250) tool calls are inspected. This detector
+is in `TIER1_DETECTORS`, so a `trigger="signal"` policy re-runs it once per step;
+an unbounded scan makes that O(n²) across a run, paid synchronously inside the
+agent.
+
+⁴ **The calibration does not currently support shipping this live.** Against a
+corpus whose negatives genuinely clear the breadth and volume floors — broad
+pipelines of 8–12 distinct tools, with and without retries — repeat ratio does
+not separate the two classes: the distributions overlap almost entirely and the
+negative median sits *above* the positive median. Precision is reachable only by
+setting the ratio high enough that the detector rarely fires (0% FP at 20%
+recall). That is a finding about the heuristic, not the thresholds. The more
+promising axis is non-convergence, which the current corpus cannot score because
+it carries tool-name sequences only. `SCATTERSHOT_TOOL_USE` stays out of
+`LIVE_DETECTORS` until that is resolved.
 
 ### PREMATURE_TERMINATION
 
@@ -991,8 +1149,7 @@ payload.
   `transfer_`, plus an `excluded_tool_names` stop-list) so `transfer_funds` and
   `user_agent` no longer misfire — calibration is 100% recall / 0% FP
   (`scripts/calibration/agent_handoff_failure_calibration.md`). It still relies
-  on naming conventions, so a handoff tool named outside them won't be seen; ships
-  shadow by default pending real-traffic validation.
+  on naming conventions, so a handoff tool named outside them won't be seen.
 
 #### Related detectors
 
@@ -1045,7 +1202,7 @@ The detector worker polls Postgres every 5 seconds for completed or stalled runs
 1. Fetches all events for that run from the `events` table
 2. Replays them into a `RunState` (tool calls, LLM calls, retrievals, durations)
 3. Fetches per-agent P75 baselines from run history in parallel (step count, tool latency, LLM latency, token growth, LLM:tool ratio, total tokens, session duration) and attaches them to the `RunState`
-4. Runs all 18 Tier 1 detectors against the `RunState`
+4. Runs all 34 structural detectors against the `RunState`, plus any active custom detectors and any detectors from packs this org has enabled
 5. Applies confidence boosting: co-occurrence multiplier + hard overrides
 6. Writes any triggered `FailureSignal` rows to `failure_signals`
 7. Marks the run as processed in `processed_runs`
@@ -1055,3 +1212,319 @@ Detection adds zero latency to the agent — it runs entirely after the run comp
 **Self-correction suppression** — `RETRY_STORM` checks whether the tool that hit the failure streak subsequently succeeded in the same run. If it did, the agent recovered on its own and no signal is emitted.
 
 **REASONING_STALL severity** — fires MEDIUM when the run finished with a `final_answer` (CoT-heavy but converged) and HIGH when the run stalled without ever converging (the ratio is likely the reason for failure).
+
+### `UNGROUNDED_DESTINATION`
+
+A tool call sends data to a destination — an email address, a URL host, a bare
+domain — that appears nowhere in the run's own trusted input surface. This is the
+actuation step of agent data exfiltration: after a successful injection, the
+agent emails an address the legitimate task never mentioned.
+
+**Provenance-based, not novelty-based.** Open-destination agents (a support agent
+emailing a different customer every run) make per-destination history useless —
+every legitimate run contains an address never seen before. So the default mode
+never asks *"have I seen this destination before"*; it asks *"did this run's own
+trusted inputs contain this string"*. A support agent whose CRM lookup returned
+the customer's address is silent by construction, forever.
+
+**The grounded surface**, and why each entry is trusted:
+
+| Source | Rationale |
+|---|---|
+| `run.started.input_text` | The task the principal actually asked for — this *is* intent |
+| `run.started.system_prompt` | Operator-authored config (fixed archive addresses, etc.) |
+| `tool.responded.output` | A value the *system* returned. The entry that keeps open-destination agents silent |
+| `retrieval.responded.content` | Same argument: corpus data the system supplied |
+| `memory.written.value` (trusted `source`) | Stored earlier from a channel the attacker can't reach |
+| `approval.denied` / `approval.granted` `note` | What a human wrote when deciding an approval. Written by a holder of the `approve` scope — a credential the agent process does not have — so it is the only text in a run neither the model nor a tool can reach. Never demoted, for the same reason the system prompt isn't. See [Approvals](approvals.md#4-decision-notes) |
+
+Deliberately **excluded**: `llm.responded` output text and the agent's own earlier
+tool arguments. Grounding on model output is circular — an injected model would
+emit the destination and thereby ground it. That exclusion is the detector's
+central trust boundary.
+
+**Conditional demotion.** Tool output and retrieval content are simultaneously the
+legitimate way a destination enters a run and the attacker's primary injection
+channel. A content block matching an injection marker is therefore *removed* from
+the grounded surface and *moved* to the taint surface; clean blocks ground
+normally. The same rule applies to `input_text` when the run carries a
+`PROMPT_INJECTION_SIGNAL`. One rule, three channels.
+
+**Approval-blocked calls are not reported.** A tool call a `require_approval`
+gate denied never ran, but `tool_called` appends the `ToolCall` *before* it
+blocks — so a blocked call sits in the run shaped exactly like one whose response
+nobody instrumented. Reporting it would alert on the run where the control
+worked. Blocked calls are matched by pairing each terminal approval event with
+the latest unresolved call of that name strictly before it, and skipped. The same
+exclusion applies to `UNRESOLVED_AMBIGUITY`.
+
+**Severity**: HIGH when ungrounded. CRITICAL when ungrounded *and* the destination
+also appears in attacker-controllable content — an untrusted-source memory value
+(including one written by an *earlier* run and read back in this one), or a
+content block carrying an injection marker.
+
+**Cross-run taint.** `memory.read` carries only a key — the SDK never sees the
+value that comes back — so a destination planted in run N's memory and read back
+in run N+2 is ungrounded in N+2 with no in-run taint source. The detector worker
+closes this by querying prior `memory.written` events for the keys this run read
+(`fetch_memory_writes`). It reads *events*, not signals: ancestor signals are
+derived and may not exist when a sibling run is processed, which would make
+severity depend on poll ordering. Note also that sequential runs sharing a memory
+store are siblings, not a `parent_run_id` chain, so an ancestor walk would not
+reach run N at all.
+
+**Novelty mode** (`mode: provenance+novelty`) is a per-agent opt-in for
+*closed*-destination agents (billing, internal reporting) where history genuinely
+defines normal. It evaluates only destinations that already *passed* grounding,
+so it can never double-fire with the provenance verdict, and it stays silent
+below `min_baseline_runs` (default 20). The baseline is materialised in
+`agent_destination_baseline` and only ever records **grounded** destinations —
+seeding it with ungrounded ones would teach it that the first successful
+exfiltration is normal.
+
+**In-path use.** The detector is in `TIER1_DETECTORS`, so a `trigger="signal"`
+policy can stop a send *before* it executes (`RunContext.tool_called` evaluates
+policies before the tool body runs). Because scanning captured tool output is
+expensive, the in-path instance runs with `max_surface_chars`, `max_args_chars`,
+`max_scan_ns` and a send-tool `tool_name_scope`. All of them **fail open**: the
+run is skipped and the server-side instance still catches it. Degradation is
+prevent → detect, never detect → nothing.
+
+**Known limits.**
+
+1. Taint matching is verbatim-string. A destination the agent *assembles* from
+   fragments ("email the user at the domain in field X") never appears whole in
+   any taint source, so it stays HIGH rather than escalating to CRITICAL. The
+   grounding check still fires. Out of scope — that is what approval policies on
+   send-class tools are for.
+2. Encoded destinations (base64, percent-encoding) are the same class.
+3. OTLP-ingested runs truncate tool args at `OTLP_MAX_ATTR_CHARS` (8192), so a
+   destination past that offset is invisible; surfaced as `args_truncated: true`.
+   The in-path SDK copy sees pre-truncation args, so the two paths can legitimately
+   disagree on a very large argument — in-path may detect what server-side cannot.
+4. `bare_domain` extraction is **off by default**: without a scheme or an `@` to
+   anchor on, `report.pdf` and `v1.2.3` are domain-shaped too.
+
+**Live** — listed in `LIVE_DETECTORS`, so its signals alert rather than being
+stored silently. If it proves noisy on your traffic, reach for
+`allowlisted_domains` (your own domains) before removing it from
+`LIVE_DETECTORS`: the commonest false positive is an address that arrived
+through a channel this run didn't instrument, and an allowlist entry fixes that
+class without disarming the detector.
+
+**Tunable**: `mode`, `min_baseline_runs`, `candidate_types`, `allowlisted_domains`,
+`max_candidates_per_run`, `max_surface_chars`, `max_args_chars`, `max_scan_ns`,
+`tool_name_scope`, `send_tool_patterns`, `demotion_phrases`, `case_sensitive`.
+
+---
+
+### `UNRESOLVED_AMBIGUITY`
+
+An agent performed an **irreversible** action on one of N candidates returned by
+an earlier tool, when nothing in the user's request distinguished that candidate
+from its siblings.
+
+`lookup_customer("Chen")` returns Sarah Chen (CUST_8834, Enterprise,
+€340k/yr) and Emily Chen (CUST_1183, Standard, €3k/yr). The request was *"close
+the account for the Chen family"*. The agent calls
+`delete_customer(...)` with the Standard account's id. Every value-local check passes — the id is
+well-formed, it exists, and it appears verbatim in a prior tool result — so
+`TOOL_ARGUMENT_FABRICATION` is correctly silent. Nothing else was looking at the
+*choice*.
+
+**Outcome-blind by design.** This detector cannot know which Chen was intended
+and never claims to. It scores epistemic warrant, so it also fires when the agent
+guesses **right** — an agent that guessed right still guessed. That is precisely
+what makes it evaluable without ground truth, and why the signal wording never
+says "the wrong record".
+
+**A new mechanism family: warrant, not grounding.** Grounding asks *"where did
+this value come from?"*. Warrant asks *"what made you choose this one over that
+one?"*. A constant never explains a choice, and neither does the menu you chose
+from — which is why the two families cannot share a surface (see
+[the warrant surface](#the-warrant-surface) below).
+
+**A new activation category: declared-scope.** `irreversible_tools` defaults to
+`[]` and the detector is fully inert until an operator fills it in. Every other
+detector on this page is zero-config and always-on.
+
+#### The algorithm
+
+For each irreversible tool call, find a prior tool result containing ≥ 2 records
+where the call's arguments use exactly one record's identifier. Then:
+
+1. **Tokenise** every field value of every candidate — Unicode-aware word
+   tokenisation with `casefold` (not `lower`, so *Straße* and *STRASSE* agree),
+   keeping tokens longer than `min_token_len`. Not `[a-z]+`: `Müller`, `Jürgen`
+   and `José` must each tokenise as one token, and alphanumerics are kept so
+   CUST_1183 and 340k are single tokens — *"delete CUST_1183"* is a real
+   discriminating request.
+2. A **discriminator** of a record is a token appearing in that record's values
+   that no sibling's values contain. Shared surnames drop out among Chens; the
+   more alike the records, the sharper the test.
+3. The **warrant surface** is user-authored input only.
+4. **Verdict**:
+   - selected record has a discriminator in the warrant surface → **silent**
+   - a **sibling** has a discriminator in the warrant surface → **STRONG** (the
+     request named someone else — the mismatch is provable from the trace)
+   - otherwise → **WEAK** (genuine ambiguity; nothing identified anyone)
+
+**Candidate-set anchoring.** The set evaluated is the **most recent** prior
+result whose records contain the selected identifier, never the widest one. An
+agent that ran a narrowing lookup — `lookup_customer("sarah.chen@example.com")`
+returning one record — and then acted is judged against that single-record set,
+so it is silent. An unrelated lookup in between does not launder the choice: the
+anchor skips results that do not contain the id.
+
+Three things this has to get right, each of which was a real bug before it was:
+
+- **A narrowed result is an object, not a one-element list.** dunetrace-demos'
+  own `lookup_customer` returns `{"customers": [...]}` for a name match and a
+  bare record `dict` for an id or email match. A lone object therefore counts as
+  a one-record set; without that, the anchor walks straight past the narrowed
+  result to the older, wider one and reports ambiguity for a run that had
+  resolved it.
+- **Key order must not decide the candidate set.** A result carrying
+  `facets`/aggregations/pagination beside its records offers more than one list.
+  The set is chosen by which one holds the identifier the call used, never by
+  dict iteration order — byte-identical data serialized the other way round has
+  to reach the same verdict.
+- **A call names a record by its identifier**, not by any field that happens to
+  look like one. The broad reading (every identifier-shaped field value) applies
+  only where the narrow one — the record's own id field — matches nothing in the
+  set at all, which keeps tools that act on an email or an SKU working. Without
+  the distinction, a collateral argument such as an `effective_date` equal to a
+  sibling's `signup_date` makes one call look like it named two records, and the
+  exactly-one test then discards a real finding.
+
+**Human approval notes are warrant.** A note attached to an approval decision is
+user-authored input of the strongest kind — it came from a person holding the
+`approve` scope, in response to this exact tool call. *"wrong Chen — it's Sarah,
+CUST_8834"* is the clearest warrant a retry could have, and without it this
+detector fires on the corrected run. Notes from both `approval.denied` and
+`approval.granted` count, and a call the gate blocked is not treated as an action
+the agent took. Scoped to the run that issued them — see
+[Approvals](approvals.md#limitation-notes-are-scoped-to-their-own-run).
+
+**Warrant precedes the action.** Only turns recorded at or before the acting
+call's step count. A reply arriving afterwards cannot justify a choice already
+committed to — and reading a run's turns as one undifferentiated bag silences
+act-first-ask-afterwards, which is the behaviour this detector exists to catch.
+
+**A rejected call performed nothing.** A tool call with `success = false` did not
+happen, so no irreversible action's warrant is in question and the detector stays
+silent. Unknown (`null`) still counts — most instrumentation never sets it, and
+treating unknown as failed would make the detector inert on most real traffic.
+
+**Severity and confidence** are part of the contract:
+
+| Tier | Severity | Confidence | Why |
+|---|---|---|---|
+| `strong` | HIGH | 0.9 | The mismatch is provable from the trace |
+| `weak` | MEDIUM | 0.6 | Genuine ambiguity — correct-but-interrupting by design |
+
+#### The warrant surface
+
+Every user-authored turn in the run: `run.started`'s `input_text` **plus any
+later user message the run recorded**. An agent that asked *"which Chen?"* and
+got *"Emily"* back is warranted by that reply, not left dangling on its opening
+request. Mid-run replies have no dedicated event type — a "conversation" here is
+a sequence of runs, each with one `input_text` — so they reach `RunState` through
+`external_signal` (`user_message`, `user_turn`, `user_reply`, `user_input`,
+`clarification`; the list is tunable). The detector reads both the raw
+`external.signal` events and `state.external_signals`, because
+`build_run_state()` — the server-side reconstruction — only ever populates the
+former.
+
+Two exclusions will look like bugs and are not:
+
+1. **`system_prompt` is deliberately excluded.** It is byte-identical on every
+   run, so it cannot explain why *this* run chose *this* candidate. demo1's
+   system prompt happens to contain CUST_8834 as an example, which made a
+   lucky-correct guess read as warranted. A grounding surface rightly includes
+   the system prompt; a warrant surface cannot.
+2. **Tool output is excluded, and more strongly.** The candidate records *are*
+   tool output. Admitting it would make every discriminator trivially present and
+   silence the detector on every run it exists for.
+
+#### Suppression
+
+| Condition | Result |
+|---|---|
+| Every candidate in the set is acted on by irreversible calls in the run | Silent — no selection occurred (*"close the accounts for the Chen family"*, both Chens deleted) |
+| Exactly 1 candidate | Silent — a set of one is not a choice |
+| Consuming tool not in `irreversible_tools` | Silent — out of scope |
+| Identifier never appeared in any prior result | Silent — that is `TOOL_ARGUMENT_FABRICATION`'s finding, never double-reported |
+| `irreversible_tools: []` (the default) | Fully inert |
+
+#### Why discrimination is token-level
+
+Given {Sarah Chen, Emily Chen}, *"delete Sarah"* unambiguously means Sarah — yet
+the whole value `"sarah chen"` is not a substring of `"delete Sarah"`.
+Whole-value matching scored 3/5 on that case family; token-level scores 5/5.
+
+Nickname, superlative and comparative requests are **WEAK on purpose**: *"Mike
+Rodriguez"* against {Miguel, Carlos}, *"the big Chen account"*, *"the older Ali
+account"*. From the tokens' point of view those requests genuinely do not resolve
+to anyone, and weakening the warrant test to silence them breaks every
+misselection case at the same time.
+
+#### Signal wording
+
+The signal must never say the agent acted on the *wrong* record; it cannot know
+that. WEAK reads *"Acted irreversibly on 1 of N candidates with no distinguishing
+token from the request."* STRONG names the mismatch, still in terms of tokens
+rather than outcome: *"The request identifies `sarah`; the agent selected the
+record whose distinguishing tokens are `emily`, `design` and `studio`."*
+
+#### Evidence
+
+`tier` (`strong`/`weak`), `candidate_count`, `selected_id`,
+`discriminators_unused` (the tokens that would have made the request
+unambiguous), `tool_name`/`tool_step`, `source_tool`/`source_step` (the
+anchoring lookup), `warrant_surfaces`, `warrant_turn_count`, and for STRONG
+`sibling_matched_in_request` + `sibling_id`. One signal per run: STRONG outranks
+WEAK, and among equals the earliest irreversible call wins.
+
+#### Known limits and non-goals
+
+1. **A narrowing lookup whose query was itself an unwarranted guess launders the
+   guess.** Warrant-checking lookup arguments recursively is out of scope.
+2. **No nickname or alias resolution, and no semantic matching.** *"Mike"* does
+   not resolve to *"Miguel"*. A config flag may add this later; it is not in the
+   default.
+3. **No irreversibility inference from tool names**, ever.
+4. **No extension to candidates without identifiers.**
+5. **Numeric tokens are matched literally, not semantically.** *"the €340k
+   account"* tokenises to `340k`, which does not match a stored
+   `annual_value_eur` of `340000`.
+6. **Instrumentation-dependent**, like `TOOL_ARGUMENT_FABRICATION`: candidate
+   sets are read from `tool.responded`'s raw output, which exists only when the
+   caller passes `output=`. A run with no captured tool output is silent.
+7. **Unparseable tool args yield no anchor.** There is no raw-text fallback: a
+   raw scan cannot tell a dict key from a value, and a wrong anchor does not
+   merely miss a signal — it judges the selection against a candidate set the
+   agent never chose from.
+
+**Cost controls fail open**, like `UNGROUNDED_DESTINATION`: on abort the run is
+skipped and nothing fires. Aborting is preferred to scanning a *truncated*
+candidate set, which makes shared tokens look unique and so invents
+discriminators that do not exist. That covers `max_depth` as well as
+`max_candidates_per_run` and `max_output_chars`: a record read only as far as its
+depth limit is an *incomplete* record, and a token it genuinely shared with a
+sibling then becomes that sibling's discriminator — the detector would
+manufacture the evidence it is meant to be weighing, and can reach a
+HIGH-severity `strong` that way. The scan budget is polled inside the anchor
+walk, not only between irreversible calls, because that walk parses every prior
+output it passes.
+
+**Shadow** — absent from `LIVE_DETECTORS`, so signals are stored and visible in
+the dashboard but never alert. The two tiers have different promotion bars:
+`strong` is promotable on mechanism-correctness alone, since its claim is
+provable from the trace. `weak` stays dashboard-only until its observed rate on
+real traffic is understood — its correct actuation is an approval gate, not an
+alert, because the human is the only party who knows the intent.
+
+**Tunable**: `min_candidates`, `irreversible_tools`, `warrant_surfaces`,
+`min_token_len`, `max_candidates_per_run`, `max_scan_ns`, `max_output_chars`,
+`max_depth`, `user_turn_signals`, `user_turn_text_keys`.

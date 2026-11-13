@@ -23,7 +23,12 @@ docker compose up -d --force-recreate alerts
 
 Each Slack alert includes: failure type, severity, confidence, what happened, why it matters, a concrete code fix targeted at the specific failure pattern detected, a one-line rate context summary showing how common this pattern is for the agent, and a **View Run** button that deep-links directly to that run's detail panel in the dashboard.
 
-Three action buttons let you respond directly from Slack:
+Three action buttons let you respond directly from Slack. They require
+`SLACK_SIGNING_SECRET` (Slack App Settings → Basic Information): the callback
+route carries no API key and reads its target org from the payload, so the
+Slack signature is the only credential on it. With the secret unset, clicks are
+refused with 403 outside `AUTH_MODE=dev` — an alert delivered through an
+incoming webhook needs no signing secret, so this is easy to miss.
 
 - **Mark resolved** — sets `resolved_at` on the signal.
 - **Not a problem** — records a false positive (`agent_detector_overrides`); after 3 false positives for the same `(agent_id, failure_type)`, that detector is silenced for that agent until manually reset.
@@ -32,6 +37,35 @@ Three action buttons let you respond directly from Slack:
 When token data is available for the run, a `:moneybag:` line is included showing total tokens consumed and estimated cost (e.g. `:moneybag: *Tokens:* 581 (wasted)  *Cost:* ~$0.00`). This uses actual `prompt_tokens + completion_tokens` from SDK-recorded `llm.responded` events.
 
 > **Note:** `docker compose restart alerts` does not re-read `.env`. Use `docker compose up -d alerts` to recreate the container and pick up env var changes.
+
+### Desktop and mobile notification preview
+
+Slack builds the push/desktop notification preview from the top-level `blocks`
+first, falling back to the top-level **`text`** field (`message.text`); mobile
+notifications use `message.text`
+[*exclusively*](https://docs.slack.dev/messaging/formatting-message-text). These
+payloads nest their blocks inside `attachments` (that is what supplies the
+severity colour bar), so before this there was no source of preview text at all
+and the client showed *"no preview available"*. Every Slack payload the alerts
+worker sends now carries a plain-text one-line summary in `text` (mirrored into
+the attachment's `fallback`):
+
+```
+HIGH: Tool loop detected: web_search called 5× in steps 3–8 · agent research-agent · run run-abc123 · ~$3.42 wasted · systemic: 12/40 runs in 7d · +4 suppressed
+```
+
+The cost, systemic and suppressed-count segments appear only when that data is
+available. It is deliberately plain text: mrkdwn is not rendered in a
+notification, and backticks or asterisks from the title would appear literally.
+Underscores are kept, since tool names and agent ids contain them.
+
+For signal alerts and the weekly digest this line is **also visible in the
+channel**, as the message body above the coloured card — Slack treats `text` as
+a pure fallback only when the payload has top-level `blocks`, and these nest
+theirs in `attachments`. Hoisting the blocks would remove the duplicate line but
+would break the mobile preview entirely (mobile reads only `message.text`) and
+lose the severity colour bar, so the visible line is the deliberate trade.
+Approval requests already use top-level `blocks`, so their summary stays hidden.
 
 ### Rate context in Slack alerts
 
@@ -86,6 +120,29 @@ The webhook payload:
 The alerts worker polls every 10 seconds for unalerted signals (`shadow=FALSE AND alerted=FALSE`). It calls the explainer, formats the payload, and POSTs with exponential backoff (up to 3 attempts). A signal is marked `alerted=TRUE` only after at least one destination succeeds.
 
 If the worker crashes between sending and marking, the signal will be re-sent on restart. Design receivers to be idempotent.
+
+### Running more than one alerts worker
+
+Safe, but only because signals are **claimed** before delivery. `alerted` is set
+after a successful send, so it can't serve as the claim on its own — two workers
+scanning the same window would both see `alerted = FALSE`, both deliver, and you'd
+get duplicate Slack messages. The `ALERT_DEDUP_WINDOW` check doesn't prevent it
+either, since both read the window before either writes it.
+
+`claim_unalerted_signals` stamps `failure_signals.alert_claimed_at` in the same
+statement that selects the rows (`FOR UPDATE SKIP LOCKED`), so a row can only be
+picked up by one worker. To actually scale throughput, also shard: set
+`SHARD_COUNT=N` and give each replica a distinct `SHARD_INDEX`, exactly as with the
+detector. Sharding on `agent_id` matters beyond throughput — the worker sends one
+alert per `(org_id, agent_id, failure_type)` group, so a group must stay whole on
+one worker.
+
+Claims expire after `CLAIM_TIMEOUT_SECS` (default 300) so a worker that dies
+mid-delivery doesn't strand its rows. Set it comfortably above your worst-case
+delivery time for a full batch: if it expires while a worker is still alive and
+working, another replica takes the row and the alert goes out twice.
+
+See [architecture.md](architecture.md#alerts-worker-sharding-plus-claiming).
 
 ---
 

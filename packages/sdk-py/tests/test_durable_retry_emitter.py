@@ -19,7 +19,12 @@ import time
 import unittest
 from unittest.mock import patch
 
-from dunetrace.emitters import BatchingEmitter, DEFAULT_QUEUE_PATH, DurableRetryEmitter
+from dunetrace.emitters import (
+    BatchingEmitter,
+    DEFAULT_QUEUE_PATH,
+    DurableRetryEmitter,
+    ShipOutcome,
+)
 from dunetrace.models import AgentEvent, EventType
 
 
@@ -64,6 +69,43 @@ class _AlwaysSucceeds(BatchingEmitter):
     def ship(self, batch):
         self.received.extend(batch)
         return True
+
+
+class _OutcomeByRunId(BatchingEmitter):
+    """Returns a per-run_id ShipOutcome — lets a test say "the backend refuses
+    r1 outright but would happily take r2"."""
+
+    def __init__(self, outcomes):
+        self._outcomes = dict(outcomes)
+        self.received: list = []
+
+    def ship(self, batch):
+        run_id = batch[0].run_id
+        self.received.append(run_id)
+        return self._outcomes.get(run_id, ShipOutcome.DELIVERED)
+
+
+class _AlwaysRejects(BatchingEmitter):
+    """Stands in for a stale DUNETRACE_API_KEY: every batch 401s."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    def ship(self, batch):
+        self.call_count += 1
+        return ShipOutcome.REJECTED
+
+
+class _LegacyBoolEmitter(BatchingEmitter):
+    """A third-party emitter written against the old bool contract."""
+
+    def __init__(self, result):
+        self._result = result
+        self.call_count = 0
+
+    def ship(self, batch):
+        self.call_count += 1
+        return self._result
 
 
 class _TempQueueTestCase(unittest.TestCase):
@@ -293,6 +335,132 @@ class TestBoundedQueueEviction(_TempQueueTestCase):
         self.assertEqual(self._row_count(), 1)
 
 
+# ── Permanently-rejected batches must not be persisted (head-of-line blocking) ──
+
+
+class TestRejectedBatchesAreNotQueued(_TempQueueTestCase):
+    """HttpBatchingEmitter logs a 401/400/413/422 batch as "not retried, events
+    dropped" and then used to hand back a bare False, which this wrapper read as
+    "transient" and wrote to disk. Because the backlog is drained oldest-first
+    and stops at the first failure, one such batch at the head blocked every
+    deliverable batch behind it — forever, at one doomed attempt every 30s,
+    until the 100k-event / 100MB cap silently evicted the good batches. Nothing
+    was ever delivered and the log line said the opposite of what happened."""
+
+    def test_rejected_batch_is_not_written_to_disk(self):
+        inner = _AlwaysRejects()
+        emitter = DurableRetryEmitter(inner, queue_path=self.queue_path)
+        outcome = emitter.ship([_event()])
+        self.assertIs(outcome, ShipOutcome.REJECTED)
+        self.assertEqual(self._row_count(), 0)
+
+    def test_a_stale_api_key_does_not_fill_the_disk_queue(self):
+        """The whole reported shape: every batch 401s, none is retained."""
+        inner = _AlwaysRejects()
+        emitter = DurableRetryEmitter(inner, queue_path=self.queue_path)
+        for i in range(25):
+            emitter.ship([_event(run_id=f"r{i}")])
+        self.assertEqual(self._row_count(), 0)
+        self.assertEqual(inner.call_count, 25)  # each tried exactly once, never re-tried
+
+    def test_retryable_batch_is_still_queued(self):
+        """The fix must not disable the feature it is fixing."""
+        emitter = DurableRetryEmitter(_AlwaysFails(), queue_path=self.queue_path)
+        self.assertIs(emitter.ship([_event()]), ShipOutcome.DELIVERED)
+        self.assertEqual(self._row_count(), 1)
+
+    def test_queued_batch_that_turns_permanent_is_dropped_not_retried_forever(self):
+        """A batch queued while the backend was merely down, and refused
+        outright once it came back (the key was rotated meanwhile)."""
+        emitter = DurableRetryEmitter(_AlwaysFails(), queue_path=self.queue_path)
+        emitter.ship([_event(run_id="r1")])
+        self.assertEqual(self._row_count(), 1)
+
+        rejecting = _AlwaysRejects()
+        emitter2 = DurableRetryEmitter(rejecting, queue_path=self.queue_path)
+        emitter2._next_retry_at = 0
+        emitter2.retry_pending()
+
+        self.assertEqual(self._row_count(), 0)
+        self.assertEqual(rejecting.call_count, 1)  # attempted once, then dropped
+
+    def test_rejected_head_does_not_block_the_batch_behind_it(self):
+        """The head-of-line property, stated directly."""
+        blocked = DurableRetryEmitter(_AlwaysFails(), queue_path=self.queue_path)
+        blocked.ship([_event(run_id="r1")])
+        blocked._next_retry_at = float("inf")  # don't let ship() drain r1 first
+        blocked.ship([_event(run_id="r2")])
+        self.assertEqual(self._row_count(), 2)
+
+        inner = _OutcomeByRunId({"r1": ShipOutcome.REJECTED, "r2": ShipOutcome.DELIVERED})
+        emitter = DurableRetryEmitter(inner, queue_path=self.queue_path)
+        emitter._next_retry_at = 0
+        delivered = emitter.retry_pending()
+
+        self.assertEqual(inner.received, ["r1", "r2"])
+        self.assertEqual(delivered, 1)  # r2 got through; r1 was never deliverable
+        self.assertEqual(self._row_count(), 0)
+
+    def test_transient_failure_still_stops_the_drain_to_preserve_order(self):
+        """Only REJECTED short-circuits. A still-down backend must not let
+        later batches jump ahead of earlier ones."""
+        seed = DurableRetryEmitter(_AlwaysFails(), queue_path=self.queue_path)
+        seed.ship([_event(run_id="r1")])
+        seed._next_retry_at = float("inf")
+        seed.ship([_event(run_id="r2")])
+        self.assertEqual(self._row_count(), 2)
+
+        inner = _OutcomeByRunId({"r1": ShipOutcome.RETRYABLE, "r2": ShipOutcome.DELIVERED})
+        emitter = DurableRetryEmitter(inner, queue_path=self.queue_path)
+        emitter._next_retry_at = 0
+        emitter.retry_pending()
+
+        self.assertEqual(inner.received, ["r1"])  # stopped at r1, r2 never attempted
+        self.assertEqual(self._row_count(), 2)
+
+    def test_third_party_bool_false_is_treated_as_retryable(self):
+        """An emitter that still returns a bool cannot say "permanent", so its
+        batches must keep being queued — never silently dropped for it."""
+        emitter = DurableRetryEmitter(_LegacyBoolEmitter(False), queue_path=self.queue_path)
+        self.assertIs(emitter.ship([_event()]), ShipOutcome.DELIVERED)
+        self.assertEqual(self._row_count(), 1)
+
+    def test_third_party_bool_true_is_delivered(self):
+        emitter = DurableRetryEmitter(_LegacyBoolEmitter(True), queue_path=self.queue_path)
+        self.assertIs(emitter.ship([_event()]), ShipOutcome.DELIVERED)
+        self.assertEqual(self._row_count(), 0)
+
+
+class TestUndecodableQueueRows(_TempQueueTestCase):
+    """A row this build cannot parse is as undeliverable as a rejected one, and
+    it used to escape _maybe_retry_backlog's sqlite3.Error-only handler
+    entirely — up into retry_pending(), where the drain thread swallows it at
+    DEBUG. Invisible at default log level, and the queue never drained again."""
+
+    def test_corrupt_row_is_discarded_and_does_not_block_the_queue(self):
+        seed = DurableRetryEmitter(_AlwaysFails(), queue_path=self.queue_path)
+        seed.ship([_event(run_id="r1")])
+        conn = sqlite3.connect(self.queue_path)
+        try:
+            conn.execute("UPDATE queue SET payload = ?", ("{not json at all",))
+            conn.commit()
+        finally:
+            conn.close()
+        seed.ship([_event(run_id="r2")])
+        self.assertEqual(self._row_count(), 2)
+
+        inner = _AlwaysSucceeds()
+        emitter = DurableRetryEmitter(inner, queue_path=self.queue_path)
+        emitter._next_retry_at = 0
+        with self.assertLogs("dunetrace", level="WARNING") as cm:
+            delivered = emitter.retry_pending()
+
+        self.assertTrue(any("undecodable" in m for m in cm.output))
+        self.assertEqual(delivered, 1)  # r2 still got through
+        self.assertEqual(self._row_count(), 0)
+        self.assertEqual([e.run_id for e in inner.received], ["r2"])
+
+
 # ── Graceful degradation ─────────────────────────────────────────────────────────
 
 
@@ -303,6 +471,63 @@ class TestGracefulDegradation(unittest.TestCase):
         self.assertFalse(emitter._db_ok)
         result = emitter.ship([_event()])
         self.assertFalse(result)  # can't queue, can't deliver — honest failure, no crash
+        self.assertIs(result, ShipOutcome.RETRYABLE)
+
+    def test_sqlite_operational_error_is_not_an_oserror(self):
+        """The premise of the bug, asserted so it cannot silently change: the
+        failure _init_db exists to absorb does not derive from OSError, so the
+        original `except OSError` never saw it."""
+        self.assertFalse(issubclass(sqlite3.OperationalError, OSError))
+        self.assertTrue(issubclass(sqlite3.OperationalError, Exception))
+
+    def test_queue_path_that_is_a_directory_does_not_raise_into_the_caller(self):
+        """A real, unmocked reproduction: makedirs succeeds, sqlite3.connect
+        then raises OperationalError("unable to open database file") — which is
+        not an OSError, so the constructor used to propagate straight into the
+        customer's agent process at import/init time."""
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertLogs("dunetrace", level="WARNING") as cm:
+                emitter = DurableRetryEmitter(_AlwaysFails(), queue_path=d)
+            self.assertFalse(emitter._db_ok)
+            self.assertTrue(any("could not initialize queue" in m for m in cm.output))
+            # Degraded, not dead: the client keeps shipping, just without a
+            # disk queue behind it.
+            self.assertIs(emitter.ship([_event()]), ShipOutcome.RETRYABLE)
+            self.assertEqual(emitter.retry_pending(), 0)
+
+    def test_unwritable_home_does_not_raise_into_the_caller(self):
+        """The documented trigger — read-only root filesystem, non-root
+        container user, $HOME unset (AWS Lambda, distroless, Kubernetes
+        readOnlyRootFilesystem) — where the default path is ~/.dunetrace."""
+        boom = sqlite3.OperationalError("unable to open database file")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "home", ".dunetrace", "queue.db")
+            with patch("dunetrace.emitters.sqlite3.connect", side_effect=boom):
+                with self.assertLogs("dunetrace", level="WARNING") as cm:
+                    emitter = DurableRetryEmitter(_AlwaysFails(), queue_path=path)
+        self.assertFalse(emitter._db_ok)
+        self.assertTrue(any("DUNETRACE_QUEUE_PATH" in m for m in cm.output))
+
+    def test_a_non_sqlite_error_during_retry_does_not_escape(self):
+        """_maybe_retry_backlog is reached through retry_pending(), which the
+        drain thread only guards at DEBUG — an escape there is invisible at the
+        default log level and the queue never drains again. `except
+        sqlite3.Error` covered neither a third-party inner emitter breaking the
+        non-raising ship() contract nor an undecodable payload."""
+
+        class _RaisingEmitter(BatchingEmitter):
+            def ship(self, batch):
+                raise RuntimeError("third-party emitter broke the contract")
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "queue.db")
+            DurableRetryEmitter(_AlwaysFails(), queue_path=path).ship([_event()])
+
+            emitter = DurableRetryEmitter(_RaisingEmitter(), queue_path=path)
+            emitter._next_retry_at = 0
+            with self.assertLogs("dunetrace", level="WARNING") as cm:
+                self.assertEqual(emitter.retry_pending(), 0)  # no raise
+        self.assertTrue(any("retry attempt failed" in m for m in cm.output))
 
 
 # ── Path resolution ──────────────────────────────────────────────────────────────

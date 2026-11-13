@@ -26,11 +26,27 @@ and correlates each one to a Dunetrace run via `trace_id` — the same
 `POST /v1/otlp/traces` in `docs/architecture.md`), so no extra wiring is
 needed if you're already sending traces to both systems.
 
+### Enable the worker
+
+Pull integrations are served by the `integrations` container, which ships in
+both compose files but is **off by default**:
+
+```bash
+INTEGRATIONS_WORKER_ENABLED=true      # in .env
+DUNETRACE_MASTER_KEY=<same value the Customer API uses>
+docker compose up -d
+```
+
+`DUNETRACE_MASTER_KEY` must match the Customer API's exactly — the API encrypts
+stored provider credentials and this worker is what decrypts them. With the flag
+off the container logs one line and exits 0, so `Exited (0)` is the expected
+state, not a failure.
+
 ### Connect a provider
 
 ```bash
 POST /v1/orgs/integrations/langfuse
-Authorization: Bearer dt_live_...
+Authorization: Bearer dt_...
 Content-Type: application/json
 
 {
@@ -102,8 +118,8 @@ framework with no pull-friendly API, or a one-off backfill — push results
 directly:
 
 ```bash
-POST /v1/semantic-signals/external
-Authorization: Bearer dt_live_...
+POST /v1/semantic-signals
+Authorization: Bearer dt_...
 Content-Type: application/json
 
 {

@@ -78,7 +78,7 @@ class TestSyncApprovalDenied(unittest.TestCase):
         cm.__exit__(None, None, None)
         c.shutdown(timeout=2)
 
-        self.assertEqual(ctx.exception.reason, "denied")
+        self.assertEqual(ctx.exception.status, "denied")
         self.assertEqual(ctx.exception.tool_name, "wire_money")
         self.assertIn(EventType.APPROVAL_DENIED, _event_types(run))
 
@@ -96,7 +96,7 @@ class TestSyncApprovalTimeout(unittest.TestCase):
         cm.__exit__(None, None, None)
         c.shutdown(timeout=2)
 
-        self.assertEqual(ctx.exception.reason, "timeout")
+        self.assertEqual(ctx.exception.status, "timeout")
         c._decide_approval.assert_called_once_with(33, "timeout")
         self.assertIn(EventType.APPROVAL_TIMEOUT, _event_types(run))
 

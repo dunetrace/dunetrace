@@ -1,0 +1,35 @@
+# OTel Collector config for shipping Dunetrace spans to Datadog.
+# Set DD_API_KEY (test tier is fine) and DD_SITE (default datadoghq.com; use
+# datadoghq.eu for the EU region) in the environment, then run the collector
+# with this config instead of collector-config.yaml.
+#
+# Datadog reads the GenAI conventions natively, so the LLM spans Dunetrace emits
+# (gen_ai.provider.name, gen_ai.request.model, gen_ai.usage.*) show up in the
+# LLM Observability views without extra mapping.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+
+exporters:
+  debug:
+    verbosity: normal
+  datadog:
+    api:
+      key: ${env:DD_API_KEY}
+      site: ${env:DD_SITE}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, datadog]

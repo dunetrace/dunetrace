@@ -12,6 +12,9 @@ import time
 from dunetrace.models import RunState, ToolCall, RetrievalResult, FailureType
 from dunetrace.detectors import (
     AgentHandoffFailureDetector,
+    ExcessiveRetrievalDetector,
+    OversizedToolArgumentsDetector,
+    ScattershotToolUseDetector,
     ToolLoopDetector,
     ToolThrashingDetector,
     ToolAvoidanceDetector,
@@ -37,16 +40,75 @@ def make_tool_call(
     success=None,
     output_length: int | None = None,
     output: str | None = None,
+    args: str = "aaa",
 ) -> ToolCall:
     return ToolCall(
         tool_name=name,
-        args="aaa",
+        args=args,
         step_index=step,
         timestamp=time.time(),
         success=success,
         output_length=output_length,
         output=output,
     )
+
+
+# ── OversizedToolArgumentsDetector ────────────────────────────────────────────
+
+
+class TestOversizedToolArgumentsDetector(unittest.TestCase):
+    detector = OversizedToolArgumentsDetector()
+
+    def test_no_signal_below_threshold(self):
+        state = make_state()
+        state.tool_calls = [make_tool_call("web_search", args="a" * 100)]
+        state.current_step = 1
+        assert self.detector.on_run_completion(state) is None
+
+    def test_fires_above_threshold(self):
+        state = make_state()
+        state.tool_calls = [make_tool_call("web_search", args="a" * 15_000)]
+        state.current_step = 1
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.OVERSIZED_TOOL_ARGUMENTS
+        assert signal.evidence["tool_name"] == "web_search"
+        assert signal.evidence["arg_length"] == 15_000
+
+    def test_empty_args_ignored(self):
+        state = make_state()
+        state.tool_calls = [make_tool_call("web_search", args="")]
+        state.current_step = 1
+        assert self.detector.on_run_completion(state) is None
+
+    def test_boundary_conditions(self):
+        # exactly 10,000 should not trigger
+        state = make_state()
+        state.tool_calls = [make_tool_call("web_search", args="a" * 10_000)]
+        assert self.detector.on_run_completion(state) is None
+
+        # 10,001 should trigger
+        state.tool_calls = [make_tool_call("web_search", args="a" * 10_001)]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.failure_type == FailureType.OVERSIZED_TOOL_ARGUMENTS
+        assert signal.evidence["arg_length"] == 10_001
+
+    def test_identifies_first_oversized_call(self):
+        state = make_state()
+        # step 1 has 10,001 chars, step 2 has 20,000 chars
+        tc1 = make_tool_call("search1", args="a" * 10_001)
+        tc1.step_index = 1
+        tc2 = make_tool_call("search2", args="b" * 20_000)
+        tc2.step_index = 2
+        state.tool_calls = [tc1, tc2]
+
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.step_index == 1
+        assert signal.evidence["tool_name"] == "search1"
+        assert signal.evidence["arg_length"] == 10_001
+        assert signal.evidence["step_index"] == 1
 
 
 # ── ToolLoopDetector ──────────────────────────────────────────────────────────
@@ -137,6 +199,111 @@ class TestToolThrashingDetector(unittest.TestCase):
         state.current_step = 6
         # This is TOOL_LOOP not thrashing
         assert self.detector.on_run_completion(state) is None
+
+
+# ── ScattershotToolUseDetector ────────────────────────────────────────────────
+
+
+class TestScattershotToolUseDetector(unittest.TestCase):
+    detector = ScattershotToolUseDetector()
+
+    @staticmethod
+    def _state(names: list, exit_reason: str = "completed") -> RunState:
+        state = make_state()
+        state.tool_calls = [make_tool_call(name, step=i + 1) for i, name in enumerate(names)]
+        state.current_step = len(names)
+        state.exit_reason = exit_reason
+        return state
+
+    def test_fires_on_breadth_with_repetition(self):
+        state = self._state(["a", "b", "c", "d", "e", "f"] * 2)
+        signal = self.detector.on_run_completion(state)
+
+        assert signal is not None
+        assert signal.failure_type == FailureType.SCATTERSHOT_TOOL_USE
+        assert signal.severity.value == "MEDIUM"
+        assert signal.evidence["distinct_tool_count"] == 6
+        assert signal.evidence["total_calls"] == 12
+        assert signal.evidence["repeat_ratio"] == 2.0
+        # A whole-run pattern reports a range, not just its last step.
+        assert signal.evidence["first_step"] == 1
+        assert signal.evidence["last_step"] == 12
+
+    def test_one_pass_multi_tool_pipeline_does_not_fire(self):
+        """The regression this detector's thresholds were rewritten for.
+
+        Eight distinct tools, each used exactly once, run completed — a data
+        pipeline doing its job. It cleared the old distinct>=6 and total>=8
+        floors because distinct <= total always holds, so a total-call floor
+        cannot exclude a one-pass workflow however high it is set.
+        """
+        state = self._state(
+            ["ingest", "validate", "transform", "enrich", "persist", "index", "notify", "audit"]
+        )
+        assert self.detector.on_run_completion(state) is None
+
+    def test_repeat_ratio_is_the_discriminator(self):
+        below = self._state(["a", "b", "c", "d", "e", "f", "g", "a"])  # 7 distinct/8 = 1.14
+        above = self._state(["a", "b", "c", "d", "e", "f", "a", "b", "c"])  # 6/9 = 1.5
+        assert self.detector.on_run_completion(below) is None
+        assert self.detector.on_run_completion(above) is not None
+
+    def test_final_answer_vetoes_the_signal(self):
+        """An agent that declared itself done converged, however wide it went."""
+        names = ["a", "b", "c", "d", "e", "f"] * 2
+        assert self.detector.on_run_completion(self._state(names)) is not None
+        assert self.detector.on_run_completion(self._state(names, "final_answer")) is None
+
+    def test_no_signal_below_distinct_tool_threshold(self):
+        state = self._state(["a", "b", "c", "d", "e"] * 3)
+        assert self.detector.on_run_completion(state) is None
+
+    def test_no_signal_below_total_call_threshold(self):
+        state = self._state(["a", "b", "c", "d", "e", "f"])
+        assert self.detector.on_run_completion(state) is None
+
+    def test_none_tool_name_does_not_raise(self):
+        """run_builder yields None for tool_name when the OTLP payload carries a
+        JSON null. sorted() on a set containing None raises TypeError, which
+        run_detectors swallows per-detector — silently disabling this detector
+        for exactly those runs rather than failing loudly."""
+        state = self._state([None, "b", "c", "d", "e", "f"] * 2)
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert "unknown" in signal.evidence["tools"]
+
+    def test_scan_is_bounded(self):
+        """In-path under a signal policy this runs once per step, so an
+        unbounded scan is O(n^2) across a run."""
+        detector = ScattershotToolUseDetector(SCAN_LIMIT=10)
+        state = self._state(["a", "b", "c", "d", "e", "f"] * 100)
+        signal = detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["scan_truncated"] is True
+        assert signal.evidence["total_calls"] == 600
+
+    def test_tunable_thresholds_are_respected(self):
+        detector = ScattershotToolUseDetector(
+            MIN_DISTINCT_TOOLS=4, MIN_TOTAL_CALLS=5, MIN_REPEAT_RATIO=1.0
+        )
+        state = self._state(["a", "b", "c", "d", "a"])
+        signal = detector.on_run_completion(state)
+
+        assert signal is not None
+        assert signal.evidence["distinct_tool_count"] == 4
+        assert signal.evidence["total_calls"] == 5
+
+    def test_rejects_invalid_thresholds(self):
+        invalid_values = (0, -1, True, 1.5, "6")
+        for name in ("MIN_DISTINCT_TOOLS", "MIN_TOTAL_CALLS", "SCAN_LIMIT"):
+            for value in invalid_values:
+                with self.subTest(name=name, value=value):
+                    with self.assertRaisesRegex(ValueError, f"{name} must be a positive integer"):
+                        ScattershotToolUseDetector(**{name: value})
+        for value in (0.5, "1.5", None):
+            with self.subTest(name="MIN_REPEAT_RATIO", value=value):
+                with self.assertRaisesRegex(ValueError, "MIN_REPEAT_RATIO must be a number"):
+                    ScattershotToolUseDetector(MIN_REPEAT_RATIO=value)
 
 
 # ── AgentHandoffFailureDetector ──────────────────────────────────────────────
@@ -387,6 +554,57 @@ class TestRagEmptyRetrievalDetector(unittest.TestCase):
         state.exit_reason = "final_answer"
         state.retrievals = []
         assert self.detector.on_run_completion(state) is None
+
+
+class TestExcessiveRetrievalDetector(unittest.TestCase):
+    def make_retrieval(self, step: int, index: str = "docs") -> RetrievalResult:
+        return RetrievalResult(
+            index_name=index,
+            result_count=3,
+            top_score=0.8,
+            step_index=step,
+        )
+
+    def test_fires_at_threshold_with_bounded_evidence(self):
+        state = make_state(
+            retrievals=[
+                self.make_retrieval(step, "docs" if step % 2 else "tickets") for step in range(1, 9)
+            ]
+        )
+
+        signal = ExcessiveRetrievalDetector().on_run_completion(state)
+
+        assert signal is not None
+        assert signal.failure_type == FailureType.EXCESSIVE_RETRIEVAL
+        assert signal.step_index == 8
+        assert signal.evidence == {
+            "retrieval_count": 8,
+            "threshold": 8,
+            "indexes": ["docs", "tickets"],
+            "first_step": 1,
+            "last_step": 8,
+        }
+
+    def test_no_signal_below_threshold(self):
+        state = make_state(retrievals=[self.make_retrieval(step) for step in range(1, 8)])
+        assert ExcessiveRetrievalDetector().on_run_completion(state) is None
+
+    def test_custom_threshold_is_respected(self):
+        state = make_state(retrievals=[self.make_retrieval(step) for step in range(1, 4)])
+        signal = ExcessiveRetrievalDetector(MAX_RETRIEVALS=3).on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["threshold"] == 3
+
+    def test_confidence_scales_with_volume(self):
+        at_threshold = make_state(retrievals=[self.make_retrieval(s) for s in range(1, 9)])
+        far_over = make_state(retrievals=[self.make_retrieval(s) for s in range(1, 41)])
+
+        base = ExcessiveRetrievalDetector().on_run_completion(at_threshold)
+        heavy = ExcessiveRetrievalDetector().on_run_completion(far_over)
+
+        assert base.confidence == 0.8
+        assert heavy.confidence > base.confidence
+        assert heavy.confidence <= 0.95  # capped
 
 
 # ── LlmTruncationLoopDetector ─────────────────────────────────────────────────
@@ -705,3 +923,39 @@ class TestReasoningSpinDetector(unittest.TestCase):
         state = _make_spin_state(llm_count=4, tool_count=0)  # ratio=4.0, now above MIN
         signal = detector.on_run_completion(state)
         assert signal is not None
+
+
+class TestOversizedToolArgumentsAcrossTransports(unittest.TestCase):
+    """The threshold (10,000) is above the OTLP ingest truncation cap (8192), so
+    a detector measuring len(args) is unreachable for every OTel-ingested run.
+    `args_length` carries the pre-truncation size so length-based detection
+    works on both transports."""
+
+    detector = OversizedToolArgumentsDetector()
+
+    def test_fires_on_truncated_args_when_true_length_is_known(self):
+        state = make_state()
+        tc = make_tool_call("summarise", args="a" * 8192)  # capped by the transport
+        tc.args_length = 42_318  # what the agent actually sent
+        state.tool_calls = [tc]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["arg_length"] == 42_318
+
+    def test_does_not_fire_when_true_length_is_under_threshold(self):
+        state = make_state()
+        tc = make_tool_call("summarise", args="a" * 8192)
+        tc.args_length = 9_000
+        state.tool_calls = [tc]
+        assert self.detector.on_run_completion(state) is None
+
+    def test_falls_back_to_len_args_when_not_supplied(self):
+        """The SDK path never truncates, so args_length is None there and
+        len(args) is already the true length."""
+        state = make_state()
+        tc = make_tool_call("summarise", args="a" * 15_000)
+        assert tc.args_length is None
+        state.tool_calls = [tc]
+        signal = self.detector.on_run_completion(state)
+        assert signal is not None
+        assert signal.evidence["arg_length"] == 15_000

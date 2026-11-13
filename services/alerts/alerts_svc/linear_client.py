@@ -23,7 +23,11 @@ from __future__ import annotations
 
 import logging
 
+import time
+
 import httpx
+
+from alerts_svc.sender import record_delivery
 
 logger = logging.getLogger("dunetrace.alerts.linear_client")
 
@@ -65,6 +69,8 @@ def create_issue(
         # customer's first live use will surface this immediately if so.
         variables["input"]["projectId"] = project_id
 
+    started = time.monotonic()
+    status: int | None = None
     try:
         resp = httpx.post(
             _LINEAR_GRAPHQL_URL,
@@ -72,11 +78,17 @@ def create_issue(
             headers={"Authorization": api_key, "Content-Type": "application/json"},
             timeout=15.0,
         )
+        status = getattr(resp, "status_code", None)
         resp.raise_for_status()
         body = resp.json()
     except Exception as exc:
         logger.error("Linear issueCreate request failed: %s", exc)
         return None
+    finally:
+        # dunetrace_alerts_delivery_{seconds,total}{destination="linear"} —
+        # status is the HTTP class when Linear answered (a 4xx from
+        # raise_for_status included), "error" when the request never got one.
+        record_delivery("linear", started, status)
 
     if body.get("errors"):
         logger.error("Linear issueCreate returned errors: %s", body["errors"])

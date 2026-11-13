@@ -1,0 +1,5 @@
+# Transient artifact written by exercise_agent.py and read by verify.py.
+last_run.json
+
+# Local test-run evidence, regenerated on each verification run.
+RESULTS.md

@@ -19,6 +19,7 @@ from __future__ import annotations
 import difflib
 import logging
 
+from api_svc import llm_provider
 from api_svc.config import settings
 
 logger = logging.getLogger("dunetrace.api.diff_generation")
@@ -36,7 +37,7 @@ async def generate_real_file_content(
     them — this call's only job is "apply this known fix to this real
     file," not root-cause analysis again.
     """
-    if not (settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY):
+    if not llm_provider.llm_configured():
         return None
 
     system = (
@@ -57,30 +58,7 @@ async def generate_real_file_content(
 
     raw = ""
     try:
-        if settings.ANTHROPIC_API_KEY:
-            import anthropic
-
-            client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-            msg = await client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=_MAX_TOKENS,
-                system=system,
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-            raw = msg.content[0].text
-        else:
-            import openai
-
-            client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-            resp = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                max_tokens=_MAX_TOKENS,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-            raw = resp.choices[0].message.content
+        raw = await llm_provider.complete(system, user_prompt, max_tokens=_MAX_TOKENS)
     except Exception as exc:
         logger.warning("generate_real_file_content LLM call failed: %s", exc)
         return None

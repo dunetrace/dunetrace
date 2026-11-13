@@ -14,6 +14,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from dunetrace.models import RunState
 from dunetrace.policies import Policy, PolicyEngine, PolicyViolation
 
 
@@ -392,3 +393,126 @@ class TestPolicyViolation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestSignalPolicyDoesNotFailOpen(unittest.TestCase):
+    """A trigger="signal" policy is a safety control. It must not stop
+    enforcing because a detector was slow — cost is shed by scope instead."""
+
+    def test_cost_downgraded_detector_still_enforces(self):
+        from dunetrace.detectors import _cost_trackers, run_detectors, TIER1_DETECTORS
+
+        target = TIER1_DETECTORS[0]
+        state = RunState(run_id="r", agent_id="a", agent_version="v")
+        # One real evaluation so the detector has a genuine cost tracker.
+        run_detectors(state, detectors=[target], context="analytics")
+        tracker = _cost_trackers[target.name]
+        previous = tracker.downgraded_at
+        tracker.downgraded_at = time.monotonic()
+        try:
+            runtime = run_detectors(state, detectors=[target], context="runtime")
+            policy = run_detectors(state, detectors=[target], context="policy")
+        finally:
+            tracker.downgraded_at = previous
+
+        # "runtime" sheds the downgraded detector; "policy" must not, because
+        # shedding it silently disables a guardrail the customer configured.
+        self.assertEqual(runtime, [])
+        self.assertIsInstance(policy, list)
+
+    def test_only_referenced_detectors_run_for_a_signal_policy(self):
+        from dunetrace import Dunetrace
+
+        dt = Dunetrace(endpoint=None)
+        dt.add_policy(
+            "halt-on-loop",
+            {"trigger": "signal", "operator": "contains", "value": "TOOL_LOOP"},
+            {"type": "log"},
+        )
+        with dt.run("agent") as run:
+            run.tool_called("x", {})
+            run.tool_responded("x", success=True)
+            wanted = run._needed_signal_types
+        self.assertEqual(wanted, {"TOOL_LOOP"})
+        dt.shutdown(timeout=1)
+
+    def test_unresolvable_condition_runs_the_full_battery(self):
+        """An expression/match condition can't be resolved to failure types
+        statically — over-running is the safe direction for a safety control."""
+        from dunetrace import Dunetrace
+
+        dt = Dunetrace(endpoint=None)
+        dt.add_policy(
+            "halt",
+            {"trigger": "signal", "operator": "contains", "value": {"any": ["A", "B"]}},
+            {"type": "log"},
+        )
+        with dt.run("agent") as run:
+            run.tool_called("x", {})
+            run.tool_responded("x", success=True)
+            wanted = run._needed_signal_types
+        self.assertIsNone(wanted)
+        dt.shutdown(timeout=1)
+
+
+class TestRemotePolicyTrustBoundary(unittest.TestCase):
+    """A remote `stop` policy halts a customer's production agent. The stated
+    threat is a compromised or spoofed server doing exactly that."""
+
+    @staticmethod
+    def _remote(action_type, signature=""):
+        return {
+            "id": 7,
+            "name": "halt",
+            "agent_id": "*",
+            "condition": {"trigger": "tool_call_count", "operator": "gte", "value": 1},
+            "action": {"type": action_type},
+            "enabled": True,
+            "priority": 100,
+            "signature": signature,
+        }
+
+    def test_unverifiable_stop_is_downgraded_to_log(self):
+        """With no secret there is nothing to verify against, so an enforcing
+        remote policy is recorded rather than obeyed."""
+        engine = PolicyEngine()
+        engine.load([self._remote("stop")], secret="")
+        self.assertEqual(len(engine), 1)
+        with engine._lock:
+            self.assertEqual(engine._policies[0].action["type"], "log")
+
+    def test_unverifiable_require_approval_is_downgraded(self):
+        engine = PolicyEngine()
+        engine.load([self._remote("require_approval")], secret="")
+        with engine._lock:
+            self.assertEqual(engine._policies[0].action["type"], "log")
+
+    def test_non_enforcing_remote_policy_is_untouched(self):
+        engine = PolicyEngine()
+        engine.load([self._remote("log")], secret="")
+        with engine._lock:
+            self.assertEqual(engine._policies[0].action["type"], "log")
+
+    def test_unsigned_policy_is_rejected_when_a_secret_is_configured(self):
+        """Accepting unsigned policies made verification optional for exactly
+        the party it was meant to constrain — omit the field, be obeyed."""
+        engine = PolicyEngine()
+        engine.load([self._remote("stop", signature="")], secret="s3cret")
+        self.assertEqual(len(engine), 0)
+
+    def test_local_policies_are_never_downgraded(self):
+        """A policy the customer registered in their own process is their own
+        code and needs no signature."""
+        engine = PolicyEngine()
+        engine.add(_policy(name="local-halt", action_type="stop", policy_id=None))
+        with engine._lock:
+            self.assertEqual(engine._policies[0].action["type"], "stop")
+
+    def test_enforcing_action_set_covers_every_run_altering_action(self):
+        from dunetrace.policies import ENFORCING_ACTIONS
+
+        for action in ("stop", "require_approval", "escalate_to_human", "switch_model"):
+            self.assertIn(action, ENFORCING_ACTIONS)
+        # Purely observational actions stay allowed unverified.
+        self.assertNotIn("log", ENFORCING_ACTIONS)
+        self.assertNotIn("slow_response_pace", ENFORCING_ACTIONS)

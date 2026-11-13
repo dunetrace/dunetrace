@@ -11,14 +11,17 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from llm_test_utils import configured_llm, no_llm
 from api_svc.diff_generation import compute_unified_diff, generate_real_file_content
 
 
 class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
     async def test_returns_none_when_no_llm_key_configured(self):
-        with patch("api_svc.diff_generation.settings") as mock_settings:
-            mock_settings.ANTHROPIC_API_KEY = ""
-            mock_settings.OPENAI_API_KEY = ""
+        # Patched at the llm_provider seam, not this module's `settings`:
+        # api_svc.config loads the repo's .env at import, so patching only the
+        # local name left provider selection reading a developer's real key —
+        # and this test then made a live API call.
+        with no_llm():
             result = await generate_real_file_content("root cause", "fix it", "a.py", "old content")
         self.assertIsNone(result)
 
@@ -29,11 +32,9 @@ class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
         mock_client.messages.create = AsyncMock(return_value=mock_msg)
 
         with (
-            patch("api_svc.diff_generation.settings") as mock_settings,
+            configured_llm("anthropic"),
             patch("anthropic.AsyncAnthropic", return_value=mock_client),
         ):
-            mock_settings.ANTHROPIC_API_KEY = "sk-ant-x"
-            mock_settings.OPENAI_API_KEY = ""
             result = await generate_real_file_content(
                 "loop bug", "add a limit", "a.py", "def broken():\n    pass\n"
             )
@@ -42,11 +43,9 @@ class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_none_when_llm_call_fails(self):
         with (
-            patch("api_svc.diff_generation.settings") as mock_settings,
+            configured_llm("anthropic"),
             patch("anthropic.AsyncAnthropic", side_effect=RuntimeError("API down")),
         ):
-            mock_settings.ANTHROPIC_API_KEY = "sk-ant-x"
-            mock_settings.OPENAI_API_KEY = ""
             result = await generate_real_file_content("rc", "fix", "a.py", "old")
 
         self.assertIsNone(result)
@@ -94,32 +93,25 @@ class TestGenerateRealFileContent(unittest.IsolatedAsyncioTestCase):
         mock_client.messages.create = AsyncMock(return_value=mock_msg)
 
         with (
-            patch("api_svc.diff_generation.settings") as mock_settings,
+            configured_llm("anthropic"),
             patch("anthropic.AsyncAnthropic", return_value=mock_client),
         ):
-            mock_settings.ANTHROPIC_API_KEY = "sk-ant-x"
-            mock_settings.OPENAI_API_KEY = ""
             result = await generate_real_file_content("rc", "fix", "a.py", "def broken(): pass")
 
         self.assertEqual(result, "def fixed():\n    pass")
 
-    async def test_falls_back_to_openai_when_no_anthropic_key(self):
-        mock_choice = MagicMock()
-        mock_choice.message.content = "def fixed():\n    pass\n"
-        mock_resp = MagicMock()
-        mock_resp.choices = [mock_choice]
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = AsyncMock(return_value=mock_resp)
-
-        with (
-            patch("api_svc.diff_generation.settings") as mock_settings,
-            patch("openai.AsyncOpenAI", return_value=mock_client),
-        ):
-            mock_settings.ANTHROPIC_API_KEY = ""
-            mock_settings.OPENAI_API_KEY = "sk-oai-x"
+    async def test_uses_whichever_provider_is_configured(self):
+        """Provider selection now lives in llm_provider; this only needs to
+        prove generate_real_file_content consumes whatever text comes back."""
+        with configured_llm("anthropic", completion="def fixed():\n    pass\n"):
             result = await generate_real_file_content("rc", "fix", "a.py", "def broken(): pass")
 
         self.assertEqual(result, "def fixed():\n    pass")
+
+    async def test_returns_none_when_no_provider_configured(self):
+        with no_llm():
+            result = await generate_real_file_content("rc", "fix", "a.py", "def broken(): pass")
+        self.assertIsNone(result)
 
 
 class TestComputeUnifiedDiff(unittest.TestCase):

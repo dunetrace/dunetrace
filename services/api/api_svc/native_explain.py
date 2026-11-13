@@ -40,6 +40,46 @@ def _extract_system_prompt(events: List[dict]) -> Optional[str]:
     return None
 
 
+# How many events the prompt may describe. Sized so the formatted trace stays
+# comfortably inside the smallest context window any configured provider uses,
+# with room for the instructions, the system prompt section and the response.
+MAX_PROMPT_EVENTS = 400
+_PROMPT_EVENT_HEAD = 40  # keep the run's opening for context
+
+
+def _select_events_for_prompt(events: List[dict], focus_steps: set) -> List[dict]:
+    """At most MAX_PROMPT_EVENTS, centred on the signal.
+
+    Returns the list unchanged when it already fits. Otherwise keeps a short
+    head (how the run started) plus a window around the flagged steps, and
+    marks the gap so the model is not told a truncated trace is complete.
+    """
+    if len(events) <= MAX_PROMPT_EVENTS:
+        return events
+
+    head = events[:_PROMPT_EVENT_HEAD]
+    remaining = MAX_PROMPT_EVENTS - len(head)
+
+    focus_idx = [i for i, e in enumerate(events) if e.get("step_index", 0) in focus_steps]
+    if focus_idx:
+        centre = (focus_idx[0] + focus_idx[-1]) // 2
+    else:
+        centre = len(events) - remaining // 2  # no focus: show the end, where it failed
+    start = max(len(head), min(centre - remaining // 2, len(events) - remaining))
+    window = events[start : start + remaining]
+
+    gap = start - len(head)
+    if gap > 0:
+        head = head + [
+            {
+                "event_type": f"... {gap} further events omitted from this prompt ...",
+                "step_index": events[len(head)].get("step_index", 0),
+                "payload": {},
+            }
+        ]
+    return head + window
+
+
 def _format_events(
     events: List[dict],
     first_step: int,
@@ -52,6 +92,20 @@ def _format_events(
 
     focus_steps = set(signal_steps) if signal_steps else set()
     lines: List[str] = []
+
+    # Cap the NUMBER of events, not just each field's length. Every field was
+    # already truncated, but nothing bounded how many events were formatted, and
+    # get_run_detail's events read has no LIMIT — so a GOAL_ABANDONMENT or
+    # TOOL_LOOP run with a few thousand steps built a multi-megabyte prompt. The
+    # provider then rejected it (gpt-4o-mini's context is 128k), _call_llm
+    # raised, and the caller got "Analysis unavailable. Try again." for exactly
+    # the long, pathological runs the feature exists to explain — after being
+    # billed for the attempt.
+    #
+    # When a run is over the cap, keep the events AROUND THE SIGNAL rather than
+    # the first N: the steps the detector flagged are the ones the model needs,
+    # and a head-truncated trace drops them entirely on a late-firing signal.
+    events = _select_events_for_prompt(events, focus_steps)
 
     for e in events:
         event_type = e.get("event_type", "")

@@ -35,7 +35,7 @@ from dunetrace import Dunetrace
 dt = Dunetrace()
 
 @dt.tool                                  # auto-emits tool.called / tool.responded
-def web_search(query: str) -> list: ...   # args are transmitted as-is
+def web_search(query: str) -> list: ...   # args are redacted + capped, then transmitted
 
 @dt.trace                                 # agent_id defaults to "my_agent"
 def my_agent(question: str) -> str:
@@ -47,7 +47,7 @@ def my_agent(question: str) -> str:
 **Or with `@dt.agent` + auto-instrumentation:**
 
 ```python
-dt.init(agent_id="my-agent")   # patches openai, anthropic, httpx, requests, langchain, crewai
+dt.init(agent_id="my-agent")   # patches openai, anthropic, mistral, httpx, requests, langchain, crewai
 
 @dt.agent(model="gpt-4o")      # agent_id inherited from init()
 def run_agent(query: str) -> str:
@@ -60,7 +60,7 @@ LangChain/LangGraph and CrewAI agents need zero manual callback wiring — see [
 
 ## What it detects
 
-28 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
+34 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Detector                  | What it catches                                            | Severity    |
 | ------------------------- | ---------------------------------------------------------- | ----------- |
@@ -71,7 +71,7 @@ LangChain/LangGraph and CrewAI agents need zero manual callback wiring — see [
 | `PREMATURE_TERMINATION`   | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
 | `RUNAWAY_ITERATION`       | Step or cost ceiling crossed with no completion signal      | HIGH/CRITICAL |
 
-→ [docs/detectors.md](../../docs/detectors.md) for the full list of 28 detectors
+→ [docs/detectors.md](../../docs/detectors.md) for the full list of 34 detectors
 
 
 ## Output modes
@@ -83,6 +83,43 @@ LangChain/LangGraph and CrewAI agents need zero manual callback wiring — see [
 | Loki NDJSON           | `emit_as_json=True`                             | stdout → Promtail / Grafana Alloy                |
 | OpenTelemetry         | `otel_exporter=DunetraceOTelExporter(provider)` | Tempo, Honeycomb, Datadog, Jaeger                |
 
+
+## What leaves the process
+
+Every free-text field the SDK ships — tool args and output, LLM output,
+retrieval query/content, memory values, `input_text` and `system_prompt` — is
+**capped** at `max_field_chars` (default 8192, the same limit the OTLP ingest
+path enforces). A capped field carries `<field>_truncated: true` and
+`<field>_original_length: N` beside it; an uncapped field carries neither, so
+ordinary payloads are unchanged. Length fields such as `output_length` always
+report the real size, and `ToolCall.args_length` keeps the real length so
+`OVERSIZED_TOOL_ARGUMENTS` still fires in-path. In-path detectors read the
+capped text — the same text the server sees.
+
+Structured tool args (`tool_called` and approval requests) are also
+**redacted by key** before they are serialised: any value under
+`authorization`, `api_key`, `apikey`, `token`, `secret`, `password`, `cookie`
+or `set-cookie` becomes `"[REDACTED]"`. Matching is case-insensitive after
+normalising `-` to `_`, and a key matches when it equals an entry *or ends
+with* `_<entry>` — so `Authorization`, `X-Api-Key`, `access_token`,
+`client_secret` and `db_password` are all caught. Nested dicts and lists of
+dicts are walked; keys are kept, only values are replaced. Plain-text fields
+are capped, not redacted.
+
+```python
+dt = Dunetrace(
+    max_field_chars=4096,                 # env: DUNETRACE_MAX_FIELD_CHARS; 0 disables the cap
+    redact_keys=["x-session-id", "ssn"],  # extends the built-in denylist
+    redact=lambda args: {**args, "account": "***"},  # runs first, then the denylist
+)
+```
+
+`redact` receives a shallow copy of the args dict and must return a new dict.
+If it raises or returns a non-dict, the SDK logs a WARNING once per process,
+drops its output and continues with the built-in denylist alone — the agent is
+never blocked by its own redaction code. Policy evaluation still sees the raw
+args (a policy gating on `args.amount` needs the real value); only what is
+shipped and what in-path detectors read is redacted.
 
 ## Backend
 
@@ -132,7 +169,7 @@ dt.add_policy(
 # Inject a corrective prompt when a loop is detected
 dt.add_policy(
     name="loop fix",
-    condition={"trigger": "signal", "operator": "eq", "value": "TOOL_LOOP"},
+    condition={"trigger": "signal", "operator": "contains", "value": "TOOL_LOOP"},
     action={"type": "inject_prompt", "params": {"prompt": "Stop repeating tool calls. Summarise what you know and answer."}},
 )
 
@@ -204,4 +241,3 @@ SDK: 620 tests · MCP server: 154 tests — both run fully offline.
 - [All integration guides](../../docs/)
 - [GitHub](https://github.com/dunetrace/dunetrace)
 - [Issues](https://github.com/dunetrace/dunetrace/issues)
-

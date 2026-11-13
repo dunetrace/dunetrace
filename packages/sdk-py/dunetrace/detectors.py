@@ -27,14 +27,17 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from collections import Counter, deque
-from typing import Deque, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit as _urlsplit
 
 from dunetrace.models import (
     AgentEvent,
     EventType,
     FailureSignal,
     FailureType,
+    LlmCall,
     RunState,
     Severity,
     ToolCall,
@@ -52,6 +55,33 @@ def _scale_confidence(ratio: float) -> float:
     Applied to count/ratio detectors; binary detectors keep their static values.
     """
     return min(1.0, 0.5 + (ratio - 1.0) * 0.4)
+
+
+def _is_unmeasurable(call: "LlmCall") -> bool:
+    """True when this call's response object could not be read at all.
+
+    `instrumentation_degraded` is set by the auto-instrumentation extractors
+    (auto.py) when a response is not the shape they expect — a raw/streaming
+    envelope, a version skew, a wrapper like with_raw_response.create(). Such a
+    call carries no trustworthy finish_reason and no trustworthy output text, so
+    every detector that keys on either must exclude it rather than read the
+    fabricated defaults that used to be substituted.
+    """
+    return getattr(call, "instrumentation_degraded", None) is not None
+
+
+# The shape a call takes when instrumentation is silently broken: nothing was
+# read, but the call demonstrably happened (latency was measured). Kept here as
+# one definition because InstrumentationDegradedDetector and the vendor-side
+# fleet query (services/api/api_svc/instrumentation_health.py) must agree on it
+# — they are the in-run and cross-run views of the same condition.
+def _matches_degraded_fingerprint(call: "LlmCall") -> bool:
+    return (
+        (call.output_length or 0) == 0
+        and (call.completion_tokens or 0) == 0
+        and (call.latency_ms or 0) > 0
+        and (call.finish_reason is None or call.finish_reason == "stop")
+    )
 
 
 # ── Base ──────────────────────────────────────────────────────────────────────
@@ -171,6 +201,51 @@ class BaseDetector:
         raise NotImplementedError
 
 
+# ── OVERSIZED_TOOL_ARGUMENTS ──────────────────────────────────────────────────
+
+
+class OversizedToolArgumentsDetector(BaseDetector):
+    """
+    An agent that stuffs a very large payload into a tool call — dumping an entire
+    document or conversation into a single `args` string — is a common cost and
+    latency footgun, and often a sign the agent is using a tool as a scratchpad
+    instead of reasoning.
+
+    Tunable: MAX_ARG_LENGTH (default 10_000) — fire if any tool call's args exceeds
+    this character limit.
+    """
+
+    name = "OVERSIZED_TOOL_ARGUMENTS"
+    SEVERITY = Severity.MEDIUM
+    MAX_ARG_LENGTH = 10_000
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        for tc in state.tool_calls:
+            # args_length is the pre-truncation length, set by transports that
+            # cap the stored string. The OTLP path truncates at 8192 chars —
+            # below this detector's default threshold — so measuring len(args)
+            # alone would make this detector unreachable for OTel-ingested runs
+            # and would understate the payload wherever it did fire.
+            arg_length = tc.args_length if tc.args_length is not None else len(tc.args or "")
+            if arg_length > self.MAX_ARG_LENGTH:
+                return FailureSignal(
+                    failure_type=FailureType.OVERSIZED_TOOL_ARGUMENTS,
+                    severity=self.SEVERITY,
+                    run_id=state.run_id,
+                    agent_id=state.agent_id,
+                    agent_version=state.agent_version,
+                    step_index=tc.step_index,
+                    confidence=0.9,
+                    evidence={
+                        "step_index": tc.step_index,
+                        "tool_name": tc.tool_name,
+                        "arg_length": arg_length,
+                        "threshold": self.MAX_ARG_LENGTH,
+                    },
+                )
+        return None
+
+
 # ── TOOL_LOOP ─────────────────────────────────────────────────────────────────
 
 
@@ -286,6 +361,126 @@ class ToolThrashingDetector(BaseDetector):
                     },
                 )
         return None
+
+
+# ── SCATTERSHOT_TOOL_USE ──────────────────────────────────────────────────────
+
+
+class ScattershotToolUseDetector(BaseDetector):
+    """
+    An agent that reached for many different tools and kept reaching, without
+    converging on an answer — trying unrelated approaches rather than executing
+    a plan.
+
+    Three conditions, all required. Breadth alone is not the signal: a data
+    pipeline that calls ingest/validate/transform/enrich/persist/index/notify/
+    audit exactly once each is eight distinct tools and is working perfectly.
+
+      1. Breadth      — at least MIN_DISTINCT_TOOLS distinct tool names.
+      2. Volume       — at least MIN_TOTAL_CALLS calls, so short runs are out.
+      3. Repetition   — total/distinct at or above MIN_REPEAT_RATIO. This is
+                        what separates flailing from a one-pass workflow, and
+                        it is the condition MIN_TOTAL_CALLS was mistakenly
+                        expected to provide: because distinct <= total always
+                        holds, a total-call floor of 8 with a distinct floor of
+                        6 admits any run with two repeats, and admits a run
+                        with ZERO repeats once distinct reaches 8. The
+                        legitimate pipeline above scored 1.0 and fired.
+
+    Plus one veto: a run whose agent explicitly declared itself finished
+    (exit_reason == "final_answer") converged by definition, so it is never
+    scattershot however many tools it touched. Same veto RUNAWAY_ITERATION
+    applies, for the same reason.
+
+    Tunable: MIN_DISTINCT_TOOLS (default 6), MIN_TOTAL_CALLS (default 8),
+    MIN_REPEAT_RATIO (default 1.5), SCAN_LIMIT (default 250).
+    """
+
+    name = "SCATTERSHOT_TOOL_USE"
+    SEVERITY = Severity.MEDIUM
+    # Named MIN_, compared with >=. The previous name was MAX_DISTINCT_TOOLS
+    # while the comparison was `>=`, so `max_distinct_tools: 6` fired AT six —
+    # an operator tuning it got the opposite of what the name promised, and the
+    # class paired it with a genuine MIN_TOTAL_CALLS, which made the two read as
+    # a range when they are both floors.
+    MIN_DISTINCT_TOOLS = 6
+    MIN_TOTAL_CALLS = 8
+    MIN_REPEAT_RATIO = 1.5
+    # Cap on how many of the most recent tool calls are inspected. This detector
+    # is in TIER1_DETECTORS, so a trigger="signal" policy re-runs it once per
+    # step; an unbounded set build over the whole list makes that O(n^2) across
+    # a run and the cost is paid synchronously inside the agent. Bounding the
+    # scan keeps it flat. A run with more calls than this has long since crossed
+    # every threshold here, so the verdict is unchanged in practice — only the
+    # exact distinct_tool_count is capped, and evidence records when that
+    # happened.
+    SCAN_LIMIT = 250
+
+    def __init__(self, **overrides: object) -> None:
+        super().__init__(**overrides)
+        for attr in ("MIN_DISTINCT_TOOLS", "MIN_TOTAL_CALLS", "SCAN_LIMIT"):
+            value = getattr(self, attr)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{attr} must be a positive integer")
+        if not isinstance(self.MIN_REPEAT_RATIO, (int, float)) or self.MIN_REPEAT_RATIO < 1:
+            raise ValueError("MIN_REPEAT_RATIO must be a number >= 1")
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        # Cheapest checks first — this runs per-step under a signal policy.
+        total_calls = len(state.tool_calls)
+        if total_calls < self.MIN_TOTAL_CALLS:
+            return None
+
+        # The agent said it was done. Converged, whatever route it took.
+        if state.exit_reason == "final_answer":
+            return None
+
+        scanned = state.tool_calls[-self.SCAN_LIMIT :]
+        # `or "unknown"` because run_builder does payload.get("tool_name",
+        # "unknown"), which yields None when the key is present with a JSON null
+        # — reachable through the OTLP path. A None in this set makes the
+        # sorted() below raise TypeError, which run_detectors catches per
+        # detector, silently disabling this one for exactly those runs.
+        names = {tc.tool_name or "unknown" for tc in scanned}
+        distinct_tool_count = len(names)
+        if distinct_tool_count < self.MIN_DISTINCT_TOOLS:
+            return None
+
+        scanned_calls = len(scanned)
+        repeat_ratio = scanned_calls / distinct_tool_count
+        if repeat_ratio < self.MIN_REPEAT_RATIO:
+            return None
+
+        # Sorted only on the firing path — the list is read nowhere but the
+        # evidence dict, and the non-firing path is the overwhelmingly common one.
+        tools = sorted(names)
+        first_step = scanned[0].step_index
+        last_step = scanned[-1].step_index
+        return FailureSignal(
+            failure_type=FailureType.SCATTERSHOT_TOOL_USE,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=last_step,
+            confidence=_scale_confidence(repeat_ratio / self.MIN_REPEAT_RATIO),
+            evidence={
+                "distinct_tool_count": distinct_tool_count,
+                "tools": tools,
+                "total_calls": total_calls,
+                "repeat_ratio": round(repeat_ratio, 2),
+                "min_distinct_tools": self.MIN_DISTINCT_TOOLS,
+                "min_total_calls": self.MIN_TOTAL_CALLS,
+                "min_repeat_ratio": self.MIN_REPEAT_RATIO,
+                # A whole-run breadth finding needs a range, not a point: without
+                # these, _get_step_range() falls back to signal.step_index and
+                # the dashboard highlights the last tool call of a pattern that
+                # spans the run.
+                "first_step": first_step,
+                "last_step": last_step,
+                "scan_truncated": total_calls > self.SCAN_LIMIT,
+            },
+        )
 
 
 # ── TOOL_AVOIDANCE ─────────────────────────────────────────────────────────────
@@ -423,18 +618,81 @@ _INJECTION_PATTERNS_COMPILED = [
 class PromptInjectionDetector(BaseDetector):
     """
     Pattern-matches user input against known injection signatures, before any LLM call.
-    No tunable parameters — extend by adding entries to _INJECTION_PATTERNS_COMPILED.
+    Extend the signature set by adding entries to _INJECTION_PATTERNS_COMPILED.
+
+    Unlike every other detector in this module, this one runs **in-path** — the
+    SDK calls it inside ``dt.run()`` before the agent does any work (see
+    client.py), because the signal has to exist by the time ``run.started`` is
+    emitted. That makes its cost the caller's latency, so the scan is bounded:
+    see SCAN_HEAD_CHARS/SCAN_TAIL_CHARS.
+
+    SCAN_HEAD_CHARS / SCAN_TAIL_CHARS (default 16384 each) set how much text is
+    scanned from each end; an input at or below their sum is scanned whole, with
+    no gap. The 18 patterns cost roughly 0.3µs per character scanned, so the
+    defaults cap the scan at ~10ms — against an LLM call of 500ms or more, i.e.
+    ~2%. Lower them if you run latency-critical agents (voice, realtime) on large
+    inputs and would rather trade edge coverage for a tighter run-start; raise
+    them if inputs routinely exceed 32K characters and you want full coverage.
+
+    Unlike every other detector's tunables these are *not* settable from
+    detectors.yml — that file configures the detector worker, and this scan runs
+    in the SDK, in the customer's process, which never reads it. Set them on this
+    class (or a subclass) instead.
     """
 
     name = "PROMPT_INJECTION_SIGNAL"
     SEVERITY = Severity.CRITICAL
 
+    # Bound the in-path scan. Cost is linear in characters scanned (~0.3µs/char
+    # across the 18 patterns), so an unbounded scan makes dt.run()'s latency a
+    # function of input size — a 1 MB input (a document, a stuffed RAG context)
+    # cost ~340ms of synchronous, blocking time before the agent ran at all.
+    #
+    # The sizing goal is coverage, not a fixed microsecond budget: the cost that
+    # matters is the fraction of a real agent step, and an LLM call is 500ms+.
+    # 16K+16K caps the scan at ~10ms (~2% of one LLM call) while scanning any
+    # input up to 32K characters *in full* — which is most of them — so the
+    # head/tail split only degrades coverage for genuinely large inputs.
+    #
+    # Beyond that, head and tail are scanned because injections cluster at the
+    # edges: a prefix override ("ignore all previous instructions...") or a
+    # payload appended after legitimate content. Text between the two windows is
+    # not scanned. This is a detection *signal*, not a security boundary.
+    SCAN_HEAD_CHARS: int = 16_384
+    SCAN_TAIL_CHARS: int = 16_384
+
+    def _scan_windows(self, input_text: str) -> tuple:
+        """Return the slices of input_text to scan, and whether it was truncated.
+
+        Windows are scanned as separate strings rather than concatenated, so no
+        pattern can match across the join between head and tail and produce a
+        match that isn't in the real input.
+        """
+        head_n, tail_n = self.SCAN_HEAD_CHARS, self.SCAN_TAIL_CHARS
+        if len(input_text) <= head_n + tail_n:
+            return (input_text,), False
+        return (input_text[:head_n], input_text[-tail_n:]), True
+
     def check_input(self, input_text: str, state: RunState) -> Optional[FailureSignal]:
+        windows, truncated = self._scan_windows(input_text)
         matched = [
-            label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(input_text)
+            label
+            for label, pattern in _INJECTION_PATTERNS_COMPILED
+            if any(pattern.search(w) for w in windows)
         ]
         if not matched:
             return None
+
+        evidence = {
+            "matched_pattern_count": len(matched),
+            "matched_patterns": matched[:5],
+            "input_length": len(input_text),
+        }
+        if truncated:
+            # Tells a reader of this signal that absence of a pattern is not
+            # proof of absence in the full input.
+            evidence["scanned_chars"] = self.SCAN_HEAD_CHARS + self.SCAN_TAIL_CHARS
+            evidence["scan_truncated"] = True
 
         return FailureSignal(
             failure_type=FailureType.PROMPT_INJECTION_SIGNAL,
@@ -444,11 +702,7 @@ class PromptInjectionDetector(BaseDetector):
             agent_version=state.agent_version,
             step_index=0,
             confidence=_scale_confidence(len(matched)),
-            evidence={
-                "matched_pattern_count": len(matched),
-                "matched_patterns": matched[:5],
-                "input_length": len(input_text),
-            },
+            evidence=evidence,
         )
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
@@ -507,6 +761,52 @@ class RagEmptyRetrievalDetector(BaseDetector):
         )
 
 
+# ── EXCESSIVE_RETRIEVAL ───────────────────────────────────────────────────────
+
+
+class ExcessiveRetrievalDetector(BaseDetector):
+    """A run issues an unusually high volume of retrieval calls.
+
+    This is a volume signal, not a duplication signal: it fires on the total
+    number of retrievals in a run regardless of whether the queries repeat.
+    High retrieval volume is itself a cost/efficiency concern — an agent that
+    needs many searches to answer is often failing to ground efficiently.
+
+    Tunable: MAX_RETRIEVALS (default 8) — fire at or above this many retrievals.
+    """
+
+    name = "EXCESSIVE_RETRIEVAL"
+    SEVERITY = Severity.MEDIUM
+    MAX_RETRIEVALS = 8
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        retrieval_count = len(state.retrievals)
+        if retrieval_count < self.MAX_RETRIEVALS:
+            return None
+
+        first_step = min(retrieval.step_index for retrieval in state.retrievals)
+        last_step = max(retrieval.step_index for retrieval in state.retrievals)
+        # Scale confidence with how far the run runs past the threshold, so a
+        # 40-retrieval run ranks above one that just tips over the line.
+        confidence = min(0.95, 0.8 + 0.01 * (retrieval_count - self.MAX_RETRIEVALS))
+        return FailureSignal(
+            failure_type=FailureType.EXCESSIVE_RETRIEVAL,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=last_step,
+            confidence=confidence,
+            evidence={
+                "retrieval_count": retrieval_count,
+                "threshold": self.MAX_RETRIEVALS,
+                "indexes": sorted({retrieval.index_name for retrieval in state.retrievals}),
+                "first_step": first_step,
+                "last_step": last_step,
+            },
+        )
+
+
 # ── LLM_TRUNCATION_LOOP ───────────────────────────────────────────────────────
 
 
@@ -530,7 +830,14 @@ class LlmTruncationLoopDetector(BaseDetector):
         if len(state.llm_calls) < self.THRESHOLD:
             return None
 
-        truncated = [c for c in state.llm_calls if c.finish_reason == "length"]
+        # None (unreadable response) is deliberately not "length": we cannot
+        # claim a truncation we never observed. This detector keys solely on
+        # finish_reason with no corroborating evidence, so an unreadable call
+        # contributes nothing here and is reported by
+        # INSTRUMENTATION_DEGRADED instead.
+        truncated = [
+            c for c in state.llm_calls if c.finish_reason == "length" and not _is_unmeasurable(c)
+        ]
 
         if len(truncated) < self.THRESHOLD:
             return None
@@ -601,7 +908,15 @@ class SilentTruncationDetector(BaseDetector):
         if not llm_calls:
             return None
 
-        all_truncated = [c for c in llm_calls if c.finish_reason in self.TRUNCATION_REASONS]
+        # `None in TRUNCATION_REASONS` is False, which is the correct branch —
+        # made explicit here so it reads as a decision rather than an accident.
+        # Same reasoning as LLM_TRUNCATION_LOOP: finish_reason is this
+        # detector's only evidence, so an unreadable one is not evidence.
+        all_truncated = [
+            c
+            for c in llm_calls
+            if c.finish_reason in self.TRUNCATION_REASONS and not _is_unmeasurable(c)
+        ]
         if not all_truncated:
             return None
         # Repeated truncation is LLM_TRUNCATION_LOOP's job — don't double-fire.
@@ -997,10 +1312,20 @@ class EmptyLlmResponseDetector(BaseDetector):
     SEVERITY = Severity.HIGH
 
     def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        # `finish_reason is None` means the response was never read (see
+        # _is_unmeasurable) and must NOT be treated as a "stop". This is the
+        # exact false positive that motivated provenance: a LangGraph agent
+        # whose with_raw_response.create() returned a LegacyAPIResponse produced
+        # a fabricated ("", "stop") pair on 100% of runs, which is byte-for-byte
+        # this detector's trigger. The `== "stop"` comparison already excludes
+        # None; the explicit degraded check below covers the partial case where
+        # finish_reason was readable but the content was not.
         empty = [
             c
             for c in state.llm_calls
-            if c.finish_reason == "stop" and getattr(c, "output_length", None) == 0
+            if c.finish_reason == "stop"
+            and getattr(c, "output_length", None) == 0
+            and not _is_unmeasurable(c)
         ]
         if not empty:
             return None
@@ -1157,12 +1482,15 @@ class FirstStepFailureDetector(BaseDetector):
                 },
             )
 
+        # Same ("", "stop") fabrication risk as EMPTY_LLM_RESPONSE, and the
+        # same resolution: an unreadable response is not an empty one.
         early_empty = [
             c
             for c in state.llm_calls
             if c.step_index <= self.MAX_STEP
             and getattr(c, "output_length", None) == 0
             and c.finish_reason == "stop"
+            and not _is_unmeasurable(c)
         ]
         if early_empty:
             return FailureSignal(
@@ -1545,12 +1873,33 @@ class PrematureTerminationDetector(BaseDetector):
         if not problem_calls:
             return None
 
+        # Absence of output text has three distinct causes and only one of them
+        # is "the agent said nothing":
+        #
+        #   1. instrumentation_degraded present -> the response was never read.
+        #      INSTRUMENTATION_DEGRADED owns this run; returning None here is
+        #      correct but its silence is explained by that signal rather than
+        #      being mistaken for a clean verdict.
+        #   2. output_length > 0 with no text -> DUNETRACE_OMIT_LLM_OUTPUT_TEXT.
+        #      A deliberate operator choice, not a fault. Nothing to report.
+        #   3. genuinely empty responses -> EMPTY_LLM_RESPONSE's job.
+        #
+        # All three end in `return None` here, but they are not the same None,
+        # and conflating them is what let a broken pipeline read as a healthy
+        # agent for the entire duration of the incident this comment documents.
         llm_responses = [
             e
             for e in state.events
             if e.event_type == EventType.LLM_RESPONDED and e.payload.get("output")
         ]
         if not llm_responses:
+            if any(_is_unmeasurable(c) for c in state.llm_calls):
+                logger.debug(
+                    "%s: no readable completion text on run %s — instrumentation "
+                    "degraded, see INSTRUMENTATION_DEGRADED",
+                    self.name,
+                    state.run_id,
+                )
             return None
         last_llm_step = max(e.step_index for e in llm_responses)
 
@@ -2411,8 +2760,14 @@ class RunawayIterationDetector(BaseDetector):
     regardless of step count or cost. Absent that, it falls back to scanning
     the last LOOKBACK_MESSAGES llm.responded outputs for completion language
     (final answer markers, "task complete", etc.) — the same kind of raw-text
-    scan PREMATURE_TERMINATION/UNREAD_TOOL_ERROR already do, always available
-    since llm.responded's output text is not optional.
+    scan PREMATURE_TERMINATION/UNREAD_TOOL_ERROR already do — but that text is
+    OPTIONAL, not guaranteed. It is absent when the caller sets
+    DUNETRACE_OMIT_LLM_OUTPUT_TEXT (a deliberate bandwidth/privacy choice) and
+    when instrumentation could not read the response at all. Absence therefore
+    means "no completion signal was observable", never "no completion signal was
+    given" — reading it the latter way makes this detector fire on runs it
+    cannot actually assess, which is why an unmeasurable run raises
+    INSTRUMENTATION_DEGRADED instead.
 
     Fires HIGH when either the step or cost ceiling is crossed with no
     completion signal; CRITICAL when both are crossed simultaneously.
@@ -2464,6 +2819,31 @@ class RunawayIterationDetector(BaseDetector):
             for e in state.events
             if e.event_type == EventType.LLM_RESPONDED and e.payload.get("output")
         ]
+
+        # This detector fails in the OPPOSITE direction from EMPTY_LLM_RESPONSE:
+        # it fires on the ABSENCE of completion language, so unreadable text
+        # produces a false positive rather than a false negative. A run whose
+        # text we never had is a run whose completion signal we cannot assess,
+        # and "could not assess" must not be reported as "no completion signal
+        # was given" — that is the false docstring this class used to carry.
+        #
+        # Two ways the text can be missing without the agent doing anything
+        # wrong: instrumentation could not read the response, or the operator
+        # set DUNETRACE_OMIT_LLM_OUTPUT_TEXT. Both leave llm.responded events
+        # present but output-free, so both are caught here.
+        responded = [e for e in state.events if e.event_type == EventType.LLM_RESPONDED]
+        if responded and not llm_outputs:
+            logger.debug(
+                "%s: %d llm.responded event(s) on run %s carry no output text — "
+                "cannot assess completion language, so not firing. Either "
+                "DUNETRACE_OMIT_LLM_OUTPUT_TEXT is set or instrumentation is "
+                "degraded (see INSTRUMENTATION_DEGRADED).",
+                self.name,
+                len(responded),
+                state.run_id,
+            )
+            return None
+
         recent = llm_outputs[-self.LOOKBACK_MESSAGES :]
         if any(self._contains_completion_pattern(e.payload["output"]) for e in recent):
             return None  # a completion signal exists — not runaway
@@ -2846,14 +3226,1827 @@ class DelegationLoopDetector(BaseDetector):
         )
 
 
+# Human decision notes attached to an approval (Capability 2). A note is written
+# only by a caller holding the `approve` scope — a credential the agent process
+# deliberately does not have — so it is the highest-trust text in a run: neither
+# the model nor any tool can put words there.
+#
+# Harvested from state.events rather than a typed RunState field because approval
+# events have no typed view; build_run_state() puts every event in state.events,
+# so this is the one channel that works identically in-path and server-side.
+# Read defensively: payload is Dict[str, Any] with no per-type validation, and a
+# malformed approval event must never turn a detector into a raising detector.
+#
+# BOTH terminal events carry notes. A grant note grounds a value just as
+# legitimately as a deny note ("approved — use CUST_8834 going forward").
+_APPROVAL_NOTE_EVENTS = (EventType.APPROVAL_DENIED, EventType.APPROVAL_GRANTED)
+
+
+def _approval_blocked_calls(state: "RunState") -> set:
+    """Indices of tool calls an approval gate PREVENTED from running.
+
+    RunContext.tool_called appends the ToolCall and only then blocks on the
+    human, so a denied call is left in state.tool_calls with success=None and no
+    output — shaped exactly like a call whose response nobody instrumented. A
+    detector that cannot tell the two apart reports the agent doing the thing the
+    approval gate stopped it from doing. That is a false positive on the run
+    where the control WORKED, which is the most expensive kind there is.
+
+    Matching mirrors tool_responded's back-fill: walk terminal approval events in
+    order and claim, for each, the latest not-yet-claimed ToolCall with the same
+    name at or before that event's step and still lacking an outcome. Deliberately
+    not an arithmetic offset — the gate emits at the gated call's step + 1 today,
+    and pinning that number would make this quietly wrong the day emission moves.
+
+    Timeout blocks too: fail-closed means the tool did not run.
+    """
+    terminal = (EventType.APPROVAL_DENIED, EventType.APPROVAL_TIMEOUT)
+    blocked: set = set()
+    for ev in getattr(state, "events", None) or []:
+        if getattr(ev, "event_type", None) not in terminal:
+            continue
+        payload = getattr(ev, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        tool_name = payload.get("tool_name")
+        if not isinstance(tool_name, str):
+            continue
+        ev_step = getattr(ev, "step_index", 0) or 0
+        for i in range(len(state.tool_calls) - 1, -1, -1):
+            if i in blocked:
+                continue
+            tc = state.tool_calls[i]
+            # STRICTLY before the gate event, not <=. tool_called appends the
+            # ToolCall, then emits tool.called (which advances the step), then
+            # gates — so a gated call always sits at a lower step than its own
+            # terminal approval event. A retry issued from the except block
+            # lands at the SAME step as that event and matches everything else
+            # about the pattern (same tool name, success still None because
+            # tool_responded hasn't run yet), so <= claimed the retry instead of
+            # the call that was actually blocked — silently inverting the
+            # exclusion and leaving the real blocked call reported.
+            if tc.tool_name == tool_name and (tc.step_index or 0) < ev_step and tc.success is None:
+                blocked.add(i)
+                break
+    return blocked
+
+
+def _approval_notes(state: "RunState") -> List[Tuple[int, str]]:
+    """(step_index, note) for every human decision note in this run, in order.
+
+    RUN-SCOPED, and that is a real limitation rather than an implementation
+    detail: RunState.events holds only this run's events, so a note issued in run
+    N cannot ground or warrant anything in run N+1. The prescribed idiom is to
+    catch ApprovalDenied and retry inside the same run, which keeps the note in
+    scope. An agent that ends the run on denial and retries as a NEW run gets its
+    corrected behaviour flagged by these same detectors — see the cross-run
+    extension note in docs/approvals.md. Same shape as UNGROUNDED_DESTINATION's
+    cross-run memory taint, and it belongs with that work, not here.
+    """
+    out: List[Tuple[int, str]] = []
+    for ev in getattr(state, "events", None) or []:
+        if getattr(ev, "event_type", None) not in _APPROVAL_NOTE_EVENTS:
+            continue
+        payload = getattr(ev, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        note = payload.get("note")
+        if isinstance(note, str) and note.strip():
+            out.append((getattr(ev, "step_index", 0) or 0, note))
+    return out
+
+
+# ── UNGROUNDED_DESTINATION ────────────────────────────────────────────────────
+#
+# Shared extraction helpers. These deliberately do NOT replace
+# ToolArgumentFabricationDetector's own _try_parse_args/_collect_leaf_texts, even
+# though the parsing half overlaps: that detector is calibrated and live, and
+# re-pointing it at shared code — however behaviour-preserving it looks — is a
+# regression risk taken for style. The duplication is ~20 lines and bounded.
+
+# Multi-label public suffixes. The real Public Suffix List has ~9,000 entries and
+# needs periodic refreshes; the core SDK has zero required dependencies, so it
+# cannot carry one. This bundled subset covers the exfiltration-relevant tail:
+# country-code second-levels, and the free shared-hosting providers an attacker
+# can stand a destination up on in minutes.
+#
+# Incompleteness degrades safely and cannot cause a missed detection, because
+# GROUNDING never consults this table — grounding compares full hostnames. It is
+# used only for (a) allowlist parenting and (b) novelty-baseline keys, where a
+# missing entry just makes the allowlist less generous and the baseline key more
+# specific. Both fail toward firing, not toward silence.
+_MULTI_LABEL_SUFFIXES = frozenset(
+    {
+        "co.uk",
+        "org.uk",
+        "ac.uk",
+        "gov.uk",
+        "me.uk",
+        "net.uk",
+        "com.au",
+        "net.au",
+        "org.au",
+        "edu.au",
+        "gov.au",
+        "co.jp",
+        "or.jp",
+        "ne.jp",
+        "ac.jp",
+        "go.jp",
+        "co.nz",
+        "co.za",
+        "co.in",
+        "co.kr",
+        "com.br",
+        "com.mx",
+        "com.cn",
+        "com.sg",
+        "com.hk",
+        "com.tw",
+        "com.tr",
+        "com.ar",
+        "com.pl",
+        "github.io",
+        "gitlab.io",
+        "pages.dev",
+        "workers.dev",
+        "web.app",
+        "firebaseapp.com",
+        "vercel.app",
+        "netlify.app",
+        "herokuapp.com",
+        "azurewebsites.net",
+        "blob.core.windows.net",
+        "s3.amazonaws.com",
+        "r2.dev",
+        "trycloudflare.com",
+        "ngrok.io",
+        "ngrok-free.app",
+        "glitch.me",
+        "repl.co",
+        "replit.dev",
+        "surge.sh",
+        "onrender.com",
+        "fly.dev",
+        "cloudfunctions.net",
+        "run.app",
+        "appspot.com",
+    }
+)
+
+# Last labels accepted for bare-domain extraction. Only consulted when
+# bare_domain is explicitly enabled (it is off by default) — a bare-domain regex
+# with no TLD gate matches "report.pdf", "v1.2.3" and "obj.method".
+_COMMON_TLDS = frozenset(
+    {
+        "com",
+        "net",
+        "org",
+        "io",
+        "co",
+        "ai",
+        "app",
+        "dev",
+        "cloud",
+        "sh",
+        "me",
+        "info",
+        "biz",
+        "xyz",
+        "top",
+        "site",
+        "online",
+        "test",
+        "example",
+        "uk",
+        "de",
+        "fr",
+        "nl",
+        "eu",
+        "us",
+        "ca",
+        "au",
+        "jp",
+        "cn",
+        "in",
+        "br",
+        "ru",
+        "ch",
+        "se",
+        "no",
+        "fi",
+        "it",
+        "es",
+        "pl",
+        "tr",
+        "za",
+        "mx",
+        "kr",
+    }
+)
+
+_DEST_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]*[\w-]\b")
+_DEST_URL_RE = re.compile(r"\bhttps?://[^\s\"'<>\\)\]}]+", re.IGNORECASE)
+_DEST_BARE_DOMAIN_RE = re.compile(
+    r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b", re.IGNORECASE
+)
+
+# Memory write sources an attacker can reach. Same vocabulary MEMORY_POISONING
+# uses (see MemoryPoisonedDetector._UNTRUSTED_SOURCES) — kept as its own constant
+# so neither detector's calibration can silently move the other's.
+_UNTRUSTED_MEMORY_SOURCES = frozenset({"retrieval", "tool_output", "external"})
+
+
+def _normalize_host(host: str) -> str:
+    """Lowercase, strip userinfo/port/trailing dot, and IDNA-normalize a hostname.
+
+    IDNA folding is stdlib (`str.encode("idna")`) and collapses a homograph-
+    adjacent evasion class for free. It raises on plenty of real-world input
+    (over-long labels, empty labels), so it is strictly best-effort.
+    """
+    h = host.strip().strip(".").lower()
+    if "@" in h:  # userinfo
+        h = h.rsplit("@", 1)[1]
+    if h.startswith("["):  # IPv6 literal
+        return h.split("]", 1)[0] + "]"
+    if ":" in h:
+        h = h.split(":", 1)[0]
+    # str.isascii() is a C-level flag check; the equivalent
+    # `any(ord(c) > 127 for c in h)` is a Python-level loop per host and showed
+    # up in profiling on args carrying hundreds of candidates.
+    if not h.isascii():
+        try:
+            h = h.encode("idna").decode("ascii")
+        except Exception:
+            pass
+    return h
+
+
+def _registrable_domain(host: str) -> str:
+    """eTLD+1 for a normalized host, using the bundled suffix table.
+
+    Allowlist parenting and novelty keys only — never grounding. See the
+    _MULTI_LABEL_SUFFIXES comment for why that distinction is load-bearing.
+    """
+    labels = host.split(".")
+    if len(labels) < 3:
+        return host
+    if ".".join(labels[-2:]) in _MULTI_LABEL_SUFFIXES:
+        return ".".join(labels[-3:])
+    if ".".join(labels[-3:]) in _MULTI_LABEL_SUFFIXES:
+        return ".".join(labels[-4:]) if len(labels) >= 4 else host
+    return ".".join(labels[-2:])
+
+
+def _host_in_allowlist(host: str, allowlist) -> bool:
+    """Label-aware suffix match: `corp.com` covers `mail.corp.com` but NOT
+    `evilcorp.com`. A plain endswith() would let an attacker register the latter
+    and inherit the allowlist entry."""
+    h = host.lower()
+    for entry in allowlist or ():
+        e = str(entry).strip().lower().lstrip(".")
+        if not e:
+            continue
+        if h == e or h.endswith("." + e):
+            return True
+    return False
+
+
+def _parse_tool_args(args_text: str):
+    """JSON first, then Python literal — the Python SDK emits str(dict) and the
+    TS SDK emits JSON.stringify. Returns None when neither parses."""
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            return parser(args_text)
+        except Exception:
+            continue
+    return None
+
+
+def _walk_arg_strings(value, max_depth: int = 12, max_nodes: int = 5000) -> List[Tuple[str, str]]:
+    """Yield (path, text) for every string leaf of a parsed args structure.
+
+    Values only, never keys — a key named "email" is schema, not data. Non-string
+    leaves are skipped rather than stringified: an int can never be a
+    destination, and stringifying it only adds noise for the regexes to chew on.
+
+    Bounded by depth AND node count. This runs inside the user's agent process
+    on the in-path path, so a deeply nested or merely enormous payload must
+    degrade to partial extraction, never to a RecursionError or a hang.
+    """
+    out: List[Tuple[str, str]] = []
+    remaining = [max_nodes]
+
+    def walk(node, path: str, depth: int) -> None:
+        if remaining[0] <= 0 or depth > max_depth:
+            return
+        remaining[0] -= 1
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}" if path else str(k), depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]", depth + 1)
+        elif isinstance(node, (set, frozenset)):
+            # Sets have no stable iteration order; sort so arg_path and the
+            # chosen candidate are deterministic across runs and processes.
+            for i, v in enumerate(sorted(node, key=repr)):
+                walk(v, f"{path}[{i}]", depth + 1)
+        elif isinstance(node, str):
+            out.append((path or "<root>", node))
+
+    walk(value, "", 0)
+    return out
+
+
+class UngroundedDestinationDetector(BaseDetector):
+    """
+    A tool call sends data to a destination — an email address, a URL host, a
+    bare domain — that does not appear anywhere in the run's own trusted input
+    surface. The actuation signature of agent data exfiltration: after a
+    successful injection, the agent emails `attacker@evil.test`, an address the
+    legitimate task never mentioned.
+
+    PROVENANCE-BASED, NOT NOVELTY-BASED, and that is the whole design. An
+    open-destination agent (a support agent emailing an ever-new customer every
+    run) makes per-destination history worthless — every legitimate run contains
+    a destination never seen before. So the default mode never asks "have I seen
+    this destination before"; it asks "did THIS RUN's own trusted inputs contain
+    this string". A support agent whose CRM lookup returned the customer's
+    address is silent by construction, forever, no matter how many new customers
+    it writes to.
+
+    Three checks, in order:
+
+    1. EXTRACT destination candidates from each tool call's args, recursing
+       through nested structures (values only, never keys), bounded by depth and
+       node count.
+    2. GROUNDING. Is the destination present in the run's trusted-input surface?
+       Grounded → silent. The surface is enumerated in _partition_surfaces();
+       the deliberate exclusion is LLM output and the agent's own earlier tool
+       args, because grounding on the model's own text is circular — an injected
+       model would emit the destination and thereby ground it.
+    3. TAINT. Does the ungrounded destination appear in attacker-controllable
+       content: an untrusted-source memory value, or a content block carrying an
+       injection marker?
+
+    CONDITIONAL DEMOTION resolves the conflict at the heart of this. Tool output
+    and retrieval content are simultaneously the legitimate way a destination
+    enters a run (a CRM lookup returns the customer's email) and the attacker's
+    primary injection channel (a poisoned document carries theirs). A block that
+    matches an injection marker is therefore REMOVED from the grounded surface
+    and MOVED to the taint surface. Clean blocks ground normally. The same rule
+    applies to the user's own input when the run carries a PROMPT_INJECTION
+    signal. One rule, three channels.
+
+    Severity: HIGH when ungrounded. CRITICAL when ungrounded AND tainted — the
+    difference between "this address came from nowhere I can see" and "this
+    address came from content an attacker controls".
+
+    Alert wording is deliberately "verify this destination", never "you are
+    breached". The commonest false positive is a destination that arrived
+    through instrumentation this run didn't capture, and an alert that overstates
+    it teaches operators to ignore the detector.
+
+    Cross-run taint (T6): a destination planted in run N's memory and read back
+    in run N+2 is ungrounded in N+2 but has no in-run taint source, because
+    `memory.read` carries only a key — the SDK never sees the value that came
+    back, so there is nothing to reconstruct. evaluate_cross_run_memory_taint()
+    closes that, fed by the worker from prior `memory.written` events for the
+    same agent and key. Deferred and NOT implemented: taint from an injection
+    signal on an ancestor run. Ancestor signals are derived, not ingested, so
+    whether the parent's signals exist when the child is processed depends on
+    poll ordering — which would make this detector's severity nondeterministic.
+    Sequential runs sharing a memory store are also not in a parent_run_id chain
+    at all, so an ancestor walk would not have covered the memory case anyway.
+
+    In-path use: this detector is in TIER1_DETECTORS, so a trigger="signal"
+    policy can stop a send BEFORE it executes (RunContext.tool_called appends the
+    call and evaluates policies before the tool body runs). Two attributes exist
+    for that path and matter only there: TOOL_NAME_SCOPE limits which tools are
+    scanned, and MAX_SCAN_NS is a hard wall-clock abort that returns None rather
+    than adding latency to the agent. Degradation is prevent → detect, never
+    detect → nothing: the server-side instance runs unscoped with a far larger
+    budget and still catches whatever the in-path pass skipped.
+
+    Novelty mode (MODE="provenance+novelty") is a secondary, per-agent opt-in for
+    CLOSED-destination agents (billing, internal reporting) where history
+    genuinely defines normal. It evaluates only destinations that PASSED
+    grounding, so it can never double-fire with provenance mode, and it needs a
+    server-supplied baseline — the in-path instance has no database and stays
+    provenance-only regardless of config.
+
+    Known limit: taint matching is verbatim-string. A destination the agent
+    ASSEMBLES from fragments ("email the user at the domain in field X") never
+    appears whole in any taint source, so it stays HIGH rather than escalating to
+    CRITICAL. Encoded destinations are the same class. Out of scope — that is
+    what approval policies on send-class tools are for.
+
+    Tunable: CANDIDATE_TYPES, ALLOWLISTED_DOMAINS, MODE, MIN_BASELINE_RUNS,
+    MAX_CANDIDATES_PER_RUN, MAX_DEPTH, MAX_NODES, MAX_SCAN_NS, TOOL_NAME_SCOPE,
+    SEND_TOOL_PATTERNS, CASE_SENSITIVE.
+    """
+
+    name = "UNGROUNDED_DESTINATION"
+    SEVERITY = None  # computed per-signal: MEDIUM | HIGH | CRITICAL
+
+    CANDIDATE_TYPES = ["email", "url"]  # + "bare_domain" (off: FP-prone, see module notes)
+    ALLOWLISTED_DOMAINS: List[str] = []
+    MODE = "provenance"  # "provenance" | "provenance+novelty"
+    MIN_BASELINE_RUNS = 20  # matches detector_svc/db.py::_MIN_BASELINE_RUNS
+    MAX_CANDIDATES_PER_RUN = 50
+    MAX_DEPTH = 12
+    MAX_NODES = 5000
+    # Hard wall-clock abort. Generous by default (server-side, off the agent's
+    # critical path); the TIER1 instance is constructed with the 1ms in-path
+    # budget. Exceeding it returns None — see the fail-open note in the docstring.
+    MAX_SCAN_NS = 50_000_000
+    # Total trusted+taint content this detector will scan. Above it the run is
+    # skipped entirely (fail open) rather than evaluated against a truncated
+    # corpus — see the guard in on_run_completion for why truncation is unsafe.
+    # The TIER1 instance is constructed with a much tighter in-path value.
+    MAX_SURFACE_CHARS = 20_000_000
+    # Longest tool-args string parsed structurally. Above it the args are scanned
+    # as raw text, truncated to this length — see the guard's comment for why
+    # truncating args is safe in a way truncating the surface is not.
+    MAX_ARGS_CHARS = 1_000_000
+    # None = scan every tool. A list of substrings limits scanning to
+    # destination-bearing tools, which is all that matters for prevention.
+    TOOL_NAME_SCOPE: Optional[List[str]] = None
+    SEND_TOOL_PATTERNS = [
+        "send",
+        "email",
+        "mail",
+        "message",
+        "post",
+        "publish",
+        "upload",
+        "webhook",
+        "http",
+        "request",
+        "fetch",
+        "notify",
+        "share",
+    ]
+    CASE_SENSITIVE = False
+
+    # Injection markers for conditional demotion. Intentionally the union of
+    # RETRIEVED_CONTENT_INJECTION's and MEMORY_POISONING's unambiguous override
+    # signatures — demotion should be at least as sensitive as either detector,
+    # since a block either of them would flag must not be allowed to ground.
+    DEMOTION_PHRASES = [
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "ignore prior instructions",
+        "ignore the above instructions",
+        "disregard previous instructions",
+        "disregard all previous instructions",
+        "disregard prior instructions",
+        "disregard the above",
+        "forget previous instructions",
+        "forget all previous instructions",
+        "forget everything above",
+        "your new task is",
+        "you should now",
+        "override safety",
+        "bypass safety",
+        "bypass your restrictions",
+        "jailbreak",
+        "dan mode",
+    ]
+    _DEMOTION_ROLE_RE = re.compile(r"(?:^|\n)\s*(system|assistant)\s*:", re.IGNORECASE)
+    _DEMOTION_DELIM_RE = re.compile(
+        r"\[/?INST\]|<<SYS>>|<</SYS>>|<\|im_start\|>|<\|system\|>|###\s*system",
+        re.IGNORECASE,
+    )
+
+    # ── Extraction ───────────────────────────────────────────────────────────
+
+    # Cheap necessary conditions for the two structural regexes. A substring scan
+    # of a pre-lowered string is memchr-fast (~37µs per 100KB); the equivalent
+    # IGNORECASE regex is ~2.2ms. Since a regex match is impossible unless its
+    # anchor text is present, gating on these is semantics-preserving and turns
+    # the dominant cost into a rounding error on the overwhelmingly common
+    # no-marker path. (An alternation regex over the phrase list was measured at
+    # ~25ms per 100KB — 40x slower than the plain loop. Do not "optimize" this
+    # back into one pattern.)
+    _ROLE_HINTS = ("system", "assistant")
+    _DELIM_HINTS = ("[inst", "<<sys", "</sys", "<|im", "<|system", "###")
+
+    def _phrase_hints(self):
+        """First token of each phrase — a necessary condition for that phrase, so
+        their union is a necessary condition for the whole list. DERIVED, not
+        hardcoded: DEMOTION_PHRASES is a tunable, and a hardcoded hint set would
+        silently stop matching an operator's added phrases."""
+        key = tuple(self.DEMOTION_PHRASES or ())
+        cached = getattr(self, "_phrase_hints_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        hints = tuple({(p.split()[0].lower() if p.split() else p.lower()) for p in key})
+        self._phrase_hints_cache = (key, hints)
+        return hints
+
+    def _demotion_marker(self, text: str) -> Optional[str]:
+        low = text if self.CASE_SENSITIVE else text.lower()
+
+        if any(h in low for h in self._phrase_hints()):
+            for phrase in self.DEMOTION_PHRASES:
+                needle = phrase if self.CASE_SENSITIVE else phrase.lower()
+                if needle in low:
+                    return phrase
+
+        if any(h in low for h in self._ROLE_HINTS) and self._DEMOTION_ROLE_RE.search(text):
+            return "embedded_role_marker"
+        if any(h in low for h in self._DELIM_HINTS) and self._DEMOTION_DELIM_RE.search(text):
+            return "instruction_delimiter"
+        return None
+
+    def _destinations_in(self, text: str) -> List[Tuple[str, str, str]]:
+        """(destination, destination_type, host) for every candidate in `text`.
+
+        Emails keep the full address as the match key — `a+x@corp.com` and
+        `a@corp.com` route to the same mailbox but are different destinations to
+        a reviewer, and collapsing them would let a tagged address inherit an
+        untagged one's grounding.
+        """
+        found: List[Tuple[str, str, str]] = []
+        types = set(self.CANDIDATE_TYPES or ())
+
+        if "email" in types:
+            for m in _DEST_EMAIL_RE.findall(text):
+                addr = m.lower()
+                found.append((addr, "email", _normalize_host(addr.rsplit("@", 1)[1])))
+
+        if "url" in types:
+            for raw in _DEST_URL_RE.findall(text):
+                try:
+                    host = _urlsplit(raw.rstrip(".,;")).hostname or ""
+                except Exception:
+                    host = ""
+                if not host:
+                    continue
+                h = _normalize_host(host)
+                if h:
+                    found.append((h, "url", h))
+
+        if "bare_domain" in types:
+            # Emails and URLs already consumed their hosts; strip them so the
+            # same host isn't reported twice under two types.
+            residue = _DEST_EMAIL_RE.sub(" ", text)
+            residue = _DEST_URL_RE.sub(" ", residue)
+            for raw in _DEST_BARE_DOMAIN_RE.findall(residue):
+                h = _normalize_host(raw)
+                if not h or "." not in h:
+                    continue
+                if h.rsplit(".", 1)[1] not in _COMMON_TLDS:
+                    continue
+                found.append((h, "bare_domain", h))
+
+        return found
+
+    def _in_scope(self, tool_name: str) -> bool:
+        if self.TOOL_NAME_SCOPE is None:
+            return True
+        name = tool_name if self.CASE_SENSITIVE else tool_name.lower()
+        return any(str(p).lower() in name for p in self.TOOL_NAME_SCOPE)
+
+    def _is_send_tool(self, tool_name: str) -> bool:
+        name = tool_name if self.CASE_SENSITIVE else tool_name.lower()
+        return any(str(p).lower() in name for p in self.SEND_TOOL_PATTERNS)
+
+    # ── Grounded / taint surfaces ────────────────────────────────────────────
+
+    def _input_is_injected(self, state: RunState) -> Optional[str]:
+        """True when the run's own input carries an injection signal.
+
+        Two sources because the two paths differ: server-side the SDK's
+        precomputed evidence rides on the run.started payload; in-path it may not
+        be attached yet, so the marker vocabulary is also applied directly.
+        """
+        for e in state.events:
+            if e.event_type == EventType.RUN_STARTED and (e.payload or {}).get("injection_signal"):
+                return "injection_signal"
+        if state.input_text:
+            return self._demotion_marker(state.input_text)
+        return None
+
+    def _partition_surfaces(self, state: RunState):
+        """Split run content into (grounded_texts, taint_blocks, surfaces_used).
+
+        Grounded — and why each is trusted:
+          input_text     the task the principal actually asked for; this IS intent
+          system_prompt  operator-authored config (fixed archive addresses etc.)
+          tool output    a value the SYSTEM returned; the entry that keeps
+                         open-destination agents silent
+          retrieval      same argument: corpus data the system supplied
+          memory value   written earlier from a channel the attacker can't reach
+          approval note  what a human wrote when deciding an approval; the only
+                         text in a run that neither the model nor a tool can
+                         reach, so it is never demoted
+
+        Excluded, deliberately:
+          llm output     circular — an injected model would ground itself
+          earlier args   circular for the same reason
+          untrusted mem  that's the taint set
+          tool names     labels, not destinations
+        """
+        grounded: List[str] = []
+        taint: List[dict] = []
+        used: List[str] = []
+
+        injected_input = self._input_is_injected(state)
+        if state.input_text:
+            if injected_input:
+                taint.append(
+                    {
+                        "kind": "user_input",
+                        "text": state.input_text,
+                        "step_index": 0,
+                        "matched_marker": injected_input,
+                    }
+                )
+            else:
+                grounded.append(state.input_text)
+                used.append("input_text")
+
+        if state.system_prompt:
+            grounded.append(state.system_prompt)
+            used.append("system_prompt")
+
+        # Human decision notes. Highest-trust text in the run — written by a
+        # holder of the `approve` scope, which the agent process does not have —
+        # so they are NOT subject to conditional demotion, for the same reason
+        # system_prompt isn't: the injection channel this detector models is
+        # content the agent ingests, and a note arrives out-of-band from a
+        # credential no injected model can reach.
+        #
+        # Without this, the deny-note idiom fires our own detector on the fixed
+        # behaviour: a human corrects "wrong Chen — it's sarah.chen@example.com",
+        # the agent retries with exactly that address, and the retry is
+        # ungrounded because the correction lives in an approval event nothing
+        # was reading. That false positive lands on the run where the human was
+        # obeyed, which is the worst possible place to spend operator trust.
+        for _step, note in _approval_notes(state):
+            grounded.append(note)
+            if "approval_note" not in used:
+                used.append("approval_note")
+
+        for tc in state.tool_calls:
+            if not tc.output:
+                continue
+            marker = self._demotion_marker(tc.output)
+            if marker:
+                taint.append(
+                    {
+                        "kind": "tool_output",
+                        "text": tc.output,
+                        "tool_name": tc.tool_name,
+                        "step_index": tc.step_index,
+                        "matched_marker": marker,
+                    }
+                )
+            else:
+                grounded.append(tc.output)
+                if "tool_output" not in used:
+                    used.append("tool_output")
+
+        for r in state.retrievals:
+            if not r.content:
+                continue
+            marker = self._demotion_marker(r.content)
+            if marker:
+                taint.append(
+                    {
+                        "kind": "retrieval",
+                        "text": r.content,
+                        "index_name": r.index_name,
+                        "step_index": r.step_index,
+                        "matched_marker": marker,
+                    }
+                )
+            else:
+                grounded.append(r.content)
+                if "retrieval" not in used:
+                    used.append("retrieval")
+
+        reads = [m for m in state.memory_events if m.op == "read"]
+        for m in state.memory_events:
+            if m.op != "written" or not m.value:
+                continue
+            if m.source in _UNTRUSTED_MEMORY_SOURCES:
+                taint.append(
+                    {
+                        "kind": "memory_write",
+                        "text": m.value,
+                        "memory_key": m.key,
+                        "memory_source": m.source,
+                        "step_index": m.step_index,
+                        "read_back": any(
+                            r.key == m.key and r.step_index >= m.step_index for r in reads
+                        ),
+                        "matched_marker": self._demotion_marker(m.value),
+                    }
+                )
+            else:
+                grounded.append(m.value)
+                if "memory" not in used:
+                    used.append("memory")
+
+        return grounded, taint, used
+
+    def _contains(self, needle: str, haystack: str) -> bool:
+        if self.CASE_SENSITIVE:
+            return needle in haystack
+        return needle.lower() in haystack.lower()
+
+    # ── Cross-run taint (T6), fed by the worker ──────────────────────────────
+
+    def evaluate_cross_run_memory_taint(self, destination: str, prior_writes: List[dict]):
+        """Taint from a PRIOR run's memory write, for a key this run read back.
+
+        `prior_writes` is supplied by the detector worker (see
+        detector_svc/db.py::fetch_memory_writes) as dicts with key/value/source/
+        run_id/step_index. Pure and injected, so it unit-tests without a database
+        — the same shape DelegationLoopDetector.evaluate_delegation_cycle uses.
+
+        Kept off on_run_completion deliberately: the in-path instance has no
+        database, and a detector that silently needs one would be a trap.
+        """
+        for w in prior_writes or ():
+            value = w.get("value") or ""
+            if w.get("source") not in _UNTRUSTED_MEMORY_SOURCES:
+                continue
+            if not self._contains(destination, value):
+                continue
+            return {
+                "kind": "memory_write",
+                "memory_key": w.get("key"),
+                "memory_source": w.get("source"),
+                "read_back": True,  # the worker only queries keys this run read
+                "cross_run": True,
+                "origin_run_id": w.get("run_id"),
+                "step_index": w.get("step_index"),
+                "matched_marker": self._demotion_marker(value),
+                "signal_id": None,  # reserved for deferred ancestor-signal taint
+            }
+        return None
+
+    def collect_destinations(self, state: RunState):
+        """(grounded, ungrounded) destination tuples for this run, as
+        [(destination, destination_type, host), ...].
+
+        Server-side helper for the novelty pass and the baseline write. A pure
+        function of RunState rather than state stashed on the instance during
+        on_run_completion(): detector instances are reused across runs, so a
+        stashed list would leak one run's destinations into the next — and into
+        another agent's, once the worker is sharded.
+        """
+        grounded_texts, _taint, _used = self._partition_surfaces(state)
+        corpus = "\n".join(grounded_texts)
+        corpus_cmp = corpus if self.CASE_SENSITIVE else corpus.lower()
+
+        grounded: List[Tuple[str, str, str]] = []
+        ungrounded: List[Tuple[str, str, str]] = []
+        seen: set = set()
+        for tc in state.tool_calls:
+            if not self._in_scope(tc.tool_name):
+                continue
+            parsed = _parse_tool_args(tc.args)
+            leaves = (
+                _walk_arg_strings(parsed, self.MAX_DEPTH, self.MAX_NODES)
+                if parsed is not None
+                else [("<raw>", tc.args)]
+            )
+            for _path, text in leaves:
+                for dest, dtype, host in self._destinations_in(text):
+                    if dest in seen:
+                        continue
+                    seen.add(dest)
+                    if _host_in_allowlist(host, self.ALLOWLISTED_DOMAINS):
+                        continue
+                    dest_cmp = dest if self.CASE_SENSITIVE else dest.lower()
+                    (grounded if dest_cmp in corpus_cmp else ungrounded).append((dest, dtype, host))
+        return grounded, ungrounded
+
+    # ── Novelty mode, fed by the worker ──────────────────────────────────────
+
+    def evaluate_novelty(self, grounded_destinations, baseline, baseline_runs: int):
+        """Secondary mode for CLOSED-destination agents.
+
+        Evaluates only destinations that PASSED grounding, so it can never
+        double-fire with the provenance verdict. Returns None below
+        MIN_BASELINE_RUNS — an immature baseline makes every destination look
+        novel, which is exactly the alert storm that would get this switched off.
+        """
+        if not self.MODE or "novelty" not in self.MODE:
+            return None
+        if baseline_runs < self.MIN_BASELINE_RUNS:
+            return None
+        known = set(baseline or ())
+        for dest, dtype, host in grounded_destinations or ():
+            key = dest if dtype == "email" else _registrable_domain(host)
+            if key in known:
+                continue
+            return {"destination": dest, "destination_type": dtype, "novelty_key": key}
+        return None
+
+    # ── Main ─────────────────────────────────────────────────────────────────
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        if not state.tool_calls:
+            return None
+        started_ns = time.perf_counter_ns()
+
+        # Surface size guard. In-path this runs inside the agent process, and a
+        # run carrying megabytes of captured tool output would cost real latency.
+        # It aborts rather than scanning a TRUNCATED corpus: a short corpus makes
+        # grounded destinations read as ungrounded, and a false positive in-path
+        # can block a legitimate send via a stop policy. Fail open, not loud.
+        surface_chars = (
+            len(state.input_text or "")
+            + len(state.system_prompt or "")
+            + sum(len(tc.output or "") for tc in state.tool_calls)
+            + sum(len(r.content or "") for r in state.retrievals)
+            + sum(len(m.value or "") for m in state.memory_events)
+        )
+        if surface_chars > self.MAX_SURFACE_CHARS:
+            return None
+
+        grounded_texts, taint_blocks, surfaces_used = self._partition_surfaces(state)
+        grounded_corpus = "\n".join(grounded_texts)
+        # Case-fold the corpus and every taint block ONCE. Doing it inside
+        # _contains() re-allocated the entire corpus per candidate, which turned
+        # a 400-candidate run against a 500KB corpus into 200MB of transient
+        # string churn.
+        grounded_cmp = grounded_corpus if self.CASE_SENSITIVE else grounded_corpus.lower()
+        for block in taint_blocks:
+            raw = block.get("text") or ""
+            block["_cmp"] = raw if self.CASE_SENSITIVE else raw.lower()
+
+        # Fabrication stops the whole run when a tool output is missing, because
+        # its claim is "no source exists" and an unseen output falsifies that.
+        # This detector must not: with tool output rarely instrumented, aborting
+        # would blind it on most real traffic — the traffic exfiltration happens
+        # in. Missing outputs become a confidence penalty instead, and never
+        # weaken taint, which is independent positive evidence.
+        visibility_complete = not any(
+            tc.success is not None and not tc.output for tc in state.tool_calls
+        )
+
+        best: Optional[Dict[str, Any]] = None
+        candidate_count = 0
+        ungrounded_count = 0
+        truncated = False
+        grounded_seen: List[Tuple[str, str, str]] = []
+        # A call an approval gate blocked never sent anything. Reporting an
+        # ungrounded destination for it means alerting on the run where the
+        # human-in-the-loop control did its job.
+        blocked = _approval_blocked_calls(state)
+
+        for tc_index, tc in enumerate(state.tool_calls):
+            if tc_index in blocked:
+                continue
+            if not self._in_scope(tc.tool_name):
+                continue
+            if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                # Fail open. The server-side instance runs unscoped with a much
+                # larger budget, so an in-path abort costs prevention, not
+                # detection. Silent by design: this path is the user's agent
+                # process, and neither an exception nor a log line belongs there.
+                return None
+
+            if len(tc.args) > self.MAX_ARGS_CHARS:
+                # Truncating ARGS can only cause a missed detection, never a
+                # false one — the exact opposite of truncating the grounded
+                # corpus, which is why that one aborts instead. In-path this is
+                # the right trade: prevention degrades to server-side detection.
+                # (ast.literal_eval alone costs ~900µs on a 10KB arg, most of the
+                # in-path budget, so this guard has to come before the parse.)
+                leaves = [("<truncated>", tc.args[: self.MAX_ARGS_CHARS])]
+            else:
+                parsed = _parse_tool_args(tc.args)
+                leaves = (
+                    _walk_arg_strings(parsed, self.MAX_DEPTH, self.MAX_NODES)
+                    if parsed is not None
+                    else [("<raw>", tc.args)]
+                )
+            # Parsing a large structure is itself a real cost, so re-check before
+            # walking it — otherwise a single 400-element arg blows the whole
+            # in-path budget between two per-tool checks.
+            if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                return None
+
+            for leaf_i, (path, text) in enumerate(leaves):
+                if (leaf_i & 63) == 0 and time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                    return None
+                for cand_i, (dest, dtype, host) in enumerate(self._destinations_in(text)):
+                    # One leaf can hold hundreds of candidates (a 400-recipient
+                    # send), so the budget has to be checked here too — the
+                    # per-leaf check never fires when there is only one leaf.
+                    if (
+                        cand_i & 31
+                    ) == 0 and time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                        return None
+                    candidate_count += 1
+                    if candidate_count > self.MAX_CANDIDATES_PER_RUN:
+                        truncated = True
+                        break
+                    if _host_in_allowlist(host, self.ALLOWLISTED_DOMAINS):
+                        continue
+                    dest_cmp = dest if self.CASE_SENSITIVE else dest.lower()
+                    if dest_cmp in grounded_cmp:
+                        grounded_seen.append((dest, dtype, host))
+                        continue
+
+                    ungrounded_count += 1
+                    taint = None
+                    for block in taint_blocks:
+                        if dest_cmp in block["_cmp"]:
+                            taint = {k: v for k, v in block.items() if k not in ("text", "_cmp")}
+                            break
+
+                    severity = Severity.CRITICAL if taint else Severity.HIGH
+                    confidence = 0.85 if taint else 0.65
+                    if taint and taint.get("read_back"):
+                        confidence = 0.92
+                    if not visibility_complete:
+                        confidence -= 0.15
+                        if not taint:
+                            severity = Severity.HIGH
+                    if self._is_send_tool(tc.tool_name):
+                        confidence += 0.05
+                    confidence = round(max(0.30, min(0.95, confidence)), 4)
+
+                    rank = (2 if severity == Severity.CRITICAL else 1, confidence)
+                    if best is None or rank > best["rank"]:
+                        best = {
+                            "rank": rank,
+                            "severity": severity,
+                            "confidence": confidence,
+                            "destination": dest,
+                            "destination_type": dtype,
+                            "destination_host": host,
+                            "tool_name": tc.tool_name,
+                            "tool_step": tc.step_index,
+                            "arg_path": path,
+                            "taint": taint,
+                            "args_snippet": tc.args[:200],
+                            "args_truncated": bool(
+                                tc.args_length is not None and tc.args_length > len(tc.args)
+                            ),
+                        }
+                if candidate_count > self.MAX_CANDIDATES_PER_RUN:
+                    break
+            if candidate_count > self.MAX_CANDIDATES_PER_RUN:
+                break
+
+        if best is None:
+            return None
+
+        return FailureSignal(
+            failure_type=FailureType.UNGROUNDED_DESTINATION,
+            severity=best["severity"],
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=best["tool_step"],
+            confidence=best["confidence"],
+            evidence={
+                "destination": best["destination"],
+                "destination_type": best["destination_type"],
+                "destination_host": best["destination_host"],
+                "tool_name": best["tool_name"],
+                "tool_step": best["tool_step"],
+                "arg_path": best["arg_path"],
+                "grounding_verdict": "ungrounded",
+                "grounded_surfaces": surfaces_used,
+                "output_visibility": "complete" if visibility_complete else "partial",
+                "taint_source": best["taint"],
+                "detection_mode": "provenance",
+                "baseline_size": None,
+                "baseline_runs": None,
+                "candidate_count": candidate_count,
+                "ungrounded_count": ungrounded_count,
+                "candidates_truncated": truncated,
+                "args_truncated": best["args_truncated"],
+                "args_snippet": best["args_snippet"],
+            },
+        )
+
+
+# ── UNRESOLVED_AMBIGUITY ──────────────────────────────────────────────────────
+#
+# WARRANT, not grounding. TOOL_ARGUMENT_FABRICATION and UNGROUNDED_DESTINATION
+# both ask "where did this value come from?" and go quiet the moment the value is
+# present somewhere in the run. That question has no answer to give here: the id
+# the agent deleted is well-formed, exists, and appears verbatim in a prior tool
+# result, so every provenance check passes. The question this detector asks is
+# the different one — "what justified choosing THIS record over its siblings?" —
+# and the surface that can answer it is much narrower than a grounding surface.
+
+# Unicode-aware word tokenisation. NOT [a-z]+: "Müller", "Jürgen" and "José" have
+# to tokenise as one token each, and casefold (not lower) so "Straße" and
+# "STRASSE" agree. `\w` also spans digits and the underscore, which is what makes
+# "CUST_1183" and "340k" single tokens — "delete CUST_1183" and "the €340k
+# account" are real discriminating requests and have to be read as one.
+_UA_WORD_RE = re.compile(r"\w+")
+
+# Keys whose value is the record's identifier. Used to decide WHICH argument of
+# an irreversible call names the record — see _ua_identifiers.
+_UA_ID_KEYS = frozenset({"id", "uuid", "guid", "key", "code", "ref", "identifier"})
+
+
+def _ua_tokens(text: object, min_token_len: int) -> set:
+    """Casefolded tokens of `text` longer than min_token_len.
+
+    NFKC first so a decomposed "u + combining diaeresis" and a precomposed "ü"
+    produce the same token — the two are indistinguishable on screen, and a
+    German name typed one way in the request and stored the other way in the
+    record would otherwise never match.
+
+    Possessives need no special case: ``\\w+`` already splits "Sarah's" into
+    ("Sarah", "s"), and "s" is below any sane min_token_len.
+    """
+    if text is None or isinstance(text, bool):
+        return set()
+    raw = text if isinstance(text, str) else str(text)
+    if not raw:
+        return set()
+    normalized = unicodedata.normalize("NFKC", raw)
+    return {
+        t for t in (m.casefold() for m in _UA_WORD_RE.findall(normalized)) if len(t) > min_token_len
+    }
+
+
+def _ua_scalars(value, max_depth: int, out: List[str], depth: int = 0) -> bool:
+    """Collect every scalar leaf of a parsed structure into `out`, values only.
+
+    Returns True if the walk hit `max_depth` and stopped early. The caller MUST
+    treat that as a reason to abort, not as a complete read: a token shared by
+    two records but nested too deep in one of them silently disappears from that
+    record's set and becomes a discriminator of the other — the detector would
+    then invent the very evidence it is supposed to be weighing, and could
+    manufacture a HIGH-severity STRONG verdict out of a depth limit.
+
+    Unlike _walk_arg_strings this keeps ints and floats: a record identifier is
+    routinely numeric (`{"id": 1183}`), and dropping numeric leaves would make
+    such a record unselectable and its whole candidate set invisible.
+    """
+    if depth > max_depth:
+        return True
+    truncated = False
+    if isinstance(value, dict):
+        for v in value.values():
+            truncated |= _ua_scalars(v, max_depth, out, depth + 1)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for v in value:
+            truncated |= _ua_scalars(v, max_depth, out, depth + 1)
+    elif isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        out.append(str(value))
+    return truncated
+
+
+def _ua_identifier_shaped(value: str) -> bool:
+    """Whether a whole field value can act as an identifier.
+
+    The same structural test TOOL_ARGUMENT_FABRICATION applies (an ID separator,
+    an embedded digit, or opaque length) and for the same reason: without it a
+    `plan` of "Standard" counts as an identifier and records get selected by
+    their pricing tier. Deliberately a separate copy — that detector is
+    calibrated and live, and re-pointing it at shared code is a regression risk
+    taken for style.
+    """
+    if len(value) < 3 or any(ch.isspace() for ch in value):
+        return False
+    if any(ch in "_-./:@#" for ch in value) or any(ch.isdigit() for ch in value):
+        return True
+    return len(value) >= 12
+
+
+def _ua_record_lists(parsed, max_depth: int) -> List[List[Any]]:
+    """Every plausible candidate set inside a parsed tool output, best first.
+
+    Returns a LIST of candidate sets rather than one, because a single result
+    routinely carries more than one list and picking by dict iteration order
+    picks by serializer whim: `{"results": [...records...], "facets": [...]}` and
+    the same payload with the keys emitted in the other order would anchor on
+    different data. The caller resolves the ambiguity with information this
+    function does not have — which set actually contains the identifier the
+    irreversible call used.
+
+    Order of preference: lists of dicts (in discovery order), then lists of
+    scalars, then the whole value as ONE record.
+
+    That last fallback is not a nicety. A narrowing lookup returns its single hit
+    as a bare object, not a one-element list — dunetrace-demos' own
+    `lookup_customer` returns `{"customers": [...]}` for a name match and a bare
+    record `dict` for an id/email match. Without it, the anchor scan walks
+    straight past the narrowed result to the older, wider one and reports
+    ambiguity for a run that had resolved it.
+    """
+    found: List[List[Any]] = []
+    scalars: List[List[Any]] = []
+
+    def walk(node, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if isinstance(node, (list, tuple)):
+            members = list(node)
+            if not members:
+                return
+            if all(isinstance(m, dict) for m in members):
+                found.append(members)
+            elif all(isinstance(m, (str, int, float)) and not isinstance(m, bool) for m in members):
+                scalars.append(members)
+            return
+        if isinstance(node, dict):
+            for v in node.values():
+                walk(v, depth + 1)
+
+    walk(parsed, 0)
+    out = found + scalars
+    if isinstance(parsed, dict) and parsed:
+        out.append([parsed])
+    return out
+
+
+def _ua_identifiers(record: Any, values: List[str]) -> List[str]:
+    """The values of `record` that name it, narrowest reading first.
+
+    A record is matched on its IDENTIFIER, not on any field that happens to look
+    like one. Without that distinction a second identifier-shaped argument — an
+    effective date, an amount, a reference — that coincides with some sibling's
+    field value makes the call look like it named two records, and the
+    "exactly one" test then discards a real finding. Observed with
+    `cancel_subscription(customer_id=..., effective_date="2024-03-15")`, where
+    the date equalled a sibling's `signup_date`.
+
+    Returns the id-keyed values when the record has any. The caller falls back to
+    the broad reading (every identifier-shaped value) only when the narrow one
+    matches nothing at all in the whole set, which keeps tools that act on an
+    email or an SKU working.
+    """
+    if not isinstance(record, dict):
+        return []
+    out = []
+    for key, value in record.items():
+        name = str(key).casefold()
+        if name in _UA_ID_KEYS or name.endswith("_id") or name.startswith("id_"):
+            text = value if isinstance(value, str) else str(value)
+            if _ua_identifier_shaped(text):
+                out.append(text)
+    return out
+
+
+def _ua_record_identifier(record: Any, values: List[str]) -> Optional[str]:
+    """The record's identifier, for the signal's evidence."""
+    narrow = _ua_identifiers(record, values)
+    if narrow:
+        return narrow[0]
+    for value in values:
+        if _ua_identifier_shaped(value):
+            return value
+    return values[0] if values else None
+
+
+def _ua_targeted(arg_values: List[str], id_sets: List[List[str]]) -> List[int]:
+    """Indices of the records an argument value identifies.
+
+    A value identifies a record when it EQUALS one of that record's identifying
+    values outright. Substring matching would let "CUST_11" select CUST_1183, and
+    would let any free-text argument select whichever record happened to contain
+    one of its words.
+    """
+    wanted = {v.casefold() for v in arg_values if _ua_identifier_shaped(v)}
+    if not wanted:
+        return []
+    return [i for i, ids in enumerate(id_sets) if any(v.casefold() in wanted for v in ids)]
+
+
+class UnresolvedAmbiguityDetector(BaseDetector):
+    """
+    An agent performed an IRREVERSIBLE action on one of N candidates returned by
+    an earlier tool, when nothing in the user's request distinguished that
+    candidate from its siblings.
+
+    Worked example. `lookup_customer("Chen")` returns Sarah Chen (CUST_8834,
+    Enterprise, €340k/yr) and Emily Chen (CUST_1183, Standard, €3k/yr). The
+    request was "close the account for the Chen family". The agent calls
+    `delete_customer("CUST_1183")`. Every value-local check passes — the id is
+    well-formed, it exists, and it appears verbatim in a prior tool result — so
+    TOOL_ARGUMENT_FABRICATION is correctly silent. Nothing else looks at the
+    *choice*.
+
+    OUTCOME-BLIND BY DESIGN. This detector cannot know which Chen was intended
+    and never claims to. It scores epistemic warrant, so it also fires when the
+    agent guessed RIGHT — an agent that guessed right still guessed. That is what
+    makes it evaluable without ground truth, and why the signal wording never
+    says "the wrong record".
+
+    Verdict, against the most recent prior tool result whose records contain the
+    identifier the call used:
+
+    - the SELECTED record has a discriminator present in the warrant surface
+      -> silent
+    - a SIBLING has a discriminator present in the warrant surface
+      -> STRONG: the request identified someone else, and the mismatch is
+      provable from the trace alone
+    - otherwise -> WEAK: genuine ambiguity, nothing in the request identified
+      anyone
+
+    A DISCRIMINATOR of a record is a token appearing in that record's field
+    values that no sibling's values contain. Shared surnames drop out among
+    Chens, so the more alike the records are the sharper the test gets.
+
+    Severity and confidence are part of the contract, not an implementation
+    detail:
+
+    - STRONG -> severity HIGH, confidence 0.9 (the mismatch is provable from the
+      trace)
+    - WEAK   -> severity MEDIUM, confidence 0.6 (genuine ambiguity;
+      correct-but-interrupting by design)
+
+    CANDIDATE-SET ANCHORING. The set evaluated is the MOST RECENT prior result
+    containing the selected identifier, never the widest one. An agent that ran a
+    narrowing lookup — `lookup_customer("sarah.chen@example.com")` returning one
+    record — and then acted is judged against that single-record set, so it is
+    silent. A narrowed result arrives as a bare OBJECT, not a one-element list
+    (dunetrace-demos' own lookup_customer returns `{"customers": [...]}` for a
+    name match and a bare record dict for an id/email match), so a lone object
+    counts as a one-record set. A result offering several lists is resolved by
+    which one holds the identifier, never by dict key order — `{"results": [...],
+    "facets": [...]}` and the same payload serialized the other way round have to
+    reach the same verdict.
+
+    A call is matched to a record by that record's IDENTIFIER, not by any field
+    that happens to look like one; the broad reading applies only where the
+    narrow one matches nothing in the set (see _ua_identifiers), so a collateral
+    argument — an effective date equal to a sibling's signup_date — cannot make
+    one call look like it named two records.
+
+    WARRANT PRECEDES THE ACTION. Only turns recorded at or before the acting
+    call's step count. A reply that arrives afterwards cannot justify a choice
+    already committed to, and reading a run's turns as one undifferentiated bag
+    silences act-first-ask-afterwards — the behaviour this exists to catch.
+
+    A call with `success is False` performed nothing, so there is no irreversible
+    action whose warrant is in question. `None` (unknown) still counts: most
+    instrumentation never sets it.
+
+    SUPPRESSION. Plural: if every candidate in the set is acted on by
+    irreversible calls within the run, no selection occurred ("close the accounts
+    for the Chen family", both Chens deleted) and nothing fires. Also silent for
+    a one-candidate set, for a consuming tool not in IRREVERSIBLE_TOOLS, and when
+    the identifier never appeared in any prior result — that last one is
+    TOOL_ARGUMENT_FABRICATION's finding and double-reporting it would be wrong.
+
+    DECLARED SCOPE. IRREVERSIBLE_TOOLS defaults to [] and the detector is then
+    fully inert. Irreversibility is never inferred from a tool-name prefix:
+    `delete_draft` and `delete_customer` are the same string pattern, and only
+    the operator knows which one cannot be undone.
+
+    Two things that will look like bugs and are not:
+
+    1. system_prompt is DELIBERATELY EXCLUDED from the warrant surface, and so is
+       tool output. A grounding surface rightly includes both; a warrant surface
+       cannot. The system prompt is byte-identical on every run, so it can never
+       explain why THIS run chose THIS candidate — demo1's system prompt happens
+       to contain CUST_8834 as an example, which made a lucky-correct guess read
+       as warranted. Tool output is worse: the candidate records ARE tool output,
+       so admitting it would make every discriminator trivially "present" and
+       silence the detector on every run it exists for. Grounding asks "where did
+       this value come from?"; warrant asks "what made you choose this one over
+       that one?" — and a constant, or the menu itself, never explains a choice.
+    2. Discrimination is TOKEN-LEVEL, not whole-value. Given {Sarah Chen, Emily
+       Chen}, "delete Sarah" unambiguously means Sarah, yet the whole value
+       "sarah chen" is not a substring of "delete Sarah". Whole-value matching
+       scored 3/5 on that case family; token-level scores 5/5.
+
+    Documented non-goal: a narrowing lookup whose QUERY was itself an unwarranted
+    guess launders the guess — warrant-checking lookup arguments recursively is
+    out of scope.
+
+    Instrumentation-dependent, like TOOL_ARGUMENT_FABRICATION: candidate sets are
+    read from `tool.responded`'s raw output, which only exists when the caller
+    passes `output=` (dt.tool() and the CrewAI integration do). A run with no
+    captured tool output has no candidate sets and is silent.
+
+    Cost controls fail OPEN, like UNGROUNDED_DESTINATION: on abort the run is
+    skipped and nothing fires. Aborting beats scanning a truncated candidate set,
+    which would make shared tokens look unique and thereby invent discriminators.
+    That applies to MAX_DEPTH too: a record read only to its depth limit is an
+    incomplete record, and the token it really shared with a sibling becomes that
+    sibling's discriminator — the detector would manufacture the evidence it is
+    weighing, up to a HIGH-severity STRONG. The scan budget is polled inside the
+    anchor walk, not only between irreversible calls: that walk parses every
+    prior output it passes, and one delete behind hundreds of chatty tool calls
+    does all of its work there.
+
+    Tunable: MIN_CANDIDATES, IRREVERSIBLE_TOOLS, WARRANT_SURFACES, MIN_TOKEN_LEN,
+    MAX_CANDIDATES_PER_RUN, MAX_SCAN_NS, MAX_OUTPUT_CHARS, MAX_DEPTH,
+    USER_TURN_SIGNALS, USER_TURN_TEXT_KEYS.
+    """
+
+    name = "UNRESOLVED_AMBIGUITY"
+    SEVERITY = None  # computed per-signal: HIGH (strong) | MEDIUM (weak)
+
+    MIN_CANDIDATES = 2
+    # DECLARED by the operator, never inferred. Empty = inert.
+    IRREVERSIBLE_TOOLS: List[str] = []
+    # "user_turns" = every user-authored turn in the run. "first_user_turn" =
+    # run.started's input_text only. There is deliberately no value for the
+    # system prompt or for tool output — see the docstring.
+    WARRANT_SURFACES = ["user_turns"]
+    MIN_TOKEN_LEN = 3
+    MAX_CANDIDATES_PER_RUN = 50
+    # Hard wall-clock abort, generous by default (server-side, off the agent's
+    # critical path); the TIER1 instance is constructed with the 1ms in-path
+    # budget. Exceeding it returns None.
+    MAX_SCAN_NS = 50_000_000
+    # Longest tool output parsed. Over it the run is skipped rather than parsed
+    # partially — see the fail-open note in the docstring.
+    MAX_OUTPUT_CHARS = 200_000
+    MAX_DEPTH = 6
+    # external_signal names carrying a user-authored turn. A run's later user
+    # messages have no dedicated event type — a "conversation" in this system is
+    # a sequence of runs, each with one input_text — so a mid-run reply reaches
+    # RunState through this channel.
+    USER_TURN_SIGNALS = [
+        "user_message",
+        "user_turn",
+        "user_reply",
+        "user_input",
+        "clarification",
+    ]
+    # Keys under such a signal's meta that hold the turn text.
+    USER_TURN_TEXT_KEYS = ["text", "content", "message", "reply", "value"]
+
+    # ── Warrant surface ──────────────────────────────────────────────────────
+
+    def _user_turns(self, state: RunState) -> List[Tuple[int, str]]:
+        """Every user-authored turn in the run as (step_index, text).
+
+        The step matters: a turn only warrants an action that came AFTER it. A
+        reply recorded later in the run cannot retroactively justify a choice the
+        agent had already committed to, and treating the run's turns as one
+        undifferentiated bag silences exactly the case this detector exists for
+        (act first, ask afterwards).
+
+        Human approval-decision notes count as user-authored turns and are
+        harvested here too — see _approval_notes for why they are the
+        highest-trust text in a run, and for the run-scoping limitation.
+
+        Reads the raw EXTERNAL_SIGNAL events as well as state.external_signals.
+        build_run_state() — the server-side reconstruction every detector-worker
+        run goes through — now rebuilds the typed view too, so the two agree;
+        the raw scan is kept as the belt-and-braces path for a RunState built by
+        anything else (a custom reconstruction, an older stored run), and `seen`
+        dedupes the overlap by text so a turn is never counted twice.
+        """
+        turns: List[Tuple[int, str]] = []
+        if state.input_text:
+            turns.append((-1, state.input_text))  # run.started, before any step
+        if "user_turns" not in (self.WARRANT_SURFACES or ()):
+            return turns
+
+        wanted = {str(n).casefold() for n in (self.USER_TURN_SIGNALS or ())}
+        if not wanted:
+            return turns
+        seen = {t for _, t in turns}
+
+        def take(name: object, meta: object, step: int) -> None:
+            if str(name or "").casefold() not in wanted or not isinstance(meta, dict):
+                return
+            for key in self.USER_TURN_TEXT_KEYS:
+                text = meta.get(key)
+                if isinstance(text, str) and text.strip():
+                    if text not in seen:
+                        seen.add(text)
+                        turns.append((step, text))
+                    return
+
+        for sig in state.external_signals:
+            take(sig.signal_name, sig.meta, sig.step_index)
+        for ev in state.events:
+            if ev.event_type == EventType.EXTERNAL_SIGNAL:
+                payload = ev.payload or {}
+                take(payload.get("signal_name"), payload.get("meta"), ev.step_index)
+
+        # A human decision note is user-authored input of the strongest kind: it
+        # came from a person holding the `approve` scope, in response to this
+        # exact tool call. "wrong Chen — it's Sarah, CUST_8834" is the clearest
+        # warrant a retry could possibly have, and without this the corrected
+        # retry reads as unwarranted and this detector fires on the fix.
+        #
+        # Step-ordered like every other turn, so a note still cannot warrant an
+        # action that preceded it.
+        for step, note in _approval_notes(state):
+            if note not in seen:
+                seen.add(note)
+                turns.append((step, note))
+        turns.sort(key=lambda t: t[0])
+        return turns
+
+    # ── Evaluation ───────────────────────────────────────────────────────────
+
+    def _arg_values(self, args_text: str) -> List[str]:
+        """Scalar leaves of a tool call's args, values only.
+
+        Unparseable args yield nothing rather than falling back to a raw-text
+        scan. A raw scan cannot tell a dict KEY from a value, and a wrong anchor
+        here does not merely miss a signal — it evaluates the selection against a
+        candidate set the agent never chose from.
+        """
+        parsed = _parse_tool_args(args_text or "")
+        if parsed is None:
+            return []
+        out: List[str] = []
+        _ua_scalars(parsed, self.MAX_DEPTH, out)
+        return out
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        if not self.IRREVERSIBLE_TOOLS or not state.tool_calls:
+            return None
+
+        started_ns = time.perf_counter_ns()
+        irreversible = {str(t).casefold() for t in self.IRREVERSIBLE_TOOLS}
+        # success is False means the call was rejected and nothing happened —
+        # there is no irreversible action to have been warranted. None (unknown)
+        # is kept: most instrumentation never sets it, and treating unknown as
+        # failed would make the detector inert on the majority of real traffic.
+        #
+        # An approval-blocked call is the other way a call can not-happen, and it
+        # is invisible to the success check: the gate raises before
+        # tool_responded, so the ToolCall keeps success=None. Excluding it here
+        # also keeps it out of plural suppression, which iterates `acting` — a
+        # candidate the agent was STOPPED from acting on has not been acted on.
+        blocked = _approval_blocked_calls(state)
+        acting = [
+            tc
+            for i, tc in enumerate(state.tool_calls)
+            if tc.tool_name.casefold() in irreversible
+            and tc.success is not False
+            and i not in blocked
+        ]
+        if not acting:
+            return None
+
+        turns = self._user_turns(state)
+        warrant_cache: Dict[int, set] = {}
+
+        def warrant_at(step: int) -> set:
+            """Tokens from the turns that preceded `step`."""
+            if step not in warrant_cache:
+                tokens: set = set()
+                for turn_step, text in turns:
+                    if turn_step <= step:
+                        tokens |= _ua_tokens(text, self.MIN_TOKEN_LEN)
+                warrant_cache[step] = tokens
+            return warrant_cache[step]
+
+        # Structure is parsed once per producing call; a set's LEAVES are
+        # extracted only when that set is actually tried. A result offering two
+        # candidate sets used to cost both, and the fallback whole-payload set is
+        # never needed once the real records match — with a set at the
+        # documented 50-record cap that eager pass alone ran the in-path
+        # instance 8x over its 1ms budget.
+        record_lists_cache: Dict[int, List[List[Any]]] = {}
+        set_cache: Dict[Tuple[int, int], Optional[Tuple[List[List[str]], List[List[str]]]]] = {}
+        args_cache: Dict[int, List[str]] = {}
+        counted: set = set()
+
+        def record_lists_of(tc: ToolCall) -> List[List[Any]]:
+            if id(tc) not in record_lists_cache:
+                lists: List[List[Any]] = []
+                output = tc.output or ""
+                if output:
+                    parsed = _parse_tool_args(output)
+                    if parsed is not None:
+                        lists = _ua_record_lists(parsed, self.MAX_DEPTH)
+                record_lists_cache[id(tc)] = lists
+            return record_lists_cache[id(tc)]
+
+        def set_data(tc: ToolCall, set_i: int, members: List[Any]):
+            """(values, identifiers) for one candidate set, None if truncated."""
+            key = (id(tc), set_i)
+            if key not in set_cache:
+                values: List[List[str]] = []
+                truncated = False
+                for member in members:
+                    leaves: List[str] = []
+                    truncated |= _ua_scalars(member, self.MAX_DEPTH, leaves)
+                    values.append(leaves)
+                # Fail open. A partially-read record makes tokens it actually
+                # shares look unique — see _ua_scalars.
+                set_cache[key] = (
+                    None
+                    if truncated
+                    else (values, [_ua_identifiers(m, v) for m, v in zip(members, values)])
+                )
+            return set_cache[key]
+
+        def args_of(tc: ToolCall) -> List[str]:
+            if id(tc) not in args_cache:
+                args_cache[id(tc)] = self._arg_values(tc.args)
+            return args_cache[id(tc)]
+
+        def match(arg_values: List[str], values: List[List[str]], identifiers: List[List[str]]):
+            """Records this call names, narrow reading first.
+
+            The broad reading (any identifier-shaped field value) only applies
+            when the narrow one — the record's actual id field — matches nothing
+            in the set at all. See _ua_identifiers.
+            """
+            hits = _ua_targeted(arg_values, identifiers)
+            if hits or any(identifiers):
+                return hits
+            return _ua_targeted(arg_values, values)
+
+        candidates_scanned = 0
+        best: Optional[Dict[str, Any]] = None
+
+        for tc in acting:
+            if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                return None  # fail open — see the docstring
+            arg_values = args_of(tc)
+            if not arg_values:
+                continue
+
+            # Anchor: the most recent PRIOR result whose records contain the
+            # identifier this call used.
+            anchor = None
+            for prior in reversed(state.tool_calls):
+                if prior is tc or prior.step_index >= tc.step_index:
+                    continue
+                # Polled here, not only between irreversible calls: the reverse
+                # walk parses every prior output it passes, and a run with one
+                # delete behind hundreds of chatty tool calls does all of its
+                # work inside this loop.
+                if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                    return None
+                if prior.output is not None and len(prior.output) > self.MAX_OUTPUT_CHARS:
+                    # An output too large to parse might have BEEN the anchor,
+                    # and a more recent set silently skipped is a wider set
+                    # wrongly used. Abort rather than guess.
+                    return None
+                for set_i, members in enumerate(record_lists_of(prior)):
+                    if not members:
+                        continue
+                    if len(members) > self.MAX_CANDIDATES_PER_RUN:
+                        # Checked BEFORE the leaves are walked, so an enormous
+                        # set costs its length and nothing more.
+                        return None
+                    data = set_data(prior, set_i, members)
+                    if data is None:
+                        return None  # a record was truncated — see set_data
+                    values, identifiers = data
+                    hits = match(arg_values, values, identifiers)
+                    if hits:
+                        anchor = (prior, set_i, values, members, identifiers, hits)
+                        break
+                if anchor is not None:
+                    break
+
+            if anchor is None:
+                # The identifier appeared in no prior result. That is
+                # TOOL_ARGUMENT_FABRICATION's finding, not this one's.
+                continue
+
+            prior, set_i, values, members, identifiers, hits = anchor
+            # Counted once per distinct candidate set. Charging the same cached
+            # set again for every irreversible call would turn a documented
+            # per-RUN cap into a per-call one and silence runs well under it.
+            key = (id(prior), set_i)
+            if key not in counted:
+                counted.add(key)
+                candidates_scanned += len(values)
+            if candidates_scanned > self.MAX_CANDIDATES_PER_RUN:
+                # Aborting beats truncating: a clipped sibling set makes shared
+                # tokens look unique, inventing discriminators that do not exist.
+                return None
+            if len(values) < self.MIN_CANDIDATES or len(hits) != 1:
+                continue
+
+            # Plural suppression — no selection occurred if every candidate in
+            # this set is acted on by some irreversible call in the run.
+            targeted: set = set()
+            for other in acting:
+                targeted.update(match(args_of(other), values, identifiers))
+            if len(targeted) >= len(values):
+                continue
+
+            warrant = warrant_at(tc.step_index)
+            selected = hits[0]
+            # Polled here and inside the loop: tokenising the candidate set is
+            # the one piece of work that scales with candidate COUNT, and both
+            # earlier poll sites sit before it.
+            if time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                return None
+            token_sets = []
+            for record_i, v in enumerate(values):
+                if (record_i & 7) == 0 and time.perf_counter_ns() - started_ns > self.MAX_SCAN_NS:
+                    return None
+                token_sets.append(_ua_tokens(" ".join(v), self.MIN_TOKEN_LEN))
+            # A token discriminates exactly when it occurs in ONE record's set.
+            # Counting once is equivalent to differencing each set against all
+            # its siblings, and is linear rather than quadratic — with a
+            # 20-record set the quadratic form spent most of the in-path budget
+            # on set algebra alone.
+            occurrences: Counter = Counter()
+            for tokens in token_sets:
+                occurrences.update(tokens)
+            discriminators = [{t for t in tokens if occurrences[t] == 1} for tokens in token_sets]
+
+            if discriminators[selected] & warrant:
+                continue  # warranted — the request named this record
+
+            sibling = next(
+                (
+                    i
+                    for i, tokens in enumerate(discriminators)
+                    if i != selected and tokens & warrant
+                ),
+                None,
+            )
+            tier = "strong" if sibling is not None else "weak"
+            # Strong beats weak; among equals the earliest irreversible call
+            # wins, because that is the one the operator has to look at first.
+            rank = (1 if sibling is not None else 0, -tc.step_index)
+            if best is not None and rank <= best["rank"]:
+                continue
+
+            best = {
+                "rank": rank,
+                "tier": tier,
+                "tool_call": tc,
+                "source_tool": prior.tool_name,
+                "source_step": prior.step_index,
+                "candidate_count": len(values),
+                "selected_id": _ua_record_identifier(members[selected], values[selected]),
+                "sibling_id": (
+                    None
+                    if sibling is None
+                    else _ua_record_identifier(members[sibling], values[sibling])
+                ),
+                "sibling_matched": (
+                    [] if sibling is None else sorted(discriminators[sibling] & warrant)
+                ),
+                "discriminators_unused": sorted(discriminators[selected]),
+                "warrant_turn_count": sum(1 for s, _ in turns if s <= tc.step_index),
+            }
+
+        if best is None:
+            return None
+
+        strong = best["tier"] == "strong"
+        tc = best["tool_call"]
+        evidence: Dict[str, Any] = {
+            "tier": best["tier"],
+            "candidate_count": best["candidate_count"],
+            "selected_id": best["selected_id"],
+            "discriminators_unused": best["discriminators_unused"][:25],
+            "tool_name": tc.tool_name,
+            "tool_step": tc.step_index,
+            "source_tool": best["source_tool"],
+            "source_step": best["source_step"],
+            "warrant_surfaces": list(self.WARRANT_SURFACES or ()),
+            "warrant_turn_count": best["warrant_turn_count"],
+        }
+        if strong:
+            evidence["sibling_matched_in_request"] = best["sibling_matched"][:25]
+            evidence["sibling_id"] = best["sibling_id"]
+
+        return FailureSignal(
+            failure_type=FailureType.UNRESOLVED_AMBIGUITY,
+            severity=Severity.HIGH if strong else Severity.MEDIUM,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=tc.step_index,
+            confidence=0.9 if strong else 0.6,
+            evidence=evidence,
+        )
+
+
+# ── INSTRUMENTATION_DEGRADED ──────────────────────────────────────────────────
+
+# Detectors whose only evidence is completion text or finish_reason. When a run
+# is unmeasurable these do not fire, and their silence must not be read as a
+# clean verdict — naming them in the signal is what turns "no findings" into
+# "these specific checks could not run".
+_TEXT_DEPENDENT_DETECTORS = (
+    "EMPTY_LLM_RESPONSE",
+    "PREMATURE_TERMINATION",
+    "UNREAD_TOOL_ERROR",
+    "LLM_TRUNCATION_LOOP",
+    "SILENT_TRUNCATION",
+    "RUNAWAY_ITERATION",
+    "FIRST_STEP_FAILURE",
+)
+
+
+class InstrumentationDegradedDetector(BaseDetector):
+    """The SDK could not measure this run's LLM calls.
+
+    This is not a statement about the agent. It is a statement about the
+    telemetry, and it exists because the detector layer previously could not
+    distinguish "I looked and found nothing wrong" from "I could not look".
+    Those two produce identical output — no signal — and the second one silently
+    disables a third of the battery.
+
+    Fires on either of two conditions:
+
+    1. Any call carries an ``instrumentation_degraded`` marker, meaning an
+       extractor in auto.py could not read the provider's response object and
+       said so instead of substituting a plausible default.
+
+    2. Every call matches the degraded fingerprint — zero output, zero
+       completion tokens, non-zero latency. A call that measurably took time and
+       measurably produced nothing, repeated across an entire run, is a broken
+       pipeline rather than a model that answered nothing every single turn.
+       Requires MIN_CALLS so a one-call run with a genuinely empty response is
+       left to EMPTY_LLM_RESPONSE, which is the right detector for that.
+
+    Deliberately does NOT fire on a run whose text is merely absent because
+    DUNETRACE_OMIT_LLM_OUTPUT_TEXT is set: that omission is a deliberate
+    operator choice, output_length is still transmitted, and calling it
+    degraded would report every privacy-conscious deployment as broken.
+
+    Tunable: MIN_CALLS (default 2).
+    """
+
+    name = "INSTRUMENTATION_DEGRADED"
+    SEVERITY = Severity.MEDIUM
+    MIN_CALLS = 2
+
+    def on_run_completion(self, state: RunState) -> Optional[FailureSignal]:
+        calls = state.llm_calls
+        if not calls:
+            return None
+
+        marked = [c for c in calls if _is_unmeasurable(c)]
+        # The `is not None` filter is redundant at runtime — _is_unmeasurable
+        # already guarantees it — but it is what narrows Optional[str] to str
+        # for the type checker, which cannot see through that helper.
+        shapes = sorted(
+            {c.instrumentation_degraded for c in marked if c.instrumentation_degraded is not None}
+        )
+
+        if marked:
+            reason = "unreadable_response_shape"
+            affected = marked
+        elif len(calls) >= self.MIN_CALLS and all(_matches_degraded_fingerprint(c) for c in calls):
+            # No marker, but every call is structurally blank. This catches a
+            # break upstream of our extractors — a framework that hands us an
+            # already-emptied response — where nothing had a chance to mark it.
+            reason = "all_calls_structurally_blank"
+            affected = list(calls)
+        else:
+            return None
+
+        return FailureSignal(
+            failure_type=FailureType.INSTRUMENTATION_DEGRADED,
+            severity=self.SEVERITY,
+            run_id=state.run_id,
+            agent_id=state.agent_id,
+            agent_version=state.agent_version,
+            step_index=affected[0].step_index,
+            confidence=0.95 if marked else 0.8,
+            evidence={
+                "reason": reason,
+                # The shape that defeated extraction, e.g.
+                # "openai_response_shape:LegacyAPIResponse". Empty for the
+                # fingerprint path, where nothing identified itself.
+                "unreadable_shapes": shapes,
+                "affected_calls": len(affected),
+                "total_llm_calls": len(calls),
+                "providers": sorted({c.provider for c in affected if c.provider}),
+                "models": sorted({c.model for c in affected if c.model}),
+                "first_step": affected[0].step_index,
+                # What this run's silence does NOT mean.
+                "suppressed_detectors": list(_TEXT_DEPENDENT_DETECTORS),
+                "unmeasurable": [
+                    "llm.responded.output",
+                    "llm.responded.finish_reason",
+                ],
+            },
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TIER1_DETECTORS: List[BaseDetector] = [
+    InstrumentationDegradedDetector(),
+    OversizedToolArgumentsDetector(),
     ToolLoopDetector(),
     ToolThrashingDetector(),
+    ScattershotToolUseDetector(),
     ToolAvoidanceDetector(),
     GoalAbandonmentDetector(),
     RagEmptyRetrievalDetector(),
+    ExcessiveRetrievalDetector(),
     LlmTruncationLoopDetector(),
     SilentTruncationDetector(),
     ContextBloatDetector(),
@@ -2874,6 +5067,29 @@ TIER1_DETECTORS: List[BaseDetector] = [
     RunawayIterationDetector(),
     ModelFallbackDriftDetector(),
     MemoryPoisonedDetector(),
+    # In-path instance, deliberately NOT the class defaults. Benchmarking against
+    # realistic payloads (100KB+ tool outputs, 8-level nesting, 400 candidates in
+    # one arg) put unscoped scanning 6–9x over MAX_COST_NS, and the cost is
+    # surface-side — case-folding and marker-scanning captured tool output —
+    # so limiting which TOOLS are scanned barely moves it. What bounds it is
+    # bounding the INPUTS, plus a hard abort. All three fail open: the run is
+    # skipped, the server-side instance (class defaults, no caps) still catches
+    # it, and the user's agent never pays more than the budget.
+    UngroundedDestinationDetector(
+        MAX_SCAN_NS=1_000_000,  # == BaseDetector.MAX_COST_NS
+        MAX_SURFACE_CHARS=30_000,
+        MAX_ARGS_CHARS=4_000,
+        TOOL_NAME_SCOPE=UngroundedDestinationDetector.SEND_TOOL_PATTERNS,
+    ),
+    # Inert until the operator declares which tools are irreversible
+    # (IRREVERSIBLE_TOOLS defaults to []), so its in-path cost on an unconfigured
+    # agent is one attribute check. The tighter scan budget matters only once a
+    # declaration exists; like UNGROUNDED_DESTINATION it fails open, and the
+    # server-side instance runs with the class defaults.
+    UnresolvedAmbiguityDetector(
+        MAX_SCAN_NS=1_000_000,  # == BaseDetector.MAX_COST_NS
+        MAX_OUTPUT_CHARS=20_000,
+    ),
     # PromptInjectionDetector and HandoffContextLossDetector are handled
     # separately — the former needs raw input, the latter needs a second
     # run's data, which no detector in this list ever gets (see their
@@ -2881,6 +5097,50 @@ TIER1_DETECTORS: List[BaseDetector] = [
 ]
 
 PROMPT_INJECTION_DETECTOR = PromptInjectionDetector()
+
+# detectors.yml section key → detector class, one entry per built-in detector
+# (all 34). The single source of that mapping: the server-side worker's
+# ``detector_svc.detectors._DETECTOR_CLASSES`` is an alias of this dict, and
+# the SDK's ``dunetrace.detector_config.build_detectors`` reads the server's
+# ``GET /v1/detector-config`` response through it, so a threshold keyed by
+# yaml section lands on the same class on both sides. Insertion order is the
+# server's evaluation order; keep it in step with TIER1_DETECTORS above.
+DETECTOR_KEYS: Dict[str, type[BaseDetector]] = {
+    "instrumentation_degraded": InstrumentationDegradedDetector,
+    "oversized_tool_arguments": OversizedToolArgumentsDetector,
+    "tool_loop": ToolLoopDetector,
+    "tool_thrashing": ToolThrashingDetector,
+    "scattershot_tool_use": ScattershotToolUseDetector,
+    "tool_avoidance": ToolAvoidanceDetector,
+    "goal_abandonment": GoalAbandonmentDetector,
+    "prompt_injection_signal": PromptInjectionDetector,
+    "rag_empty_retrieval": RagEmptyRetrievalDetector,
+    "excessive_retrieval": ExcessiveRetrievalDetector,
+    "llm_truncation_loop": LlmTruncationLoopDetector,
+    "silent_truncation": SilentTruncationDetector,
+    "context_bloat": ContextBloatDetector,
+    "slow_step": SlowStepDetector,
+    "retry_storm": RetryStormDetector,
+    "empty_llm_response": EmptyLlmResponseDetector,
+    "step_count_inflation": StepCountInflationDetector,
+    "cascading_tool_failure": CascadingToolFailureDetector,
+    "first_step_failure": FirstStepFailureDetector,
+    "reasoning_stall": ReasoningSpinDetector,
+    "cost_spike": CostSpikeDetector,
+    "session_latency": SessionLatencyDetector,
+    "premature_termination": PrematureTerminationDetector,
+    "unread_tool_error": UnreadToolErrorDetector,
+    "tool_argument_fabrication": ToolArgumentFabricationDetector,
+    "retrieved_content_injection": RetrievedContentInjectionDetector,
+    "agent_handoff_failure": AgentHandoffFailureDetector,
+    "handoff_context_loss": HandoffContextLossDetector,
+    "runaway_iteration": RunawayIterationDetector,
+    "model_fallback_drift": ModelFallbackDriftDetector,
+    "memory_poisoning": MemoryPoisonedDetector,
+    "delegation_loop": DelegationLoopDetector,
+    "ungrounded_destination": UngroundedDestinationDetector,
+    "unresolved_ambiguity": UnresolvedAmbiguityDetector,
+}
 
 
 # ── Cost budget tracking ────────────────────────────────────────────────────────
@@ -3048,13 +5308,37 @@ def run_detectors(
     active = detectors if detectors is not None else TIER1_DETECTORS
     signals = []
     for detector in active:
+        # context="policy" deliberately does NOT honour the cost downgrade.
+        # A trigger="signal" policy is a safety control — the product's promise
+        # that a tool loop is stopped before it burns the budget — and a safety
+        # control must not switch itself off because it was slow. Cost is shed
+        # by scope instead: run_context passes only the detectors the active
+        # signal policies actually reference. "runtime" keeps the old
+        # shed-on-cost behaviour for any non-enforcement hot path.
         if context == "runtime":
             tracker = _cost_trackers.get(detector.name)
             if tracker is not None and tracker.downgraded_at is not None:
                 continue
 
         t0 = time.perf_counter_ns()
-        signal = detector.on_run_completion(state)
+        try:
+            signal = detector.on_run_completion(state)
+        except Exception:
+            # One detector must not cost the run its other 30. Failure isolation
+            # was already applied at plugin *construction*
+            # (detector_svc/detectors.py::_build_plugin_detectors), which made
+            # this gap easy to miss: a registered plugin or pack detector that
+            # raises on an unusual RunState — an empty tool_calls list, a None
+            # field it didn't expect — used to abort the whole battery and
+            # record the run as clean. ERROR, not debug: a raising detector is a
+            # bug worth seeing, it just isn't worth losing detection over.
+            logger.error(
+                "Detector %s raised on run %s — skipping it for this run",
+                detector.name,
+                state.run_id,
+                exc_info=True,
+            )
+            continue
         elapsed_ns = time.perf_counter_ns() - t0
         _record_cost_and_maybe_warn(detector, elapsed_ns, state.run_id)
 

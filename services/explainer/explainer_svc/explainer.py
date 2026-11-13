@@ -22,6 +22,32 @@ from explainer_svc.templates import TEMPLATES
 logger = logging.getLogger("dunetrace.explainer")
 
 
+def coerce_failure_type(raw: str, evidence: dict | None) -> tuple[FailureType, dict]:
+    """Map a stored failure_type string onto the enum, tolerating open-set values.
+
+    `failure_signals.failure_type` is TEXT, and several first-class writers
+    deliberately store values that are not `FailureType` members: JSON-config
+    custom detectors (`CUSTOM_*`), detector packs (`VOICE_*`), semantic
+    evaluators, and the operational markers `SEMANTIC_QUOTA_EXCEEDED` /
+    `EXTERNAL_INTEGRATION_DOWN`. Calling `FailureType(value)` directly on a read
+    path therefore raises for rows that are perfectly valid.
+
+    Unknown values map to the `CUSTOM` sentinel with the original name preserved
+    at `evidence["raw_failure_type"]` — the convention `_fallback` below already
+    reads to render a proper title, so the signal comes back with a real
+    explanation instead of empty strings.
+
+    Returns `(failure_type, evidence)`. The evidence dict is only copied when a
+    key has to be added, so the common path allocates nothing.
+    """
+    try:
+        return FailureType(raw), (evidence or {})
+    except ValueError:
+        enriched = dict(evidence or {})
+        enriched.setdefault("raw_failure_type", raw)
+        return FailureType.CUSTOM, enriched
+
+
 def explain(signal: FailureSignal, rate_context: dict | None = None) -> Explanation:
     """Produce a human-readable Explanation from a FailureSignal. Returns a fallback for unknown failure types rather than raising — the caller should never crash on explain().
 

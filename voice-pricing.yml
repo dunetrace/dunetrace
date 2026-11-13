@@ -1,0 +1,50 @@
+# Voice cost pricing (Phase 2.2). Rates for transcription (STT), text-to-speech
+# (TTS), and telephony, used to attribute per-turn and per-call cost for voice
+# agents. LLM cost is not configured here: it is computed per token from the
+# model on each run, in the shared cost table (services/explainer cost.py).
+#
+# These are LIST PRICES as of the date below. They are defaults to get cost
+# tracking working immediately. Verify them against your own contract and update
+# rates_as_of when you do. Dunetrace logs a warning at startup if rates_as_of is
+# more than 90 days old, to nudge a recheck (pricing drifts).
+#
+# Sources (fetched 2026-07-22):
+#   Deepgram   https://deepgram.com/pricing
+#   OpenAI     https://developers.openai.com/api/docs/pricing
+
+rates_as_of: "2026-07-22"
+
+stt:
+  default: deepgram_nova3
+  providers:
+    deepgram_nova3:               { per_minute: 0.0048 }  # Nova-3 monolingual streaming
+    deepgram_nova3_multi:         { per_minute: 0.0058 }  # Nova-3 multilingual
+    openai_gpt4o_transcribe:      { per_minute: 0.006 }
+    openai_gpt4o_mini_transcribe: { per_minute: 0.003 }
+
+tts:
+  default: deepgram_aura2
+  providers:
+    deepgram_aura2: { per_1k_chars: 0.030 }
+    deepgram_aura1: { per_1k_chars: 0.015 }
+    openai_tts1:    { per_1k_chars: 0.015 }  # tts-1, list price; verify
+    elevenlabs:     { per_1k_chars: 0.30 }   # plan-dependent, verify against your plan
+
+# Telephony is off by default: per-minute transport pricing varies widely by
+# provider and route. Set default to a provider below to turn it on.
+telephony:
+  default: none
+  providers:
+    twilio_pstn:    { per_minute: 0.0085 }  # US inbound, list; verify your route
+    vapi_transport: { per_minute: 0.05 }
+
+# Per-agent provider overrides. Use when different agents run on different
+# providers (e.g. one on Deepgram, one on OpenAI). Any category omitted here
+# falls back to the category default above.
+#
+# agent_overrides:
+#   billing-line:
+#     stt: openai_gpt4o_transcribe
+#     tts: openai_tts1
+#     telephony: twilio_pstn
+agent_overrides: {}

@@ -45,7 +45,13 @@ def mock_db(monkeypatch):
     monkeypatch.setattr("ingest_svc.db.postgres.close_pool", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.check_db", AsyncMock(return_value="ok"))
-    monkeypatch.setattr("ingest_svc.db.postgres.insert_events", AsyncMock(return_value=1))
+    # Returns the batch size: /v1/ingest now treats fewer rows than events as
+    # a persistence failure (503), so a fixed return_value=1 would reject every
+    # multi-event payload below.
+    monkeypatch.setattr(
+        "ingest_svc.db.postgres.insert_events",
+        AsyncMock(side_effect=lambda events, batch_id, org_id: len(events)),
+    )
     # Patched where routers/ingest.py actually looks it up — see the identical
     # comment in tests/test_ingest.py's mock_db fixture. Return value matches
     # the agent_id _record_a_full_run() below uses for every event.
@@ -103,11 +109,21 @@ def _record_a_full_run() -> list:
         run.retrieval_responded("docs", result_count=3, top_score=0.9)
         run.external_signal("rate_limit", source="openai")
 
-        # Voice-pack events.
+        # Voice-pack events. tts_generated carries the Phase 4.1 provider
+        # correlation fields so the real ingest schema is exercised with them
+        # present, proving the wire format tolerates the new optional keys.
         run.transcription_received("hello", confidence=0.95)
-        run.tts_generated("hi there", latency_ms=40)
+        run.tts_generated(
+            "hi there",
+            latency_ms=40,
+            voice_id="21m00Tcm4TlvDq8ikWAM",
+            model="eleven_multilingual_v2",
+            provider="elevenlabs",
+            provider_generation_id="hist_abc123",
+        )
         run.voice_activity_detected("speech_start", duration_ms=100)
         run.turn_taking("agent_speaking")
+        run.recording_metadata("https://s3.example.com/call.wav", storage_provider="s3")
 
         # Memory channel events.
         run.memory_written("user_prefs", "prefers concise answers", source="user_input")

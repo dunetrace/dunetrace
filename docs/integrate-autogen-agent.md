@@ -1,5 +1,20 @@
 # Integrating an AutoGen Agent with Dunetrace
 
+<!--dunetrace:instrument
+framework: autogen
+language: python
+install: pip install dunetrace autogen-agentchat autogen-ext
+primary_symbol: dunetrace.integrations.autogen.DunetraceAutoGenObserver
+mechanism: client-wrap
+opens_own_run: true
+requires_run_context: false
+target_file: the module that constructs the model client and runs the team
+target_example: `main.py`, `src/team.py`
+target_hints: ["OpenAIChatCompletionClient", "AssistantAgent(", "RoundRobinGroupChat", ".run(task="]
+emits: [run.started, run.completed, run.errored, llm.called, llm.responded, tool.called, tool.responded]
+verify_cmd: OPENAI_API_KEY=sk-... SCENARIO=tool_loop python packages/sdk-py/examples/autogen_agent.py
+-->
+
 ## Quick Start
 
 ```bash
@@ -33,6 +48,21 @@ asyncio.run(main())
 
 Start the backend once, locally, before running this: `docker compose up -d`.
 
+## Where this goes
+
+`observer.wrap_client()` goes where the model client is constructed.
+`observer.run()` goes around the team or agent execution.
+
+Find both with:
+
+```bash
+grep -rn "OpenAIChatCompletionClient\|AssistantAgent(\|\.run(task=" --include=*.py .
+```
+
+Usually the same module, typically `main.py`. Wrap **each** agent's model client
+separately if agents use different clients; they all report into the same
+`observer.run()`.
+
 ## What this does
 
 `observer.wrap_client()` instruments a model client so every `create()` call — model name, token counts, latency — is captured automatically. `observer.run()` opens a Dunetrace run around the whole conversation, so a multi-agent team's calls all land under one run.
@@ -51,6 +81,39 @@ OPENAI_API_KEY=sk-... SCENARIO=tool_loop python packages/sdk-py/examples/autogen
 ```
 
 Check the dashboard at `http://localhost:3000` — the run (and, for the tool-loop scenario, a `TOOL_LOOP` signal) should appear within ~15 seconds.
+
+
+### If nothing arrives
+
+Work down this list. The first two cover almost every case.
+
+1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm the registration call (`DunetraceAutoGenObserver`) actually ran, and ran **before** the first agent invocation.
+
+2. **Did the process flush?** Events ship from a background thread. Call
+   `dt.shutdown()` before the process exits, or the buffer dies with it.
+
+3. **Is the backend reachable?** Both should return `{"status":"ok",...}`:
+
+   ```bash
+   curl -s localhost:8001/ready   # ingest
+   curl -s localhost:8002/ready   # customer API
+   ```
+
+4. **Did anything land?** If your agent id is listed here, instrumentation is
+   working and the problem is downstream:
+
+   ```bash
+   curl -s localhost:8002/v1/agents
+   curl -s "localhost:8002/v1/agents/<your-agent-id>/runs?limit=5"
+   ```
+
+5. **Turn on debug logging.** `Dunetrace(debug=True)` logs every event as it is buffered and
+   every batch as it ships.
+
+**Runs appear but no signals?** That is usually correct, not a fault. The
+detector polls every 5 seconds, and a healthy run produces no signals. Several
+detectors also need cross-run baselines and stay dormant until the agent has
+run history. Check `docker compose logs detector` if you expected one.
 
 ---
 

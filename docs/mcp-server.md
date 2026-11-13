@@ -14,7 +14,41 @@ The MCP server wraps the Dunetrace Customer API in the [Model Context Protocol](
 - *"Is the TOOL_LOOP I'm seeing systemic or a one-off?"*
 - *"Walk me through run `019e2314-6b7` step by step."*
 
-All data is read-only, sourced from the Customer API over your existing Dunetrace deployment.
+All data is sourced from the Customer API over your existing Dunetrace deployment.
+
+**The server is read-only by default.** Nine tools write through to your
+deployment: `create_policy`, `toggle_policy`, `delete_policy`,
+`create_custom_detector`, `activate_custom_detector`, `pause_custom_detector`,
+`delete_custom_detector`, `resolve_issue`, and `trigger_explain` (which spends
+an LLM call). They're flagged **✎ writes** in the tool reference below, and they
+are **not registered at all** unless you opt in:
+
+```bash
+DUNETRACE_MCP_READONLY=false   # register the nine write tools
+```
+
+Read-only is the default because an MCP server feeds a model untrusted agent
+output — signal evidence, tool arguments, captured LLM text — which is exactly
+the shape that turns a write tool into a confused deputy. `create_policy` and
+`toggle_policy` affect **live agent runs**: a `stop` policy terminates real runs
+as soon as the SDK next pulls policies.
+
+**Opting in also needs the right credential.** Seven of the nine write tools —
+the three policy tools and the four custom-detector tools — call Customer API
+endpoints that require an API key with the **`admin`** scope, so in prod mode
+`DUNETRACE_API_KEY` has to carry it or those calls return `403`. `resolve_issue`
+and `trigger_explain` work with any key for the org. Every read tool works with
+an agent's ingest-only key, and that is the right key for a read-only server:
+give the MCP server an admin key only when you have turned the write tools on.
+In `AUTH_MODE=dev` (the local quickstart) every request is already admin, so
+nothing changes there. How keys and scopes are minted is in
+[Operations › Deploying](operations.md#minting-the-first-api-key).
+
+> Earlier versions of this page advised issuing the MCP server "an API key
+> scoped to reads". No read-scoped key exists in Dunetrace: an ingest-only key
+> is now kept out of the seven admin-gated writes, but it can still resolve
+> issues, trigger explains and submit events. Withholding the tools is the
+> mechanism that actually works; the scope is the second lock, not the first.
 
 ---
 
@@ -83,14 +117,29 @@ Create `.cursor/mcp.json` in your project root (or global `~/.cursor/mcp.json`):
 
 ### Codex / SSE clients
 
-Run the server in SSE mode (listens on `:8000` by default):
+Run the server in SSE mode. It binds **loopback only** (`127.0.0.1:8000`) by
+default:
 
 ```bash
 dunetrace-mcp --sse
-dunetrace-mcp --sse --port 9000   # custom port
+dunetrace-mcp --sse --port 9000            # custom port
+dunetrace-mcp --sse --host 0.0.0.0         # expose it — read the warning below first
 ```
 
-Point your client's tool endpoint at `http://localhost:8000/sse`.
+Point your client's tool endpoint at `http://127.0.0.1:8000/sse`.
+
+> **The SSE server has no authentication.** There is no bearer check, no
+> allow-list, nothing. Anyone who can reach the port can call every registered
+> tool using *your* `DUNETRACE_API_KEY` — and under `AUTH_MODE=dev` that key is
+> an admin of every org. With `DUNETRACE_MCP_READONLY=false` that includes the
+> nine writing tools: `create_policy(action="stop")` terminates every
+> production run of an agent as soon as the SDK next pulls policies, and
+> `delete_policy` removes guardrails that are already in place.
+>
+> That is why the default bind is loopback and why `--host` exists: exposing it
+> has to be a deliberate act. The server prints a warning on any non-loopback
+> bind. If a remote client genuinely needs to reach it, put an authenticating
+> reverse proxy in front and keep the server itself on loopback.
 
 ### Manual test (stdio)
 
@@ -108,12 +157,31 @@ The server speaks MCP over stdin/stdout. You can pipe JSON-RPC messages manually
 |---|---|---|
 | `DUNETRACE_API_URL` | `http://localhost:8002` | Customer API base URL |
 | `DUNETRACE_API_KEY` | `dt_dev_test` | Bearer token (auth header) |
+| `DUNETRACE_MCP_READONLY` | `true` | Withhold the nine write tools. Set `false` to register them |
 
-For production, set `DUNETRACE_API_KEY` to your real API key.
+For production, set `DUNETRACE_API_KEY` to a real key: an ingest-only key covers
+every read tool; with `DUNETRACE_MCP_READONLY=false` the key must carry the
+`admin` scope for the policy and custom-detector tools (see above).
 
 ---
 
 ## Tools
+
+31 tools. **✎** marks a tool that writes to your deployment.
+
+| Area | Tools |
+|---|---|
+| Agents | `list_agents`, `summarize_agent`, `get_agent_health`, `get_agent_patterns`, `get_agent_token_stats` |
+| Runs | `get_agent_runs`, `get_run_detail`, `compare_runs` |
+| Signals | `get_agent_signals`, `get_signal_detail`, `search_signals`, `get_failure_pattern_detail` |
+| Root cause & fixes | `trigger_explain` ✎, `get_fix_status`, `list_agent_fixes` |
+| Issues | `list_agent_issues`, `get_issue`, `search_issues`, `resolve_issue` ✎ |
+| Policies | `list_policies`, `create_policy` ✎, `toggle_policy` ✎, `delete_policy` ✎ |
+| Custom detectors | `list_custom_detectors`, `create_custom_detector` ✎, `activate_custom_detector` ✎, `pause_custom_detector` ✎, `delete_custom_detector` ✎ |
+| Voice | `list_voice_calls`, `get_call_detail` |
+| Onboarding | `get_instrumentation_guide` |
+
+`search_signals` is also registered under the alias `list_all_signals`.
 
 ### `list_agents`
 
@@ -279,6 +347,43 @@ The alternating 🔴 / ✅ pattern here is a tell: runs with 8 steps consistentl
 
 ---
 
+### `list_voice_calls`
+
+List recent voice calls with call-level metrics: duration, how the call ended, silence percentage, voice signal count, and cost. A "call" is a voice agent's conversation (the runs that share one conversation id).
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | string | "" | Filter to one voice agent (optional) |
+| `completion_status` | string | "" | `natural`, `dropped`, or `escalated` (optional) |
+| `cost_bucket` | string | "" | `low` (<$0.10), `medium` ($0.10–$1), or `high` (>$1) (optional) |
+| `limit` | int | 20 | Max calls to return (max 100) |
+
+**Example output:**
+```
+Voice calls
+
+ CALL  AGENT              WHEN          DUR SILENCE  SIGS      COST  STATUS
+────────────────────────────────────────────────────────────────────────────────────
+  101  voice-support      5m ago        92s     12%     0 $  0.0423  ✅ natural
+  102  voice-support      15m ago       45s     55%  🔴 2 $  0.5000  🔴 dropped
+```
+
+---
+
+### `get_call_detail`
+
+One voice call's full picture: call-level metrics, per-stage cost breakdown (STT / LLM / TTS / telephony), the voice failure signals detected, and links to the call audio when recorded.
+
+**Arguments:**
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `conversation_id` | int | required | Call id (from `list_voice_calls`) |
+
+---
+
 ### `get_agent_signals`
 
 Recent failure signals for a specific agent, with titles, explanations, and fix suggestions.
@@ -436,6 +541,8 @@ Full context for a single issue — metadata, affected runs, root cause, and a s
 
 May trigger an LLM call to generate the root cause/fix (the same native root-cause analysis `trigger_explain` uses) and can take 5–15 seconds. If no LLM key is configured on the backend, `root_cause`/`suggested_fix` are omitted but the rest of the report still returns.
 
+For the four `dunetrace_native` failure types — `TOOL_LOOP`, `RETRY_STORM`, `CASCADING_TOOL_FAILURE`, `STEP_COUNT_INFLATION` — the fix is a runtime policy rather than a diff, so the report adds a **SUGGESTED POLICY** block with the policy's name, agent, condition and action. The same body is returned machine-readably as `suggested_policy`, shaped exactly like `POST /v1/policies` expects, so it can be applied unchanged. (This path used to return a 500: the policy is a structured object and the field carrying it was typed as free text.)
+
 `code_references` (the source file/line an issue maps to) is always empty for now — Dunetrace has no source-mapping capability yet.
 
 **Arguments:**
@@ -497,7 +604,7 @@ Issues matching filters (2 total, showing 2):
 
 ---
 
-### `resolve_issue`
+### `resolve_issue` ✎
 
 Manually mark an issue resolved with notes on what fixed it — for when you've made a code/prompt change and want to close the loop, distinct from Dunetrace's automatic resolve-after-5-clean-runs detection.
 
@@ -557,9 +664,240 @@ Quick-start code snippet for instrumenting an agent with Dunetrace.
 
 | Argument | Type | Description |
 |---|---|---|
-| `framework` | string | `langchain`, `python`, `typescript`, `tools`, or `otel` |
+| `framework` | string | `autogen`, `crewai`, `dify`, `haystack`, `langchain`, `litellm`, `llamaindex`, `openai-agents`, `otel`, `pydantic-ai`, `python`, `smolagents`, `tools`, `typescript`, `vercel-ai`, `voice` |
 
-Aliases: `langgraph`, `lc`, `ts`, `js`, `node`, `otlp`, `opentelemetry`, `langdock`, `dify`, `tool-calls`, `tracking`.
+Aliases: `ag2`, `agents-sdk`, `ai-sdk`, `autogen-agentchat`, `crew`, `crew-ai`, `custom python`, `custom-python`, `haystack-ai`, `haystack2`, `hs`, `javascript`, `js`, `langdock`, `langgraph`, `lc`, `lc-graph`, `lc_graph`, `litellm-proxy`, `llama-index`, `llama_index`, `next.js`, `nextjs`, `no-code`, `node`, `nodejs`, `open-telemetry`, `openai_agents`, `opentelemetry`, `otlp`, `py`, `pydantic_ai`, `pydanticai`, `rag`, `smol`, `smolagent`, `speech`, `stt`, `swarm`, `tool`, `tool-calls`, `tool_calls`, `tracking`, `ts`, `tts`, `vercel`, `voice-agent`, `voice-agents`, `voice_agent`, `zero-code`.
+
+Each returns a short inline guide where one exists, followed by the full
+Markdown guide. The guides are bundled into the wheel at build time, so a
+`pip install dunetrace-mcp` gets the same content as a source checkout.
+
+---
+
+### `compare_runs`
+
+Compare two runs side by side — duration, step count, token usage, signals, and exit reason. Useful for spotting a regression between a known-good run and a bad one, or for comparing runs either side of a deploy.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `run_id_1` | string | First run UUID |
+| `run_id_2` | string | Second run UUID |
+| `agent_id` | string | Agent ID (optional; informational only) |
+
+---
+
+### `get_failure_pattern_detail`
+
+Deep dive into one failure type for one agent: evidence aggregates, a 14-day trend with an ASCII bar chart, signals that co-occur with this failure, and the top example runs. Use it after `get_agent_patterns` tells you *which* failure dominates and you want to know *why*.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID (from `list_agents`) |
+| `failure_type` | string | Detector type, e.g. `TOOL_LOOP`, `COST_SPIKE`, `CONTEXT_BLOAT` |
+
+---
+
+### `trigger_explain` ✎
+
+Run root-cause analysis on a signal and return a fix suggestion. Calls `POST /v1/signals/{id}/explain`, which **spends an LLM call** on your configured provider — this is the one read-shaped tool that costs money.
+
+Returns either a suggested Dunetrace policy (for `dunetrace_native` fixes) or a diff (for `customer_code` fixes). See [Root cause and fix classification](detectors.md) for what determines which.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `signal_id` | int | The integer signal ID to analyze |
+| `agent_id` | string | Agent ID (optional; not required for lookup) |
+
+---
+
+### `get_fix_status`
+
+Check whether a fix applied for a signal actually reduced recurrence.
+
+| Verdict | Meaning |
+|---|---|
+| `verified` | Signal has not recurred since the fix was applied |
+| `likely_fixed` | Recurrence dropped significantly but not to zero |
+| `still_occurring` | Signal is still firing at a similar rate |
+| `insufficient_data` | Not enough post-fix runs to make a determination |
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `signal_id` | int | The integer signal ID to check |
+| `agent_id` | string | Agent ID (optional; not required for lookup) |
+
+---
+
+### `list_agent_fixes`
+
+List every fix applied for an agent's signals — which signal, the fix type, how it was applied (clipboard copy or GitHub PR), and whether it was verified effective.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent ID (from `list_agents`) |
+
+**Example output:**
+```
+Fixes for: langchain-example-agent  (2 total)
+
+ SIGNAL  TYPE                VIA         VERDICT               WHEN
+───────────────────────────────────────────────────────────────────────────
+    518  prompt_addition     clipboard   verified              3d ago
+    502  code_change         github_pr   still_occurring       9d ago
+```
+
+---
+
+### `list_policies`
+
+List runtime policies configured for your agents. Policies act *during* a live run — they stop it, switch the model, inject a corrective prompt, or log — when a condition is met. See [policies.md](policies.md).
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Filter to one agent. Empty = all agents. |
+
+**Example output:**
+```
+Policies (2):
+
+NAME                       AGENT            TRIGGER       OP    VALUE       ACTION              STATUS
+────────────────────────────────────────────────────────────────────────────────────────────────────
+cap-tool-calls             support-bot      tool_call_c   gt    5           stop                enabled
+downgrade-on-cost          *                cost_usd      gt    0.5         switch_model        enabled
+```
+
+---
+
+### `create_policy` ✎
+
+Create a runtime policy. **This takes effect on live agent runs** as soon as the SDK next pulls policies at run start — a `stop` action will terminate real runs.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `name` | string | Human-readable policy name |
+| `agent_id` | string | Agent to apply to (`*` for all agents) |
+| `condition` | string | JSON: `{"metric": ..., "operator": ..., "threshold": ...}` |
+| `action` | string | JSON: `{"type": "stop"}`, `{"type": "switch_model", "model": ...}`, `{"type": "inject_prompt", "text": ...}`, or `{"type": "log"}` |
+
+Operators: `gt`, `gte`, `lt`, `lte`, `eq`. For the full condition and action reference — including the `match` block for gating on tool-argument values — see [policies.md](policies.md#condition-reference).
+
+---
+
+### `toggle_policy` ✎
+
+Enable or disable an existing policy without deleting it.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `policy_id` | string | The policy ID to toggle |
+| `enabled` | bool | `true` to enable, `false` to disable |
+
+---
+
+### `delete_policy` ✎
+
+Delete a runtime policy permanently. Prefer `toggle_policy` if you may want it back.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `policy_id` | string | The policy ID to delete |
+
+---
+
+### `list_custom_detectors`
+
+List custom detectors with status, fire rate, and run counts.
+
+| Status | Meaning |
+|---|---|
+| `shadow` | Evaluating silently — results stored, no alerts fire |
+| `active` | Firing live alerts when triggered |
+| `paused` | Evaluation suspended |
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `agent_id` | string | Filter to one agent. Empty = all. |
+
+**Example output:**
+```
+Custom detectors (2):
+
+NAME                            STATUS     AGENT            FIRE RATE  TOTAL RUNS
+────────────────────────────────────────────────────────────────────────────────
+excessive-tool-calls            [shadow]   support-bot      3/120 (2%)  120
+refund-over-10k                 [active]   billing-bot      1/40 (2%)   40
+```
+
+---
+
+### `create_custom_detector` ✎
+
+Create a custom detector from a plain-English description. The tool translates the description to a structured config via LLM (**spends an LLM call**), then creates the detector **in shadow mode** — it evaluates on every matching run but fires no alerts until you call `activate_custom_detector`.
+
+If the description can't be expressed with the supported metrics and content fields, the tool returns the translator's reason instead of creating anything. See [detectors.md](detectors.md#custom-detectors) for what's expressible.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `description` | string | Plain English, e.g. "Alert when total tool calls exceed 20 in a single run" |
+| `agent_id` | string | Agent to apply to (`*` for all agents, the default) |
+
+---
+
+### `activate_custom_detector` ✎
+
+Promote a shadow or paused detector to `active` so it fires live alerts. Check its shadow fire rate with `list_custom_detectors` first — that's what shadow mode is for.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `detector_id` | string | The custom detector ID to activate |
+
+---
+
+### `pause_custom_detector` ✎
+
+Pause a custom detector so it stops evaluating entirely, without deleting it or losing its history.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `detector_id` | string | The custom detector ID to pause |
+
+---
+
+### `delete_custom_detector` ✎
+
+Delete a custom detector permanently, **including all its historical evaluation results** (`custom_detector_results` cascades). Use `pause_custom_detector` if you only want to stop evaluation.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|---|---|---|
+| `detector_id` | string | The custom detector ID to delete |
 
 ---
 
@@ -706,6 +1044,16 @@ All data served by the MCP tools comes from the Dunetrace Customer API:
 
 The `evidence` dict in signal responses contains the actual content the detector used, not a hash of it.
 
+**Writes.** Nine tools mutate your deployment rather than just reading it — see
+the ✎ markers in the tool index above. Two of them have effects outside
+Dunetrace itself: `create_policy` and `toggle_policy` change how **live agent
+runs** behave (a `stop` policy terminates real runs from the moment the SDK
+next pulls policies), and `trigger_explain` / `create_custom_detector` each
+spend an LLM call against your configured provider. Everything else is scoped
+to Dunetrace's own records. The policy and custom-detector tools need an
+`admin`-scoped `DUNETRACE_API_KEY` in prod mode; `resolve_issue` and
+`trigger_explain` accept any key for the org.
+
 ---
 
 ## Troubleshooting
@@ -744,7 +1092,7 @@ python -m pytest tests/ -v
 dunetrace_mcp/
   __init__.py
   client.py      # thin httpx wrapper around the Customer API
-  server.py      # FastMCP server with 10 tools + 7 doc resources
+  server.py      # FastMCP server with 31 tools + 8 doc resources
 tests/
   test_tools.py  # 105 unit tests (all offline)
 pyproject.toml

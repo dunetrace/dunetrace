@@ -3,7 +3,8 @@ LangChain agent example. One callback, nothing else changes.
 Works with LangChain 1.x and LangGraph (langgraph >= 0.2).
 
 Install:
-    pip install 'dunetrace[langchain]' langchain-openai langgraph
+    pip install 'dunetrace[langchain]' langchain-openai python-dotenv
+    # langgraph comes with the [langchain] extra
 
 Run:
     OPENAI_API_KEY=sk-... python examples/langchain_agent.py
@@ -23,13 +24,25 @@ import time
 import warnings
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+    # Reads the repo-root .env — including OPENAI_API_KEY. This example makes
+    # real, billable LLM calls, and will pick up a key from there even if you
+    # don't pass one on the command line.
+    load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+except ImportError:
+    pass  # python-dotenv is optional; fall back to the ambient environment.
 
-from langchain.tools import tool
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
+try:
+    from langchain.tools import tool
+    from langchain_openai import ChatOpenAI
+    from langgraph.prebuilt import create_react_agent
+except ImportError as exc:
+    raise SystemExit(
+        f"This example needs LangChain — {exc.name} is not installed.\n"
+        "  pip install 'dunetrace[langchain]' langchain-openai python-dotenv"
+    ) from None
 
 # The suggested migration target (langchain.agents.create_react_agent) doesn't
 # exist in the installed langchain version, so the warning is premature.

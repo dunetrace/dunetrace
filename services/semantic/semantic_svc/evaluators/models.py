@@ -32,16 +32,36 @@ from semantic_svc.config import settings
 _DEFAULT_MODEL_BY_PROVIDER = {
     "openai": "gpt-4o-mini",
     "anthropic": "claude-haiku-4-5",
+    "mistral": "mistral-small-latest",
 }
 
 
+def normalise_provider(provider: str) -> str:
+    """Case- and whitespace-insensitive, because these come from an env var."""
+    return (provider or "").strip().lower()
+
+
 def resolve_model_name(provider: str, model_name: str | None) -> str:
-    return model_name or _DEFAULT_MODEL_BY_PROVIDER.get(provider, "gpt-4o-mini")
+    return model_name or _DEFAULT_MODEL_BY_PROVIDER.get(normalise_provider(provider), "gpt-4o-mini")
 
 
 def build_deepeval_model(provider: str, model_name: str | None = None):
-    """provider: "openai" | "anthropic". model_name falls back to a
-    cost-conscious per-provider default when empty/None."""
+    """provider: "openai" | "anthropic" | "mistral". model_name falls back to a
+    cost-conscious per-provider default when empty/None.
+
+    There is deliberately no cross-provider fallback, on either the miss path or
+    the failure path. A customer who selects mistral has usually done so to keep
+    evaluation inside a European provider, and quietly retrying a failed
+    evaluation against OpenAI — or silently treating a typo'd provider name as
+    OpenAI — would ship the run's text to a US API precisely when they asked us
+    not to. So the provider set is closed: an unrecognised name raises rather
+    than falling through to GPTModel. A provider failure surfaces as a failure.
+
+    This covers the primary evaluation path. The *second opinion* path has its
+    own residency rule, enforced in worker.py::_resolve_second_opinion.
+    See docs/integrations/mistral.md.
+    """
+    provider = normalise_provider(provider)
     resolved = resolve_model_name(provider, model_name)
 
     if provider == "anthropic":
@@ -49,6 +69,20 @@ def build_deepeval_model(provider: str, model_name: str | None = None):
 
         return AnthropicModel(model=resolved, api_key=settings.ANTHROPIC_API_KEY or None)
 
-    from deepeval.models import GPTModel
+    if provider == "mistral":
+        # Local class, not a DeepEval one: 4.0.9 ships no Mistral model. See
+        # evaluators/mistral_model.py for the two DeepEval internals that shape
+        # it (the GEval logprob fallback and non-native token accounting).
+        from semantic_svc.evaluators.mistral_model import MistralModel
 
-    return GPTModel(model=resolved, api_key=settings.OPENAI_API_KEY or None)
+        return MistralModel(model=resolved, api_key=settings.MISTRAL_API_KEY or None)
+
+    if provider == "openai":
+        from deepeval.models import GPTModel
+
+        return GPTModel(model=resolved, api_key=settings.OPENAI_API_KEY or None)
+
+    raise ValueError(
+        f"Unsupported SEMANTIC_LLM_PROVIDER={provider!r}. "
+        f"Expected one of: {', '.join(sorted(_DEFAULT_MODEL_BY_PROVIDER))}."
+    )

@@ -17,6 +17,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import HTTPException
+
 from api_svc.routers.signals import OpenPRRequest, _attempt_real_diff, _resolve_github_auth, open_pr
 
 
@@ -319,3 +321,85 @@ class TestOpenPrRealDiffBranching(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOpenPrEnforcesFixCategory(unittest.IsolatedAsyncioTestCase):
+    """This endpoint is documented as serving customer_code/code_change only.
+
+    Nothing enforced it: the dashboard gated the button client-side and the
+    server accepted anything, so a caller could open a PR for a signal whose
+    fix is a runtime policy, or for one explain returns with
+    `apply_blocked: true` — and _attempt_real_diff would then resolve a real
+    source file and commit caller-supplied content into the customer's repo.
+    """
+
+    @staticmethod
+    def _patches(signal):
+        return (
+            patch(
+                "api_svc.routers.signals._resolve_github_auth",
+                AsyncMock(return_value=TestOpenPrRealDiffBranching._auth),
+            ),
+            patch(
+                "api_svc.routers.signals.get_signal_by_id",
+                AsyncMock(return_value=signal),
+            ),
+            patch("api_svc.github_client.create_fix_pr", AsyncMock()),
+        )
+
+    async def _expect_400(self, signal, *, contains):
+        import contextlib as _ctx
+
+        with _ctx.ExitStack() as stack:
+            for p in self._patches(signal):
+                stack.enter_context(p)
+            with self.assertRaises(HTTPException) as ctx:
+                await open_pr(1, _open_pr_body(), org_id="org-1")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn(contains, str(ctx.exception.detail))
+
+    async def test_a_dunetrace_native_signal_is_refused_and_points_at_policies(self):
+        # TOOL_LOOP evidence that build_suggested_policy can actually use.
+        signal = _signal(failure_type="TOOL_LOOP")
+        signal["evidence"] = {"tool": "search", "count": 6}
+        await self._expect_400(signal, contains="POST /v1/policies")
+
+    async def test_a_prompt_addition_signal_is_refused(self):
+        await self._expect_400(_signal(failure_type="TOOL_AVOIDANCE"), contains="code_change")
+
+    async def test_a_code_change_signal_is_still_accepted(self):
+        """The guard must not close the path it exists to protect."""
+        import contextlib as _ctx
+
+        signal = _signal(failure_type="CONTEXT_BLOAT")
+        with _ctx.ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "api_svc.routers.signals._resolve_github_auth",
+                    AsyncMock(return_value=TestOpenPrRealDiffBranching._auth),
+                )
+            )
+            stack.enter_context(
+                patch("api_svc.routers.signals.get_signal_by_id", AsyncMock(return_value=signal))
+            )
+            stack.enter_context(
+                patch("api_svc.routers.signals._attempt_real_diff", AsyncMock(return_value=None))
+            )
+            stack.enter_context(
+                patch(
+                    "api_svc.github_client.create_fix_pr",
+                    AsyncMock(
+                        return_value={
+                            "pr_url": "u",
+                            "pr_number": 1,
+                            "branch": "b",
+                            "applied_to_real_file": False,
+                        }
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch("api_svc.routers.signals.record_fix", AsyncMock(return_value=5))
+            )
+            result = await open_pr(1, _open_pr_body(), org_id="org-1")
+        self.assertEqual(result["pr_number"], 1)

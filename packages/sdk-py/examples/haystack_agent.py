@@ -4,7 +4,7 @@ Haystack 2.x agent example for Dunetrace monitoring.
 Registers DunetraceHaystackTracer once at startup — no pipeline changes needed.
 
 Install:
-    pip install 'dunetrace[haystack]' haystack-ai openai python-dotenv
+    pip install 'dunetrace[haystack]' python-dotenv
 
 Run:
     python examples/haystack_agent.py                       # RAG pipeline
@@ -21,16 +21,28 @@ import os
 import time
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+    # Reads the repo-root .env — including OPENAI_API_KEY. This example makes
+    # real, billable LLM calls, and will pick up a key from there even if you
+    # don't pass one on the command line.
+    load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+except ImportError:
+    pass  # python-dotenv is optional; fall back to the ambient environment.
 
-import haystack.tracing
-from haystack import Pipeline
-from haystack.components.agents import Agent
-from haystack.components.generators.chat import OpenAIChatGenerator
-from haystack.dataclasses import ChatMessage
-from haystack.tools import Tool
+try:
+    import haystack.tracing
+    from haystack import Pipeline
+    from haystack.components.agents import Agent
+    from haystack.components.generators.chat import OpenAIChatGenerator
+    from haystack.dataclasses import ChatMessage
+    from haystack.tools import Tool
+except ImportError as exc:
+    raise SystemExit(
+        f"This example needs Haystack 2.x — {exc.name} is not installed.\n"
+        "  pip install 'dunetrace[haystack]' python-dotenv"
+    ) from None
 
 from dunetrace import Dunetrace
 from dunetrace.integrations.haystack import DunetraceHaystackTracer

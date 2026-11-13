@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import os
 
+from dunetrace_schemas.deploy_guard import assert_safe_deployment
+
 
 def _load_dotenv(path: str = ".env") -> None:
     try:
@@ -35,7 +37,15 @@ class Settings:
     # audit Finding 34: real build version reported by /health (was hardcoded
     # 0.1.0). Set APP_VERSION (or GIT_COMMIT) in deploy to identify the build.
     APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
-    AUTH_MODE: str = os.getenv("AUTH_MODE", "dev")
+    # Fails CLOSED: an unset AUTH_MODE means full auth, not skipped auth. Dev
+    # mode disables authentication entirely, so it must be an explicit opt-in —
+    # a deployment that forgets to set this gets a locked-down API rather than
+    # an open one. Both compose files set `dev` explicitly for the local
+    # quickstart; anything else (k8s, systemd, bare uvicorn) inherits `prod`.
+    AUTH_MODE: str = os.getenv("AUTH_MODE", "prod")
+    # Deployment identity, read only by the startup guard at the bottom of
+    # this file (AUTH_MODE alone drives is_dev). Same default as ingest_svc.
+    ENV: str = os.getenv("ENV", "dev")
 
     # Trusted-upstream bypass — mirrors ingest_svc's INTERNAL_TOKEN. When set, requests
     # carrying a matching x-internal-token header skip this service's own api_keys
@@ -43,12 +53,24 @@ class Settings:
     # so self-hosted/dev deployments are unaffected.
     INTERNAL_TOKEN: str = os.getenv("INTERNAL_TOKEN", "")
 
+    # Rate limit stamped on keys created through POST /v1/keys. Operator-set,
+    # not caller-set: key creation is self-service, so letting the request body
+    # choose this made the quota self-granting.
+    DEFAULT_KEY_RATE_LIMIT_RPM: int = int(os.getenv("DEFAULT_KEY_RATE_LIMIT_RPM", "600"))
     PAGE_SIZE_DEFAULT: int = int(os.getenv("PAGE_SIZE_DEFAULT", "50"))
     PAGE_SIZE_MAX: int = int(os.getenv("PAGE_SIZE_MAX", "500"))
 
-    # LLM for explain endpoint (Anthropic preferred; falls back to OpenAI)
+    # LLM for this service's own features: native explain, fix diff generation,
+    # custom-detector translation, issue summarisation. With API_LLM_PROVIDER
+    # unset the first configured key wins in the order below (Anthropic first,
+    # as before). Set it to anthropic|openai|mistral to pin one — a deployment
+    # that must keep this text inside a European provider sets `mistral`.
+    # See api_svc/llm_provider.py; distinct from the semantic worker's
+    # SEMANTIC_LLM_PROVIDER, which selects a different service's evaluators.
+    API_LLM_PROVIDER: str = os.getenv("API_LLM_PROVIDER", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
 
     # GitHub integration — for opening fix PRs from code-change signals.
     # GITHUB_TOKEN/GITHUB_REPO is the original single-tenant PAT-based path
@@ -103,3 +125,6 @@ class Settings:
 
 
 settings = Settings()
+
+# ENV=prod with AUTH_MODE=dev never comes up — see dunetrace_schemas.deploy_guard.
+assert_safe_deployment("api", settings.ENV, settings.AUTH_MODE)

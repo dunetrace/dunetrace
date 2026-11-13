@@ -15,9 +15,49 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
+from dunetrace_schemas import metrics as _metrics
+
 from alerts_svc.config import settings
 
 logger = logging.getLogger("dunetrace.alerts.sender")
+
+# One observation per outbound HTTP call — a retried delivery observes once
+# per attempt, so the counter's status classes show what the destination
+# actually answered, not just the final SendResult. Labels are the closed
+# destination set (slack | webhook | linear) and the HTTP status class
+# ("2xx", "4xx", ...) or "error" when no response arrived.
+DELIVERY_SECONDS = _metrics.histogram(
+    "dunetrace_alerts_delivery_seconds",
+    "Latency of one outbound alert delivery HTTP call.",
+    ("destination",),
+    buckets=_metrics.DEFAULT_LATENCY_BUCKETS,
+)
+DELIVERY_TOTAL = _metrics.counter(
+    "dunetrace_alerts_delivery_total",
+    "Outbound alert delivery HTTP calls by destination and HTTP status class.",
+    ("destination", "status"),
+)
+
+_KNOWN_DESTINATIONS = frozenset({"slack", "webhook", "linear"})
+
+
+def _status_class(status: int | None) -> str:
+    if not isinstance(status, int) or isinstance(status, bool) or status < 100:
+        return "error"
+    return f"{status // 100}xx"
+
+
+def record_delivery(destination: str, started: float, status: int | None) -> None:
+    """Observe one outbound call: ``started`` is a ``time.monotonic()`` stamp
+    taken just before the request, ``status`` the HTTP status (None when the
+    request raised before a response). Never raises — telemetry must not
+    turn a delivered alert into a failed one."""
+    try:
+        dest = destination if destination in _KNOWN_DESTINATIONS else "other"
+        DELIVERY_SECONDS.labels(destination=dest).observe(max(time.monotonic() - started, 0.0))
+        DELIVERY_TOTAL.labels(destination=dest, status=_status_class(status)).inc()
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_delivery failed", exc_info=True)
 
 
 @dataclass
@@ -71,8 +111,10 @@ def send_with_retry(
     delay = retry_backoff
 
     for attempt in range(1, max_retries + 2):  # +1 for initial attempt
+        started = time.monotonic()
         try:
             status, response_body = _post(url, body, headers)
+            record_delivery(destination, started, status)
 
             # Slack returns 200 with body "ok" on success
             if 200 <= status < 300:
@@ -100,6 +142,7 @@ def send_with_retry(
                 )
 
         except urllib.error.HTTPError as exc:
+            record_delivery(destination, started, exc.code)
             last_error = f"HTTPError {exc.code}: {exc.reason}"
             last_status = exc.code
             logger.warning(
@@ -110,6 +153,7 @@ def send_with_retry(
             )
 
         except urllib.error.URLError as exc:
+            record_delivery(destination, started, None)
             last_error = f"URLError: {exc.reason}"
             logger.warning(
                 "Alert URLError. dest=%s attempt=%d error=%s",
@@ -119,6 +163,7 @@ def send_with_retry(
             )
 
         except Exception as exc:
+            record_delivery(destination, started, None)
             last_error = str(exc)
             logger.warning(
                 "Alert unexpected error. dest=%s attempt=%d error=%s",

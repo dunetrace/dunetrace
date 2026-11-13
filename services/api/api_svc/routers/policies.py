@@ -5,10 +5,19 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from dunetrace.policies import (
+    DEFAULT_MODE,
+    DRY_RUN_MODE,
+    VALID_MODES,
+    PolicyConfigError,
+    VALID_OPERATORS,
+    VALID_TRIGGERS,
+    validate_condition,
+)
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.db.queries import (
     list_policies,
     get_policy_by_id,
@@ -16,27 +25,20 @@ from api_svc.db.queries import (
     update_policy,
     delete_policy,
     log_policy_audit,
+    fetch_dry_run_summary,
     fetch_policy_evaluations,
 )
 
 logger = logging.getLogger("dunetrace.api.policies")
 router = APIRouter(prefix="/v1/policies", tags=["Policies"])
 
-_VALID_TRIGGERS = {
-    "tool_call_count",
-    "step_count",
-    "cost_usd",
-    "error_count",
-    "finish_reason",
-    "llm_latency_ms",
-    "signal",
-    # Human-in-the-loop (Capability 2) — the tool about to be called.
-    "before_tool_call",
-    # Expression-only policy: the flat trigger is a no-op sentinel and the
-    # condition.match block carries the whole condition.
-    "expression",
-}
-_VALID_OPERATORS = {"gt", "gte", "lt", "lte", "eq", "neq", "contains"}
+# Imported from the SDK rather than restated here. These policies are enforced
+# by dunetrace.policies in the customer's process, so a trigger this service
+# accepts and that engine does not know is a row that stores cleanly, shows as
+# enabled in the dashboard, and never fires. VALID_OPERATORS is derived from the
+# engine's own operator table, so the two cannot disagree.
+_VALID_TRIGGERS = VALID_TRIGGERS
+_VALID_OPERATORS = VALID_OPERATORS
 _VALID_ACTIONS = {
     "stop",
     "switch_model",
@@ -46,6 +48,7 @@ _VALID_ACTIONS = {
     "stop_current_tts",
     "escalate_to_human",
     "inject_recovery_prompt",
+    "slow_response_pace",
     # Human-in-the-loop (Capability 2)
     "require_approval",
 }
@@ -76,6 +79,11 @@ class PolicyCreate(BaseModel):
     action: ActionModel
     priority: int = 100
     enabled: bool = True
+    #: "enforcing" (default) or "dry_run". Enforcing by default on purpose: a
+    #: policy someone took the trouble to create should guard something, and a
+    #: guardrail that quietly does nothing is the failure this engine is being
+    #: hardened against. Dry run is how you preview one, not how one arrives.
+    mode: str = DEFAULT_MODE
 
 
 class PolicyUpdate(BaseModel):
@@ -85,6 +93,10 @@ class PolicyUpdate(BaseModel):
     action: Optional[ActionModel] = None
     priority: Optional[int] = None
     enabled: Optional[bool] = None
+    #: Promotion is this field changing from "dry_run" to "enforcing". It is a
+    #: field update and nothing else, so the policy keeps its id and every
+    #: verdict already written against it stays attached and readable.
+    mode: Optional[str] = None
 
 
 def _check_prompt_injection(text: str) -> list:
@@ -94,7 +106,18 @@ def _check_prompt_injection(text: str) -> list:
     return [label for label, pattern in _INJECTION_PATTERNS_COMPILED if pattern.search(text)]
 
 
-def _validate(condition: ConditionModel, action: ActionModel, name: str = "") -> None:
+def _validate(
+    condition: ConditionModel,
+    action: ActionModel,
+    name: str = "",
+    mode: Optional[str] = None,
+) -> None:
+    if mode is not None and mode not in VALID_MODES:
+        raise HTTPException(
+            422,
+            f"Invalid mode {mode!r}. Valid: {sorted(VALID_MODES)}. A policy is "
+            f"{DEFAULT_MODE!r} unless you ask for {DRY_RUN_MODE!r}.",
+        )
     if condition.trigger not in _VALID_TRIGGERS:
         raise HTTPException(
             422,
@@ -113,6 +136,22 @@ def _validate(condition: ConditionModel, action: ActionModel, name: str = "") ->
                 422,
                 f"Invalid operator {condition.operator!r}. Valid: {sorted(_VALID_OPERATORS)}",
             )
+        # Operator/trigger compatibility, from the engine that will run this
+        # policy. Catches the combinations that store fine and then never fire
+        # (or always fire) — trigger 'signal' is list-valued, so only 'contains'
+        # means anything against it. Same "reject dead config rather than let it
+        # silently never fire" rule as the require_approval pairing check below.
+        try:
+            validate_condition(
+                {
+                    "trigger": condition.trigger,
+                    "operator": condition.operator,
+                    "value": condition.value,
+                },
+                policy_name=name,
+            )
+        except PolicyConfigError as exc:
+            raise HTTPException(422, str(exc)) from exc
     # Validate the expression block, if present, by parsing it with the same SDK
     # parser the runtime uses — a malformed match is rejected at create time, not
     # at fire time. Import locally so the SDK stays an optional API dependency.
@@ -140,8 +179,9 @@ def _validate(condition: ConditionModel, action: ActionModel, name: str = "") ->
                 f"inject_prompt content rejected: matches injection pattern(s): {matched}",
             )
     # inject_recovery_prompt (Phase 1.3) is injected spoken text — same required
-    # param and same injection-pattern guard as inject_prompt. stop_current_tts
-    # and escalate_to_human take no required params (reason is optional).
+    # param and same injection-pattern guard as inject_prompt. stop_current_tts,
+    # escalate_to_human, and slow_response_pace take no required params (reason and
+    # pace are optional; pace defaults to "slow" in the SDK when absent).
     # require_approval and before_tool_call are only meaningful together — the
     # SDK only evaluates require_approval via the before_tool_call gate, so any
     # other pairing is dead config. Reject it rather than silently never firing.
@@ -174,9 +214,9 @@ async def list_all_policies(
 @router.post("", response_model=Dict[str, Any], summary="Create a policy")
 async def create(
     body: PolicyCreate,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> Dict[str, Any]:
-    _validate(body.condition, body.action, body.name)
+    _validate(body.condition, body.action, body.name, body.mode)
     row = await create_policy(
         org_id=org_id,
         name=body.name,
@@ -205,6 +245,34 @@ async def get_one(
 
 
 @router.get(
+    "/{policy_id}/dry-run-summary",
+    response_model=Dict[str, Any],
+    summary="What a dry-run policy would have done",
+)
+async def get_dry_run_summary(
+    policy_id: int,
+    days: int = 14,
+    org_id: str = Depends(require_org),
+):
+    """Answers "is this policy correctly tuned" without opening anything else.
+
+    Every number is computed server-side. The dashboard's standing rule is that
+    a derived metric whose numerator and denominator come from different
+    populations is the bug that keeps recurring there, and a fire rate is
+    exactly that shape, so both halves come from one window and one agent.
+    """
+    if days < 1 or days > 90:
+        raise HTTPException(422, "days must be between 1 and 90")
+    policy = await get_policy_by_id(org_id, policy_id)
+    if not policy:
+        raise HTTPException(404, "Policy not found")
+    summary = await fetch_dry_run_summary(org_id, policy_id, days=days)
+    summary["policy_name"] = policy.get("name", "")
+    summary["mode"] = policy.get("mode", DEFAULT_MODE)
+    return summary
+
+
+@router.get(
     "/{policy_id}/evaluations",
     response_model=List[Dict[str, Any]],
     summary="Recent evaluation results for a policy (why it did/didn't fire)",
@@ -227,14 +295,19 @@ async def get_evaluations(
 async def update(
     policy_id: int,
     body: PolicyUpdate,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> Dict[str, Any]:
     existing = await get_policy_by_id(org_id, policy_id)
     if existing is None:
         raise HTTPException(404, f"Policy {policy_id} not found")
     effective_condition = body.condition or ConditionModel(**existing["condition"])
     effective_action = body.action or ActionModel(**existing["action"])
-    _validate(effective_condition, effective_action, body.name or existing.get("name", ""))
+    _validate(
+        effective_condition,
+        effective_action,
+        body.name or existing.get("name", ""),
+        body.mode,
+    )
     row = await update_policy(org_id, policy_id, body.model_dump(exclude_none=True))
     await log_policy_audit(policy_id, "updated", org_id, before=existing, after=row)
     return row
@@ -243,7 +316,7 @@ async def update(
 @router.delete("/{policy_id}", response_model=Dict[str, Any], summary="Delete a policy")
 async def delete(
     policy_id: int,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> Dict[str, Any]:
     existing = await get_policy_by_id(org_id, policy_id)
     if existing is None:
@@ -260,7 +333,7 @@ async def delete(
 )
 async def toggle(
     policy_id: int,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> Dict[str, Any]:
     existing = await get_policy_by_id(org_id, policy_id)
     if existing is None:

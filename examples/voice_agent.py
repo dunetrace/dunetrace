@@ -7,10 +7,17 @@ What this shows:
   2. Emitting the four voice event types across a multi-turn call.
   3. A voice policy (inject_recovery_prompt on a slow LLM turn) and reading the
      result off the run.
+  4. Capturing ElevenLabs correlation metadata on tts_generated so a configured
+     ElevenLabs integration can line up cost and voice choices against this run.
 
 Run it against a local stack:
     docker compose up -d
     python examples/voice_agent.py
+
+To see the ElevenLabs correlation, connect ElevenLabs on the dashboard's
+Integrations page (or POST /v1/orgs/integrations/elevenlabs), run a real voice
+agent that captures the fields shown below, and open the Voice analytics page.
+See docs/integrations/elevenlabs.md.
 
 The event emission works against the ingest API; pack activation needs the
 Customer API (:8002) and an API key. In local dev (AUTH_MODE=dev) any key
@@ -56,7 +63,10 @@ def run_one_call() -> None:
     ) as run:
         # ── Turn 1: a clean turn ──────────────────────────────────────────
         run.voice_activity_detected("speech_start")
-        run.transcription_received("book me a table for two", confidence=0.94, latency_ms=110)
+        # audio_seconds feeds per-minute STT cost attribution (Phase 2.2).
+        run.transcription_received(
+            "book me a table for two", confidence=0.94, latency_ms=110, audio_seconds=1.4
+        )
         run.voice_activity_detected("speech_end", duration_ms=1400)
         run.turn_taking("user_speaking", to_user=True)
 
@@ -65,10 +75,26 @@ def run_one_call() -> None:
         run.llm_responded(completion_tokens=32, latency_ms=780, finish_reason="stop", output=reply)
 
         run.turn_taking("agent_speaking", from_agent=True)
-        run.tts_generated(reply, latency_ms=95, truncated=False)
+        # The optional voice_id / model / provider / provider_generation_id let a
+        # configured ElevenLabs integration correlate this generation to its cost
+        # and voice. provider_generation_id (the id ElevenLabs returns from the
+        # synthesize call) gives an exact match; voice_id resolves most ambiguity
+        # on its own. All four are optional. Omit them and correlation falls back
+        # to timestamp plus character count.
+        run.tts_generated(
+            reply,
+            latency_ms=95,
+            truncated=False,
+            voice_id="CwhRBWXzGAHq8TQ4Fs17",
+            model="eleven_multilingual_v2",
+            provider="elevenlabs",
+            provider_generation_id="hist_replace_with_real_id",
+        )
 
         # ── Turn 2: a slow LLM turn that trips the recovery policy ─────────
-        run.transcription_received("actually make it three", confidence=0.88, latency_ms=130)
+        run.transcription_received(
+            "actually make it three", confidence=0.88, latency_ms=130, audio_seconds=1.1
+        )
         run.turn_taking("user_speaking", to_user=True)
 
         run.llm_called("gpt-4o-realtime", prompt_tokens=210)
@@ -88,6 +114,8 @@ def run_one_call() -> None:
             print(f"[policy] escalating to human (reason={run.escalation_reason})")
         if run.stop_tts:
             print("[policy] halting current TTS playback")
+        if run.response_pace:
+            print(f"[policy] slowing response pace ({run.response_pace}): emit a filler token")
 
         run.turn_taking("agent_speaking", from_agent=True)
         run.tts_generated(reply2, latency_ms=90, truncated=False)

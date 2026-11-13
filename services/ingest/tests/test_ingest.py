@@ -33,7 +33,13 @@ def mock_db(monkeypatch):
     monkeypatch.setattr("ingest_svc.db.postgres.close_pool", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.check_db", AsyncMock(return_value="ok"))
-    monkeypatch.setattr("ingest_svc.db.postgres.insert_events", AsyncMock(return_value=1))
+    # Returns the batch size: /v1/ingest treats fewer rows than events as a
+    # persistence failure (503 — see test_ingest_durability.py), so the old
+    # fixed return_value=1 would reject every multi-event batch below.
+    monkeypatch.setattr(
+        "ingest_svc.db.postgres.insert_events",
+        AsyncMock(side_effect=lambda events, batch_id, org_id: len(events)),
+    )
     # Patched where routers/ingest.py actually looks it up (`from ingest_svc.db
     # import verify_api_key` binds a local name there) — patching
     # ingest_svc.db.postgres.verify_api_key instead is a no-op, since that
@@ -43,6 +49,12 @@ def mock_db(monkeypatch):
     monkeypatch.setattr(
         "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value="org-test")
     )
+    # BOTH call sites, because in production they are the same function called
+    # with the same key. set_org_context (main.py) verifies first and caches the
+    # result on request.state; _resolve_org_id reuses it rather than repeating
+    # an uncached api_keys SELECT on the hot path. Patching only the route's
+    # binding left the two disagreeing, which no real deployment can do.
+    monkeypatch.setattr("ingest_svc.main.verify_api_key", AsyncMock(return_value="org-test"))
 
 
 @pytest.fixture
@@ -616,6 +628,58 @@ class TestRateLimitMiddleware:
         assert r.status_code != 429
 
 
+class TestPolicyFetchAuth:
+    """GET /v1/policies authenticates by header, not by query string.
+
+    A key in a query string is written verbatim into web-server and proxy
+    access logs on every request. The query param is still accepted so an older
+    SDK build keeps working, but the header is the supported path and the one
+    the current SDK sends.
+    """
+
+    async def test_bearer_header_authenticates(self, client):
+        r = await client.get(
+            "/v1/policies",
+            params={"agent_id": "agent-xyz"},
+            headers={"Authorization": "Bearer dt_live_header"},
+        )
+        assert r.status_code == 200
+        assert "policies" in r.json()
+
+    async def test_x_dunetrace_api_key_header_authenticates(self, client):
+        r = await client.get(
+            "/v1/policies",
+            params={"agent_id": "agent-xyz"},
+            headers={"X-Dunetrace-API-Key": "dt_live_header"},
+        )
+        assert r.status_code == 200
+
+    async def test_query_param_still_accepted_for_older_sdks(self, client):
+        r = await client.get(
+            "/v1/policies", params={"agent_id": "agent-xyz", "api_key": "dt_live_legacy"}
+        )
+        assert r.status_code == 200
+
+    async def test_header_wins_when_both_are_present(self, client, monkeypatch):
+        seen = []
+
+        async def _spy(key):
+            seen.append(key)
+            return "org-1"
+
+        monkeypatch.setattr("ingest_svc.routers.ingest.verify_api_key", _spy)
+        await client.get(
+            "/v1/policies",
+            params={"agent_id": "agent-xyz", "api_key": "from-query"},
+            headers={"Authorization": "Bearer from-header"},
+        )
+        assert seen == ["from-header"]
+
+    async def test_no_key_at_all_is_rejected(self, client):
+        r = await client.get("/v1/policies", params={"agent_id": "agent-xyz"})
+        assert r.status_code == 401
+
+
 # ── verify_api_key (real implementation, not the router-level mock) ────────────
 
 
@@ -623,22 +687,23 @@ class TestVerifyApiKeyDevMode:
     async def test_dev_mode_dt_dev_key_resolves_to_default_org(self, monkeypatch):
         from ingest_svc.db.postgres import verify_api_key
 
-        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "dev")
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "dev")
         assert await verify_api_key("dt_dev_anything") == "default"
 
     async def test_dev_mode_empty_key_resolves_to_default_org(self, monkeypatch):
         from ingest_svc.db.postgres import verify_api_key
 
-        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "dev")
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "dev")
         assert await verify_api_key("") == "default"
 
     async def test_non_dev_mode_dt_dev_key_is_not_special_cased(self, monkeypatch):
-        # dt_dev_* is only a wildcard in dev mode (is_dev checks settings.ENV,
-        # not AUTH_MODE). In prod, it's just a string that won't match any row
+        # dt_dev_* is only a wildcard in dev mode (is_dev checks AUTH_MODE, the
+        # same knob api_svc uses — not ENV). In prod, it's just a string that
+        # won't match any row
         # and correctly resolves to no org.
         from ingest_svc.db.postgres import verify_api_key
 
-        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "production")
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "prod")
         monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
         assert await verify_api_key("dt_dev_anything") is None
 
@@ -673,7 +738,7 @@ class TestVerifyApiKeyDevMode:
             def acquire(self):
                 return _FakeConn()
 
-        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "production")
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "prod")
         monkeypatch.setattr("ingest_svc.db.postgres._pool", _FakePool())
 
         with caplog.at_level(logging.ERROR, logger="dunetrace.ingest.db"):
@@ -776,12 +841,18 @@ class TestHealth:
         body = (await client.get("/health")).json()
         assert body["status"] == "ok"
         assert "version" in body
-        assert "db" in body
+        # Liveness carries no dependency state any more — that is /ready's
+        # verdict (test_metrics_ready.py). A liveness probe that waited on a
+        # pool connection reported a saturated process as dead.
+        assert "db" not in body
 
-    async def test_db_status_reported(self, client, monkeypatch):
-        monkeypatch.setattr("ingest_svc.routers.health.check_db", AsyncMock(return_value="no_pool"))
-        body = (await client.get("/health")).json()
-        assert body["db"] == "no_pool"
+    async def test_does_not_touch_the_db(self, client, monkeypatch):
+        pool = MagicMock()
+        pool.acquire.side_effect = AssertionError("liveness must not acquire a connection")
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        r = await client.get("/health")
+        assert r.status_code == 200
+        pool.acquire.assert_not_called()
 
 
 # ── Partition management tests ─────────────────────────────────────────────────
@@ -1116,6 +1187,17 @@ class TestAdminPruneEventsEndpoint:
 
         store = _DroppingStore()
         set_event_store(store)
+
+        # The `client` fixture installs a truthy sentinel _pool, so the real
+        # scrub would try to acquire() on it. Endpoint tests don't reach the DB.
+        scrub_calls = []
+
+        async def _scrub(retention_days):
+            scrub_calls.append(retention_days)
+            return 5
+
+        monkeypatch.setattr("ingest_svc.routers.ingest.scrub_old_signal_evidence", _scrub)
+
         try:
             resp = await client.post(
                 "/admin/prune-events", json={"admin_key": "correct-key", "retention_days": 45}
@@ -1123,8 +1205,11 @@ class TestAdminPruneEventsEndpoint:
             assert resp.status_code == 200
             body = resp.json()
             assert body["partitions_dropped"] == 2
+            assert body["signals_scrubbed"] == 5
             assert body["retention_days"] == 45
             assert store.called_with == 45
+            # Both passes get the SAME window — one content horizon, not two.
+            assert scrub_calls == [45]
         finally:
             import ingest_svc.db.event_store as es_mod
 
@@ -1148,11 +1233,52 @@ class TestAdminPruneEventsEndpoint:
 
         store = _DroppingStore()
         set_event_store(store)
+
+        scrub_calls = []
+
+        async def _scrub(retention_days):
+            scrub_calls.append(retention_days)
+            return 0
+
+        monkeypatch.setattr("ingest_svc.routers.ingest.scrub_old_signal_evidence", _scrub)
+
         try:
             resp = await client.post("/admin/prune-events", json={"admin_key": "correct-key"})
             assert resp.status_code == 200
             assert resp.json()["retention_days"] == 77
             assert store.called_with == 77
+            assert scrub_calls == [77]
+        finally:
+            import ingest_svc.db.event_store as es_mod
+
+            es_mod._store = None
+
+    async def test_scrub_failure_surfaces_rather_than_reporting_zero(self, client, monkeypatch):
+        """A scrub error must not come back as signals_scrubbed=0 — that reads
+        as "nothing to scrub" and is indistinguishable from success. The daily
+        loop swallows failures (it retries next tick); a manual admin call has
+        no next tick, so the operator has to be told."""
+        from ingest_svc.db.event_store import EventStore, set_event_store
+
+        monkeypatch.setenv("ADMIN_API_KEY", "correct-key")
+
+        class _DroppingStore(EventStore):
+            async def insert_events(self, events, batch_id, org_id):
+                raise NotImplementedError
+
+            async def prune_old_events(self, retention_days):
+                return 1
+
+        set_event_store(_DroppingStore())
+
+        async def _boom(retention_days):
+            raise RuntimeError("db unreachable")
+
+        monkeypatch.setattr("ingest_svc.routers.ingest.scrub_old_signal_evidence", _boom)
+
+        try:
+            with pytest.raises(RuntimeError, match="db unreachable"):
+                await client.post("/admin/prune-events", json={"admin_key": "correct-key"})
         finally:
             import ingest_svc.db.event_store as es_mod
 
@@ -1529,3 +1655,227 @@ class TestOtlpRateLimiting:
             headers={"Authorization": "Bearer dt_live_otlp_b2"},
         )
         assert other_key.status_code == 200
+
+
+class _FakePool:
+    """Minimal asyncpg-pool stand-in: acquire() yields the conn it was built
+    with. Simpler than _make_pool above when the test wants a hand-written conn
+    that returns a different result per execute() call."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def acquire(self):
+        conn = self._conn
+
+        class _Ctx:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+
+# ── Signal evidence scrub (postgres.py::scrub_old_signal_evidence) ─────────────
+#
+# `events` has a retention policy and `failure_signals` deliberately does not
+# (the dashboard's 30d-vs-90d regression comparison reads signals past the event
+# horizon). That left raw content excerpts in failure_signals.evidence outliving
+# the horizon the event prune exists to enforce. The scrub strips the
+# content-bearing keys and leaves the rows — see CONTENT_EVIDENCE_KEYS.
+
+
+class TestContentEvidenceKeyCoverage:
+    """Guards CONTENT_EVIDENCE_KEYS against detector drift.
+
+    The failure mode this exists for: someone adds a detector that puts a new
+    content excerpt in evidence, nothing lists it, and it silently outlives the
+    retention horizon forever. A count assertion wouldn't catch it — this walks
+    the actual detector source.
+    """
+
+    def _evidence_assignments(self):
+        import re
+        from pathlib import Path
+
+        import dunetrace.detectors as det_mod
+
+        src = Path(det_mod.__file__).read_text()
+        # "key": <expr>  — expr on the same line, which is how every evidence
+        # entry in detectors.py is written.
+        return re.findall(r'"(\w+)"\s*:\s*([^\n]+)', src)
+
+    async def test_every_content_derived_evidence_key_is_scrubbed(self):
+        from ingest_svc.db.postgres import CONTENT_EVIDENCE_KEYS
+
+        # Expressions that read raw agent content off RunState/ToolCall/etc.
+        # Deliberately narrow: `.args`, `.output`, `.value`, `.content`,
+        # `input_text`, `system_prompt` are the content-bearing attributes.
+        import re
+
+        content_expr = re.compile(
+            r"\.args\b|\.output\b|\.value\b|\.content\b|\.error\b|\.query\b"
+            r"|input_text|system_prompt|output_text|\[:\d+\]"
+        )
+        # Known-safe: these read a content-shaped attribute but yield a length,
+        # a boolean, a count, or a detector-owned label — not the content.
+        allowed = {
+            # lengths / flags / counts
+            "args_identical",
+            "args_similar",
+            "args_length",
+            "input_length",
+            "output_length",
+            "args_truncated",
+            "max_arg_length",
+            # a classification literal ("declared" | "output_text"), not content
+            "failure_source",
+            # the argument's JSON path, not its value
+            "arg_path",
+            # which of OUR OWN constants matched: _INJECTION_PATTERNS_COMPILED
+            # labels, DEMOTION_PHRASES entries, or a fixed marker literal
+            "matched_patterns",
+            "matched_marker",
+            # event type names ("llm.called", ...), not payloads
+            "stall_event_sequence",
+            # only ever appears nested inside taint_source, which IS scrubbed —
+            # removing the parent key removes this with it
+            "text",
+        }
+
+        offenders = {
+            key
+            for key, expr in self._evidence_assignments()
+            if content_expr.search(expr) and key not in allowed and key not in CONTENT_EVIDENCE_KEYS
+        }
+        assert not offenders, (
+            f"Evidence key(s) {sorted(offenders)} carry raw agent content but are not in "
+            "CONTENT_EVIDENCE_KEYS (services/ingest/ingest_svc/db/postgres.py), so they "
+            "would outlive EVENT_RETENTION_DAYS. Add them there, or to this test's "
+            "`allowed` set if they only expose a length/flag."
+        )
+
+    async def test_detector_metadata_keys_are_not_scrubbed(self):
+        """The scrub must not eat keys the analytics read — losing these would
+        silently break the failure-pattern and fix-verification queries."""
+        from ingest_svc.db.postgres import CONTENT_EVIDENCE_KEYS
+
+        analytics_keys = {
+            "tool",
+            "count",
+            "consecutive_fails",
+            "args_identical",
+            "growth_factor",
+            "conversation_id",
+            "first_step",
+            "last_step",
+            "step_index",
+            "destination_type",
+            "matched_marker",
+            "matched_patterns",
+            "grounded_surfaces",
+        }
+        overlap = analytics_keys & set(CONTENT_EVIDENCE_KEYS)
+        assert not overlap, f"CONTENT_EVIDENCE_KEYS would strip analytics key(s): {sorted(overlap)}"
+
+
+class TestScrubOldSignalEvidence:
+    async def test_returns_zero_without_a_pool(self, monkeypatch):
+        import ingest_svc.db.postgres as pg
+
+        monkeypatch.setattr(pg, "_pool", None)
+        assert await pg.scrub_old_signal_evidence(90) == 0
+
+    async def test_batches_until_a_short_batch(self, monkeypatch):
+        """A backlog larger than one batch must keep going, and stop as soon as a
+        batch comes back short — not hold one long transaction over everything."""
+        import ingest_svc.db.postgres as pg
+
+        results = ["UPDATE 10000", "UPDATE 10000", "UPDATE 7"]
+        seen = []
+
+        class _Conn:
+            async def execute(self, sql, *args):
+                seen.append(args)
+                return results[len(seen) - 1]
+
+        monkeypatch.setattr(pg, "_pool", _FakePool(_Conn()))
+        assert await pg.scrub_old_signal_evidence(90) == 20007
+        assert len(seen) == 3
+
+    async def test_passes_cutoff_and_key_list(self, monkeypatch):
+        from datetime import date, timedelta
+
+        import ingest_svc.db.postgres as pg
+
+        seen = []
+
+        class _Conn:
+            async def execute(self, sql, *args):
+                seen.append((sql, args))
+                return "UPDATE 0"
+
+        monkeypatch.setattr(pg, "_pool", _FakePool(_Conn()))
+        await pg.scrub_old_signal_evidence(30)
+
+        sql, args = seen[0]
+        assert "UPDATE failure_signals" in sql
+        assert "evidence - $2::text[]" in sql
+        # The ?| guard is what makes repeat passes free — without it every pass
+        # rewrites every aged row.
+        assert "evidence ?| $2::text[]" in sql
+        assert args[0] == date.today() - timedelta(days=30)
+        assert args[1] == list(pg.CONTENT_EVIDENCE_KEYS)
+
+    async def test_no_rows_means_a_single_pass(self, monkeypatch):
+        import ingest_svc.db.postgres as pg
+
+        calls = []
+
+        class _Conn:
+            async def execute(self, sql, *args):
+                calls.append(1)
+                return "UPDATE 0"
+
+        monkeypatch.setattr(pg, "_pool", _FakePool(_Conn()))
+        assert await pg.scrub_old_signal_evidence(90) == 0
+        assert len(calls) == 1
+
+
+class TestScrubScheduling:
+    async def test_uses_the_same_retention_window_as_the_event_prune(self, monkeypatch):
+        """One content horizon, not two — raw content must leave `events` and
+        `failure_signals.evidence` at the same moment."""
+        import ingest_svc.main as main_mod
+
+        monkeypatch.setattr("ingest_svc.config.settings.EVENT_RETENTION_DAYS", 45)
+        seen = []
+
+        async def _spy(retention_days):
+            seen.append(retention_days)
+            return 0
+
+        monkeypatch.setattr(main_mod, "scrub_old_signal_evidence", _spy)
+        await main_mod._run_scrub_once()
+        assert seen == [45]
+
+    async def test_failure_is_logged_not_raised(self, monkeypatch, caplog):
+        import ingest_svc.main as main_mod
+
+        async def _boom(retention_days):
+            raise RuntimeError("db unreachable")
+
+        monkeypatch.setattr(main_mod, "scrub_old_signal_evidence", _boom)
+        assert await main_mod._run_scrub_once() == 0
+        assert any("scrub_old_signal_evidence failed" in r.message for r in caplog.records)
+
+    async def test_returns_rows_scrubbed(self, monkeypatch):
+        import ingest_svc.main as main_mod
+
+        async def _ok(retention_days):
+            return 12
+
+        monkeypatch.setattr(main_mod, "scrub_old_signal_evidence", _ok)
+        assert await main_mod._run_scrub_once() == 12

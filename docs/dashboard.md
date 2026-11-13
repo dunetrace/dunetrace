@@ -2,6 +2,8 @@
 
 The Mission Control dashboard is a live, API-driven single-page app served at **[http://localhost:3000](http://localhost:3000)**. Auto-refreshes every 15 seconds. No build step — static HTML fetching from the Customer API.
 
+That address is the loopback-only quickstart, where the page talks to the Customer API on `localhost:8002` with no real key. In a deployment the dashboard is the one published port, and its `API` / `KEY` constants must point at the Customer API your reverse proxy exposes, with an `admin`-scoped key (its config pages write through admin-gated endpoints) — see [Operations › Deploying](operations.md#reverse-proxy-and-the-dashboards-api-origin).
+
 ---
 
 ## Navigation
@@ -88,7 +90,7 @@ Powered by `GET /v1/agents/{agent_id}/failure-patterns/{failure_type}`.
 
 Click any run row to open the detail panel. Three tabs:
 
-- **Analysis** — execution timeline (one node per step, loop detection), signal score cards with confidence bars, plain-English explanation + suggested fix. Failure type labels show a plain-English tooltip on hover. When multiple signals fire, each card shows an amber **"confidence boosted · N co-occurring signals"** badge. A **"Dunetrace Root Cause Analysis"** button triggers native root-cause analysis (no external tracing system required — just `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` on the server). After explaining:
+- **Analysis** — execution timeline (one node per step, loop detection), signal score cards with confidence bars, plain-English explanation + suggested fix. Failure type labels show a plain-English tooltip on hover. When multiple signals fire, each card shows an amber **"confidence boosted · N co-occurring signals"** badge. A **"Dunetrace Root Cause Analysis"** button triggers native root-cause analysis (no external tracing system required — just one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `MISTRAL_API_KEY` on the server). After explaining:
   - **Prompt-fix signals** (TOOL_LOOP, GOAL_ABANDONMENT, etc.) — shown as a diff to copy into your system prompt manually; there's no one-click apply for these.
   - **Code-change signals** (CONTEXT_BLOAT, SLOW_STEP, etc.) — **Open PR on GitHub ↗** button creates a draft PR. When source mapping resolves a real file, the PR edits it directly; otherwise it's a summary file documenting the suggested fix. Requires either a per-org GitHub App installation or the legacy `GITHUB_TOKEN`/`GITHUB_REPO` in `.env` — see [docs/integrations/github-app.md](integrations/github-app.md).
 - **Run graph** — SVG node graph: green = LLM call, orange = tool call (ok), red = looping tool call, blue = start/end.
@@ -178,6 +180,12 @@ All data is computed client-side from the Customer API. No server-side rendering
 | Run detail | `GET /v1/runs/{id}` (events + signals) |
 | Agent view (health record + deploy timeline + runs) | `GET /v1/agents/{id}/runs` + `/signals` + `/insights` (includes `deploy_events`) + `/health-score` |
 | Why is this happening? panel | `GET /v1/agents/{id}/failure-patterns/{failure_type}` |
-| Detectors | Static — edits require updating `detectors.yml` and restarting the detector service |
+| Detectors | Static — edits require updating `detectors.yml` and restarting **both** `detector` and `ingest` (ingest serves the same file to SDKs via `GET /v1/detector-config`; `alerts` too if you changed its per-detector `destinations` routing) |
 | Policies | `GET /v1/policies` + `POST` + `PUT /{id}` + `DELETE /{id}` + `PATCH /{id}/toggle` |
 | Patterns | `GET /v1/patterns` |
+
+---
+
+## Security headers
+
+The dashboard container's `dashboard/nginx.conf` serves the page with `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin` and a strict `Content-Security-Policy` whose `script-src` is only the hash of the page's single inline `<script>`. That is why rendered markup never carries inline handlers: every element declares `data-action="name"` (rendered by `actionAttrs()`) and a delegated dispatcher looks the name up in the `ACTIONS` registry at the top of the script. Editing the script — including the `API`/`KEY` constants — changes the hash; run `python scripts/check_dashboard_safety.py --fix` and restart the container, and add any non-`'self'` API origin to `connect-src`. Details, including what the CI check enforces, are in [Operations › Dashboard security headers](operations.md#dashboard-security-headers).

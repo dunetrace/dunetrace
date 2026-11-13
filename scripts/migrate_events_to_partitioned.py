@@ -123,6 +123,31 @@ async def main(apply: bool) -> int:
 
         async with conn.transaction():
             await conn.execute("ALTER TABLE events RENAME TO events_premigration")
+            # Renaming a table does NOT rename its indexes — they keep their
+            # original names and stay attached to events_premigration. Without
+            # this step PARTITIONED_DDL below fails with DuplicateTableError on
+            # the first index it recreates (idx_events_event_id), aborting the
+            # whole migration. Rename them out of the way rather than dropping
+            # them, so events_premigration stays queryable for the row-count
+            # verification and any manual rollback.
+            await conn.execute(
+                """
+                DO $$
+                DECLARE r record;
+                BEGIN
+                    FOR r IN
+                        SELECT indexname FROM pg_indexes
+                        WHERE tablename = 'events_premigration'
+                          AND schemaname = current_schema()
+                    LOOP
+                        EXECUTE format(
+                            'ALTER INDEX %I RENAME TO %I',
+                            r.indexname, left(r.indexname, 49) || '_premigration'
+                        );
+                    END LOOP;
+                END $$;
+                """
+            )
             await conn.execute(PARTITIONED_DDL)
             await conn.execute("CREATE TABLE events_default PARTITION OF events DEFAULT")
             for m in months:

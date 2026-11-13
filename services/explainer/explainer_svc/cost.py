@@ -45,9 +45,30 @@ _PRICES: dict[str, tuple[float, float]] = {
     "gemini-1.5-flash": (0.075, 0.30),
     "gemini-2.0-flash": (0.10, 0.40),
     "gemini-2.5-pro": (1.25, 10.00),
-    # Mistral
-    "mistral-large": (3.00, 9.00),
-    "mistral-small": (0.20, 0.60),
+    # Mistral, verified against https://mistral.ai/pricing/api on 2026-08-08.
+    # The previous mistral-large (3.00, 9.00) and mistral-small (0.20, 0.60)
+    # rows predated the Large 3 / Small 4 price cuts and overcharged Large by
+    # 6x. mistral.ai/pricing (the FAQ page) still quotes the retired $2/$6
+    # Large rate; the per-model cards agree with the numbers here.
+    # _normalise() sorts keys longest-first, so "codestral-embed" wins over
+    # "codestral" without needing a particular order in this dict.
+    # Reasoning (magistral) and coding (devstral) families. Verified against
+    # https://mistral.ai/pricing/api on 2026-08-09.
+    "magistral-medium": (2.00, 5.00),
+    "magistral-small": (0.50, 1.50),
+    "devstral-medium": (0.40, 2.00),
+    "devstral-small": (0.10, 0.30),
+    "mistral-medium": (1.50, 7.50),
+    "mistral-large": (0.50, 1.50),
+    "mistral-small": (0.15, 0.60),
+    "ministral-3b": (0.10, 0.10),
+    "ministral-8b": (0.15, 0.15),
+    "ministral-14b": (0.20, 0.20),
+    "codestral": (0.30, 0.90),
+    # Embeddings bill on input only. Output stays 0 so an embedding call can't
+    # pick up the _DEFAULT output rate.
+    "mistral-embed": (0.10, 0.0),
+    "codestral-embed": (0.15, 0.0),
 }
 
 _DEFAULT = (1.00, 4.00)  # fallback for unknown/unlisted models

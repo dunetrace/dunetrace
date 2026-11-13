@@ -25,8 +25,13 @@ before the tool/LLM call it would have guarded actually executes.
 Thread-safe: a single handler instance can be shared across concurrent invoke() calls.
 Each invocation is tracked by LangChain's root run_id, so parallel calls don't collide.
 
-Note: LangChain's callback manager runs sync handlers in a thread-pool executor for
-ainvoke(), so no async variants are needed here.
+Note: this handler sets ``run_inline = True``. LangChain's callback manager would
+otherwise dispatch a sync handler for ainvoke() through
+``run_in_executor(None, partial(copy_context().run, event, ...))``, giving every
+callback a fresh context copy — which silently broke ``get_current_run()`` inside
+tools and made the ContextVar reset raise on every async run. Running inline puts
+the hooks in the awaiting task's own context instead. No async variants are needed
+either way; see the comment on ``run_inline`` below for the full reasoning.
 """
 
 from __future__ import annotations
@@ -116,6 +121,27 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
     # the caller of agent.invoke()/.stream().
     raise_error = True
 
+    # Run this handler in the caller's own context rather than a thread-pool
+    # copy. On the async path LangChain otherwise dispatches a *sync* handler via
+    #   run_in_executor(None, partial(copy_context().run, event, ...))
+    # (callbacks/manager.py), giving every callback a fresh context copy. Two
+    # things broke as a result, both async-only and both silent:
+    #
+    #   1. `_current_run.set()` in on_chain_start landed in a copy that was
+    #      discarded the moment the callback returned, so get_current_run()
+    #      returned None inside tools for the whole run — the documented way to
+    #      reach the run from a tool simply did not work under ainvoke().
+    #   2. The matching reset in _cleanup then raised "Token was created in a
+    #      different Context" on every run.
+    #
+    # run_inline=True takes manager.py's `elif handler.run_inline:` branch, which
+    # calls the hook directly in the awaiting task's context. Safe here because
+    # every hook is non-blocking: buffer appends, dict ops under a short lock,
+    # and flush() defaults to block=False. Inline handlers are also awaited
+    # before the non-inline gather, so Dunetrace observes a callback slightly
+    # earlier than a co-registered handler; nothing here depends on that order.
+    run_inline = True
+
     def __init__(
         self,
         client: "Dunetrace",
@@ -200,6 +226,23 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
         (RUN_STARTED/COMPLETED/ERRORED). LLM/tool events go through _safe_call
         instead so policies registered via add_policy() actually get evaluated.
         """
+        # A terminal closes the run, so any stream the caller abandoned must
+        # report itself FIRST — otherwise _StreamProxy.__del__ fires at GC time
+        # and emits llm.responded for a run the detector has already processed
+        # (a completed run never re-enters the poll), so the tokens the customer
+        # paid for are lost. dt.run() does this in its own finally; these
+        # integrations build a RunContext directly and emit their own terminal,
+        # so the flush has to live on the shared emit path rather than at each
+        # call site, where it was simply forgotten. It is idempotent per stream.
+        try:
+            from dunetrace.models import EventType as _ET
+
+            if event_type in (_ET.RUN_COMPLETED, _ET.RUN_ERRORED):
+                flush = getattr(ctx, "_flush_open_streams", None)
+                if callable(flush):
+                    flush()
+        except Exception:  # never let stream bookkeeping break the terminal
+            pass
         try:
             from dunetrace.models import AgentEvent
 
@@ -364,8 +407,12 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                     },
                 )
             self._last_run_id = ctx.run_id
-            self._cleanup(lc_run_id)
-            self._client.flush()
+            try:
+                self._cleanup(lc_run_id)
+            finally:
+                # The end-of-run flush barrier must survive a cleanup failure:
+                # short-lived processes rely on it having run before exit.
+                self._client.flush()
         except Exception as exc:
             logger.warning("Dunetrace: on_chain_end failed: %s", exc)
 
@@ -392,8 +439,10 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                     payload["policy_name"] = error.policy_name
 
                 self._safe_emit(EventType.RUN_ERRORED, ctx, payload)
-            self._cleanup(lc_run_id)
-            self._client.flush()
+            try:
+                self._cleanup(lc_run_id)
+            finally:
+                self._client.flush()
         except Exception as exc:
             logger.warning("Dunetrace: on_chain_error failed: %s", exc)
 
@@ -704,8 +753,31 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             if ctx:
                 for child_id in ctx.children:
                     self._lc_parent.pop(child_id, None)
-        if ctx and ctx.ctx_token is not None:
-            _current_run.reset(ctx.ctx_token)
+        if ctx is not None:
+            self._reset_ctx_token(ctx)
+
+    def _reset_ctx_token(self, ctx: _RunCtx) -> None:
+        """Restore _current_run, tolerating a token from another context.
+
+        run_inline=True keeps the common path in one context, but the stale
+        sweep can still reach a run started on a different thread (the handler
+        is explicitly shared across concurrent invocations), and a token from
+        there cannot be reset here. Same guard as
+        integrations/openai_agents.py::_reset_ctx_token: only restore when the
+        var still holds *our* run, and treat a cross-context token as a no-op
+        rather than letting it abort the caller. Leaving the value in place is
+        harmless — the ContextVar is task-local.
+        """
+        if ctx.ctx_token is None:
+            return
+        try:
+            current = _current_run.get(None)
+            if current is not None and current.run_id == ctx.run_id:
+                _current_run.reset(ctx.ctx_token)
+        except ValueError:
+            pass
+        finally:
+            ctx.ctx_token = None
 
     def _sweep_stale(self) -> None:
         """Remove runs that started more than _STALE_RUN_SECS ago and never completed.
@@ -719,7 +791,13 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 root_id,
                 _STALE_RUN_SECS,
             )
-            self._cleanup(root_id)
+            try:
+                self._cleanup(root_id)
+            except Exception as exc:
+                # A sweep runs inside on_chain_start. Letting one stale entry
+                # raise aborted the whole incoming invocation before it was
+                # registered, so that invocation emitted nothing at all.
+                logger.warning("Dunetrace: pruning stale run %s failed: %s", root_id, exc)
 
     def _reset(self) -> None:
         """Clear all state (e.g. for testing). Not needed in normal usage."""

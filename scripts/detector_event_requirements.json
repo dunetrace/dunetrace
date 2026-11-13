@@ -1,0 +1,379 @@
+{
+  "_README": [
+    "Curated: which instrumentation a detector NEEDS before it can fire at all.",
+    "",
+    "This file exists because reading a RunState field is not the same as",
+    "requiring it. TOOL_LOOP reads state.llm_calls, but only to sum wasted_tokens",
+    "into its evidence; it gates purely on tool_calls and fires fine with",
+    "wasted_tokens=None. A manifest derived from field reads alone would tell a",
+    "user that TOOL_LOOP needs LLM instrumentation, which is false, and the",
+    "coverage report would understate what is live. Since that report exists",
+    "specifically to catch silent under-instrumentation, getting it wrong would",
+    "be self-defeating.",
+    "",
+    "So: `requires` is a human judgment, read off each detector's gating",
+    "condition. `enriches` is everything else the detector touches. Together they",
+    "must account for every RunState field the AST pass finds, which is what",
+    "scripts/gen_detector_manifest.py enforces. A new detector fails the build",
+    "until it is described here.",
+    "",
+    "`requires` semantics: a list of entries, ALL of which must be satisfied.",
+    "A string entry is one capability token. A nested list is any-of.",
+    "Token vocabulary is declared in `_TOKENS` below.",
+    "",
+    "`why` quotes the gate. Keep it accurate; it is the reviewable part."
+  ],
+  "_TOKENS": {
+    "run": "run.started plus run.completed or run.errored. Present for any run at all.",
+    "llm": "llm.called + llm.responded",
+    "llm.tokens": "llm.responded carrying prompt_tokens / completion_tokens",
+    "tool": "tool.called + tool.responded",
+    "tool.output": "tool.responded carrying the raw output text (output=)",
+    "retrieval": "retrieval.called + retrieval.responded",
+    "retrieval.content": "retrieval.responded carrying the retrieved text (content=)",
+    "memory": "memory.written / memory.read / memory.cleared",
+    "external": "external.signal",
+    "input_text": "the user input on the run.started payload",
+    "system_prompt": "the system prompt on the run.started payload",
+    "declared_tools": "the tools list on the run.started payload",
+    "parent_run_id": "nested runs, so a parent/child delegation graph exists",
+    "baseline": "cross-run history. NOT instrumentation: it accrues on its own once the agent has run enough times.",
+    "config:IRREVERSIBLE_TOOLS": "operator declaration in detectors.yml. Not instrumentation."
+  },
+  "_IMPLIES": {
+    "__doc__": [
+      "A token on the left also satisfies every token on the right.",
+      "Emitting token counts means you are emitting LLM events, so a",
+      "detector needing `llm` is satisfied by `llm.tokens`. The skill",
+      "applies this when evaluating coverage, and the generator applies",
+      "it when auditing curated entries against what the code reads."
+    ],
+    "llm.tokens": [
+      "llm"
+    ],
+    "tool.output": [
+      "tool"
+    ],
+    "retrieval.content": [
+      "retrieval"
+    ]
+  },
+  "detectors": {
+    "INSTRUMENTATION_DEGRADED": {
+      "requires": [
+        "llm"
+      ],
+      "enriches": [],
+      "why": "`calls = state.llm_calls; if not calls: return None`"
+    },
+    "OVERSIZED_TOOL_ARGUMENTS": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [],
+      "why": "iterates state.tool_calls; no other input"
+    },
+    "TOOL_LOOP": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [
+        "llm.tokens"
+      ],
+      "why": "`if len(state.tool_calls) < self.WINDOW: return None`. llm_calls only sums wasted_tokens into evidence and degrades to None."
+    },
+    "TOOL_THRASHING": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [],
+      "why": "`if len(state.tool_calls) < self.WINDOW: return None`"
+    },
+    "SCATTERSHOT_TOOL_USE": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [
+        "run"
+      ],
+      "why": "`total_calls = len(state.tool_calls); if total_calls < self.MIN_TOTAL_CALLS: return None`"
+    },
+    "TOOL_AVOIDANCE": {
+      "requires": [
+        "run",
+        "declared_tools"
+      ],
+      "enriches": [
+        "llm",
+        "tool"
+      ],
+      "why": "`if state.exit_reason != 'final_answer': return None` then `if not state.available_tools: return None`. Needs the tools list declared on run.started, not tool calls."
+    },
+    "GOAL_ABANDONMENT": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [
+        "run"
+      ],
+      "why": "`if state.exit_reason is not None: return None` then `if not state.tool_calls: return None`. Fires on a stalled run, so the terminal event is absent by definition."
+    },
+    "PROMPT_INJECTION_SIGNAL": {
+      "requires": [
+        "input_text"
+      ],
+      "enriches": [],
+      "why": "on_run_completion returns None unconditionally. The detector worker extracts this from the run.started payload instead (see _DETECTOR_CLASSES notes in CLAUDE.md).",
+      "not_runstate": true
+    },
+    "RAG_EMPTY_RETRIEVAL": {
+      "requires": [
+        "retrieval",
+        "run"
+      ],
+      "enriches": [],
+      "why": "`if state.exit_reason != 'final_answer': return None` then `if not state.retrievals: return None`"
+    },
+    "EXCESSIVE_RETRIEVAL": {
+      "requires": [
+        "retrieval"
+      ],
+      "enriches": [],
+      "why": "`if retrieval_count < self.MAX_RETRIEVALS: return None`"
+    },
+    "LLM_TRUNCATION_LOOP": {
+      "requires": [
+        "llm"
+      ],
+      "enriches": [],
+      "why": "`if len(state.llm_calls) < self.THRESHOLD: return None`; reads finish_reason"
+    },
+    "SILENT_TRUNCATION": {
+      "requires": [
+        "llm"
+      ],
+      "enriches": [
+        "tool"
+      ],
+      "why": "`llm_calls = state.llm_calls; if not llm_calls: return None`"
+    },
+    "CONTEXT_BLOAT": {
+      "requires": [
+        "llm.tokens"
+      ],
+      "enriches": [
+        "baseline"
+      ],
+      "why": "`calls_with_tokens = [...]; if len(calls_with_tokens) < self.MIN_CALLS: return None`. Falls back to the static GROWTH_FACTOR when baseline_p75_token_growth is None, so the baseline is not required."
+    },
+    "SLOW_STEP": {
+      "requires": [
+        [
+          "llm",
+          "tool"
+        ]
+      ],
+      "enriches": [
+        "baseline",
+        "external"
+      ],
+      "why": "`if not state.step_durations_ms or not state.events: return None`. Durations are derived from the timestamps of step-advancing events, so any of llm or tool supplies them."
+    },
+    "RETRY_STORM": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [],
+      "why": "`if len(state.tool_calls) < self.THRESHOLD: return None`"
+    },
+    "EMPTY_LLM_RESPONSE": {
+      "requires": [
+        "llm"
+      ],
+      "enriches": [],
+      "why": "builds `empty` from state.llm_calls; `if not empty: return None`"
+    },
+    "STEP_COUNT_INFLATION": {
+      "requires": [
+        "baseline",
+        [
+          "llm",
+          "tool"
+        ]
+      ],
+      "enriches": [],
+      "why": "`if state.baseline_p75_steps is None: return None`. Hard-gated on history, so this is instrumented-but-dormant until the agent has run enough times."
+    },
+    "CASCADING_TOOL_FAILURE": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [],
+      "why": "`if len(state.tool_calls) < self.THRESHOLD: return None`"
+    },
+    "FIRST_STEP_FAILURE": {
+      "requires": [
+        "run"
+      ],
+      "enriches": [
+        "llm",
+        "tool"
+      ],
+      "why": "`if state.exit_reason == 'error' and state.current_step <= self.MAX_STEP` fires on the terminal event alone. The early-empty-LLM branch is an additional path, not a precondition."
+    },
+    "REASONING_STALL": {
+      "requires": [
+        "llm",
+        "tool"
+      ],
+      "enriches": [
+        "baseline",
+        "run"
+      ],
+      "why": "compares len(state.llm_calls) against len(state.tool_calls); a ratio needs both sides"
+    },
+    "COST_SPIKE": {
+      "requires": [
+        "llm.tokens"
+      ],
+      "enriches": [
+        "baseline"
+      ],
+      "why": "`if len(state.llm_calls) < self.MIN_LLM_CALLS: return None` then `if total_tokens == 0: return None`"
+    },
+    "SESSION_LATENCY": {
+      "requires": [
+        [
+          "llm",
+          "tool"
+        ]
+      ],
+      "enriches": [
+        "baseline"
+      ],
+      "why": "`if len(state.events) < self.MIN_EVENTS: return None`; duration comes from event timestamps"
+    },
+    "PREMATURE_TERMINATION": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [
+        "llm",
+        "run"
+      ],
+      "why": "`problem_calls` is built from state.tool_calls; `if not problem_calls: return None`"
+    },
+    "UNREAD_TOOL_ERROR": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [
+        "llm"
+      ],
+      "why": "`problem_calls` from state.tool_calls; `if not problem_calls: return None`. The follow-up scan reads TOOL_CALLED / LLM_RESPONDED events."
+    },
+    "TOOL_ARGUMENT_FABRICATION": {
+      "requires": [
+        "tool",
+        [
+          "input_text",
+          "system_prompt"
+        ]
+      ],
+      "enriches": [],
+      "why": "`if not state.tool_calls: return None`, then builds the grounding surface from input_text and system_prompt. With neither, every argument reads as ungrounded."
+    },
+    "RETRIEVED_CONTENT_INJECTION": {
+      "requires": [
+        [
+          "retrieval.content",
+          "tool.output"
+        ]
+      ],
+      "enriches": [
+        "input_text"
+      ],
+      "why": "candidates come from retrievals carrying content= and tool calls carrying output=. Either source alone is enough."
+    },
+    "AGENT_HANDOFF_FAILURE": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [],
+      "why": "iterates state.tool_calls looking for handoff-shaped calls"
+    },
+    "HANDOFF_CONTEXT_LOSS": {
+      "requires": [
+        "run",
+        "parent_run_id"
+      ],
+      "enriches": [
+        "input_text"
+      ],
+      "why": "on_run_completion returns None. Evaluated by the worker against the cross-run delegation graph (_handoff_signal_from_parent), so it needs nested runs.",
+      "not_runstate": true
+    },
+    "RUNAWAY_ITERATION": {
+      "requires": [
+        [
+          "llm",
+          "tool"
+        ]
+      ],
+      "enriches": [
+        "llm.tokens",
+        "run"
+      ],
+      "why": "`step_exceeded = state.current_step > self.STEP_THRESHOLD` or a cost threshold; steps come from llm/tool events"
+    },
+    "MODEL_FALLBACK_DRIFT": {
+      "requires": [
+        "llm"
+      ],
+      "enriches": [
+        "external"
+      ],
+      "why": "`calls = [c for c in state.llm_calls if c.model]; if len(calls) < 2: return None`"
+    },
+    "MEMORY_POISONING": {
+      "requires": [
+        "memory"
+      ],
+      "enriches": [],
+      "why": "`writes = [m for m in state.memory_events if m.op == 'written' and m.value]; if not writes: return None`"
+    },
+    "DELEGATION_LOOP": {
+      "requires": [
+        "run",
+        "parent_run_id"
+      ],
+      "enriches": [],
+      "why": "on_run_completion returns None. Evaluated by the worker against the delegation chain (_delegation_signal_from_chain), so it needs nested runs.",
+      "not_runstate": true
+    },
+    "UNGROUNDED_DESTINATION": {
+      "requires": [
+        "tool"
+      ],
+      "enriches": [
+        "input_text",
+        "system_prompt",
+        "retrieval",
+        "memory",
+        "tool.output"
+      ],
+      "why": "`if not state.tool_calls: return None`. The grounding surface is assembled from input_text, system_prompt, tool output, retrievals and memory, but a missing surface makes it more likely to fire, not less."
+    },
+    "UNRESOLVED_AMBIGUITY": {
+      "requires": [
+        "tool",
+        "config:IRREVERSIBLE_TOOLS"
+      ],
+      "enriches": [
+        "input_text",
+        "external"
+      ],
+      "why": "`if not self.IRREVERSIBLE_TOOLS or not state.tool_calls: return None`. IRREVERSIBLE_TOOLS defaults to [], so this is inert until an operator declares which tools are irreversible in detectors.yml."
+    }
+  }
+}

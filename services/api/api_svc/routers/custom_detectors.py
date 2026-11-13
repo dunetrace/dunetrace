@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.custom_detector_translator import (
     translate_description,
     SUPPORTED_METRICS,
@@ -166,7 +166,7 @@ async def list_detectors(agent_id: Optional[str] = None, org_id: str = Depends(r
 
 
 @router.post("", status_code=201)
-async def create_detector(body: CreateRequest, org_id: str = Depends(require_org)):
+async def create_detector(body: CreateRequest, org_id: str = Depends(require_scope("admin"))):
     """Save a new custom detector (always starts in shadow mode)."""
     _validate_config(body.config)
     detector = await create_custom_detector(
@@ -197,7 +197,9 @@ async def shadow_stats(detector_id: int, org_id: str = Depends(require_org)):
 
 
 @router.patch("/{detector_id}")
-async def update_detector(detector_id: int, body: StatusUpdate, org_id: str = Depends(require_org)):
+async def update_detector(
+    detector_id: int, body: StatusUpdate, org_id: str = Depends(require_scope("admin"))
+):
     """Activate, pause, or return a detector to shadow mode."""
     try:
         updated = await update_custom_detector_status(org_id, detector_id, body.status)
@@ -209,7 +211,7 @@ async def update_detector(detector_id: int, body: StatusUpdate, org_id: str = De
 
 
 @router.delete("/{detector_id}", status_code=204)
-async def remove_detector(detector_id: int, org_id: str = Depends(require_org)):
+async def remove_detector(detector_id: int, org_id: str = Depends(require_scope("admin"))):
     try:
         deleted = await delete_custom_detector(org_id, detector_id)
     except RuntimeError:

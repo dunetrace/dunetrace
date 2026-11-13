@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Dunetrace, getCurrentRun } from "../src/client.js";
 import type { AgentEvent } from "../src/models.js";
+import type { EventBuffer } from "../src/buffer.js";
 
 // ── Fetch mock helpers ────────────────────────────────────────────────────────
 
@@ -250,13 +251,17 @@ describe("T6 — Error scenarios", () => {
       });
     }
 
-    const buffer = (dt as unknown as { _buffer: AgentEvent[] })._buffer;
+    const buffer = (dt as unknown as { _buffer: EventBuffer })._buffer;
     expect(buffer.length).toBeLessThanOrEqual(BUFFER_SIZE);
 
     await dt.shutdown();
   });
 
-  it("buffer cap is enforced — first BUFFER_SIZE events fill the buffer, extras are dropped", async () => {
+  it("a single run that overflows the buffer is shed WHOLE, not trimmed at the tail", async () => {
+    // The old ring buffer kept the first BUFFER_SIZE events of the run and
+    // dropped the rest, which handed the detector a run whose later steps are
+    // missing but which looks complete. The run is now cut whole instead, and
+    // its terminal carries the drop count — see buffer.test.ts.
     const BUFFER_SIZE = 10;
     const dt = new Dunetrace({
       endpoint: "http://localhost:8001",
@@ -277,9 +282,24 @@ describe("T6 — Error scenarios", () => {
       });
     }
 
-    const buffer = (dt as unknown as { _buffer: AgentEvent[] })._buffer;
-    // Buffer must not exceed the configured cap
-    expect(buffer.length).toBe(BUFFER_SIZE);
+    const buffer = (dt as unknown as { _buffer: EventBuffer })._buffer;
+    // Nothing of the run survives — it was shed as a unit, never over the cap.
+    expect(buffer.length).toBe(0);
+    expect(buffer.droppedCount("run-cap")).toBe(TOTAL);
+
+    // ...and the terminal still gets through, stamped with the loss.
+    dt._emit({
+      event_type: "run.completed",
+      run_id: "run-cap",
+      agent_id: "agent",
+      agent_version: "v1",
+      step_index: TOTAL,
+      timestamp: Date.now() / 1000,
+      payload: { total_steps: TOTAL, dropped_events: buffer.droppedCount("run-cap") },
+    });
+    const [terminal] = buffer.drain(10);
+    expect(terminal.event_type).toBe("run.completed");
+    expect(terminal.payload["dropped_events"]).toBe(TOTAL);
 
     await dt.shutdown();
   });

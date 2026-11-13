@@ -28,12 +28,14 @@
 
 AI agents fail silently:
 
-- ✓ API returns 200 &nbsp; ✓ Logs are clean
-- ✗ Agent called the same tool 12 times, burned $10, and gave the user a wrong answer
+- ✓ API returns 200 &nbsp; ✓ Latency is normal &nbsp; ✓ Cost looks normal
+- ✗ The upstream API returned an error body. The agent invented the numbers and reported success.
+- ✗ Two agents delegated in a circle. Eight runs, all green, no progress.
+- ✗ A document your agent read last week wrote an instruction into its memory. It fired today.
 
-Tracers answer "what happened?" — after you already know it broke.
-Dunetrace answers **"is something breaking right now?"** and fires an alert in 15 seconds,
-using zero-LLM structural checks that run in-path with sub-500μs overhead.
+Tracers answer "what happened?" i.e. after you already know it broke. Dunetrace answers
+**"is something breaking right now?"** with deterministic, zero-LLM checks on every run,
+and in the request path, where a policy can block the action before it executes.
 
 ---
 
@@ -44,24 +46,10 @@ Dunetrace covers the full agent reliability lifecycle, not just one slice of it:
 | | Pillar | What it does |
 |---|---|---|
 | 1 | **Sessions & Events** | Every run, every tool call, every LLM exchange — the raw data everything else is built on |
-| 2 | **Structural Detection** | 27 zero-LLM detectors, in-path, sub-500μs — the always-on first line |
+| 2 | **Structural Detection** | 34 zero-LLM detectors (31 of them in-path, sub-500μs per hook) — the always-on first line → [docs/detectors.md](docs/detectors.md) |
 | 3 | **Semantic Evaluation** | LLM-based judgment (hallucination, task completion, cross-turn frustration) — post-hoc, sampling-based, opt-in → [docs/semantic-evaluation.md](docs/semantic-evaluation.md) |
 | 4 | **Runtime Prevention** | Policies that stop, redirect, or downgrade a run *while it's happening* — the differentiator no tracer offers → [docs/policies.md](docs/policies.md) |
 | 5 | **Root Cause & Fix** | Native root-cause analysis, auto-applied policy fixes, or a one-click draft PR → [Diagnose & fix](#diagnose--fix) |
-
-**Where tracers fit in:** if you already run Langfuse, LangSmith, or Braintrust,
-Dunetrace pulls their evaluation results in alongside its own (pillar 3) rather
-than asking you to switch — see [docs/integrations/external-evaluation.md](docs/integrations/external-evaluation.md).
-What no tracer does is pillar 4: none of them can stop a run mid-flight, because
-none of them run in-path.
-
-| | Dunetrace | A tracer (Langfuse / LangSmith / etc.) |
-|---|---|---|
-| **When it fires** | Within 15s of run completion (structural); can also stop a run *while it's happening* (policies) | You query it after you notice a problem |
-| **What it watches** | Structural patterns (always) + LLM-based semantic judgment (opt-in) | Raw trace data |
-| **Alert channel** | Slack / webhook / Dashboard | Dashboard only |
-| **Fix path** | Auto-apply a policy, one-click draft PR, or push to a connected prompt store | Manual |
-| **Your existing tracer** | Pull its evaluations in, use alongside Dunetrace's own | — |
 
 ---
 
@@ -71,14 +59,18 @@ none of them run in-path.
 ```bash
 git clone https://github.com/dunetrace/dunetrace
 cd dunetrace && cp .env.example .env
-docker compose -f docker-compose.ghcr.yml up -d
-pip install -r requirements.txt
+docker compose -f docker-compose.ghcr.yml up -d   # localhost, auth off — see docs/operations.md to deploy
+curl -s localhost:8001/ready && curl -s localhost:8002/ready   # both {"status":"ok",...}
 ```
 
 **2. Install the SDK**
 ```bash
 pip install dunetrace                       # Python
 npm install dunetrace                       # Node.js / TypeScript
+
+# Or skip steps 2-3 entirely: the skill installs the SDK and instruments your
+# code. Run /dunetrace-setup (Claude Code, Cursor) or $dunetrace-setup (Codex).
+npx skills add dunetrace/dunetrace-skills --skill dunetrace-setup
 ```
 
 **3. Instrument your agent**
@@ -89,7 +81,7 @@ from dunetrace import Dunetrace
 import openai
 
 dt = Dunetrace()
-dt.init(agent_id="support-agent")   # auto-instruments installed clients (OpenAI, Anthropic, LangChain, CrewAI, httpx, requests)
+dt.init(agent_id="support-agent")   # auto-instruments installed clients (OpenAI, Anthropic, Mistral, Bedrock, LangChain, CrewAI, httpx, requests)
 
 @dt.agent("support-agent", model="gpt-4o")
 def my_agent(question: str) -> str:
@@ -102,29 +94,37 @@ def my_agent(question: str) -> str:
 
 **TypeScript / Node.js**
 ```typescript
-import { Dunetrace } from "dunetrace";
+import { Dunetrace, autoInstrument } from "dunetrace";
 import OpenAI from "openai";
 
-const dt     = new Dunetrace();
-const openai = dt.wrapOpenAI(new OpenAI());
+const dt = new Dunetrace();
+autoInstrument({ openai: OpenAI });   // patches OpenAI + outbound fetch; add `anthropic:` / `mistral:` too, or wrap one client with dt.wrapOpenAI()
 
-await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
+const openai = new OpenAI();          // constructed after the patch — still tracked
+
+await dt.run("support-agent", { model: "gpt-4o" }, async (run) => {
   await openai.chat.completions.create({ model: "gpt-4o", messages });
-  run.finalAnswer();
+  run.finalAnswer();                  // LLM + tool calls tracked automatically, streaming included
 });
 ```
 
+→ [TypeScript auto-instrumentation](docs/integrate-typescript-agent.md#auto-instrumentation)
+
 **Try the built-in failure scenarios**
 
-For the full examples index, see [`examples/README.md`](examples/README.md).
-
 ```bash
-cd packages/sdk-py
-
-python examples/basic_agent.py                          # No LLM calls
-SCENARIO=tool_loop python examples/langchain_agent.py   # TOOL_LOOP via LangChain
+cd packages/sdk-py                                      # Python
+python examples/basic_agent.py                          # No LLM calls, no API key
+SCENARIO=tool_loop python examples/langchain_agent.py   # TOOL_LOOP via LangChain — needs OPENAI_API_KEY
 SCENARIO=failures python examples/decorator_agent.py    # TOOL_LOOP, RETRY_STORM, RAG_EMPTY_RETRIEVAL
+
+cd ../sdk-ts && npm install                             # TypeScript — needs Node 22+
+ollama pull llama3.2                                    # and Ollama, so no API key is needed
+npm run example:vercel-ai                               # Happy path
+npm run example:vercel-ai:loop                          # TOOL_LOOP → detect → explain, end to end
 ```
+
+More, including approvals, policies, agent memory and voice → [examples index](examples/README.md)
 
 Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
@@ -132,7 +132,7 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 
 ## Detectors
 
-28 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
+34 detectors run on every completed run — no configuration, no LLM. A few of the main ones:
 
 | Signal | What it catches |
 |---|---|
@@ -146,33 +146,18 @@ Open the dashboard: **[http://localhost:3000](http://localhost:3000)**
 | `SILENT_TRUNCATION` | A response was truncated and the agent used it without retrying |
 | `MODEL_FALLBACK_DRIFT` | The run silently switched to a weaker model (e.g. under rate limiting) |
 
-Each alert includes: what fired, why it matters, a concrete fix, and a rate context line (first occurrence / recurring / systemic).
+Each alert carries what fired, why it matters, a concrete fix, and rate context (first occurrence / recurring / systemic). → [docs/detectors.md](docs/detectors.md) for all 34
 
-→ [docs/detectors.md](docs/detectors.md) for the full list of 28 detectors
-
-**Multi-agent systems** — instrument each agent as its own `dt.run()` and Dunetrace auto-links them into a delegation graph (`parent_run_id` is threaded automatically for nested runs). Two detectors read that graph: `DELEGATION_LOOP` (agents cycling without converging) and `HANDOFF_CONTEXT_LOSS` (a handoff dropping the parent's context). → [docs/multi-agent.md](docs/multi-agent.md)
-
-**Agent memory** — instrument what an agent writes to and reads from its own memory (`run.memory_written()` / `memory_read()`, or automatically for LangGraph/CrewAI memory via `dt.auto_instrument()`), and `MEMORY_POISONING` flags adversarial content persisted into it. → [docs/memory.md](docs/memory.md)
-
-**Custom detectors** — write a detector in plain English. Dunetrace translates it to a structured condition set, runs it in shadow mode against real traffic, and lets you review the fire rate before any alert fires. In the dashboard: **Config → Custom detectors → Add detector**.
-
-**Detector packs** — opt-in detector bundles for a specific class of agent, activated per org. The **voice pack** adds 9 detectors for real-time voice agents (`dt.enable_pack("voice")`). Built-in detectors always run; packs only add to them and start in shadow mode.
-
-→ [detector packs](docs/detector-packs/index.md) · [voice pack](docs/detector-packs/voice.md) · [wiring a voice framework](docs/integrations/voice-frameworks.md)
+- **Multi-agent** — nested `dt.run()` calls auto-link into a delegation graph that `DELEGATION_LOOP` and `HANDOFF_CONTEXT_LOSS` read → [docs/multi-agent.md](docs/multi-agent.md)
+- **Agent memory** — instrument memory writes/reads and `MEMORY_POISONING` flags adversarial content persisted into them → [docs/memory.md](docs/memory.md)
+- **Custom detectors** — describe one in plain English; it runs in shadow mode until you approve the fire rate → [docs/detectors.md](docs/detectors.md#custom-detectors)
+- **Detector packs** — opt-in bundles per org; the voice pack adds 9 detectors → [detector packs](docs/detector-packs/index.md) · [voice pack](docs/detector-packs/voice.md)
 
 ---
 
 ## Semantic evaluation
 
-For failure modes no structural check can catch — did the agent hallucinate,
-did it finish the task, did it solve the wrong task, is the user going in
-circles. Post-hoc (never in your agent's request path), sampling-based,
-disabled by default. Ships seven [DeepEval](https://github.com/confident-ai/deepeval)-backed
-evaluators — four run-level (hallucination, task completion, task-understanding
-failure, off-topic drift) and three conversation-level (user frustration,
-confusion loops, sycophancy) — plus false-positive management (confidence
-floors, grouping, feedback loop, second-opinion for high-stakes findings). Each
-calibrated before ship (see `scripts/calibration/`).
+Opt-in LLM judgment for what structural checks can't see — seven [DeepEval](https://github.com/confident-ai/deepeval)-backed evaluators (hallucination, task completion, task-understanding failure, off-topic drift, user frustration, confusion loops, sycophancy). Post-hoc and sampling-based, never in your agent's request path. Its own container, off by default:
 
 ```bash
 SEMANTIC_WORKER_ENABLED=true
@@ -199,9 +184,8 @@ Slack and generic webhook (PagerDuty, Linear, custom).
 ```bash
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 SLACK_MIN_SEVERITY=LOW   # LOW | MEDIUM | HIGH | CRITICAL
+DIGEST_ENABLED=true      # weekly digest of top failure types, Monday 9am UTC
 ```
-
-A weekly digest (Monday 9am UTC) summarises top failure types and systemic patterns. Enable with `DIGEST_ENABLED=true`.
 
 → [docs/alerts.md](docs/alerts.md)
 
@@ -209,41 +193,24 @@ A weekly digest (Monday 9am UTC) summarises top failure types and systemic patte
 
 ## Diagnose & fix
 
-Root-cause analysis is native — no third-party tracer required. Click **Explain +** on any alert and Dunetrace analyzes the run's own stored events and returns a specific cause and fix. Every fix is one of two kinds:
-
-- **Policy fixes** (tool loops, retry storms, runaway step counts) → Dunetrace applies a runtime guardrail directly, no code change needed
-- **Prompt / code fixes** → a diff you copy in, or a one-click draft PR on GitHub for code/infra changes
-
-Fix effectiveness is tracked automatically.
+Click **Explain +** on any alert: Dunetrace analyzes the run's own stored events (no third-party tracer) and returns a cause plus a fix — either a runtime **policy** it applies itself (tool loops, retry storms, runaway step counts) or a **prompt/code diff** you copy in or open as a draft PR. Fix effectiveness is tracked automatically.
 
 ---
 
 ## Policies
 
-Runtime guardrails that fire mid-run — before a failure propagates.
+Runtime guardrails that fire mid-run — before a failure propagates. Defined in code or in the dashboard (the SDK refetches every 60s).
 
 ```python
-dt.add_policy(
+dt.add_policy(                                  # stop, switch_model, escalate, inject, ...
     name="cap tool calls",
     condition={"trigger": "tool_call_count", "operator": "gt", "value": 5},
     action={"type": "stop"},
 )
-dt.add_policy(
-    name="cost cap",
-    condition={"trigger": "cost_usd", "operator": "gt", "value": 0.50},
-    action={"type": "switch_model", "params": {"model": "gpt-4o-mini"}},
-)
-```
-
-Policies can also be created in the dashboard and fetched automatically by the SDK (60s TTL).
-
-**Human-in-the-loop approvals** — gate a risky tool (wiring money, deleting data) behind human approval. A `require_approval` policy blocks the tool call until someone approves in Slack or the dashboard, or it times out (fail-closed: a timeout blocks the tool). No agent code changes — the gate fires on the existing tool-call hook.
-
-```python
-dt.add_policy(
-    name="approve-wires",
+dt.add_policy(                                  # human-in-the-loop: blocks the call until
+    name="approve-wires",                       # someone approves in Slack or the dashboard,
     condition={"trigger": "before_tool_call", "operator": "eq", "value": "wire_money"},
-    action={"type": "require_approval", "params": {"timeout_s": 300}},
+    action={"type": "require_approval", "params": {"timeout_s": 300}},   # fail-closed on timeout
 )
 ```
 
@@ -253,14 +220,16 @@ dt.add_policy(
 
 ## MCP server
 
-Query agent signals directly from Claude Code, Cursor, or Codex — without leaving your editor.
+Query agent signals from Claude Code, Cursor, or Codex — "what failed in the last 24 hours?" — without leaving your editor.
 
 ```bash
 pip install dunetrace-mcp
 ```
 
+31 tools covering agents, runs, signals, fixes, issues, policies, custom detectors and voice calls. Claude Code registers the server automatically in `~/.claude.json` (restart to load); Cursor and Codex need one config block.
+
 <details>
-<summary>29 tools for signals, runs, policies, and custom detectors. Ask your editor things like "what failed in the last 24 hours?" A representative 10:</summary>
+<summary>A representative 10 of the 31 tools</summary>
 
 | Tool | What you can ask |
 |---|---|
@@ -277,48 +246,28 @@ pip install dunetrace-mcp
 
 </details>
 
-**Claude Code**: registered automatically in `~/.claude.json` after `pip install dunetrace-mcp`. Restart Claude Code to load.
-
-**Cursor**: add `.cursor/mcp.json` to your project root:
-
-```json
-{
-  "mcpServers": {
-    "dunetrace": {
-      "command": "dunetrace-mcp",
-      "env": {
-        "DUNETRACE_API_URL": "http://localhost:8002",
-        "DUNETRACE_API_KEY": "dt_dev_test"
-      }
-    }
-  }
-}
-```
-
 → [docs/mcp-server.md](docs/mcp-server.md)
 
 ---
 
 ## Architecture
 
-```
-Agent Code
-  └─► Dunetrace SDK        (raw content → ingest events)
-        └─► Ingest API      (POST /v1/ingest → Postgres)
-                ├─► Detector          (poll → 28 detectors → signals)
-                ├─► Semantic Worker   (optional — poll → DeepEval → signals)
-                ├─► Integrations      (optional — pull Langfuse/LangSmith/Braintrust)
-                ├─► Alerts            (poll → explain → Slack / webhook)
-                └─► Customer API      (runs, signals, explanations → dashboard)
-```
+Services share one Postgres and no message broker: the SDK ships events to the ingest API, and each worker polls for what it needs next. The core pipeline runs with no LLM key; three workers are opt-in.
 
-→ [docs/architecture.md](docs/architecture.md) for the full service breakdown
+→ [docs/architecture.md](docs/architecture.md) — services, data flow, detection paths, schema
+· [docs/operations.md](docs/operations.md) — deploying, probes and metrics, retention, redaction, rate limiting
 
 ---
 
 ## Integrations
 
+**Model providers** — OpenAI, Anthropic, Mistral and AWS Bedrock, auto-instrumented with no call-site changes.
+- [Auto-instrumentation (what's patched, streaming, agent_id resolution)](docs/integrations/auto-instrumentation.md)
+- [Mistral (hyperscaler-hosted clients, EU-resident evaluation)](docs/integrations/mistral.md)
+
 **Evaluation & tracing**
+- [OpenTelemetry export (Datadog, Grafana, Honeycomb, Signoz, any OTLP backend)](docs/integrations/opentelemetry.md)
+- [OpenTelemetry ingestion (send your existing OTel traces to Dunetrace: OpenLIT, Traceloop, OTel contrib)](docs/integrations/otel-ingestion.md)
 - [External evaluation (Langfuse, LangSmith, Braintrust, generic push)](docs/integrations/external-evaluation.md)
 - [Semantic evaluation (Dunetrace's own DeepEval-backed layer)](docs/semantic-evaluation.md)
 
@@ -326,6 +275,12 @@ Agent Code
 - [GitHub App (automated draft PRs)](docs/integrations/github-app.md)
 - [Slack & Linear alerts](docs/alerts.md)
 - [Coding agents — Claude Code, Cursor, Codex (MCP)](docs/integrations/coding-agents.md)
+
+**Voice**
+- [ElevenLabs (correlate TTS cost and voice choices with agent behavior)](docs/integrations/elevenlabs.md)
+- [Wiring a voice framework](docs/integrations/voice-frameworks.md)
+- [Voice metrics (call-level view of a voice agent)](docs/voice-metrics.md)
+- [Voice detector pack (9 detectors)](docs/detector-packs/voice.md)
 
 <details>
 <summary>Agent frameworks: LangChain, CrewAI, AutoGen, Haystack, LlamaIndex, TypeScript, and more</summary>
@@ -342,6 +297,9 @@ Agent Code
 - [smolagents (Hugging Face)](docs/integrate-smolagents.md)
 - [TypeScript / JavaScript](docs/integrate-typescript-agent.md)
 - [Langdock](docs/integrate-langdock.md)
+- [Dify](docs/integrate-dify.md)
+- [LiteLLM](docs/integrate-litellm.md)
+- [Vercel AI SDK](docs/integrate-vercel-ai.md)
 - [Policies](docs/policies.md)
 - [Human-in-the-loop approvals](docs/approvals.md)
 - [Agent state machine](docs/state-machine.md)
@@ -352,15 +310,13 @@ Agent Code
 
 ## Contributing
 
-Fork, branch, change, `make test`, PR. For larger changes (new integrations, architecture changes), open an issue first.
+Fork, branch, change, `make test`, PR — open an issue first for new integrations or architecture changes. Requires Python 3.11+, Node.js 22+, Docker + Docker Compose.
 
-New here? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup and workflow, browse the [good first issues](https://github.com/dunetrace/dunetrace/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) (most are "add one detector"), and follow the step-by-step **[Adding a detector guide](docs/contributing/adding-a-detector.md)**.
-
-Requires Python 3.11+, Node.js 22+, Docker + Docker Compose.
+→ [CONTRIBUTING.md](CONTRIBUTING.md) (setup and workflow) · [good first issues](https://github.com/dunetrace/dunetrace/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) · [adding a detector](docs/contributing/adding-a-detector.md)
 
 ## Contact
 
-[dunetrace@gmail.com](mailto:dunetrace@gmail.com)
+Dunetrace UG (haftungsbeschränkt) · Kolonnenstr. 8, 10827 Berlin, Germany · [vikas@dunetrace.com](mailto:vikas@dunetrace.com)
 
 ## License
 

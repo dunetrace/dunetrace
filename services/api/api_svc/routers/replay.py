@@ -28,6 +28,7 @@ _VALID_MODS = frozenset(
         "reduce_context",
         "fix_rag_retrieval",
         "add_final_answer",
+        "fix_model_downgrade",
         "truncate_at_step",
     }
 )
@@ -40,6 +41,7 @@ MOD_TARGETS: dict[str, list[str]] = {
     "reduce_context": ["CONTEXT_BLOAT"],
     "fix_rag_retrieval": ["RAG_EMPTY_RETRIEVAL"],
     "add_final_answer": ["GOAL_ABANDONMENT"],
+    "fix_model_downgrade": ["MODEL_FALLBACK_DRIFT"],
     "truncate_at_step": [],
 }
 
@@ -61,22 +63,24 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
             continue
 
         if mod_type == "break_tool_loop":
-            # Remove duplicate tool.called events (same tool_name + args).
-            # ToolLoopDetector counts tool_name occurrences in the window; we need
-            # to reduce the call count below THRESHOLD, not just mutate args.
-            # Also drop the paired tool.responded at the same step so build_run_state
-            # doesn't see orphaned responses.
-            seen_tool_args: set[tuple] = set()
+            # Simulate the agent not looping: keep at most THRESHOLD-1 calls of any
+            # one tool. TOOL_LOOP counts by tool_name (not by args), so an
+            # arg-varying loop has to be thinned by name — deduping (name, args)
+            # left arg-varying loops firing. Drop each surplus tool.called and its
+            # paired tool.responded (same step) so build_run_state sees no orphans.
+            from dunetrace.detectors import ToolLoopDetector  # noqa: PLC0415
+
+            cap = max(1, ToolLoopDetector.THRESHOLD - 1)
+            per_tool: dict[str, int] = {}
             dropped_steps: set[int] = set()
             filtered: list[dict] = []
             for e in events:
                 if e["event_type"] == "tool.called":
-                    p = e.get("payload") or {}
-                    key = (p.get("tool_name", ""), p.get("args", ""))
-                    if key in seen_tool_args:
+                    name = (e.get("payload") or {}).get("tool_name", "")
+                    per_tool[name] = per_tool.get(name, 0) + 1
+                    if per_tool[name] > cap:
                         dropped_steps.add(e.get("step_index", -1))
                         continue
-                    seen_tool_args.add(key)
                 elif e["event_type"] == "tool.responded":
                     if e.get("step_index", -1) in dropped_steps:
                         continue
@@ -99,23 +103,55 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
                         p.pop("error", None)
 
         elif mod_type == "reduce_context":
-            factor = float(mod_params.get("factor", 0.5))
-            factor = max(0.1, min(1.0, factor))
+            # Simulate effective context compression by capping prompt-token GROWTH,
+            # not by uniformly scaling every call. CONTEXT_BLOAT fires on the
+            # last/first ratio, which is scale-invariant — multiplying every call by
+            # the same factor (the old behavior) never changed the ratio, so the
+            # signal never resolved. Cap each later call so growth stays under the
+            # detector's threshold.
+            from dunetrace.detectors import ContextBloatDetector  # noqa: PLC0415
+
+            factor = max(0.1, min(1.0, float(mod_params.get("factor", 0.5))))
+            # Allowed growth headroom scaled by factor: factor=0.5 -> ~2x (< 3x).
+            cap_ratio = 1.0 + (ContextBloatDetector.GROWTH_FACTOR - 1.0) * factor
+            # prompt_tokens can live on llm.called (direct SDK) or llm.responded
+            # (e.g. LangChain, where llm.called carries 0). build_run_state uses
+            # whichever is non-zero, so cap both to actually flatten the effective
+            # growth the detector reads.
+            first_pt: int | None = None
             for e in events:
-                if e["event_type"] == "llm.called":
+                if e["event_type"] in ("llm.called", "llm.responded"):
                     p = e.get("payload") or {}
                     pt = p.get("prompt_tokens")
-                    if pt:
-                        p["prompt_tokens"] = max(1, int(pt * factor))
+                    if not pt:
+                        continue
+                    if first_pt is None:
+                        first_pt = pt
+                        continue
+                    cap = max(1, int(first_pt * cap_ratio))
+                    if pt > cap:
+                        p["prompt_tokens"] = cap
 
         elif mod_type == "fix_rag_retrieval":
+            # RAG_EMPTY_RETRIEVAL fires on `result_count < MIN_RESULTS` OR a
+            # non-None `top_score < MIN_SCORE`, so repairing the count alone
+            # does not clear it. Raising the score only when it was None left
+            # the common case unrepaired: an empty retrieval naturally reports
+            # top_score 0.0, not null, which is still under the threshold — the
+            # same shape of bug as reduce_context and break_tool_loop above,
+            # where the modification did not actually move its own detector.
+            from dunetrace.detectors import RagEmptyRetrievalDetector  # noqa: PLC0415
+
+            min_results = max(1, RagEmptyRetrievalDetector.MIN_RESULTS)
+            good_score = min(1.0, RagEmptyRetrievalDetector.MIN_SCORE + 0.2)
             for e in events:
                 if e["event_type"] == "retrieval.responded":
                     p = e.get("payload") or {}
-                    if (p.get("result_count") or 0) == 0:
-                        p["result_count"] = 5
-                        if p.get("top_score") is None:
-                            p["top_score"] = 0.85
+                    if (p.get("result_count") or 0) < min_results:
+                        p["result_count"] = min_results + 4
+                    score = p.get("top_score")
+                    if score is None or score < RagEmptyRetrievalDetector.MIN_SCORE:
+                        p["top_score"] = good_score
 
         elif mod_type == "add_final_answer":
             has_terminal = any(e["event_type"] in ("run.completed", "run.errored") for e in events)
@@ -133,6 +169,43 @@ def _apply_modifications(events: list[dict], mods: list) -> list[dict]:
                         "parent_run_id": None,
                     }
                 )
+
+        elif mod_type == "fix_model_downgrade":
+            # Simulate the run never falling back to a weaker model: clamp every
+            # call to the most capable model seen so far.
+            #
+            # MODEL_FALLBACK_DRIFT fires on the FIRST call whose tier is strictly
+            # below an earlier one, so repairing only the last downgrade leaves an
+            # earlier one still firing. Rewriting every call to the run's first
+            # model would clear it too, but by erasing legitimate upgrades as well
+            # — the counterfactual would no longer be the same run minus the
+            # fallback. Clamping to the running maximum removes every downgrade
+            # and leaves upgrades intact.
+            #
+            # Tier resolution comes from the detector instance rather than a
+            # second copy of the model->family matching: MODEL_TIERS is tunable
+            # from detectors.yml, and a local copy would stop agreeing with it the
+            # first time an operator added a model.
+            from dunetrace.detectors import ModelFallbackDriftDetector  # noqa: PLC0415
+
+            drift = ModelFallbackDriftDetector()
+            best_model: str | None = None
+            best_tier: int | None = None
+            for e in events:
+                if e["event_type"] not in ("llm.called", "llm.responded"):
+                    continue
+                p = e.get("payload") or {}
+                model = p.get("model")
+                tier = drift._tier(model) if model else None
+                if tier is None:
+                    continue  # unknown model — the detector skips these too
+                if best_tier is None or tier > best_tier:
+                    best_model, best_tier = model, tier
+                elif tier < best_tier and best_model:
+                    # Both llm.called and llm.responded carry `model`, and
+                    # build_run_state can take it from either, so both sides of a
+                    # downgraded call have to be rewritten or the pair disagrees.
+                    p["model"] = best_model
 
         elif mod_type == "truncate_at_step":
             step = int(mod_params.get("step", 0))

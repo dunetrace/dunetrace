@@ -100,6 +100,9 @@ meta-narration cases.
 
 ## Ship status
 
-Shadow by default (not in `LIVE_DETECTORS`), matching the SILENT_TRUNCATION /
-MODEL_FALLBACK_DRIFT precedent — promote to live once real traffic confirms the
-FP rate holds outside the calibration corpus.
+**Live** — listed in `LIVE_DETECTORS`
+(`services/detector/detector_svc/db.py`). Shipped shadow first, matching the
+SILENT_TRUNCATION / MODEL_FALLBACK_DRIFT precedent, and promoted once real
+traffic confirmed the FP rate held outside the calibration corpus. To reverse,
+remove it from `LIVE_DETECTORS`; `require_untrusted_source: true` in
+`detectors.yml` is the first knob to reach for if it is noisier than expected.

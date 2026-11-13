@@ -28,7 +28,7 @@ needed to consume them). See `packages/sdk-py/dunetrace/models.py`.
 | `state.exit_reason`, `state.current_step` | how/where the run ended |
 | `state.baseline_p75_*` | per-agent learned baselines (may be `None`) |
 
-## The 8 steps
+## The 9 steps
 
 ### 1. Write the detector class
 
@@ -79,20 +79,31 @@ Rules of the road:
 
 Then add an instance to the `TIER1_DETECTORS` list at the bottom of the file.
 
-### 2. Add the `FailureType` — in BOTH enums
+### 2. Add the `FailureType` — edit the source, then generate
 
-This is the step first-time contributors miss and it fails CI. Add your member to
-**both**:
-
-- `packages/sdk-py/dunetrace/models.py` → `class FailureType`
-- `packages/schemas-py/dunetrace_schemas/enums.py` → `class FailureType`
+This is the step first-time contributors miss and it fails CI. The SDK's
+`FailureType` (`dunetrace.models`) and the schemas package's
+(`dunetrace_schemas.enums`) are both **generated** from one source file, because
+the two packages must not import each other. Add your member to
+`FAILURE_TYPE_MEMBERS` in `packages/schemas-py/dunetrace_schemas/enum_source.py`
+(a `(NAME, value, comment_or_None)` tuple — keep it before `CUSTOM`):
 
 ```python
-EXCESSIVE_RETRIEVAL = "EXCESSIVE_RETRIEVAL"
+("EXCESSIVE_RETRIEVAL", "EXCESSIVE_RETRIEVAL", None),
 ```
 
-`packages/schemas-py/tests/test_sdk_parity.py` asserts the two are identical — if
-you add to one and not the other, the `schemas-py` CI job goes red.
+then regenerate both enum modules:
+
+```bash
+python scripts/gen_enums.py
+```
+
+That rewrites `packages/sdk-py/dunetrace/_enums.py` and
+`packages/schemas-py/dunetrace_schemas/enums.py` (both carry a `# GENERATED` header —
+never edit them by hand; commit them alongside the source). The docs-consistency
+CI job runs `python scripts/gen_enums.py --check` and goes red if either module
+is stale, and `packages/schemas-py/tests/test_sdk_parity.py` stays as the backstop
+asserting the two enums are identical.
 
 ### 3. Register in the detector service
 
@@ -136,13 +147,30 @@ Add a section under `default:` in `detectors.yml` documenting the tunables and a
 stored and visible but never alert, so you can validate the false-positive rate
 on real traffic before promoting it.
 
-### 5. Tests
+### 5. Add an explainer template — the build fails without one
+
+`services/explainer/explainer_svc/templates.py`: write an
+`explain_<your_detector>()` returning an `Explanation`, and register it in the
+`TEMPLATES` dict. `test_template_coverage.py` asserts that *every* producible
+`FailureType` has one, so omitting it turns the suite red.
+
+The failure it prevents is worse than a red build, though. Without a template
+`explain()` falls through to `_fallback()`, which emits a bare title and no
+evidence-derived text — so every Slack alert and every dashboard explanation for
+your detector is content-free while still looking like a working alert. This
+step was missing from this checklist, and the first detector added after that
+omission shipped exactly that way.
+
+Read the evidence keys defensively (`ev.get(...)`) — a signal written before a
+later evidence change still has to render.
+
+### 6. Tests
 
 Add unit tests in `packages/sdk-py/tests/test_detectors.py` (or the detector
 service's `test_all_detectors.py`): at least one run that fires, one just under
 the threshold that doesn't, and the tunable being respected.
 
-### 6. Calibrate
+### 7. Calibrate
 
 Every recent detector ships with a calibration script + report that measures
 false-positive / true-positive rate on a labeled corpus. Copy the closest
@@ -153,7 +181,19 @@ deterministic) is a good template — into
 **FP < 15%**; if you can't get there, that's a signal to rethink the heuristic (or
 disclose it and keep it shadow).
 
-### 7. Document it
+**Gate on recall as well as FP.** A configuration that fires on almost nothing
+scores 0% false positives trivially, so an FP-only gate will happily recommend an
+inert detector. Require something like recall >= 50% too.
+
+**Build the corpus so it can disprove you.** The failure mode is a negative set
+whose members are excluded by being *just under* a threshold rather than by any
+structural property — then the sweep is scoring the corpus, not the boundary.
+Check that your negatives clear every floor outright and are rejected only by the
+condition you actually believe in, and print the class distributions so a reader
+can see the separation instead of trusting a headline number.
+`scripts/calibrate_scattershot_tool_use.py` documents both mistakes concretely.
+
+### 8. Document it
 
 In `docs/detectors.md`: add a row to the summary table, a detail section (what it
 catches, signal, severity, config, how it differs from related detectors), bump
@@ -161,7 +201,7 @@ the detector count in the intro line, and add it to the shadow-mode list. The
 `validate-detector-docs` check requires every detector name mentioned in the docs
 to exist in code and vice-versa.
 
-### 8. Run the checks
+### 9. Run the checks
 
 ```bash
 make test
@@ -179,7 +219,8 @@ pre-commit run --all-files    # ruff, mypy, docs-consistency, the test suites
 
 ## Common gotchas
 
-- **Enum parity (step 2)** — the #1 CI failure. Both `FailureType` enums.
+- **Generated enums (step 2)** — the #1 CI failure. Edit `enum_source.py`, run
+  `python scripts/gen_enums.py`, commit the two regenerated modules.
 - **Shadow by default** — don't add to `LIVE_DETECTORS` in the same PR.
 - **Docs consistency** — a detector name in `docs/detectors.md`/README must exist
   in code (and it must be reachable from `code_names()` in

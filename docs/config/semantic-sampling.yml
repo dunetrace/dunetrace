@@ -1,0 +1,24 @@
+# DuneTrace — Semantic Evaluation Sampling Defaults
+#
+# Tunes Phase 1.2's adaptive sampling engine
+# (services/semantic/semantic_svc/sampling.py). Restart the semantic worker
+# after any change:
+#
+#   docker compose restart semantic
+#
+# Per-agent overrides (sample_rate, budget_monthly, evaluators,
+# semantic_critical) live in the agent_semantic_config table, not here.
+#
+# All fields are optional; omitted fields use the default shown below.
+
+structural_signal_rate: 1.0   # runs where a structural detector already fired
+semantic_critical_rate: 1.0   # agents flagged semantic_critical=true
+retrieval_rate: 0.20          # runs with retrieval.called/retrieval.responded events
+baseline_rate: 0.05           # everything else
+
+# Phase 3.2 — independent of the per-run rates above. Bucketed on the
+# conversation's own id (not run_id): a conversation that lands in the
+# sampled bucket stays sampled for its whole lifetime. Only considered once
+# a conversation has at least MIN_CONVERSATION_RUNS runs (currently 3,
+# not configurable here — see sampling.py).
+conversation_evaluation_rate: 0.50

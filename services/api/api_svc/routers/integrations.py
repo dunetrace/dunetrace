@@ -16,7 +16,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.crypto import encrypt_credentials
 from api_svc.db.queries import (
     delete_external_integration,
@@ -83,7 +83,7 @@ def _status_response(status: dict | None) -> IntegrationStatus:
 )
 async def set_langfuse_integration(
     body: LangfuseIntegrationRequest,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> IntegrationStatus:
     try:
         encrypted = encrypt_credentials(
@@ -114,7 +114,7 @@ async def get_langfuse_integration(org_id: str = Depends(require_org)) -> Integr
     summary="Remove this org's Langfuse integration",
     status_code=204,
 )
-async def remove_langfuse_integration(org_id: str = Depends(require_org)):
+async def remove_langfuse_integration(org_id: str = Depends(require_scope("admin"))):
     deleted = await delete_external_integration(org_id, "langfuse")
     if not deleted:
         raise HTTPException(status_code=404, detail="No Langfuse integration configured.")
@@ -128,7 +128,7 @@ async def remove_langfuse_integration(org_id: str = Depends(require_org)):
 )
 async def set_langsmith_integration(
     body: LangSmithIntegrationRequest,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> IntegrationStatus:
     try:
         encrypted = encrypt_credentials(
@@ -159,7 +159,7 @@ async def get_langsmith_integration(org_id: str = Depends(require_org)) -> Integ
     summary="Remove this org's LangSmith integration",
     status_code=204,
 )
-async def remove_langsmith_integration(org_id: str = Depends(require_org)):
+async def remove_langsmith_integration(org_id: str = Depends(require_scope("admin"))):
     deleted = await delete_external_integration(org_id, "langsmith")
     if not deleted:
         raise HTTPException(status_code=404, detail="No LangSmith integration configured.")
@@ -173,7 +173,7 @@ async def remove_langsmith_integration(org_id: str = Depends(require_org)):
 )
 async def set_braintrust_integration(
     body: BraintrustIntegrationRequest,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> IntegrationStatus:
     try:
         encrypted = encrypt_credentials({"api_key": body.api_key, "project_id": body.project_id})
@@ -202,7 +202,7 @@ async def get_braintrust_integration(org_id: str = Depends(require_org)) -> Inte
     summary="Remove this org's Braintrust integration",
     status_code=204,
 )
-async def remove_braintrust_integration(org_id: str = Depends(require_org)):
+async def remove_braintrust_integration(org_id: str = Depends(require_scope("admin"))):
     deleted = await delete_external_integration(org_id, "braintrust")
     if not deleted:
         raise HTTPException(status_code=404, detail="No Braintrust integration configured.")

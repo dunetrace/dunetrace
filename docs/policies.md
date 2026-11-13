@@ -1,10 +1,30 @@
 # Policies
 
+> **Remote policies that change agent behaviour require a verified signature.**
+> A remote policy asking for `stop`, `require_approval`, `escalate_to_human`,
+> `switch_model`, `inject_prompt`, `inject_recovery_prompt` or
+> `stop_current_tts` is **downgraded to log-only** unless a policy secret is
+> configured — set `DUNETRACE_POLICY_SECRET` in the agent's environment and
+> `POLICY_SIGNING_SECRET` on the server. Without one there is no way to tell the
+> policy came from your server, and these actions change what a production agent
+> does. Policies you register in-process with `dt.add_policy()` are your own
+> code and are never downgraded.
+>
+> Signing is a shared HMAC secret, so a server that is itself compromised holds
+> the signing key. What this protects against is a party who cannot produce a
+> correctly signed payload — a spoofed endpoint, a hijacked DNS record, a MITM.
+> Closing the compromised-server case needs asymmetric signing, which needs a
+> crypto library; the core SDK is deliberately zero-dependency.
+
 Runtime guardrails evaluated mid-run after every `tool_called`, `llm_responded`, and `tool_responded` event. Policies fire at most once per run (except `log` policies, which fire every time).
 
 Policy checks are synchronous and O(1) — running totals for `error_count` and `cost_usd` are maintained incrementally, and signal detector results are cached per step.
 
 ---
+
+> **New to policies?** [Writing your first policy](policies/first-policy.md)
+> walks the whole loop: write it, watch it in [dry run](policies/dry-run.md),
+> read what it would have done, arm it.
 
 ## Structural signals only
 
@@ -13,9 +33,16 @@ below) can only ever match a **structural** detector signal — never a
 [semantic evaluation](semantic-evaluation.md) finding. This isn't a policy
 choice enforced by a check somewhere; it's true by construction: `trigger="signal"`
 runs the SDK's own in-process detector battery
-(`dunetrace.detectors.run_detectors`, the same 28 structural detectors
-described in [docs/detectors.md](detectors.md)) synchronously, inside your
-agent's process, before the run has even finished. Semantic evaluation runs
+(`dunetrace.detectors.run_detectors` over the per-agent list built from
+`GET /v1/detector-config` — the 31 in-path detectors of the 34 in
+[docs/detectors.md](detectors.md), with the server's `detectors.yml`
+thresholds, packs and P75 baselines applied, or the `TIER1_DETECTORS` class
+defaults until that first fetch succeeds) synchronously, inside your
+agent's process, before the run has even finished. Thresholds are
+server-authoritative: tune `detectors.yml` and both this pass and the
+detector worker pick the change up (the SDK within 60s); `policy.evaluated`
+events report `detector_config_stale` while the SDK is running on defaults.
+See [Detection: Two Independent Paths](architecture.md#detection-two-independent-paths). Semantic evaluation runs
 entirely after a run completes, in a separate `semantic_worker` service the
 SDK never calls into — there is no code path by which an in-process policy
 check could see a semantic finding, because none exist yet at the moment the
@@ -55,7 +82,7 @@ dt.add_policy(
 # Inject a corrective prompt when a loop is detected mid-run
 dt.add_policy(
     name="loop fix",
-    condition={"trigger": "signal", "operator": "eq", "value": "TOOL_LOOP"},
+    condition={"trigger": "signal", "operator": "contains", "value": "TOOL_LOOP"},
     action={"type": "inject_prompt", "params": {
         "prompt": "Stop repeating tool calls. Summarise what you know and answer directly."
     }},
@@ -76,13 +103,33 @@ dt.add_policy(
 When `api_key` and `endpoint` are set, the SDK fetches policies from the backend at run start and caches them for 60 seconds per agent. Policies defined in the dashboard apply automatically — no code changes needed.
 
 ```python
-dt = Dunetrace(api_key="dt_live_...", endpoint="https://ingest.dunetrace.com")
+dt = Dunetrace(api_key="dt_...", endpoint="https://ingest.dunetrace.com")
 # Policies defined in the dashboard are pulled at run start.
 ```
 
 Local policies (added via `add_policy`) take priority over remote ones at the same `priority` level and are never replaced by remote fetches.
 
 **Long-running agents:** the 60-second remote refresh window means a newly pushed policy may not reach an already-running agent until its next run. Signal-trigger policy checks (`trigger="signal"`) cache whether any such policy is active per engine generation — adding a new signal policy via `add_policy()` mid-run takes effect on the next policy-checked event.
+
+### When the fetch fails
+
+The fetch runs on a background thread at run start and never blocks or fails the run. It is **fail-open**: whatever bundle was last loaded for that agent stays in memory and keeps being enforced; if nothing was ever loaded, only local `add_policy()` policies apply. What changed is that a failure is no longer quiet:
+
+- **Retry on a backoff, not the TTL.** Only a *successful* load starts the 60-second refresh window. A failed fetch is retried after 2s, then 4s, 8s, and every 15s after that (capped — well under the TTL), until one succeeds. A single failure therefore costs seconds of stale guardrails, not a minute. Concurrent runs starting together still make one request: an in-flight guard per agent replaces the old "mark as fetched before the request" stampede guard.
+- **Log levels.** The first failure in a streak logs at `WARNING` on the `dunetrace` logger with the agent id, the endpoint host, the exception class and message, and the next retry delay. Later failures in the same streak log at `DEBUG` (one warning per outage, not one per retry). The fetch that ends a streak logs at `INFO`: `recovered after N failure(s)`.
+- **Staleness on the wire.** When [evaluation reporting](policies/condition-expressions.md#debugging-why-did-my-policy-fire) is enabled, every `policy.evaluated` payload carries `policy_bundle_stale` (bool) and `policy_bundle_age_s` (float, or `null`). `policy_bundle_age_s` is the seconds since the last successful remote load for that agent; `policy_bundle_stale` is `true` when remote fetching is configured and either no load has ever succeeded for that agent or a refresh is overdue (`age_s` past 60s). A client with no `api_key` has nothing to be stale relative to and reports `false` / `null`. Only this opt-in payload changed; the default wire format is unchanged.
+
+**Optional on-disk cache.** A process that starts while the policy server is unreachable has no bundle at all until a fetch succeeds. To close that gap, point `policy_cache_path` (or `DUNETRACE_POLICY_CACHE_PATH`) at a writable directory:
+
+```python
+dt = Dunetrace(
+    api_key="dt_...",
+    endpoint="https://ingest.dunetrace.com",
+    policy_cache_path="/var/lib/my-agent/dunetrace-policies",
+)
+```
+
+Every successful fetch writes the raw server response for that agent to `<path>/<agent_id>.json` (atomic rename, one file per agent). On the first fetch attempt for an agent that has no bundle in memory, the SDK primes the engine from that file **through the same loader as a live response** — signature verification applies when a policy secret is set, and an unsigned enforcing action is downgraded to log-only when it is not — so editing the cache file cannot inject a `stop` or `require_approval` the server never issued. A primed bundle is reported as stale (`policy_bundle_age_s: null`) and does not delay the network fetch; a cache that cannot be read or written is logged (`WARNING`, once for write failures) and otherwise ignored. Off by default: nothing is written anywhere unless you opt in.
 
 ---
 
@@ -96,11 +143,19 @@ Local policies (added via `add_policy`) take priority over remote ones at the sa
 | `error_count` | int | Failed tool calls (`success=False`) |
 | `finish_reason` | str | Latest LLM `finish_reason` (e.g. `"length"`, `"stop"`, `"tool_calls"`) |
 | `llm_latency_ms` | int | Latest LLM call latency in milliseconds |
-| `signal` | str | Detector signal name — runs the full detector suite lazily (e.g. `"TOOL_LOOP"`) |
+| `signal` | list[str] | Failure types detected so far this run — runs the full detector suite lazily. Pair it with `contains` (e.g. `"TOOL_LOOP"`); `eq` compares against the whole list and never matches |
 | `before_tool_call` | str | Name of the tool about to be called — only valid with the `require_approval` action (human-in-the-loop). See [Approvals](approvals.md) |
 | `expression` | — | Sentinel for a **pure-expression** policy: the flat fields are a no-op and a [`match` block](#expression-conditions-argument--metadata-values) carries the whole condition |
 
 Supported operators (flat condition): `gt` `gte` `lt` `lte` `eq` `neq` `contains`
+
+Operators are spelled out — `>`, `>=`, `==` are the *custom detector* syntax and
+are rejected here. An operator that cannot match its trigger's metric type is
+also rejected at registration rather than silently never firing: `signal` is
+list-valued, so it takes `contains` and nothing else. `eq` against it can never
+match and `neq` matches on *every* evaluation (firing the policy on every run,
+signals or not) — both are refused, by `dt.add_policy()`, by `POST`/`PUT
+/v1/policies`, and by the SDK's remote-policy loader.
 
 ### Expression conditions (argument & metadata values)
 
@@ -149,6 +204,7 @@ must read and honor:
 | `switch_model` | Advisory | Sets `run.model_override`. The SDK does **not** swap your LLM call — you must read the attribute and use it. |
 | `inject_prompt` / `inject_recovery_prompt` | Advisory | Appends to `run.prompt_additions` / sets `run.recovery_prompt`. You must read and prepend/speak it. |
 | `escalate_to_human` / `stop_current_tts` | Advisory | Set `run.escalate_to_human` / `run.stop_tts`. Your loop must act on them. |
+| `slow_response_pace` | Advisory | Sets `run.response_pace` (default `"slow"`). Your loop must slow the turn (filler token, lower TTS rate). |
 
 If you configure an advisory action but never read the corresponding attribute in
 your agent code, the action is a silent no-op. See [switch_model](#switch_model) /
@@ -243,18 +299,19 @@ When multiple policies match simultaneously, only the highest-priority one fires
 
 ## Trust boundary
 
-**Who can define policies:** Bearer token authentication is required for all policy CRUD endpoints. In `AUTH_MODE=dev` (local Docker only), auth is skipped — do not expose port 8002 beyond localhost in dev mode. `dt.add_policy()` in-process requires no auth; trust is whoever controls the code.
+**Who can define policies:** every policy write — `POST`, `PUT`, `DELETE`, `PATCH …/toggle` — requires an API key with the **`admin`** scope. Reads (`GET`) accept any key for the org, including an agent's ingest-only key, which is what the SDK uses to pull its bundle — so the process a `stop` policy governs cannot rewrite or disable it. Admin keys are minted through `POST /v1/keys` by an existing admin key; the first one comes from the ingest bootstrap in [Operations › Deploying](operations.md#minting-the-first-api-key). In `AUTH_MODE=dev` (the local quickstart) auth is skipped and every request is admin — the quickstart binds port 8002 to `127.0.0.1` for exactly that reason; do not widen it in dev mode. `dt.add_policy()` in-process requires no auth; trust is whoever controls the code.
 
 **Validation at write time:**
-1. Trigger, operator, and action type are checked against fixed allowlists — unknown values are rejected with 422.
-2. `inject_prompt` prompt content is scanned against the prompt injection pattern detector. Matching content is rejected before it reaches the database.
-3. Every policy is signed with HMAC-SHA256 at write time. The signature is stored alongside the policy. The signature covers the whole `condition` — including any [`match` expression block](policies/condition-expressions.md#signing) — so a tampered condition fails verification. Policies using a `match` block are signed under canonical-form version 2 (`sig_version: 2`); legacy policies stay version 1, byte-identical, so existing signatures keep verifying.
+1. Trigger, operator, and action type are checked against fixed allowlists — unknown values are rejected with 422. The trigger and operator allowlists are imported from `dunetrace.policies` (`VALID_TRIGGERS` / `VALID_OPERATORS`), not restated in the API, so a value this service accepts is always one the in-process engine can evaluate.
+2. Operator/trigger compatibility is checked against the metric's type — a combination that can never match (or that always matches) is rejected with 422 rather than stored as a policy that reads as enabled and prevents nothing. See the note under [Condition reference](#condition-reference).
+3. `inject_prompt` prompt content is scanned against the prompt injection pattern detector. Matching content is rejected before it reaches the database.
+4. Every policy is signed with HMAC-SHA256 at write time. The signature is stored alongside the policy. The signature covers the whole `condition` — including any [`match` expression block](policies/condition-expressions.md#signing) — so a tampered condition fails verification. The canonical form is versioned so new fields can be authenticated without invalidating signatures already issued: v1 is the original seven fields (byte-identical to pre-feature policies), v2 adds an authenticated prefix and is used by a policy with a `match` block, and v3 adds the policy's `mode`. A policy signs at the lowest version that can carry it, so an enforcing policy with no `match` block still signs at v1. `mode` is covered because it decides whether the policy enforces at all — see [Signing](policies/condition-expressions.md#signing).
 
 **Signature verification:** Configure `POLICY_SIGNING_SECRET` (same value on server and SDK client) to enable end-to-end verification:
 
 ```python
 dt = Dunetrace(
-    api_key="dt_live_...",
+    api_key="dt_...",
     endpoint="https://ingest.dunetrace.com",
     policy_secret="your-shared-secret",
 )
@@ -262,7 +319,50 @@ dt = Dunetrace(
 
 The SDK verifies each policy's signature before loading it. Policies with a non-matching signature are skipped and logged as warnings — a tampered or replayed policy never reaches the agent.
 
-**Migration note:** Policies created before `POLICY_SIGNING_SECRET` was set will have an empty signature. These are loaded with a warning rather than silently dropped. Re-save each policy in the dashboard to sign it.
+### Degraded policies (not enforcing)
+
+An unsigned remote policy that asks for an enforcing action is **downgraded to
+log-only**. That is correct: config whose origin cannot be verified must not
+act on production traffic. What used to be wrong is that it was invisible. The
+downgrade rewrote the action in place, so from the dashboard a policy forced to
+log-only looked exactly like one someone chose to make log-only, and the only
+evidence was a single log line on a background thread.
+
+A downgraded policy is now labelled in three places:
+
+- **The policy list** shows a **DEGRADED** badge, with the reason on hover.
+- **`GET /v1/policies`** returns `enforcement` on every policy
+  (`enforcing`, `log_only`, `degraded` or `disabled`) plus an
+  `enforcement_reason` naming the fix. This is server-knowable: a policy the
+  server never signed is downgraded by every SDK that loads it.
+- **The agent logs one summary** when the degraded set changes, naming each
+  policy and the action it asked for. It logs on change, not on every
+  60-second refresh, so a steady state stays quiet.
+
+```
+2 of 3 policies are running DEGRADED (downgraded to log-only because their
+origin cannot be verified): 'stop-runaway' (wanted stop), 'downgrade-model'
+(wanted switch_model). These evaluate and record but enforce nothing. Set
+DUNETRACE_POLICY_SECRET on this agent and POLICY_SIGNING_SECRET on the server
+to restore enforcement.
+```
+
+**To resolve it:**
+
+1. Set `POLICY_SIGNING_SECRET` on the server and `DUNETRACE_POLICY_SECRET` on
+   the agent, to the same value.
+2. Re-save each affected policy so the server signs it. A policy created before
+   the secret existed has an empty signature and stays degraded until it is
+   re-saved.
+3. Confirm: the badge clears, `enforcement` reads `enforcing`, and the agent
+   logs `Policy enforcement restored: no policies are running degraded.`
+
+Policies registered in-process with `dt.add_policy()` are never downgraded.
+They are the customer's own code, and there is nothing to verify.
+
+**Not the same as dry run.** A degraded policy wanted to enforce and cannot. A
+[dry-run](policies/dry-run.md) policy was asked not to. Both record and neither
+acts, which is exactly why they are labelled differently.
 
 **Audit log:** Every create, update, delete, and toggle is written to `policy_audit_log` with the customer ID, timestamp, and full before/after diff. Query it directly in Postgres for forensic review.
 
@@ -272,7 +372,7 @@ The SDK verifies each policy's signature before loading it. Policies with a non-
 
 Policies can be created, edited, toggled, and deleted from the **Policies** page in the dashboard at `http://localhost:3000`. Changes are fetched by the SDK within the 60-second TTL window.
 
-REST API:
+REST API — the writes need the `admin` scope, `GET` any key in the org:
 
 | Endpoint | Description |
 |---|---|

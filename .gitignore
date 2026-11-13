@@ -14,7 +14,6 @@ extracted/
 pip-log.txt
 pip-delete-this-directory.txt
 .installed.cfg
-config
 
 # Virtual environments
 .venv/
@@ -47,6 +46,10 @@ coverage.xml
 CLAUDE.md
 .claude/
 .claude.json
+# Cursor MCP config holds a local API key; commit .cursor/mcp.json.example instead
+.cursor/mcp.json
+# Stray CLAUDE.md that was committed as bare ".md" (root only)
+/.md
 
 # macOS
 .DS_Store
@@ -97,5 +100,10 @@ docker-compose.override.yaml
 *.orig
 *.rej
 
-# Marketing drafts — not part of the tracked docs
+# Marketing drafts
 docs/blog/
+
+# Docs copied into the MCP server package at build time (see
+# packages/mcp-server/setup.py). Generated from docs/ — never edit or commit;
+# docs/ is the single source of truth.
+packages/mcp-server/dunetrace_mcp/_docs/

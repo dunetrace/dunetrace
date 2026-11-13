@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json as _json_mod
 import logging
+import secrets
 import time
 from typing import Any, AsyncGenerator, Optional
 
@@ -19,8 +20,9 @@ except ImportError:
     asyncpg = None  # type: ignore
 
 from api_svc.config import settings
+from api_svc.explain_common import _get_step_range
 from dunetrace.models import FailureSignal, FailureType, Severity
-from explainer_svc.explainer import explain
+from explainer_svc.explainer import coerce_failure_type, explain
 
 logger = logging.getLogger("dunetrace.api.db")
 _pool = None
@@ -28,76 +30,13 @@ _pool = None
 
 # ── Pool lifecycle ─────────────────────────────────────────────────────────────
 
-_MIGRATIONS_DDL = """
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS co_signal_count INTEGER NOT NULL DEFAULT 0;
-"""
+# Every table this service shares with another — failure_signals, organizations,
+# api_keys, fixes, policies, policy_evaluations, custom_detectors,
+# custom_detector_results, packs, org_enabled_packs, run_state_metrics — is
+# declared by dunetrace_schemas.migrations, which init_pool() applies before
+# any of the DDL below. What is declared here is this service's alone.
 
-_FIXES_DDL = """
-CREATE TABLE IF NOT EXISTS fixes (
-    id                    BIGSERIAL PRIMARY KEY,
-    run_id                TEXT        NOT NULL,
-    signal_id             BIGINT      NOT NULL,
-    fix_content           TEXT        NOT NULL,
-    fix_type              TEXT        NOT NULL DEFAULT 'prompt_addition',
-    applied_via           TEXT        NOT NULL,
-    langfuse_prompt_name  TEXT,
-    langfuse_version      INTEGER,
-    applied_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- org_id is nullable here: this table is also created by ingest_svc, which owns the
--- org_id backfill + NOT NULL migration (services/ingest/ingest_svc/db/postgres.py).
--- Whichever service starts first creates the base table; the other's ALTER ... ADD
--- COLUMN IF NOT EXISTS / backfill is a no-op or idempotent catch-up.
-ALTER TABLE fixes ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_fixes_signal_id ON fixes(signal_id);
-CREATE INDEX IF NOT EXISTS idx_fixes_run_id    ON fixes(run_id, applied_at DESC);
-"""
-
-_POLICIES_DDL = """
-CREATE TABLE IF NOT EXISTS policies (
-    id          BIGSERIAL PRIMARY KEY,
-    agent_id    TEXT        NOT NULL DEFAULT '*',
-    name        TEXT        NOT NULL,
-    condition   JSONB       NOT NULL,
-    action      JSONB       NOT NULL,
-    enabled     BOOLEAN     NOT NULL DEFAULT TRUE,
-    priority    INT         NOT NULL DEFAULT 100,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- See fixes.org_id comment above — same cross-service "whichever wins" ownership.
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
-"""
-
-_POLICY_SECURITY_DDL = """
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT '';
--- Which version of the HMAC canonical form a policy was signed under. Existing
--- rows default to 1 (the original form); policies using a condition.match
--- expression block are signed as 2. Verification is driven by this per-row value.
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS sig_version INT NOT NULL DEFAULT 1;
-
--- Policy evaluation observability (Phase 5). Owned/written by ingest_svc; created
--- defensively here (IF NOT EXISTS) so the API's read query never fails if the API
--- happens to start first. Kept in sync with ingest_svc's DDL.
-CREATE TABLE IF NOT EXISTS policy_evaluations (
-    id              BIGSERIAL PRIMARY KEY,
-    org_id          TEXT,
-    policy_id       BIGINT,
-    policy_name     TEXT        NOT NULL DEFAULT '',
-    agent_id        TEXT        NOT NULL DEFAULT '',
-    run_id          TEXT,
-    trigger_name    TEXT,
-    trigger_matched BOOLEAN,
-    fired           BOOLEAN,
-    sampled         BOOLEAN     NOT NULL DEFAULT FALSE,
-    reason          TEXT,
-    conditions      JSONB,
-    evaluated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_policy_evals_policy
-    ON policy_evaluations(org_id, policy_id, evaluated_at DESC);
-
+_POLICY_AUDIT_DDL = """
 CREATE TABLE IF NOT EXISTS policy_audit_log (
     id          BIGSERIAL    PRIMARY KEY,
     policy_id   BIGINT,
@@ -124,8 +63,6 @@ CREATE INDEX IF NOT EXISTS idx_policy_audit_changed_at ON policy_audit_log(chang
 """
 
 _FEEDBACK_DDL = """
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
-
 CREATE TABLE IF NOT EXISTS agent_detector_overrides (
     agent_id         TEXT        NOT NULL,
     failure_type     TEXT        NOT NULL,
@@ -162,102 +99,12 @@ END $$;
 ALTER TABLE agent_detector_overrides ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
 """
 
-_KEYS_DDL = """
--- organizations/org_id replace companies/customer_id (see
--- services/ingest/ingest_svc/db/postgres.py for the rename migration that owns
--- this transition). This DDL only needs to land the NEW shape idempotently —
--- whichever of ingest_svc/api_svc starts first creates it.
-CREATE TABLE IF NOT EXISTS organizations (
-    id          TEXT PRIMARY KEY,
-    name        TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-INSERT INTO organizations (id, name) VALUES ('default', 'Default Organization')
-    ON CONFLICT (id) DO NOTHING;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS id BIGSERIAL;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_rpm INTEGER NOT NULL DEFAULT 600;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_id ON api_keys(id);
-"""
-
-_CUSTOM_DETECTORS_DDL = """
-CREATE TABLE IF NOT EXISTS custom_detectors (
-    id                BIGSERIAL    PRIMARY KEY,
-    agent_id          TEXT         NOT NULL DEFAULT '*',
-    name              TEXT         NOT NULL,
-    description       TEXT         NOT NULL,
-    config_json       JSONB        NOT NULL,
-    status            TEXT         NOT NULL DEFAULT 'shadow',
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    total_runs        INTEGER      NOT NULL DEFAULT 0,
-    shadow_fire_count INTEGER      NOT NULL DEFAULT 0
-);
--- org_id ownership: see detector_svc/db.py, which also creates this table and
--- owns the org_id backfill + NOT NULL migration for it.
-ALTER TABLE custom_detectors ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_custom_detectors_agent ON custom_detectors(agent_id, status);
-
-CREATE TABLE IF NOT EXISTS custom_detector_results (
-    id           BIGSERIAL    PRIMARY KEY,
-    detector_id  BIGINT       NOT NULL REFERENCES custom_detectors(id) ON DELETE CASCADE,
-    run_id       TEXT         NOT NULL,
-    agent_id     TEXT         NOT NULL,
-    fired        BOOLEAN      NOT NULL,
-    evaluated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-ALTER TABLE custom_detector_results ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
-"""
-
-# Phase 1.4.3 — semantic signal feedback capture. This service creates
-# signal_groups/signal_group_members defensively (IF NOT EXISTS) even though
-# semantic_svc is their primary owner — same dual-creation convention already
-# used for custom_detectors/custom_detector_results (detector_svc + api_svc):
-# whichever service starts first wins, and semantic_svc may never even be
-# enabled (SEMANTIC_WORKER_ENABLED defaults to false) on a given install.
+# Phase 1.4.3 — semantic signal feedback capture. signal_groups /
+# signal_group_members / signal_group_overrides (which this service reads and,
+# for fp_count, writes) are migration 10's; the per-org opt-in flags this loop
+# is gated on (organizations.semantic_feedback_enabled / _auto_suppress) are
+# migration 6's. What is declared here is this service's alone.
 _SEMANTIC_FEEDBACK_DDL = """
--- Opt-in per org (default off) — the whole feedback loop (capture +
--- auto-suppress) is inert until an org turns it on. auto_suppress controls
--- what happens once a group crosses the false-positive threshold: FALSE
--- (default) just lowers future confidence by 0.3; TRUE stops writing new
--- signals for that group entirely. See semantic_svc/worker.py.
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_enabled BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_auto_suppress BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS signal_groups (
-    id                BIGSERIAL    PRIMARY KEY,
-    org_id            TEXT         NOT NULL,
-    agent_id          TEXT         NOT NULL,
-    evaluator         TEXT         NOT NULL,
-    root_cause_hash   TEXT         NOT NULL,
-    root_cause_sample TEXT         NOT NULL,
-    first_seen        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    last_seen         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    signal_count      INTEGER      NOT NULL DEFAULT 0,
-    UNIQUE (org_id, agent_id, evaluator, root_cause_hash)
-);
-CREATE INDEX IF NOT EXISTS idx_signal_groups_org_agent ON signal_groups(org_id, agent_id);
-
-CREATE TABLE IF NOT EXISTS signal_group_members (
-    id         BIGSERIAL   PRIMARY KEY,
-    group_id   BIGINT      NOT NULL REFERENCES signal_groups(id) ON DELETE CASCADE,
-    signal_id  BIGINT      NOT NULL,
-    run_id     TEXT        NOT NULL,
-    added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_signal_group_members_group ON signal_group_members(group_id, added_at DESC);
-CREATE INDEX IF NOT EXISTS idx_signal_group_members_signal ON signal_group_members(signal_id);
-
--- One row per group that has accumulated false-positive feedback. No row at
--- all means fp_count=0 — a group is only ever created here once its first
--- false_positive verdict arrives (see record_signal_feedback).
-CREATE TABLE IF NOT EXISTS signal_group_overrides (
-    group_id   BIGINT      PRIMARY KEY REFERENCES signal_groups(id) ON DELETE CASCADE,
-    fp_count   INTEGER     NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 -- One row per feedback submission (not per group) — (signal_id, org_id,
 -- verdict, notes), exactly the shape in the Phase 1.4 brief. Aggregation
 -- into signal_group_overrides.fp_count happens at write time in
@@ -273,141 +120,20 @@ CREATE TABLE IF NOT EXISTS signal_feedback (
 CREATE INDEX IF NOT EXISTS idx_signal_feedback_signal ON signal_feedback(signal_id);
 """
 
-# Phase 1.5 — semantic evaluation billing/quotas. Defensively duplicated from
-# semantic_svc's own migration (services/semantic/semantic_svc/db.py), same
-# whichever-starts-first convention as _SEMANTIC_FEEDBACK_DDL above — this
-# service's new usage endpoint reads both tables without depending on
-# semantic_svc (which may be disabled entirely, SEMANTIC_WORKER_ENABLED
-# defaults to false) having ever run.
-_SEMANTIC_QUOTA_DDL = """
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_evaluation_quota INTEGER NOT NULL DEFAULT 1000;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS allow_semantic_overage BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS org_semantic_evaluation_usage (
-    org_id     TEXT    NOT NULL,
-    month      TEXT    NOT NULL,
-    eval_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (org_id, month)
-);
-
-CREATE TABLE IF NOT EXISTS semantic_evaluation_log (
-    id                BIGSERIAL   PRIMARY KEY,
-    org_id            TEXT        NOT NULL,
-    agent_id          TEXT        NOT NULL,
-    evaluator         TEXT        NOT NULL,
-    fired             BOOLEAN     NOT NULL,
-    prompt_tokens     INTEGER     NOT NULL,
-    completion_tokens INTEGER     NOT NULL,
-    cost_usd          REAL        NOT NULL,
-    evaluated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_semantic_evaluation_log_org_time ON semantic_evaluation_log(org_id, evaluated_at);
-"""
-
-# Phase 2.1 — external evaluation integrations (Langfuse first; LangSmith/
-# Braintrust reuse this same generic shape in 2.2/2.3, differing only by
-# `provider` and whatever keys their own credentials JSON needs).
-# Primarily owned by integrations_worker's own migration (not yet built as of
-# this PR being the config-CRUD half); duplicated here defensively, same
-# whichever-starts-first convention as every other cross-service table in
-# this schema.
-_INTEGRATIONS_DDL = """
-CREATE TABLE IF NOT EXISTS external_evaluation_integrations (
-    id                    BIGSERIAL    PRIMARY KEY,
-    org_id                TEXT         NOT NULL,
-    provider              TEXT         NOT NULL,
-    endpoint_url          TEXT         NOT NULL,
-    encrypted_credentials TEXT         NOT NULL,
-    poll_interval_secs    INTEGER      NOT NULL DEFAULT 60,
-    enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
-    last_polled_at        TIMESTAMPTZ,
-    last_success_at       TIMESTAMPTZ,
-    consecutive_failures  INTEGER      NOT NULL DEFAULT 0,
-    first_failure_at      TIMESTAMPTZ,
-    last_alerted_at       TIMESTAMPTZ,
-    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, provider)
-);
-CREATE INDEX IF NOT EXISTS idx_ext_integrations_enabled
-    ON external_evaluation_integrations(enabled) WHERE enabled = TRUE;
-
--- Dedup: a poll's overlap window (to tolerate the provider's own indexing
--- lag) will re-fetch evaluations already seen — this is what prevents
--- writing a duplicate failure_signals row for the same external evaluation.
-CREATE TABLE IF NOT EXISTS external_evaluation_processed (
-    org_id       TEXT        NOT NULL,
-    provider     TEXT        NOT NULL,
-    external_id  TEXT        NOT NULL,
-    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (org_id, provider, external_id)
-);
-"""
-
-_ALERT_INTEGRATIONS_DDL = """
--- Phase 4.1 — per-org Slack/Linear alert destinations, both bring-your-own
--- (a customer's own Slack incoming webhook / Linear API key + webhook
--- secret), same encrypt-at-rest pattern as Phase 2.1's
--- external_evaluation_integrations. api_svc only ever encrypts (on config
--- submission) and never decrypts, EXCEPT for Linear's webhook_secret — see
--- api_svc/crypto.py::decrypt_credentials_for_webhook_verification's
--- docstring for why that one case is a deliberate, narrow exception.
--- alerts_svc is the only thing that decrypts webhook_url/api_key, to
--- actually call Slack/Linear's API.
-CREATE TABLE IF NOT EXISTS org_alert_integrations (
-    id                    BIGSERIAL    PRIMARY KEY,
-    org_id                TEXT         NOT NULL,
-    provider              TEXT         NOT NULL,   -- 'slack' | 'linear'
-    encrypted_credentials TEXT         NOT NULL,   -- slack: {webhook_url}; linear: {api_key, webhook_secret}
-    config_json           JSONB        NOT NULL DEFAULT '{}',  -- slack: {channel}; linear: {team_id, project_id}
-    enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, provider)
-);
-
--- Bi-directional sync (Linear issue closed -> Dunetrace signal resolved).
--- Written by alerts_svc (when it creates a Linear issue for a signal), read
--- by api_svc's webhook receiver (routers/linear_webhook.py) to find which
--- signal a given Linear issue corresponds to.
-CREATE TABLE IF NOT EXISTS linear_issue_signals (
-    id              BIGSERIAL    PRIMARY KEY,
-    org_id          TEXT         NOT NULL,
-    signal_id       BIGINT       NOT NULL,
-    linear_issue_id TEXT         NOT NULL,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (linear_issue_id)
-);
-"""
-
-# Phase 4.2 — MCP resolve_issue tool. `issues` is owned by detector_svc
-# (services/detector/detector_svc/db.py); api_svc has only ever read it
-# (list_issues) until now. This service becomes the first WRITER of these
-# two specific columns (via resolve_issue below), so it defensively ensures
-# they exist here — same "whichever service needs a column adds it
-# defensively" convention detector_svc itself already uses for
-# failure_signals.shadow/co_signal_count (owned by ingest_svc).
-# Deliberately orthogonal to the existing auto-resolve/reopen-on-recurrence
-# machinery (clean_runs_since) — a manually-resolved issue still reopens if
-# the failure recurs later, same as an auto-resolved one; these two columns
-# only record how a resolution happened, not a permanent lock.
-#
-# Guarded by an existence check, not a bare ALTER — api_svc doesn't create
-# `issues` itself (detector_svc does), so on a fresh install where
-# detector_svc hasn't started yet, a bare ALTER TABLE would fail with
-# "relation issues does not exist" and crash this service's entire
-# startup, taking down every other endpoint with it. This degrades to a
-# no-op instead, retried (and eventually succeeding) on next restart —
-# same tolerance list_issues already implicitly relies on.
-_ISSUES_RESOLUTION_DDL = """
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'issues') THEN
-        ALTER TABLE issues ADD COLUMN IF NOT EXISTS resolution_notes TEXT;
-        ALTER TABLE issues ADD COLUMN IF NOT EXISTS manually_resolved BOOLEAN NOT NULL DEFAULT FALSE;
-    END IF;
-END $$;
-"""
+# Every other table this service shares with a worker is declared by
+# dunetrace_schemas.migrations, applied first in init_pool():
+# - org_semantic_evaluation_usage / semantic_evaluation_log (the usage
+#   endpoint; written by semantic_svc)                          -> migration 10
+# - external_evaluation_integrations / external_evaluation_processed
+#   (config CRUD; polled by integrations_svc)                    -> migration 11
+# - elevenlabs_integrations / elevenlabs_generations (config CRUD and the
+#   run/call read paths; polled by integrations_svc)             -> migration 11
+# - org_alert_integrations / linear_issue_signals (config CRUD and the
+#   Linear webhook receiver; delivered by alerts_svc)            -> migration 9
+# - issues, including resolution_notes / manually_resolved, which
+#   resolve_issue() below writes (upserted by detector_svc)      -> migration 12
+# Each used to be a "defensive copy" of the worker's DDL here, guarded on
+# whichever service started first; the copies are gone.
 
 # Phase 4.3 — GitHub App per-org config. installation_id isn't a secret (an
 # App is one operator-level registration; per-org installs are just
@@ -415,6 +141,21 @@ END $$;
 # encrypted_credentials column here at all — a genuine simplification, not
 # an oversight.
 _GITHUB_APP_DDL = """
+-- Single-use nonces for the GitHub App install redirect. The callback is
+-- unauthenticated by necessity (GitHub controls that redirect and there is no
+-- Dunetrace key on it), so `state` is the ONLY thing establishing which org is
+-- installing. It previously carried org_id directly, which is a stable,
+-- guessable identifier rather than a nonce — anyone could bind any org to any
+-- installation_id. A row here is minted by the authenticated install-url call
+-- and consumed exactly once by the callback.
+CREATE TABLE IF NOT EXISTS github_install_states (
+    state       TEXT         PRIMARY KEY,
+    org_id      TEXT         NOT NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_github_install_states_created
+    ON github_install_states(created_at);
+
 CREATE TABLE IF NOT EXISTS org_github_integrations (
     id               BIGSERIAL    PRIMARY KEY,
     org_id           TEXT         NOT NULL,
@@ -440,43 +181,6 @@ CREATE TABLE IF NOT EXISTS agent_source_config (
 );
 """
 
-# failure_signals.source is owned by semantic_svc's migration (added there
-# for Phase 1's semantic evaluators, reused by integrations_svc for
-# Phase 2's external providers) — but Phase 4.4's agent_performance_trends()
-# reads it directly from api_svc, and semantic_svc is disabled by default
-# (SEMANTIC_WORKER_ENABLED). Found via a real 500 (UndefinedColumnError)
-# against a deployment that had never started semantic_svc: api_svc must not
-# assume a column owned by an optional service exists. Defensive
-# ADD COLUMN IF NOT EXISTS, same "whichever starts first wins" convention
-# already used for custom_detectors/custom_detector_results above.
-_PERFORMANCE_TRENDS_DDL = """
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'structural';
-"""
-
-# Pack activation (Phase 1.0). detector_svc owns packs (it seeds rows from
-# PACK_REGISTRY at startup and is the sole reader of org_enabled_packs for
-# detector selection) — created here too defensively, same "whichever starts
-# first wins" convention as every other cross-service table, since api_svc
-# is the write path for activation (POST/DELETE /v1/orgs/packs/{name}) and
-# must not assume detector_svc has started first.
-_PACKS_DDL = """
-CREATE TABLE IF NOT EXISTS packs (
-    name           TEXT         PRIMARY KEY,
-    description    TEXT         NOT NULL,
-    detector_names TEXT[]       NOT NULL DEFAULT '{}',
-    added_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS org_enabled_packs (
-    org_id      TEXT         NOT NULL,
-    pack_name   TEXT         NOT NULL REFERENCES packs(name),
-    enabled_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    enabled_by  TEXT,
-    PRIMARY KEY (org_id, pack_name)
-);
-CREATE INDEX IF NOT EXISTS idx_org_enabled_packs_org ON org_enabled_packs(org_id);
-"""
-
 # Human-in-the-loop approvals (Capability 2). org_id TEXT NOT NULL, no FK to
 # organizations(id) — same convention as every other org-scoped table here.
 # status is stored as TEXT (validated against api_svc.approvals.ApprovalStatus
@@ -495,35 +199,23 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_at       TIMESTAMPTZ,
     decided_by       TEXT,
     decision_channel TEXT,
-    delivered_at     TIMESTAMPTZ
+    delivered_at     TIMESTAMPTZ,
+    note             TEXT
 );
 -- delivered_at: set once alerts_svc has notified a human (Phase 2.3). Added
 -- via ALTER too, so an approvals table created by an earlier build in this
 -- sprint (before delivery existed) gains the column without a manual migration.
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+-- note: the deciding human's free-text message, written ONLY as part of the
+-- terminal decision write below. It inherits the decision's immutability from
+-- the `status = 'pending'` guard in set_approval_decision — there is no
+-- note-update path, by design, so an audit trail entry can never be edited
+-- after the fact. Added via ALTER for the same reason delivered_at was.
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS note TEXT;
 CREATE INDEX IF NOT EXISTS idx_approvals_org_status ON approvals(org_id, status);
 CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_undelivered
     ON approvals(requested_at) WHERE delivered_at IS NULL AND status = 'pending';
-"""
-
-# Per-run state metrics (Capability 3, Phase 3.3). Written by detector_svc,
-# read here for cross-run analytics. Defensive copy (CREATE IF NOT EXISTS) —
-# whichever service starts first wins, same pattern as the packs tables.
-_RUN_STATE_METRICS_DDL = """
-CREATE TABLE IF NOT EXISTS run_state_metrics (
-    run_id         TEXT         NOT NULL,
-    org_id         TEXT         NOT NULL,
-    agent_id       TEXT         NOT NULL,
-    state          TEXT         NOT NULL,
-    total_ms       BIGINT       NOT NULL,
-    segment_count  INT          NOT NULL,
-    run_started_at TIMESTAMPTZ,
-    computed_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (run_id, state)
-);
-CREATE INDEX IF NOT EXISTS idx_rsm_agent
-    ON run_state_metrics(org_id, agent_id, run_started_at);
 """
 
 
@@ -549,24 +241,35 @@ async def init_pool() -> None:
         # is incompatible with asyncpg's default prepared-statement cache.
         statement_cache_size=0,
     )
+    # Shared schema first: migrations own every definition more than one
+    # service touches (the tables this service reads but never declares, and
+    # the ones it writes alongside ingest or the detector). Booting this
+    # service against an empty database used to crash on
+    # `relation "failure_signals" does not exist`.
+    #
+    # Apply, then require. require_schema_version is the guard for a replica
+    # that could not apply (a lock timeout, a read-only standby): it raises
+    # before any local DDL runs, so a too-old schema fails the start here
+    # rather than the first query that reads a column it lacks.
+    from dunetrace_schemas.migrations import (
+        CURRENT_SCHEMA_VERSION,
+        apply_migrations,
+        require_schema_version,
+        schema_connection,
+    )
+
+    # Untimed connection: a migration that builds an index on a populated
+    # table takes longer than the pool's command_timeout. See schema_connection.
+    async with schema_connection(settings.DATABASE_URL) as conn:
+        await apply_migrations(conn)
+        await require_schema_version(conn, CURRENT_SCHEMA_VERSION, "api")
+
     async with _pool.acquire() as conn:
-        await conn.execute(_MIGRATIONS_DDL)
-        await conn.execute(_FIXES_DDL)
-        await conn.execute(_POLICIES_DDL)
-        await conn.execute(_POLICY_SECURITY_DDL)
+        await conn.execute(_POLICY_AUDIT_DDL)
         await conn.execute(_FEEDBACK_DDL)
-        await conn.execute(_KEYS_DDL)
-        await conn.execute(_CUSTOM_DETECTORS_DDL)
         await conn.execute(_SEMANTIC_FEEDBACK_DDL)
-        await conn.execute(_SEMANTIC_QUOTA_DDL)
-        await conn.execute(_INTEGRATIONS_DDL)
-        await conn.execute(_ALERT_INTEGRATIONS_DDL)
-        await conn.execute(_ISSUES_RESOLUTION_DDL)
         await conn.execute(_GITHUB_APP_DDL)
-        await conn.execute(_PERFORMANCE_TRENDS_DDL)
-        await conn.execute(_PACKS_DDL)
         await conn.execute(_APPROVALS_DDL)
-        await conn.execute(_RUN_STATE_METRICS_DDL)
     logger.info("DB pool ready")
 
 
@@ -575,6 +278,15 @@ async def close_pool() -> None:
     if _pool:
         await _pool.close()
         _pool = None
+
+
+def get_pool():
+    """The live asyncpg pool (None before init_pool / after close_pool).
+
+    Exposed for the readiness probe in main.py, which hands it to
+    dunetrace_schemas.metrics.db_ready — nothing else should reach for it.
+    """
+    return _pool
 
 
 async def check_db() -> str:
@@ -588,18 +300,100 @@ async def check_db() -> str:
         return str(exc)
 
 
-async def verify_api_key(key: str) -> Optional[str]:
-    """Returns org_id if valid, None otherwise. Dev mode accepts anything."""
-    if settings.is_dev:
-        return "default"
+async def get_org_otel_ingestion_enabled(org_id: str) -> bool:
+    """Whether OTel ingestion is enabled for the org. Fail-open (True) when there
+    is no row or no pool, matching how ingest enforces it."""
     if not _pool:
-        return None
+        return True
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT org_id FROM api_keys WHERE key = $1 AND active = TRUE",
-            key,
+            "SELECT otel_ingestion_enabled FROM organizations WHERE id = $1", org_id
         )
-    return row["org_id"] if row else None
+    return bool(row["otel_ingestion_enabled"]) if row is not None else True
+
+
+async def set_org_otel_ingestion_enabled(org_id: str, enabled: bool) -> None:
+    """Set the org's own OTel ingestion flag (the self-service toggle in the
+    dashboard). Inserts the organizations row if it does not exist yet, so a
+    disable always takes effect. ingest picks the change up within its enablement
+    cache TTL."""
+    if not _pool:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO organizations (id, name, otel_ingestion_enabled)
+            VALUES ($1, $1, $2)
+            ON CONFLICT (id) DO UPDATE SET otel_ingestion_enabled = EXCLUDED.otel_ingestion_enabled
+            """,
+            org_id,
+            enabled,
+        )
+
+
+async def fetch_otel_receiver_stats(org_id: str, hours: int = 24) -> list[dict]:
+    """Ascending hourly OTLP-receiver counters for one org over the last `hours`
+    (written by ingest, read here). Returns [] when no pool. rejections is
+    decoded from JSONB into a plain dict."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT hour_bucket, batches_received, spans_received, events_translated,
+                   spans_rejected, auth_failures, rate_limit_hits, rejections
+            FROM otel_receiver_stats
+            WHERE org_id = $1
+              AND hour_bucket >= NOW() - make_interval(hours => $2)
+            ORDER BY hour_bucket ASC
+            """,
+            org_id,
+            hours,
+        )
+    out: list[dict] = []
+    for row in rows:
+        record = dict(row)
+        rejections = record.get("rejections")
+        if isinstance(rejections, str):
+            try:
+                record["rejections"] = _json_mod.loads(rejections)
+            except Exception:
+                record["rejections"] = {}
+        out.append(record)
+    return out
+
+
+async def verify_api_key(key: str) -> Optional[str]:
+    """Returns org_id if valid, None otherwise. Dev mode accepts anything."""
+    resolved = await verify_api_key_with_scopes(key)
+    return resolved[0] if resolved else None
+
+
+async def verify_api_key_with_scopes(key: str) -> Optional[tuple]:
+    """(org_id, scopes) if valid, None otherwise.
+
+    Scopes are what stop an agent's own credential from granting the approval
+    it is waiting on — see dunetrace_schemas.scopes.
+    """
+    from dunetrace_schemas.scopes import ADMIN, normalise
+
+    if settings.is_dev:
+        # Dev mode already disables auth entirely; withholding scopes here would
+        # only break the local quickstart without protecting anything.
+        return ("default", (ADMIN,))
+    if not _pool:
+        return None
+    from dunetrace_schemas.keys import hash_api_key
+
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            # Matched on the hash: the database never holds the secret.
+            "SELECT org_id, scopes FROM api_keys WHERE key_hash = $1 AND active = TRUE",
+            hash_api_key(key),
+        )
+    if not row:
+        return None
+    return (row["org_id"], normalise(row["scopes"]))
 
 
 # ── Agents ────────────────────────────────────────────────────────────────────
@@ -614,20 +408,27 @@ async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
         return [], 0
 
     async with _pool.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(DISTINCT agent_id) FROM events WHERE org_id = $1",
-            org_id,
-        )
-
         rows = await conn.fetch(
             """
-            WITH event_agg AS (
-                SELECT
-                    agent_id,
-                    MAX(received_at)          AS last_seen,
-                    COUNT(DISTINCT run_id)    AS run_count
+            WITH run_agg AS (
+                -- Collapse to one row per (agent, run) FIRST, then count those.
+                -- `COUNT(DISTINCT run_id) GROUP BY agent_id` reads the same rows
+                -- but makes the planner sort all of them by (agent_id, run_id):
+                -- 149,907 rows, an external merge spilling 10MB to disk, 743ms.
+                -- Two hash aggregates over the same scan give the identical
+                -- numbers in 172ms with no spill (verified row-for-row across
+                -- all 136 agents).
+                SELECT agent_id, run_id, MAX(received_at) AS last_seen
                 FROM events
                 WHERE org_id = $1
+                GROUP BY agent_id, run_id
+            ),
+            event_agg AS (
+                SELECT
+                    agent_id,
+                    MAX(last_seen) AS last_seen,
+                    COUNT(*)       AS run_count
+                FROM run_agg
                 GROUP BY agent_id
             ),
             signal_agg AS (
@@ -646,7 +447,11 @@ async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
                 e.run_count,
                 COALESCE(s.signal_count, 0)   AS signal_count,
                 COALESCE(s.critical_count, 0) AS critical_count,
-                COALESCE(s.high_count, 0)     AS high_count
+                COALESCE(s.high_count, 0)     AS high_count,
+                -- The total is one row per agent in event_agg, so a window
+                -- function reads it off this scan. It used to be a second
+                -- COUNT(DISTINCT agent_id) query over the whole events table.
+                COUNT(*) OVER () AS _total
             FROM event_agg e
             LEFT JOIN signal_agg s ON s.agent_id = e.agent_id
             ORDER BY e.last_seen DESC
@@ -657,7 +462,22 @@ async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
             offset,
         )
 
-    return [dict(r) for r in rows], total or 0
+        # COUNT(*) OVER () is computed before LIMIT, so it is the full agent
+        # count even on a partial page. An empty page (offset past the end)
+        # carries no row to read it from — fall back to a direct count rather
+        # than reporting 0. Inside the `async with`: conn is back in the pool
+        # once it exits.
+        if rows:
+            total = int(rows[0]["_total"])
+        else:
+            total = (
+                await conn.fetchval(
+                    "SELECT COUNT(DISTINCT agent_id) FROM events WHERE org_id = $1", org_id
+                )
+                or 0
+            )
+
+    return [{k: v for k, v in dict(r).items() if k != "_total"} for r in rows], total
 
 
 # ── Failure type breakdown ────────────────────────────────────────────────────
@@ -738,42 +558,88 @@ async def agent_signal_sparklines(org_id: str) -> dict:
 
 async def list_runs(
     org_id: str,
-    agent_id: str,
+    agent_id: Optional[str],
     offset: int,
     limit: int,
     has_signals: Optional[bool] = None,
+    per_agent_limit: Optional[int] = None,
 ) -> tuple[list, int]:
-    """List runs for an agent within org_id. Optionally filter to only runs with signals."""
+    """List runs within org_id. Optionally filter to only runs with signals.
+
+    ``agent_id=None`` lists across the whole org, which is what the dashboard's
+    initial load actually wants — it was issuing one request per agent and then
+    flattening the results itself.
+
+    ``per_agent_limit=N`` bounds the result to each agent's newest N rather than
+    the newest N overall, which is the only form that can replace that fan-out:
+    on this dataset the newest 8,000 runs come from 37 of 135 agents, so a global
+    window would leave 98 agents with none. With N=200 this returns the same 7,794
+    rows the 136 per-agent requests did.
+    """
     if not _pool:
         return [], 0
 
     signal_filter = ""
+    # s.org_id = pr.org_id, not just s.run_id = pr.run_id: run_id is
+    # caller-supplied, so an unscoped correlation lets another tenant's signals
+    # decide whether this org's run is filtered in or out.
     if has_signals is True:
-        signal_filter = "AND EXISTS (SELECT 1 FROM failure_signals s WHERE s.run_id = pr.run_id AND s.shadow = FALSE)"
+        signal_filter = (
+            "AND EXISTS (SELECT 1 FROM failure_signals s "
+            "WHERE s.run_id = pr.run_id AND s.org_id = pr.org_id AND s.shadow = FALSE)"
+        )
     elif has_signals is False:
-        signal_filter = "AND NOT EXISTS (SELECT 1 FROM failure_signals s WHERE s.run_id = pr.run_id AND s.shadow = FALSE)"
+        signal_filter = (
+            "AND NOT EXISTS (SELECT 1 FROM failure_signals s "
+            "WHERE s.run_id = pr.run_id AND s.org_id = pr.org_id AND s.shadow = FALSE)"
+        )
+
+    # Built together so the placeholder numbering holds with or without the
+    # agent filter — see the same note in list_signals.
+    params: list = [org_id]
+    agent_filter = ""
+    if agent_id is not None:
+        params.append(agent_id)
+        agent_filter = f"AND pr.agent_id = ${len(params)}"
+    rank_filter = ""
+    if per_agent_limit is not None:
+        params.append(per_agent_limit)
+        rank_filter = f"WHERE _rn <= ${len(params)}"
+    limit_ph, offset_ph = f"${len(params) + 1}", f"${len(params) + 2}"
 
     async with _pool.acquire() as conn:
         total = await conn.fetchval(
             f"""
-            SELECT COUNT(*) FROM processed_runs pr
-            WHERE pr.org_id = $1 AND pr.agent_id = $2
-            {signal_filter}
+            SELECT COUNT(*) FROM (
+                SELECT ROW_NUMBER() OVER (
+                           PARTITION BY pr.agent_id ORDER BY pr.processed_at DESC
+                       ) AS _rn
+                FROM processed_runs pr
+                WHERE pr.org_id = $1 {agent_filter}
+                {signal_filter}
+            ) r {rank_filter}
             """,
-            org_id,
-            agent_id,
+            *params,
         )
 
         rows = await conn.fetch(
             f"""
-            WITH page AS (
+            WITH ranked AS (
                 SELECT pr.run_id, pr.agent_id, pr.agent_version,
-                       pr.trigger AS exit_reason, pr.processed_at
+                       pr.trigger AS exit_reason, pr.processed_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY pr.agent_id ORDER BY pr.processed_at DESC
+                       ) AS _rn
                 FROM processed_runs pr
-                WHERE pr.org_id = $1 AND pr.agent_id = $2
+                WHERE pr.org_id = $1 {agent_filter}
                 {signal_filter}
-                ORDER BY pr.processed_at DESC
-                LIMIT $3 OFFSET $4
+            ),
+            page AS (
+                SELECT run_id, agent_id, agent_version, exit_reason, processed_at
+                FROM ranked
+                {rank_filter}
+                ORDER BY processed_at DESC
+                LIMIT {limit_ph} OFFSET {offset_ph}
             ),
             run_events AS (
                 -- Single pass over events for just this page's runs, instead of
@@ -785,10 +651,31 @@ async def list_runs(
                         WHERE e.event_type IN ('run.completed', 'run.errored')
                     )                                                            AS completed_at,
                     MAX(e.step_index)                                           AS step_count,
-                    SUM(
-                        CASE WHEN e.event_type IN ('llm.called', 'llm.responded')
-                             THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
-                             ELSE 0 END
+                    -- llm.called carries a chars//4 ESTIMATE and llm.responded the
+                    -- exact count for the SAME call, so the two must be overridden,
+                    -- not added (dunetrace/run_builder.py, and CLAUDE.md's note on
+                    -- the paired events).
+                    --
+                    -- The previous CASE did not do that: it picks a value per ROW
+                    -- and SUM then adds across rows, so a run with both events got
+                    -- estimate + exact anyway. Measured on run 00042bc0… that was
+                    -- 13 tokens for a call that used 12, and 152% over across
+                    -- agent "agent"'s 30-day history. Two nested aggregates give
+                    -- the real override in the same single scan: take the exact
+                    -- total when there is one, else fall back to the estimate
+                    -- (direct-SDK traces report tokens only on llm.called,
+                    -- LangChain-shaped ones only on llm.responded).
+                    COALESCE(
+                        NULLIF(SUM(
+                            CASE WHEN e.event_type = 'llm.responded'
+                                 THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
+                                 ELSE 0 END
+                        ), 0),
+                        SUM(
+                            CASE WHEN e.event_type = 'llm.called'
+                                 THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
+                                 ELSE 0 END
+                        )
                     )                                                            AS prompt_tokens,
                     SUM(
                         CASE WHEN e.event_type = 'llm.responded'
@@ -800,13 +687,21 @@ async def list_runs(
                         FILTER (WHERE e.event_type = 'llm.called'
                                        AND e.payload->>'model' IS NOT NULL))[1]  AS model
                 FROM events e
-                WHERE e.run_id IN (SELECT run_id FROM page)
+                -- org_id is not redundant with the page CTE. `page` is
+                -- org-scoped, but joining events on run_id ALONE re-widens to
+                -- every tenant: run_id is caller-supplied, so two orgs can hold
+                -- the same one and this would fold their token counts and step
+                -- counts into ours. It also lets the planner prune partitions
+                -- instead of scanning all of them.
+                WHERE e.org_id = $1 AND e.run_id IN (SELECT run_id FROM page)
                 GROUP BY e.run_id
             ),
             run_signals AS (
                 SELECT s.run_id, COUNT(*) AS signal_count
                 FROM failure_signals s
-                WHERE s.run_id IN (SELECT run_id FROM page) AND s.shadow = FALSE
+                WHERE s.org_id = $1
+                  AND s.run_id IN (SELECT run_id FROM page)
+                  AND s.shadow = FALSE
                 GROUP BY s.run_id
             )
             SELECT
@@ -821,8 +716,7 @@ async def list_runs(
             LEFT JOIN run_signals rs ON rs.run_id = p.run_id
             ORDER BY p.processed_at DESC
             """,
-            org_id,
-            agent_id,
+            *params,
             limit,
             offset,
         )
@@ -839,6 +733,22 @@ async def list_runs(
         rd["cost_usd"] = round(raw, 6) if raw else None
         results.append(rd)
     return results, total or 0
+
+
+def _focus_range(evidence: dict, failure_type: str, step_index: int) -> dict:
+    """The step span a signal points at, as {first_step, last_step}.
+
+    Thin wrapper over the explainer's _get_step_range so there is exactly one
+    per-detector mapping in the codebase. Most detectors have no range and
+    collapse to the signal's own step; the ten that span a window
+    (TOOL_LOOP, CONTEXT_BLOAT, ...) name their own evidence keys.
+    """
+    fallback = step_index if isinstance(step_index, int) else 0
+    try:
+        first, last = _get_step_range(evidence or {}, failure_type, fallback)
+    except Exception:  # a malformed evidence dict must not break run detail
+        first = last = fallback
+    return {"first_step": first, "last_step": last}
 
 
 async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False) -> Optional[dict]:
@@ -859,13 +769,20 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         if not pr:
             return None
 
+        # Every fan-out below carries org_id. Authorising on processed_runs and
+        # then fanning out on run_id alone was the leak: run_id is
+        # caller-supplied, so two tenants can hold the same one — and since the
+        # composite (org_id, run_id) key they legitimately BOTH exist, which
+        # makes an unscoped predicate return the other tenant's raw system
+        # prompts, tool arguments and LLM output rather than merely the wrong row.
         events = await conn.fetch(
             """
             SELECT event_type, step_index, timestamp, payload, parent_run_id
-            FROM events WHERE run_id = $1
+            FROM events WHERE run_id = $1 AND org_id = $2
             ORDER BY step_index ASC, timestamp ASC
             """,
             run_id,
+            org_id,
         )
 
         shadow_filter = "" if include_shadow else "AND shadow = FALSE"
@@ -874,10 +791,11 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
             SELECT id, failure_type, severity, step_index, confidence,
                    detected_at, evidence, shadow
             FROM failure_signals
-            WHERE run_id = $1 {shadow_filter}
+            WHERE run_id = $1 AND org_id = $2 {shadow_filter}
             ORDER BY shadow ASC, step_index ASC
             """,
             run_id,
+            org_id,
         )
 
         # Phase 3.3 — "part of conversation X" navigation. runs is owned by
@@ -887,7 +805,24 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         # NULL for runs that predate this migration or never had a
         # conversation_id at all, same "instrumentation-dependent, may be
         # absent" tolerance as trace_id/system_prompt elsewhere.
-        run_row = await conn.fetchrow("SELECT conversation_id FROM runs WHERE run_id = $1", run_id)
+        dry_run_rows = await conn.fetch(
+            """
+            SELECT policy_id, policy_name, step_index, would_action_type,
+                   would_action_params, matched_branch, reason, evaluated_at
+              FROM policy_evaluations
+             WHERE org_id = $1 AND run_id = $2
+               AND mode = 'dry_run' AND fired = TRUE
+             ORDER BY step_index NULLS LAST, evaluated_at
+            """,
+            org_id,
+            run_id,
+        )
+
+        run_row = await conn.fetchrow(
+            "SELECT conversation_id FROM runs WHERE run_id = $1 AND org_id = $2",
+            run_id,
+            org_id,
+        )
         conversation_id = run_row["conversation_id"] if run_row else None
 
     started_at = next((e["timestamp"] for e in events if e["event_type"] == "run.started"), None)
@@ -913,6 +848,24 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         )
 
     # Build signal list with explanations
+    dry_run_verdicts = [
+        {
+            "policy_id": r["policy_id"],
+            "policy_name": r["policy_name"],
+            "step_index": r["step_index"],
+            "would_action_type": r["would_action_type"],
+            "would_action_params": (
+                json.loads(r["would_action_params"])
+                if isinstance(r["would_action_params"], str)
+                else r["would_action_params"]
+            ),
+            "matched_branch": r["matched_branch"],
+            "reason": r["reason"],
+            "at": r["evaluated_at"].timestamp() if r["evaluated_at"] else None,
+        }
+        for r in dry_run_rows
+    ]
+
     signal_list = []
     for s in signals:
         evidence = s["evidence"]
@@ -925,7 +878,9 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
 
         exp = None
         try:
-            ft = FailureType(s["failure_type"])
+            ft, explain_evidence = coerce_failure_type(
+                s["failure_type"], dict(evidence) if evidence else {}
+            )
             fs = FailureSignal(
                 failure_type=ft,
                 severity=Severity(s["severity"]),
@@ -934,12 +889,10 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
                 agent_version=dict(pr)["agent_version"],
                 step_index=s["step_index"],
                 confidence=s["confidence"],
-                evidence=dict(evidence) if evidence else {},
+                evidence=explain_evidence,
                 detected_at=detected_at,
             )
             exp = explain(fs)
-        except ValueError:
-            pass  # custom failure types (CUSTOM_*) are not in the FailureType enum
         except Exception as exc:
             logger.error("Explain failed for signal %d: %s", s["id"], exc)
 
@@ -952,6 +905,18 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
                 "confidence": s["confidence"],
                 "detected_at": detected_at,
                 "evidence": dict(evidence) if evidence else {},
+                # Which steps to put in focus when this signal is the entry
+                # point. Computed here, not in the page: the evidence key
+                # holding the step range differs per detector
+                # (_STEP_RANGE_FIELDS), and a second copy of that mapping in
+                # the dashboard would drift the moment a detector changes its
+                # evidence shape — and would drift silently, focusing the
+                # wrong step rather than failing.
+                "focus": _focus_range(
+                    dict(evidence) if evidence else {},
+                    s["failure_type"],
+                    s["step_index"],
+                ),
                 "shadow": s["shadow"],
                 "title": exp.title if exp else s["failure_type"],
                 "what": exp.what if exp else "",
@@ -970,9 +935,14 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
 
     llm_responded = [e for e in event_list if e["event_type"] == "llm.responded"]
     llm_called = [e for e in event_list if e["event_type"] == "llm.called"]
-    llm_all = llm_called + llm_responded
-    # prompt_tokens: direct SDK writes to llm.called; LangChain writes to llm.responded
-    prompt_tokens = sum(e["payload"].get("prompt_tokens") or 0 for e in llm_all)
+    # prompt_tokens appears on BOTH event types for the same call: llm.called
+    # carries a chars//4 estimate, llm.responded the exact count once the
+    # provider reports it. Summing them double-counted (~67% inflation on a
+    # typical call). Prefer the responded value and fall back to called — the
+    # same override the canonical run builder does.
+    responded_prompt = sum(e["payload"].get("prompt_tokens") or 0 for e in llm_responded)
+    called_prompt = sum(e["payload"].get("prompt_tokens") or 0 for e in llm_called)
+    prompt_tokens = responded_prompt or called_prompt
     completion_tokens = sum(e["payload"].get("completion_tokens") or 0 for e in llm_responded)
     total_tokens = (prompt_tokens + completion_tokens) or None
     model = next(
@@ -999,6 +969,11 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         "cost_usd": cost_usd,
         "events": event_list,
         "signals": signal_list,
+        # What a dry-run policy would have done on THIS run, beside the step
+        # that triggered it. A verdict read on its own is a claim; a verdict
+        # read next to the tool arguments that caused it is evidence, and that
+        # is what gets someone to turn enforcement on.
+        "dry_run_verdicts": dry_run_verdicts,
         "conversation_id": conversation_id,
     }
 
@@ -1174,6 +1149,439 @@ async def search_conversations(
     )
 
 
+# ── Calls (voice-focused view over conversations, Phase 2.1) ──────────────────
+#
+# A "call" is a conversation for a voice agent: the same conversations/runs tables
+# as the Conversations view, read through a voice lens. No separate storage (see
+# BACKLOG.md V1). Metrics are derived read-time from the call's events.
+
+_VOICE_EVENT_TYPES = (
+    "transcription.received",
+    "tts.generated",
+    "voice_activity.detected",
+    "turn_taking.changed",
+)
+
+# Voice events, the markers that decide completion status, and the LLM events
+# needed for per-call LLM cost (Phase 2.2).
+_CALL_EVENT_TYPES = _VOICE_EVENT_TYPES + (
+    "run.errored",
+    "policy.triggered",
+    "external.signal",
+    "llm.called",
+    "llm.responded",
+    "recording.available",
+)
+
+# endedReason values (Vapi's, plus generic substrings) that mean the call dropped
+# rather than ended naturally. Everything else with a reason is a natural end.
+# Deliberately small; make it configurable per org later (BACKLOG).
+_DROP_REASON_SUBSTRINGS = (
+    "silence-timed-out",
+    "did-not-answer",
+    "no-answer",
+    "exceeded-max-duration",
+    "error",
+    "failed",
+    "provider",
+    "websocket",
+)
+
+# Upper bound on how many recent voice calls one /calls request aggregates.
+# Read-time aggregation is bounded here; precompute into a table if this ceiling
+# becomes limiting (BACKLOG).
+_CALL_CANDIDATE_CAP = 200
+
+
+def _is_drop_reason(reason: Optional[str]) -> bool:
+    if not reason:
+        return False
+    r = reason.lower()
+    return any(sub in r for sub in _DROP_REASON_SUBSTRINGS)
+
+
+def _coerce_payload(v: Any) -> dict:
+    if isinstance(v, str):
+        return _json_mod.loads(v)
+    return dict(v) if v else {}
+
+
+def _compute_call_metrics(events: list, signals: list) -> dict:
+    """Call-level metrics from one call's events (ordered by received_at) and its
+    voice signals. Both are already scoped to a single call."""
+    ts = [e["received_at"] for e in events if e["received_at"] is not None]
+    duration_s = (max(ts) - min(ts)).total_seconds() if len(ts) >= 2 else 0.0
+
+    silence_ms = 0
+    turn_events: list = []
+    escalated = False
+    dropped = False
+    for e in events:
+        et = e["event_type"]
+        p = e["payload"]
+        if et == "voice_activity.detected" and p.get("type") == "silence":
+            silence_ms += int(p.get("duration_ms", 0) or 0)
+        elif et == "turn_taking.changed":
+            turn_events.append(e)
+        elif et == "policy.triggered" and p.get("action_type") == "escalate_to_human":
+            escalated = True
+        elif et == "run.errored":
+            dropped = True
+        elif et == "external.signal" and p.get("signal_name") == "call_ended":
+            if _is_drop_reason((p.get("meta") or {}).get("reason")):
+                dropped = True
+
+    # Talk time: the floor stays with the current speaker until the next
+    # turn_taking transition. Approximate each speaker's time from the gap between
+    # consecutive turn_taking events (the last span runs to the final event). This
+    # is a timestamp-derived approximation, not an exact playback measurement.
+    agent_ms = 0.0
+    caller_ms = 0.0
+    last_ts = max(ts) if ts else None
+    for i, e in enumerate(turn_events):
+        start = e["received_at"]
+        end = turn_events[i + 1]["received_at"] if i + 1 < len(turn_events) else last_ts
+        if start is None or end is None:
+            continue
+        span_ms = max(0.0, (end - start).total_seconds() * 1000.0)
+        action = e["payload"].get("action")
+        if action == "agent_speaking":
+            agent_ms += span_ms
+        elif action == "user_speaking":
+            caller_ms += span_ms
+
+    if any(s["failure_type"] == "VOICE_LATENCY_INDUCED_HANGUP" for s in signals):
+        dropped = True
+
+    status = "escalated" if escalated else ("dropped" if dropped else "natural")
+    talk_total = agent_ms + caller_ms
+    return {
+        "duration_seconds": round(duration_s, 1),
+        "completion_status": status,
+        # Clamp to 1.0: summed silence durations can exceed the event span (long or
+        # overlapping VAD silences), and a call can't be more than 100% silent.
+        "silence_pct": round(min(1.0, silence_ms / (duration_s * 1000.0)), 3)
+        if duration_s > 0
+        else 0.0,
+        "agent_talk_ms": int(agent_ms),
+        "caller_talk_ms": int(caller_ms),
+        "agent_talk_ratio": round(agent_ms / talk_total, 3) if talk_total > 0 else None,
+        "voice_signal_count": len(signals),
+        # Sentiment ships in Phase 3 (Feature 6). Placeholder until then.
+        "sentiment_trend": None,
+    }
+
+
+def _compute_call_cost(events: list, agent_id: str, pricing: dict) -> dict:
+    """Per-call cost by category (Phase 2.2). STT from audio_seconds, TTS from
+    character count, telephony from call duration, LLM per token. Categories with
+    no configured provider/rate contribute 0 (never guessed)."""
+    from explainer_svc.cost import estimate_cost
+
+    from api_svc.voice_pricing import (
+        providers_for,
+        stt_cost_usd,
+        telephony_cost_usd,
+        tts_cost_usd,
+    )
+
+    providers = providers_for(agent_id, pricing)
+    ts = [e["received_at"] for e in events if e["received_at"] is not None]
+    duration_min = ((max(ts) - min(ts)).total_seconds() / 60.0) if len(ts) >= 2 else 0.0
+
+    stt = tts = 0.0
+    llm_tokens: dict = {}  # model -> [prompt, completion, reasoning]
+    cur_model = "unknown"
+    for e in events:
+        et = e["event_type"]
+        p = e["payload"]
+        if et == "transcription.received":
+            stt += stt_cost_usd(float(p.get("audio_seconds", 0) or 0), providers["stt"], pricing)
+        elif et == "tts.generated":
+            tts += tts_cost_usd(len(p.get("text", "") or ""), providers["tts"], pricing)
+        elif et == "llm.called":
+            cur_model = p.get("model") or "unknown"
+            acc = llm_tokens.setdefault(cur_model, [0, 0, 0])
+            acc[0] += int(p.get("prompt_tokens", 0) or 0)
+        elif et == "llm.responded":
+            acc = llm_tokens.setdefault(cur_model, [0, 0, 0])
+            acc[0] += int(p.get("prompt_tokens", 0) or 0)
+            acc[1] += int(p.get("completion_tokens", 0) or 0)
+            acc[2] += int(p.get("reasoning_tokens", 0) or 0)
+
+    llm = sum(estimate_cost(m, t[0], t[1], t[2]) for m, t in llm_tokens.items())
+    telephony = telephony_cost_usd(duration_min, providers["telephony"], pricing)
+    return {
+        "cost_usd": round(stt + llm + tts + telephony, 6),
+        "cost_breakdown": {
+            "stt": round(stt, 6),
+            "llm": round(llm, 6),
+            "tts": round(tts, 6),
+            "telephony": round(telephony, 6),
+        },
+    }
+
+
+# Cost buckets for the /calls filter (Phase 2.2).
+def _cost_bucket(cost_usd: float) -> str:
+    if cost_usd < 0.10:
+        return "low"
+    if cost_usd <= 1.0:
+        return "medium"
+    return "high"
+
+
+async def _fetch_call_events_and_signals(conn, org_id: str, run_ids: list) -> tuple[list, list]:
+    # org_id is not redundant with the caller's conversation/runs authorisation:
+    # run_id is caller-supplied, so two tenants legitimately hold the same one
+    # (that is why `runs` is keyed (org_id, run_id)). Fanning out on the bare id
+    # pulled the *other* tenant's transcription.received (caller speech),
+    # tts.generated (spoken text), llm.called/llm.responded payloads and
+    # recording.available URLs into this tenant's call timeline, recordings list
+    # and cost breakdown. The failure_signals read below was always scoped; this
+    # one has to be too.
+    event_rows = await conn.fetch(
+        """
+        SELECT run_id, event_type, payload, received_at, step_index
+        FROM events
+        WHERE org_id = $1 AND run_id = ANY($2::text[]) AND event_type = ANY($3::text[])
+        ORDER BY received_at ASC
+        """,
+        org_id,
+        run_ids,
+        list(_CALL_EVENT_TYPES),
+    )
+    sig_rows = await conn.fetch(
+        """
+        SELECT run_id, failure_type, step_index FROM failure_signals
+        WHERE org_id = $1 AND run_id = ANY($2::text[]) AND failure_type LIKE 'VOICE%'
+        """,
+        org_id,
+        run_ids,
+    )
+    return event_rows, sig_rows
+
+
+async def list_calls(
+    org_id: str,
+    agent_id: Optional[str] = None,
+    since_ts: Optional[float] = None,
+    status: Optional[str] = None,
+    cost_bucket: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 25,
+) -> tuple[list[dict], int]:
+    """Voice calls (conversations with voice activity) plus per-call metrics and
+    cost. Bounded to the most recent _CALL_CANDIDATE_CAP calls; the status and
+    cost-bucket filters and pagination are applied after read-time computation."""
+    if not _pool:
+        return [], 0
+
+    since_dt = (
+        datetime.datetime.fromtimestamp(since_ts, datetime.timezone.utc) if since_ts else None
+    )
+
+    async with _pool.acquire() as conn:
+        conv_rows = await conn.fetch(
+            """
+            SELECT c.id, c.agent_id, c.external_id, c.first_run_at, c.last_run_at, c.run_count
+            FROM conversations c
+            WHERE c.org_id = $1
+              AND ($2::text IS NULL OR c.agent_id = $2)
+              AND ($3::timestamptz IS NULL OR c.last_run_at >= $3)
+              -- Both halves of the join carry org_id for the same reason
+              -- _fetch_call_events_and_signals does: run_id is caller-supplied
+              -- and collides across tenants, so `e.run_id = r.run_id` alone lets
+              -- another org's voice events decide that this org's conversation
+              -- is a call at all.
+              AND EXISTS (
+                  SELECT 1 FROM runs r
+                  JOIN events e ON e.run_id = r.run_id AND e.org_id = r.org_id
+                  WHERE r.conversation_id = c.id AND r.org_id = c.org_id
+                    AND e.event_type = ANY($4::text[])
+              )
+            ORDER BY c.last_run_at DESC
+            LIMIT $5
+            """,
+            org_id,
+            agent_id,
+            since_dt,
+            list(_VOICE_EVENT_TYPES),
+            _CALL_CANDIDATE_CAP,
+        )
+        if not conv_rows:
+            return [], 0
+        conv_ids = [r["id"] for r in conv_rows]
+
+        # conv_ids came from an org-scoped read, but the run ids harvested here
+        # are handed straight to the events fan-out below — re-asserting org_id
+        # keeps the whole chain scoped instead of relying on one upstream filter.
+        run_rows = await conn.fetch(
+            "SELECT run_id, conversation_id FROM runs "
+            "WHERE conversation_id = ANY($1::bigint[]) AND org_id = $2",
+            conv_ids,
+            org_id,
+        )
+        run_to_conv = {r["run_id"]: r["conversation_id"] for r in run_rows}
+        run_ids = list(run_to_conv.keys())
+        if not run_ids:
+            return [], 0
+
+        event_rows, sig_rows = await _fetch_call_events_and_signals(conn, org_id, run_ids)
+
+    events_by_conv: dict = {}
+    for e in event_rows:
+        cid = run_to_conv.get(e["run_id"])
+        if cid is not None:
+            events_by_conv.setdefault(cid, []).append(
+                {
+                    "event_type": e["event_type"],
+                    "payload": _coerce_payload(e["payload"]),
+                    "received_at": e["received_at"],
+                }
+            )
+    sigs_by_conv: dict = {}
+    for s in sig_rows:
+        cid = run_to_conv.get(s["run_id"])
+        if cid is not None:
+            sigs_by_conv.setdefault(cid, []).append({"failure_type": s["failure_type"]})
+
+    from api_svc.voice_pricing import load_pricing
+
+    pricing = load_pricing()
+    calls = []
+    for c in conv_rows:
+        cid = c["id"]
+        cevents = events_by_conv.get(cid, [])
+        metrics = _compute_call_metrics(cevents, sigs_by_conv.get(cid, []))
+        cost = _compute_call_cost(cevents, c["agent_id"], pricing)
+        calls.append(
+            {
+                "id": cid,
+                "agent_id": c["agent_id"],
+                "external_id": c["external_id"],
+                "first_run_at": c["first_run_at"].timestamp(),
+                "last_run_at": c["last_run_at"].timestamp(),
+                "run_count": c["run_count"],
+                **metrics,
+                **cost,
+            }
+        )
+
+    if status:
+        calls = [c for c in calls if c["completion_status"] == status]
+    if cost_bucket:
+        calls = [c for c in calls if _cost_bucket(c["cost_usd"]) == cost_bucket]
+    total = len(calls)
+    return calls[offset : offset + limit], total
+
+
+async def get_call_detail(org_id: str, conversation_id: int) -> Optional[dict]:
+    """One call's metrics, its runs, its voice-signal list, and an ordered voice
+    event timeline. Returns None if the conversation is missing or another org's."""
+    if not _pool:
+        return None
+
+    async with _pool.acquire() as conn:
+        conv = await conn.fetchrow(
+            """
+            SELECT id, agent_id, external_id, first_run_at, last_run_at, run_count
+            FROM conversations WHERE id = $1 AND org_id = $2
+            """,
+            conversation_id,
+            org_id,
+        )
+        if not conv:
+            return None
+
+        # Same reason as list_calls: these run ids feed the events fan-out, so
+        # the org filter travels with them rather than stopping at `conversations`.
+        run_rows = await conn.fetch(
+            "SELECT run_id, agent_version, started_at FROM runs "
+            "WHERE conversation_id = $1 AND org_id = $2 ORDER BY started_at ASC",
+            conversation_id,
+            org_id,
+        )
+        run_ids = [r["run_id"] for r in run_rows]
+        if not run_ids:
+            return None
+
+        event_rows, sig_rows = await _fetch_call_events_and_signals(conn, org_id, run_ids)
+
+    events = [
+        {
+            "event_type": e["event_type"],
+            "payload": _coerce_payload(e["payload"]),
+            "received_at": e["received_at"],
+        }
+        for e in event_rows
+    ]
+    signals = [{"failure_type": s["failure_type"]} for s in sig_rows]
+    metrics = _compute_call_metrics(events, signals)
+
+    from api_svc.voice_pricing import load_pricing
+
+    cost = _compute_call_cost(events, conv["agent_id"], load_pricing())
+
+    # Compact timeline of just the voice events for the detail view.
+    timeline = [
+        {
+            "event_type": e["event_type"],
+            "payload": e["payload"],
+            "at": e["received_at"].timestamp() if e["received_at"] else None,
+        }
+        for e in events
+        if e["event_type"] in _VOICE_EVENT_TYPES
+    ]
+
+    # Recordings + per-signal deep-link offsets (Phase 2.3). Metadata only:
+    # Dunetrace links to the audio, never fetches it.
+    recordings = [
+        _coerce_payload(e["payload"])
+        for e in event_rows
+        if e["event_type"] == "recording.available"
+    ]
+    signal_jumps: list = []
+    if recordings:
+        ev_ts = [e["received_at"] for e in event_rows if e["received_at"] is not None]
+        call_start = min(ev_ts) if ev_ts else None
+        start_offset = float(recordings[0].get("start_offset_seconds", 0) or 0)
+        step_time = {(e["run_id"], e["step_index"]): e["received_at"] for e in event_rows}
+        for s in sig_rows:
+            t = step_time.get((s["run_id"], s["step_index"]))
+            if t is None or call_start is None:
+                continue
+            # Approximate: the signal's structural step time into the call, not a
+            # frame-accurate audio timestamp.
+            secs = (t - call_start).total_seconds() - start_offset
+            signal_jumps.append(
+                {"failure_type": s["failure_type"], "seconds": round(max(0.0, secs), 1)}
+            )
+
+    return {
+        "id": conv["id"],
+        "agent_id": conv["agent_id"],
+        "external_id": conv["external_id"],
+        "first_run_at": conv["first_run_at"].timestamp(),
+        "last_run_at": conv["last_run_at"].timestamp(),
+        "run_count": conv["run_count"],
+        **metrics,
+        **cost,
+        "runs": [
+            {
+                "run_id": r["run_id"],
+                "agent_version": r["agent_version"],
+                "started_at": r["started_at"].timestamp(),
+            }
+            for r in run_rows
+        ],
+        "voice_signals": [s["failure_type"] for s in signals],
+        "timeline": timeline,
+        "recordings": recordings,
+        "signal_jumps": signal_jumps,
+    }
+
+
 # ── Signals ───────────────────────────────────────────────────────────────────
 
 
@@ -1210,15 +1618,18 @@ async def get_signal_by_id(org_id: str, signal_id: int) -> Optional[dict]:
         detected_at = detected_at.timestamp()
 
     try:
+        ft, explain_evidence = coerce_failure_type(
+            row["failure_type"], dict(evidence) if evidence else {}
+        )
         fs = FailureSignal(
-            failure_type=FailureType(row["failure_type"]),
+            failure_type=ft,
             severity=Severity(row["severity"]),
             run_id=row["run_id"],
             agent_id=row["agent_id"],
             agent_version=row["agent_version"],
             step_index=row["step_index"],
             confidence=row["confidence"],
-            evidence=dict(evidence) if evidence else {},
+            evidence=explain_evidence,
             detected_at=detected_at,
         )
         exp = explain(fs)
@@ -1254,23 +1665,55 @@ async def get_signal_by_id(org_id: str, signal_id: int) -> Optional[dict]:
 
 async def list_signals(
     org_id: str,
-    agent_id: str,
+    agent_id: Optional[str],
     offset: int,
     limit: int,
     severity: Optional[str] = None,
     failure_type: Optional[str] = None,
     include_shadow: bool = False,
+    explain_rows: bool = True,
+    per_agent_limit: Optional[int] = None,
 ) -> tuple[list, int]:
-    """List signals for an agent with optional filters. By default only live (non-shadow) signals are returned; pass include_shadow=True to include shadow signals too."""
+    """List signals with optional filters. By default only live (non-shadow)
+    signals are returned; pass include_shadow=True to include shadow ones too.
+
+    ``agent_id=None`` lists across the whole org. The dashboard's initial load
+    needs every agent's signals at once, and fetching them per agent was 136
+    requests the browser could only run 6 at a time.
+
+    ``explain_rows=False`` drops the LONG-FORM prose — ``what``,
+    ``why_it_matters`` and ``suggested_fixes``, together 74% of this endpoint's
+    payload (``suggested_fixes`` alone is 49%), and only read when a human opens
+    one signal. ``title`` and ``evidence_summary`` are returned either way:
+    ``evidence_summary`` is the single line the aggregate views actually render,
+    and omitting it sent the dashboard's Incidents cards down a client-side
+    fallback that produced "confidence 90%" for 90% of signals (5,665 of 6,291)
+    instead of a description. The omitted keys stay present and empty, so the
+    response shape is unchanged for every caller, and the default stays True so
+    the MCP server and the per-agent views are unaffected.
+
+    ``per_agent_limit=N`` returns each agent's newest N rather than the newest N
+    overall. That distinction is the point: the dashboard needs a bounded slice
+    PER AGENT, and a global newest-N window does not give it one — measured on a
+    real dataset the newest 8,000 runs came from 37 of 135 agents, so 98 agents
+    would have loaded with nothing. Windowing here reproduces exactly what one
+    request per agent returned, in a single query.
+    """
     if not _pool:
         return [], 0
 
     import json
 
-    where = ["org_id = $1", "agent_id = $2"]
+    # where/params are built together so the placeholder numbering stays correct
+    # whether or not agent_id is bound — an org-wide call must not leave a $2 in
+    # the SQL with nothing to fill it.
+    where = ["org_id = $1"]
+    params: list = [org_id]
+    if agent_id is not None:
+        params.append(agent_id)
+        where.append(f"agent_id = ${len(params)}")
     if not include_shadow:
         where.append("shadow = FALSE")
-    params: list = [org_id, agent_id]
 
     if severity:
         params.append(severity.upper())
@@ -1281,20 +1724,37 @@ async def list_signals(
 
     where_clause = " AND ".join(where)
 
+    _cols = """id, failure_type, severity, run_id, agent_id, agent_version,
+               step_index, confidence, detected_at, evidence, alerted, shadow,
+               COALESCE(co_signal_count, 0) AS co_signal_count"""
+
+    if per_agent_limit is not None:
+        # Rank within each agent, then page over the union of those slices, so a
+        # busy agent cannot crowd a quiet one out of the result set.
+        params.append(per_agent_limit)
+        source = f"""(
+                SELECT {_cols},
+                       ROW_NUMBER() OVER (
+                           PARTITION BY agent_id ORDER BY detected_at DESC
+                       ) AS _rn
+                FROM failure_signals WHERE {where_clause}
+            ) w WHERE w._rn <= ${len(params)}"""
+        # co_signal_count is already unwrapped by the inner SELECT.
+        out_cols = """id, failure_type, severity, run_id, agent_id, agent_version,
+                      step_index, confidence, detected_at, evidence, alerted, shadow,
+                      co_signal_count"""
+    else:
+        source = f"failure_signals WHERE {where_clause}"
+        out_cols = _cols
+
     async with _pool.acquire() as conn:
-        total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM failure_signals WHERE {where_clause}",
-            *params,
-        )
+        total = await conn.fetchval(f"SELECT COUNT(*) FROM {source}", *params)
 
         params_paged = params + [limit, offset]
         rows = await conn.fetch(
             f"""
-            SELECT id, failure_type, severity, run_id, agent_id, agent_version,
-                   step_index, confidence, detected_at, evidence, alerted, shadow,
-                   COALESCE(co_signal_count, 0) AS co_signal_count
-            FROM failure_signals
-            WHERE {where_clause}
+            SELECT {out_cols}
+            FROM {source}
             ORDER BY detected_at DESC
             LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
             """,
@@ -1312,15 +1772,18 @@ async def list_signals(
             detected_at = detected_at.timestamp()
 
         try:
+            ft, explain_evidence = coerce_failure_type(
+                s["failure_type"], dict(evidence) if evidence else {}
+            )
             fs = FailureSignal(
-                failure_type=FailureType(s["failure_type"]),
+                failure_type=ft,
                 severity=Severity(s["severity"]),
                 run_id=s["run_id"],
                 agent_id=s["agent_id"],
                 agent_version=s["agent_version"],
                 step_index=s["step_index"],
                 confidence=s["confidence"],
-                evidence=dict(evidence) if evidence else {},
+                evidence=explain_evidence,
                 detected_at=detected_at,
             )
             exp = explain(fs)
@@ -1344,16 +1807,18 @@ async def list_signals(
                 "shadow": s["shadow"],
                 "co_signal_count": s["co_signal_count"],
                 "title": exp.title if exp else s["failure_type"],
-                "what": exp.what if exp else "",
-                "why_it_matters": exp.why_it_matters if exp else "",
+                # Always returned: the aggregate views render this line, and it
+                # is 7% of the payload against suggested_fixes' 49%.
                 "evidence_summary": exp.evidence_summary if exp else "",
+                "what": exp.what if (exp and explain_rows) else "",
+                "why_it_matters": exp.why_it_matters if (exp and explain_rows) else "",
                 "suggested_fixes": [
                     {
                         "description": f.description,
                         "language": f.language,
                         "code": f.code,
                     }
-                    for f in (exp.suggested_fixes if exp else [])
+                    for f in (exp.suggested_fixes if (exp and explain_rows) else [])
                 ],
             }
         )
@@ -2082,7 +2547,11 @@ async def agent_failure_pattern(org_id: str, agent_id: str, failure_type: str) -
         return {}
 
     def _ts(v):
-        return v.isoformat() if v else None
+        # Epoch seconds, not ISO: FailureOverview.first_seen/last_seen and
+        # TopRun.detected_at are typed Optional[float], and the dashboard's timeAgo
+        # expects epoch. Returning isoformat here 500'd the whole endpoint whenever
+        # the failure type actually had signals.
+        return v.timestamp() if v else None
 
     async with _pool.acquire() as conn:
         # 1. Overview
@@ -2343,7 +2812,9 @@ async def agent_failure_pattern(org_id: str, agent_id: str, failure_type: str) -
                 "severity": r["severity"],
                 "step_index": int(r["step_index"]),
                 "detected_at": _ts(r["detected_at"]),
-                "evidence": dict(r["evidence"]),
+                # asyncpg returns jsonb as a str unless a codec is set; dict() on a
+                # str raises "dictionary update sequence element #0 has length 1".
+                "evidence": _coerce_payload(r["evidence"]),
             }
             for r in run_rows
         ],
@@ -2547,6 +3018,315 @@ async def delete_external_integration(org_id: str, provider: str) -> bool:
     return result != "DELETE 0"
 
 
+# ── ElevenLabs pull integration (Phase 4.1) ────────────────────────────────────
+
+
+async def upsert_elevenlabs_integration(
+    org_id: str,
+    encrypted_credentials: str,
+    poll_interval_secs: int,
+) -> int:
+    """Create or replace this org's ElevenLabs config. Replacing (rather than a
+    separate update path) re-encrypts a freshly-supplied key in one call, which
+    is the "I rotated my ElevenLabs key" path. Resets failure tracking so new
+    credentials start with a clean slate instead of inheriting a stale outage
+    streak. Does NOT reset last_seen_generation_at: the generation high-water
+    mark belongs to the org's history, not to a particular key, so rotating the
+    key must not re-pull and re-correlate everything already seen."""
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO elevenlabs_integrations
+                (org_id, encrypted_credentials, poll_interval_secs)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (org_id) DO UPDATE
+                SET encrypted_credentials = EXCLUDED.encrypted_credentials,
+                    poll_interval_secs    = EXCLUDED.poll_interval_secs,
+                    enabled               = TRUE,
+                    consecutive_failures  = 0,
+                    first_failure_at      = NULL,
+                    updated_at            = NOW()
+            RETURNING id
+            """,
+            org_id,
+            encrypted_credentials,
+            poll_interval_secs,
+        )
+    return row["id"]
+
+
+async def get_elevenlabs_integration_status(org_id: str) -> Optional[dict]:
+    """Configuration + health status for this org's ElevenLabs integration.
+    Never returns the credential itself, even encrypted. Returns None when the
+    org has never configured ElevenLabs (distinct from configured-but-failing,
+    which is a real dict with consecutive_failures > 0)."""
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT poll_interval_secs, enabled, last_polled_at,
+                   last_success_at, consecutive_failures
+            FROM elevenlabs_integrations
+            WHERE org_id = $1
+            """,
+            org_id,
+        )
+    if row is None:
+        return None
+    return {
+        "poll_interval_secs": row["poll_interval_secs"],
+        "enabled": row["enabled"],
+        "last_polled_at": row["last_polled_at"],
+        "last_success_at": row["last_success_at"],
+        "consecutive_failures": row["consecutive_failures"],
+    }
+
+
+async def delete_elevenlabs_integration(org_id: str) -> bool:
+    async with _pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM elevenlabs_integrations WHERE org_id = $1",
+            org_id,
+        )
+    return result != "DELETE 0"
+
+
+# ── ElevenLabs correlated-generation reads (Phase 5.1) ─────────────────────────
+#
+# All read only correlated rows (correlated_to_event_id IS NOT NULL) and use the
+# denormalized run_id/agent_id, so none of them join the big partitioned events
+# table. Returns [] / zeros for orgs with no ElevenLabs data, so callers stay
+# backward compatible.
+
+_GEN_SELECT = """
+    generation_id, voice_id, voice_name, model, character_count, cost_credits,
+    source, generated_at, run_id, agent_id, correlation_method, correlation_confidence
+"""
+
+
+async def get_run_elevenlabs_generations(org_id: str, run_id: str) -> list[dict]:
+    """Correlated ElevenLabs generations for one run, in generation-time order.
+    Empty when the run has no correlated TTS (non-ElevenLabs run, or not yet
+    correlated)."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT {_GEN_SELECT}
+            FROM elevenlabs_generations
+            WHERE org_id = $1 AND run_id = $2 AND correlated_to_event_id IS NOT NULL
+            ORDER BY generated_at
+            """,
+            org_id,
+            run_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def list_elevenlabs_generations(
+    org_id: str,
+    voice_id: Optional[str],
+    model: Optional[str],
+    min_credits: Optional[int],
+    limit: int,
+) -> list[dict]:
+    """Correlated generations for an org, filterable by voice / model / minimum
+    credits, ordered by cost descending so the 'high-cost generations' view is
+    just this with a min_credits threshold or no filter at all."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT {_GEN_SELECT}
+            FROM elevenlabs_generations
+            WHERE org_id = $1
+              AND correlated_to_event_id IS NOT NULL
+              AND ($2::text IS NULL OR voice_id = $2)
+              AND ($3::text IS NULL OR model = $3)
+              AND ($4::int  IS NULL OR cost_credits >= $4)
+            ORDER BY cost_credits DESC NULLS LAST, generated_at DESC
+            LIMIT $5
+            """,
+            org_id,
+            voice_id,
+            model,
+            min_credits,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_call_elevenlabs_cost(org_id: str, conversation_id: int) -> dict:
+    """Aggregate ElevenLabs cost for one call (all its runs). Org-scoped through
+    conversations so another org's call id yields zeros, not another org's data.
+    Returns {generation_count, character_count, cost_credits}."""
+    if not _pool:
+        return {"generation_count": 0, "character_count": 0, "cost_credits": 0}
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT count(*)                              AS generation_count,
+                   COALESCE(sum(g.character_count), 0)   AS character_count,
+                   COALESCE(sum(g.cost_credits), 0)      AS cost_credits
+            FROM elevenlabs_generations g
+            JOIN runs r          ON r.run_id = g.run_id
+            JOIN conversations c ON c.id = r.conversation_id AND c.org_id = g.org_id
+            WHERE g.org_id = $1
+              AND c.id = $2
+              AND g.correlated_to_event_id IS NOT NULL
+            """,
+            org_id,
+            conversation_id,
+        )
+    return {
+        "generation_count": row["generation_count"] or 0,
+        "character_count": row["character_count"] or 0,
+        "cost_credits": row["cost_credits"] or 0,
+    }
+
+
+# ── ElevenLabs cross-tool analytics (Phase 6.1) ────────────────────────────────
+#
+# All three aggregate ElevenLabs generation data against Dunetrace signals. They
+# use the denormalized run_id and separate CTEs per metric so joining cost and
+# signals never multiplies into a cartesian product. "Unsuccessful" is defined
+# as "the call carries at least one non-shadow failure signal": completion status
+# is computed from events per call (not stored), so signals are the stored,
+# query-able proxy at 10k-call scale.
+
+
+async def analytics_cost_by_outcome(org_id: str, limit: int) -> list[dict]:
+    """Per conversation: correlated ElevenLabs cost and its non-shadow signal
+    count. Only conversations that actually have correlated ElevenLabs cost are
+    returned, ordered most-expensive first."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH conv_cost AS (
+                SELECT r.conversation_id AS cid,
+                       SUM(g.character_count) AS chars,
+                       SUM(g.cost_credits)    AS credits,
+                       COUNT(*)               AS gen_count
+                FROM elevenlabs_generations g
+                JOIN runs r ON r.run_id = g.run_id
+                WHERE g.org_id = $1 AND g.correlated_to_event_id IS NOT NULL
+                GROUP BY r.conversation_id
+            ),
+            conv_sig AS (
+                SELECT r.conversation_id AS cid, COUNT(*) AS signal_count
+                FROM failure_signals s
+                JOIN runs r ON r.run_id = s.run_id
+                WHERE s.org_id = $1 AND s.shadow = FALSE
+                GROUP BY r.conversation_id
+            )
+            SELECT c.id AS conversation_id, c.external_id, c.agent_id,
+                   cc.chars, cc.credits, cc.gen_count,
+                   COALESCE(cs.signal_count, 0) AS signal_count
+            FROM conversations c
+            JOIN conv_cost cc ON cc.cid = c.id
+            LEFT JOIN conv_sig cs ON cs.cid = c.id
+            WHERE c.org_id = $1
+            ORDER BY cc.credits DESC NULLS LAST
+            LIMIT $2
+            """,
+            org_id,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def analytics_voice_impact(org_id: str) -> list[dict]:
+    """Per voice_id: how many correlated runs used it and how many of those runs
+    carried at least one non-shadow signal. The signal rate (computed by the
+    caller) is the 'does this voice correlate with worse outcomes' proxy."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH voice_runs AS (
+                SELECT DISTINCT g.voice_id, g.voice_name, g.run_id
+                FROM elevenlabs_generations g
+                WHERE g.org_id = $1
+                  AND g.correlated_to_event_id IS NOT NULL
+                  AND g.voice_id IS NOT NULL
+            ),
+            run_sig AS (
+                SELECT run_id, COUNT(*) AS sig_count
+                FROM failure_signals
+                WHERE org_id = $1 AND shadow = FALSE
+                GROUP BY run_id
+            )
+            SELECT vr.voice_id,
+                   MAX(vr.voice_name) AS voice_name,
+                   COUNT(DISTINCT vr.run_id) AS run_count,
+                   COUNT(DISTINCT vr.run_id) FILTER (WHERE COALESCE(rs.sig_count, 0) > 0)
+                       AS runs_with_signals
+            FROM voice_runs vr
+            LEFT JOIN run_sig rs ON rs.run_id = vr.run_id
+            GROUP BY vr.voice_id
+            ORDER BY run_count DESC
+            """,
+            org_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def analytics_truncation_impact(org_id: str, frustration_types: list) -> dict:
+    """Within the ElevenLabs-correlated run population, compare the frustration/
+    abandonment signal rate of runs where VOICE_TTS_TRUNCATION fired against runs
+    where it did not. Returns the raw counts; the caller computes the rates."""
+    if not _pool:
+        return {
+            "truncated_runs": 0,
+            "truncated_with_frustration": 0,
+            "clean_runs": 0,
+            "clean_with_frustration": 0,
+        }
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            WITH tts_runs AS (
+                SELECT DISTINCT run_id FROM elevenlabs_generations
+                WHERE org_id = $1 AND correlated_to_event_id IS NOT NULL AND run_id IS NOT NULL
+            ),
+            truncated AS (
+                SELECT DISTINCT run_id FROM failure_signals
+                WHERE org_id = $1 AND failure_type = 'VOICE_TTS_TRUNCATION'
+            ),
+            frustration AS (
+                SELECT DISTINCT run_id FROM failure_signals
+                WHERE org_id = $1 AND failure_type = ANY($2::text[])
+            )
+            SELECT
+                COUNT(*) FILTER (WHERE t.run_id IS NOT NULL) AS truncated_runs,
+                COUNT(*) FILTER (WHERE t.run_id IS NOT NULL AND f.run_id IS NOT NULL)
+                    AS truncated_with_frustration,
+                COUNT(*) FILTER (WHERE t.run_id IS NULL)  AS clean_runs,
+                COUNT(*) FILTER (WHERE t.run_id IS NULL AND f.run_id IS NOT NULL)
+                    AS clean_with_frustration
+            FROM tts_runs tr
+            LEFT JOIN truncated   t ON t.run_id = tr.run_id
+            LEFT JOIN frustration f ON f.run_id = tr.run_id
+            """,
+            org_id,
+            frustration_types,
+        )
+    return (
+        dict(row)
+        if row
+        else {
+            "truncated_runs": 0,
+            "truncated_with_frustration": 0,
+            "clean_runs": 0,
+            "clean_with_frustration": 0,
+        }
+    )
+
+
 # ── Alert destination integrations (Phase 4.1) ─────────────────────────────────
 
 
@@ -2615,6 +3395,49 @@ async def delete_org_alert_integration(org_id: str, provider: str) -> bool:
 
 
 # ── GitHub App integration + source mapping (Phase 4.3) ────────────────────────
+
+
+# How long an install nonce stays valid. Long enough for a human to click
+# through GitHub's install screen, short enough that a leaked URL goes stale.
+GITHUB_INSTALL_STATE_TTL_MINUTES = 30
+
+
+async def mint_github_install_state(org_id: str) -> str:
+    """A single-use, unguessable state for the install redirect."""
+    state = secrets.token_urlsafe(32)
+    if not _pool:
+        return state
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO github_install_states (state, org_id) VALUES ($1, $2)",
+            state,
+            org_id,
+        )
+        # Opportunistic cleanup; this table should never grow.
+        await conn.execute(
+            "DELETE FROM github_install_states "
+            "WHERE created_at < NOW() - ($1 || ' minutes')::interval",
+            str(GITHUB_INSTALL_STATE_TTL_MINUTES),
+        )
+    return state
+
+
+async def consume_github_install_state(state: str) -> str | None:
+    """The org that minted this state, or None if it is unknown, expired or
+    already used. Deleting in the same statement is what makes it single-use."""
+    if not _pool or not state:
+        return None
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            DELETE FROM github_install_states
+            WHERE state = $1
+              AND created_at > NOW() - ($2 || ' minutes')::interval
+            RETURNING org_id
+            """,
+            state,
+            str(GITHUB_INSTALL_STATE_TTL_MINUTES),
+        )
 
 
 async def upsert_org_github_installation(org_id: str, installation_id: int) -> None:
@@ -2807,7 +3630,7 @@ async def create_approval(
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, org_id, run_id, agent_id, tool_name, tool_args,
                       status, requested_at, expires_at, decided_at, decided_by,
-                      decision_channel
+                      decision_channel, note
             """,
             org_id,
             run_id,
@@ -2828,7 +3651,8 @@ async def list_approvals(org_id: str, status: Optional[str] = None, limit: int =
         rows = await conn.fetch(
             """
             SELECT id, org_id, run_id, agent_id, tool_name, tool_args, status,
-                   requested_at, expires_at, decided_at, decided_by, decision_channel
+                   requested_at, expires_at, decided_at, decided_by, decision_channel,
+                   note
             FROM approvals
             WHERE org_id = $1 AND ($2::text IS NULL OR status = $2)
             ORDER BY requested_at DESC
@@ -2849,7 +3673,8 @@ async def get_approval(org_id: str, approval_id: int) -> Optional[dict]:
         row = await conn.fetchrow(
             """
             SELECT id, org_id, run_id, agent_id, tool_name, tool_args, status,
-                   requested_at, expires_at, decided_at, decided_by, decision_channel
+                   requested_at, expires_at, decided_at, decided_by, decision_channel,
+                   note
             FROM approvals
             WHERE org_id = $1 AND id = $2
             """,
@@ -2865,6 +3690,7 @@ async def set_approval_decision(
     new_status: str,
     decided_by: Optional[str],
     decision_channel: Optional[str],
+    note: Optional[str] = None,
 ) -> Optional[dict]:
     """Move a *pending* approval to a terminal status. The `status = 'pending'`
     guard in the WHERE clause makes this a no-op on an already-decided approval
@@ -2872,7 +3698,15 @@ async def set_approval_decision(
     the recorded outcome. Caller should treat None as 'already decided or not
     found' and re-read to see the actual state. Transition legality is enforced
     here structurally (only pending → terminal is reachable); the full rule set
-    lives in api_svc.approvals.is_valid_transition()."""
+    lives in api_svc.approvals.is_valid_transition().
+
+    `note` is the deciding human's message. It rides this write and only this
+    write, which is what makes it immutable: a decision that loses the terminal
+    race writes nothing, so its note is discarded along with it. There is
+    deliberately no note-update path — an audit trail you can edit afterwards is
+    not an audit trail. Keyword with a default so the Slack caller
+    (routers/slack.py) needs no change.
+    """
     if not _pool:
         return None
     async with _pool.acquire() as conn:
@@ -2882,16 +3716,19 @@ async def set_approval_decision(
             SET status = $3,
                 decided_at = NOW(),
                 decided_by = $4,
-                decision_channel = $5
+                decision_channel = $5,
+                note = $6
             WHERE org_id = $1 AND id = $2 AND status = 'pending'
             RETURNING id, org_id, run_id, agent_id, tool_name, tool_args, status,
-                      requested_at, expires_at, decided_at, decided_by, decision_channel
+                      requested_at, expires_at, decided_at, decided_by,
+                      decision_channel, note
             """,
             org_id,
             approval_id,
             new_status,
             decided_by,
             decision_channel,
+            note,
         )
     return dict(row) if row else None
 
@@ -3208,6 +4045,41 @@ async def get_signal_fix_status(
 # ── Policies ─────────────────────────────────────────────────────────────────
 
 
+#: Actions the SDK will refuse to honour from an unverifiable remote policy.
+#: Mirrors ENFORCING_ACTIONS in the SDK's policies module; imported rather than
+#: duplicated so the two cannot drift.
+from dunetrace.policies import ENFORCING_ACTIONS as _ENFORCING_ACTIONS
+
+
+def _enforcement_state(action: dict, signature: str, enabled: bool) -> dict:
+    """Will this policy enforce, and if not, what fixes it.
+
+    Three states, deliberately distinct:
+      enforcing  — it will do what it says
+      log_only   — it records and does nothing, because that is what was asked
+      degraded   — it records and does nothing, and that is NOT what was asked
+
+    The third is the one worth surfacing. Everything else looks identical in a
+    policy list.
+    """
+    action_type = (action or {}).get("type", "log")
+    if not enabled:
+        return {"enforcement": "disabled", "enforcement_reason": ""}
+    if action_type not in _ENFORCING_ACTIONS:
+        return {"enforcement": "log_only", "enforcement_reason": ""}
+    if not signature:
+        return {
+            "enforcement": "degraded",
+            "enforcement_reason": (
+                f"This policy asks for {action_type!r} but is unsigned, so every SDK "
+                f"downgrades it to log-only and it enforces nothing. Set "
+                f"POLICY_SIGNING_SECRET on the server and DUNETRACE_POLICY_SECRET on "
+                f"the agent, then re-save the policy to sign it."
+            ),
+        }
+    return {"enforcement": "enforcing", "enforcement_reason": ""}
+
+
 def _policy_row(r: Any) -> dict:
     import json as _json
 
@@ -3229,49 +4101,30 @@ def _policy_row(r: Any) -> dict:
         "priority": r["priority"],
         "signature": r.get("signature", "") or "",
         "sig_version": r.get("sig_version", 1) or 1,
+        # "enforcing" | "dry_run". Read from the row rather than defaulted, or
+        # a dry-run policy reads back as enforcing and the dashboard renders no
+        # dry-run card for it at all.
+        "mode": r.get("mode") or "enforcing",
+        # Whether this policy will actually enforce once an SDK loads it, and
+        # why not when it will not. The SDK downgrades an enforcing remote
+        # policy to log-only when it cannot verify the origin, and rewrites the
+        # action in place — so from the dashboard a downgraded policy looked
+        # exactly like one deliberately set to log. That is server-knowable:
+        # an unsigned policy (POLICY_SIGNING_SECRET unset here) is downgraded
+        # by every SDK that loads it.
+        **_enforcement_state(act, r.get("signature", "") or "", r["enabled"]),
         "created_at": ca.timestamp() if hasattr(ca, "timestamp") else ca,
         "updated_at": ua.timestamp() if hasattr(ua, "timestamp") else ua,
     }
 
 
-def _policy_canonical(
-    version: int,
-    policy_id: int,
-    agent_id: str,
-    name: str,
-    condition: dict,
-    action: dict,
-    enabled: bool,
-    priority: int,
-) -> str:
-    """Versioned canonical string for the policy HMAC. MUST stay in exact sync
-    with the SDK's ``_policy_canonical`` (dunetrace/policies/__init__.py):
-      v1 — original 7 fields, null-byte separated (byte-identical to pre-feature).
-      v2 — same fields with an authenticated "v2" domain-separation prefix; used
-           for policies carrying a condition.match expression block.
-    condition is JSON-dumped with sort_keys, so the nested `match` block is
-    already covered by the signature under either version."""
-    fields = [
-        str(policy_id),
-        agent_id,
-        name,
-        _json_mod.dumps(condition, sort_keys=True),
-        _json_mod.dumps(action, sort_keys=True),
-        str(enabled),
-        str(priority),
-    ]
-    if version >= 2:
-        fields.insert(0, "v%d" % version)
-    return "\x00".join(fields)
-
-
-def _sig_version_for(condition: dict) -> int:
-    """The minimum canonical-form version representing this condition: v2 when it
-    uses a `match` expression block, else v1 (keeps legacy policies byte-identical
-    and older SDKs able to verify them)."""
-    if isinstance(condition, dict) and condition.get("match") is not None:
-        return 2
-    return 1
+# The canonical string and version selector are IMPORTED from the SDK rather
+# than duplicated here. They were two copies with a "MUST stay in exact sync"
+# comment on each, which is a standing invitation to drift: the two disagreeing
+# does not fail loudly, it makes every signature mismatch and every remote
+# policy silently stop enforcing. One definition cannot disagree with itself.
+from dunetrace.policies import _policy_canonical  # noqa: E402
+from dunetrace.policies import sig_version_for_condition as _sig_version_for  # noqa: E402
 
 
 def _sign_policy(
@@ -3283,6 +4136,7 @@ def _sign_policy(
     enabled: bool,
     priority: int,
     secret: str,
+    mode: str = "enforcing",
 ) -> tuple:
     """HMAC-SHA256 over the versioned canonical policy fields. Returns
     ``(signature, sig_version)``; signature is '' when secret is empty (dev mode),
@@ -3290,11 +4144,11 @@ def _sign_policy(
 
     Must stay in sync with _verify_policy_signature in the SDK's policies.py.
     """
-    version = _sig_version_for(condition)
+    version = _sig_version_for(condition, mode)
     if not secret:
         return "", version
     canonical = _policy_canonical(
-        version, policy_id, agent_id, name, condition, action, enabled, priority
+        version, policy_id, agent_id, name, condition, action, enabled, priority, mode
     )
     return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest(), version
 
@@ -3396,6 +4250,135 @@ async def fetch_policy_evaluations(org_id: str, policy_id: int, limit: int = 100
     return [_policy_eval_row(r) for r in rows]
 
 
+async def fetch_dry_run_summary(org_id: str, policy_id: int, days: int = 14) -> dict:
+    """Everything the dry-run card needs, computed here rather than in the page.
+
+    The dashboard has a standing rule against deriving metrics client-side: the
+    bugs it produced were all a numerator and a denominator drawn from
+    different populations. This is exactly that shape of number, so the ratio
+    is computed in one query against one window.
+
+    `would_fire_runs` counts DISTINCT run_id, not rows. A dry-run `log` policy
+    records on every match, so a row count would report a policy firing forty
+    times on four runs and read as far noisier than it is. The question the
+    card answers is "how many runs would this have acted on".
+    """
+    empty = {
+        "policy_id": policy_id,
+        "window_days": days,
+        "would_fire_runs": 0,
+        "total_runs": 0,
+        "fire_rate": None,
+        "would_action_type": None,
+        "would_action_params": None,
+        "branches": [],
+        "samples": [],
+        "first_seen": None,
+        "last_seen": None,
+    }
+    if not _pool:
+        return empty
+
+    async with _pool.acquire() as conn:
+        head = await conn.fetchrow(
+            """
+            WITH win AS (
+                SELECT run_id, agent_id, would_action_type, would_action_params,
+                       matched_branch, evaluated_at
+                  FROM policy_evaluations
+                 WHERE org_id = $1 AND policy_id = $2
+                   AND mode = 'dry_run' AND fired = TRUE
+                   AND evaluated_at > NOW() - ($3 || ' days')::interval
+            )
+            SELECT COUNT(DISTINCT run_id)                        AS would_fire_runs,
+                   MIN(evaluated_at)                             AS first_seen,
+                   MAX(evaluated_at)                             AS last_seen,
+                   (ARRAY_AGG(would_action_type  ORDER BY evaluated_at DESC))[1] AS action_type,
+                   (ARRAY_AGG(would_action_params ORDER BY evaluated_at DESC))[1] AS action_params,
+                   (ARRAY_AGG(agent_id           ORDER BY evaluated_at DESC))[1] AS agent_id
+              FROM win
+            """,
+            org_id,
+            policy_id,
+            str(days),
+        )
+        if head is None or not head["would_fire_runs"]:
+            return empty
+
+        # Denominator from the same agent and the same window as the numerator.
+        total_runs = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM runs
+             WHERE org_id = $1 AND agent_id = $2
+               AND started_at > NOW() - ($3 || ' days')::interval
+            """,
+            org_id,
+            head["agent_id"] or "",
+            str(days),
+        )
+        branches = await conn.fetch(
+            """
+            SELECT matched_branch AS branch, COUNT(DISTINCT run_id) AS runs
+              FROM policy_evaluations
+             WHERE org_id = $1 AND policy_id = $2
+               AND mode = 'dry_run' AND fired = TRUE
+               AND matched_branch IS NOT NULL
+               AND evaluated_at > NOW() - ($3 || ' days')::interval
+             GROUP BY matched_branch
+             ORDER BY runs DESC
+             LIMIT 5
+            """,
+            org_id,
+            policy_id,
+            str(days),
+        )
+        samples = await conn.fetch(
+            """
+            SELECT DISTINCT ON (run_id) run_id, agent_id, step_index, evaluated_at
+              FROM policy_evaluations
+             WHERE org_id = $1 AND policy_id = $2
+               AND mode = 'dry_run' AND fired = TRUE
+               AND evaluated_at > NOW() - ($3 || ' days')::interval
+             ORDER BY run_id, evaluated_at DESC
+             LIMIT 5
+            """,
+            org_id,
+            policy_id,
+            str(days),
+        )
+
+    fired = int(head["would_fire_runs"] or 0)
+    total = int(total_runs or 0)
+    params = head["action_params"]
+    if isinstance(params, str):
+        params = _json_mod.loads(params)
+    return {
+        "policy_id": policy_id,
+        "window_days": days,
+        "would_fire_runs": fired,
+        "total_runs": total,
+        # None rather than 0 when the denominator is unknown: a rate of "0%"
+        # and "no runs to compare against" are different answers.
+        "fire_rate": round(fired / total, 4) if total else None,
+        "would_action_type": head["action_type"],
+        "would_action_params": params,
+        "branches": [{"branch": b["branch"], "runs": int(b["runs"])} for b in branches],
+        "samples": [
+            {
+                "run_id": s["run_id"],
+                # The run-detail view is addressed by (run_id, agent_id), so a
+                # sample that cannot be opened is not much of a sample.
+                "agent_id": s["agent_id"],
+                "step_index": s["step_index"],
+                "at": s["evaluated_at"].timestamp() if s["evaluated_at"] else None,
+            }
+            for s in samples
+        ],
+        "first_seen": head["first_seen"].timestamp() if head["first_seen"] else None,
+        "last_seen": head["last_seen"].timestamp() if head["last_seen"] else None,
+    }
+
+
 async def create_policy(
     org_id: str,
     name: str,
@@ -3404,6 +4387,7 @@ async def create_policy(
     action: dict,
     priority: int = 100,
     enabled: bool = True,
+    mode: str = "enforcing",
 ) -> dict:
     if not _pool:
         raise RuntimeError("DB pool not available")
@@ -3412,8 +4396,9 @@ async def create_policy(
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
-                INSERT INTO policies (name, agent_id, condition, action, priority, enabled, org_id)
-                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
+                INSERT INTO policies
+                    (name, agent_id, condition, action, priority, enabled, org_id, mode)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7, $8)
                 RETURNING *
                 """,
                 name,
@@ -3423,6 +4408,7 @@ async def create_policy(
                 priority,
                 enabled,
                 org_id,
+                mode,
             )
             # Signature is over policy identity/behavior fields only — org_id is a
             # tenancy filter, not part of the policy's cryptographic identity, and
@@ -3437,6 +4423,7 @@ async def create_policy(
                 enabled,
                 priority,
                 settings.POLICY_SIGNING_SECRET,
+                mode,
             )
             row = await conn.fetchrow(
                 "UPDATE policies SET signature = $1, sig_version = $2 WHERE id = $3 RETURNING *",
@@ -3542,20 +4529,33 @@ async def get_agent_health_score(org_id: str, agent_id: str) -> dict:
                 WHERE org_id = $1 AND agent_id = $2
                   AND processed_at >= NOW() - INTERVAL '30 days'
             ),
+            -- Both numerators are scoped by JOINing runs_30d rather than by
+            -- repeating a detected_at window. The two timestamps are not
+            -- interchangeable: processed_at is refreshed every time a run is
+            -- re-analysed (late events trigger re-detection), while a signal
+            -- keeps its original detected_at. An independent
+            -- `detected_at >= NOW() - 30 days` therefore counted runs in the
+            -- denominator whose signals had aged out of the numerator, driving
+            -- every rate toward zero and every component score toward full
+            -- marks — the agent scoring 25/25 on loop_avoidance while TOOL_LOOP
+            -- was its most common failure.
+            --
+            -- Joining also makes numerator ⊆ denominator structurally, so these
+            -- rates cannot exceed 100% however the timestamps move.
             signal_runs AS (
-                SELECT DISTINCT run_id
-                FROM failure_signals
-                WHERE org_id = $1 AND agent_id = $2
-                  AND shadow = FALSE
-                  AND detected_at >= NOW() - INTERVAL '30 days'
+                SELECT DISTINCT s.run_id
+                FROM failure_signals s
+                JOIN runs_30d r ON r.run_id = s.run_id
+                WHERE s.org_id = $1 AND s.agent_id = $2
+                  AND s.shadow = FALSE
             ),
             loop_runs AS (
-                SELECT DISTINCT run_id
-                FROM failure_signals
-                WHERE org_id = $1 AND agent_id = $2
-                  AND shadow = FALSE
-                  AND detected_at >= NOW() - INTERVAL '30 days'
-                  AND failure_type IN (
+                SELECT DISTINCT s.run_id
+                FROM failure_signals s
+                JOIN runs_30d r ON r.run_id = s.run_id
+                WHERE s.org_id = $1 AND s.agent_id = $2
+                  AND s.shadow = FALSE
+                  AND s.failure_type IN (
                       'TOOL_LOOP','TOOL_THRASHING','TOOL_AVOIDANCE',
                       'STEP_COUNT_INFLATION','LLM_TRUNCATION_LOOP'
                   )
@@ -3760,13 +4760,24 @@ async def agent_cost_stats(org_id: str, agent_id: str) -> dict:
     from explainer_svc.cost import estimate_cost
 
     async with _pool.acquire() as conn:
-        # Prompt tokens + model per run. prompt_tokens may be in llm.called (direct SDK)
-        # or llm.responded (LangChain) — sum both; model always comes from llm.called.
+        # Prompt tokens + model per run. prompt_tokens may be in llm.called (direct
+        # SDK) or llm.responded (LangChain) — take the exact llm.responded total
+        # when present and fall back to the llm.called estimate, never both. Summing
+        # them (which this did) counts one call twice whenever an integration emits
+        # both, and disagreed with the run-detail page for the same runs.
+        # model always comes from llm.called.
         prompt_rows = await conn.fetch(
             """
             SELECT run_id,
                    MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
-                   SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens
+                   COALESCE(
+                       NULLIF(SUM(CASE WHEN event_type = 'llm.responded'
+                                       THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                                       ELSE 0 END), 0),
+                       SUM(CASE WHEN event_type = 'llm.called'
+                                THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                                ELSE 0 END)
+                   ) AS prompt_tokens
             FROM events
             WHERE org_id = $1 AND agent_id = $2
               AND event_type IN ('llm.called', 'llm.responded')
@@ -3855,14 +4866,29 @@ async def agent_cost_stats(org_id: str, agent_id: str) -> dict:
 
 async def agent_token_stats(org_id: str, agent_id: str) -> dict:
     """
-    Per-window token usage and waste stats for 1d / 7d / 30d.
+    Per-window token usage stats for 1d / 7d / 30d.
+
+    Three distinct spend metrics, because "wasted" means different things:
+
+      • failed_run_tokens — total tokens on runs that had ≥1 live signal. Backward-
+        looking attribution ("spend on runs that had a problem"). Exposed under the
+        legacy ``wasted_*`` keys too, for compatibility.
+      • excess_tokens — the *avoidable* portion: tokens above a healthy baseline
+        (P75 of that agent version's clean runs) on failed runs. A 596k-token
+        runaway whose healthy self is 6k contributes ~590k; a 6k run that tripped
+        one signal contributes ~0.
+      • prevented_tokens — tokens we actually *stopped from being spent*, only for
+        runs a policy/approval halted in-path (``policy.triggered`` action_type=stop,
+        ``approval.denied``/``timeout``). Post-hoc detectors prevent nothing, so they
+        never count here. Estimated as (healthy baseline − tokens already spent).
+
+    Also projects avoidable waste forward (Model 3): projected_monthly_excess_* is
+    the window's excess run-rate extrapolated to 30 days.
 
     Returns:
       windows: {"1d": {...}, "7d": {...}, "30d": {...}}
-        Each window: total_tokens, prompt_tokens, completion_tokens, wasted_tokens,
-                     total_cost_usd, wasted_cost_usd, wasted_pct, run_count, wasted_run_count
       waste_by_failure_type: [{failure_type, wasted_tokens, wasted_cost_usd, affected_runs}]
-        (30d only, sorted by wasted_cost_usd desc)
+        (tokens on failed runs, by type; sorted by wasted_cost_usd desc)
     """
     if not _pool:
         return {"windows": {}, "waste_by_failure_type": []}
@@ -3871,14 +4897,25 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
 
     async with _pool.acquire() as conn:
         # Per-run token totals + run timestamp.
-        # prompt_tokens: direct SDK → llm.called, LangChain → llm.responded.
+        # prompt_tokens: direct SDK → llm.called, LangChain → llm.responded. An
+        # integration that emits BOTH reports the same call twice (estimate, then
+        # exact), so override rather than sum — this page and the run-detail page
+        # must not disagree about the same run's tokens.
         # completion_tokens: always in llm.responded.
         token_rows = await conn.fetch(
             """
             SELECT
                 run_id,
+                MAX(agent_version) AS agent_version,
                 MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
-                SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
+                COALESCE(
+                    NULLIF(SUM(CASE WHEN event_type = 'llm.responded'
+                                    THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                                    ELSE 0 END), 0),
+                    SUM(CASE WHEN event_type = 'llm.called'
+                             THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                             ELSE 0 END)
+                ) AS prompt_tokens,
                 SUM(CASE WHEN event_type = 'llm.responded'
                     THEN COALESCE((payload->>'completion_tokens')::int, 0) ELSE 0 END) AS completion_tokens,
                 SUM(CASE WHEN event_type = 'llm.responded'
@@ -3906,12 +4943,33 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
             agent_id,
         )
 
+        # Runs a policy/approval actually halted in-path — the only runs with a
+        # genuine "we prevented this spend" counterfactual. A structural detector
+        # that fires on run.completed cannot prevent tokens already spent.
+        block_rows = await conn.fetch(
+            """
+            SELECT DISTINCT run_id
+            FROM events
+            WHERE org_id = $1 AND agent_id = $2
+              AND received_at >= NOW() - INTERVAL '30 days'
+              AND (
+                    (event_type = 'policy.triggered' AND payload->>'action_type' = 'stop')
+                 OR event_type IN ('approval.denied', 'approval.timeout')
+              )
+            """,
+            org_id,
+            agent_id,
+        )
+
     now = time.time()
     cutoffs = {"1d": now - 86400, "7d": now - 7 * 86400, "30d": now - 30 * 86400}
+    window_days = {"1d": 1, "7d": 7, "30d": 30}
 
     run_signals: dict[str, set] = {}
     for r in signal_rows:
         run_signals.setdefault(r["run_id"], set()).add(r["failure_type"])
+
+    blocked_run_ids = {r["run_id"] for r in block_rows}
 
     runs = []
     for r in token_rows:
@@ -3923,41 +4981,166 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
         runs.append(
             {
                 "run_id": r["run_id"],
+                "agent_version": r["agent_version"] or "",
                 "prompt_tokens": prompt,
                 "completion_tokens": comp,
                 "total_tokens": prompt + comp + reasoning,
                 "cost": cost,
                 "ts": ts,
                 "failure_types": run_signals.get(r["run_id"], set()),
+                "blocked": r["run_id"] in blocked_run_ids,
             }
         )
 
-    def _aggregate(filtered: list) -> dict:
-        total_tokens = prompt_tokens = completion_tokens = wasted_tokens = 0
-        total_cost = wasted_cost = 0.0
-        wasted_run_count = 0
+    # ── Healthy baselines. Isolate the *avoidable* (excess) portion of failed-run
+    # spend and value what an in-path block prevented. Preference order:
+    #   1. P75 of this agent version's clean (no-signal) runs
+    #   2. P75 of the agent's clean runs across versions
+    #   3. P50 (median) of ALL the agent's runs — robust last resort so heavily-
+    #      failing agents (which lack a clean sample) still get a "typical run"
+    #      floor. Median ignores the runaway tail, so excess still surfaces.
+    _MIN_BASELINE_RUNS = 3
+
+    def _pct(values: list, q: float) -> "Optional[float]":
+        vals = sorted(values)
+        n = len(vals)
+        if n == 0:
+            return None
+        rank = q * (n - 1)  # linear interpolation — matches PERCENTILE_CONT
+        lo = int(rank)
+        hi = min(lo + 1, n - 1)
+        return float(vals[lo] + (vals[hi] - vals[lo]) * (rank - lo))
+
+    clean_by_version: dict[str, list] = {}
+    clean_all: list = []
+    for r in runs:
+        if not r["failure_types"]:
+            clean_by_version.setdefault(r["agent_version"], []).append(r["total_tokens"])
+            clean_all.append(r["total_tokens"])
+    version_baseline = {
+        v: _pct(tt, 0.75) for v, tt in clean_by_version.items() if len(tt) >= _MIN_BASELINE_RUNS
+    }
+    agent_baseline = _pct(clean_all, 0.75) if len(clean_all) >= _MIN_BASELINE_RUNS else None
+    all_tokens = [r["total_tokens"] for r in runs]
+    fallback_baseline = _pct(all_tokens, 0.50) if len(all_tokens) >= _MIN_BASELINE_RUNS else None
+
+    def _baseline_for(version: str) -> "Optional[float]":
+        b = version_baseline.get(version)
+        if b is None:
+            b = agent_baseline
+        if b is None:
+            b = fallback_baseline
+        return b
+
+    # Effective $/token across the window — used to price hypothetical tokens for
+    # in-path blocks that stopped before any billable LLM call (no rate of their own).
+    _tot_tok = sum(r["total_tokens"] for r in runs)
+    _tot_cost = sum(r["cost"] for r in runs)
+    avg_rate = (_tot_cost / _tot_tok) if _tot_tok else 0.0
+
+    def _excess(r: dict) -> "tuple[int, float]":
+        """Avoidable (tokens, cost) for one run: spend above its healthy baseline."""
+        if not r["failure_types"]:
+            return 0, 0.0
+        base = _baseline_for(r["agent_version"])
+        tt = r["total_tokens"]
+        if base is None or tt <= base:
+            return 0, 0.0
+        ex = tt - base
+        rate = (r["cost"] / tt) if tt else avg_rate
+        return int(ex), rate * ex
+
+    def _aggregate(filtered: list, days: int) -> dict:
+        total_tokens = prompt_tokens = completion_tokens = 0
+        failed_tokens = excess_tokens = prevented_tokens = 0
+        total_cost = failed_cost = excess_cost = prevented_cost = 0.0
+        failed_run_count = blocked_run_count = 0
         for r in filtered:
-            total_tokens += r["total_tokens"]
+            tt = r["total_tokens"]
+            total_tokens += tt
             prompt_tokens += r["prompt_tokens"]
             completion_tokens += r["completion_tokens"]
             total_cost += r["cost"]
+            rate = (r["cost"] / tt) if tt else avg_rate
+            base = _baseline_for(r["agent_version"])
             if r["failure_types"]:
-                wasted_tokens += r["total_tokens"]
-                wasted_cost += r["cost"]
-                wasted_run_count += 1
+                failed_tokens += tt
+                failed_cost += r["cost"]
+                failed_run_count += 1
+                # Avoidable = spend above a healthy run of the same agent version.
+                ex_tok, ex_cost = _excess(r)
+                excess_tokens += ex_tok
+                excess_cost += ex_cost
+            if r["blocked"]:
+                blocked_run_count += 1
+                # Counterfactual: absent the block it would have run to at least a
+                # normal completion. Prevented = normal spend − spend so far.
+                if base is not None:
+                    prev = base - tt
+                    if prev > 0:
+                        prevented_tokens += int(prev)
+                        prevented_cost += (rate or avg_rate) * prev
         return {
             "total_tokens": total_tokens,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
-            "wasted_tokens": wasted_tokens,
             "total_cost_usd": round(total_cost, 4),
-            "wasted_cost_usd": round(wasted_cost, 4),
-            "wasted_pct": round(wasted_cost / total_cost, 3) if total_cost else 0.0,
             "run_count": len(filtered),
-            "wasted_run_count": wasted_run_count,
+            # Attribution: all tokens on runs that had ≥1 signal.
+            "failed_run_tokens": failed_tokens,
+            "failed_run_cost_usd": round(failed_cost, 4),
+            "failed_run_count": failed_run_count,
+            "failed_pct": round(failed_cost / total_cost, 3) if total_cost else 0.0,
+            # Avoidable: spend above the healthy baseline on failed runs.
+            "excess_tokens": excess_tokens,
+            "excess_cost_usd": round(excess_cost, 4),
+            "baseline_tokens": (
+                round(agent_baseline)
+                if agent_baseline is not None
+                else round(fallback_baseline)
+                if fallback_baseline is not None
+                else None
+            ),
+            # Prevented: in-path blocks that stopped a run before it ran on.
+            "prevented_tokens": prevented_tokens,
+            "prevented_cost_usd": round(prevented_cost, 4),
+            "blocked_run_count": blocked_run_count,
+            # Forward projection (Model 3): a single rate, filled in below so it is
+            # identical across windows (a longer window must not project *less*).
+            "projected_monthly_excess_tokens": 0,
+            "projected_monthly_excess_cost_usd": 0.0,
+            # ── Back-compat aliases: legacy "wasted_*" == failed-run attribution ──
+            "wasted_tokens": failed_tokens,
+            "wasted_cost_usd": round(failed_cost, 4),
+            "wasted_pct": round(failed_cost / total_cost, 3) if total_cost else 0.0,
+            "wasted_run_count": failed_run_count,
         }
 
-    windows = {w: _aggregate([r for r in runs if r["ts"] >= cut]) for w, cut in cutoffs.items()}
+    windows = {
+        w: _aggregate([r for r in runs if r["ts"] >= cut], window_days[w])
+        for w, cut in cutoffs.items()
+    }
+
+    # Forward projection: "if this continues unfixed, ~$X/month." It is a *rate*, so
+    # it must not depend on which window the user is viewing. Base it on the recent
+    # 7-day run-rate of avoidable spend, normalised by how many days were actually
+    # observed (guards agents with <7 days of history), then scale to 30 days.
+    recent = [r for r in runs if r["ts"] >= cutoffs["7d"]]
+    recent_ex_tok = 0
+    recent_ex_cost = 0.0
+    for r in recent:
+        et, ec = _excess(r)
+        recent_ex_tok += et
+        recent_ex_cost += ec
+    recent_ts = [r["ts"] for r in recent if r["ts"] > 0]
+    # Floor the observed span at 3 days so a single-day burst can't extrapolate ×30.
+    observed_days = min(7.0, max(3.0, (now - min(recent_ts)) / 86400)) if recent_ts else 7.0
+    proj_scale = 30.0 / observed_days
+    proj_tokens = int(recent_ex_tok * proj_scale)
+    proj_cost = round(recent_ex_cost * proj_scale, 4)
+    for w in windows.values():
+        w["projected_monthly_excess_tokens"] = proj_tokens
+        w["projected_monthly_excess_cost_usd"] = proj_cost
 
     ft_stats: dict[str, dict] = {}
     for r in runs:
@@ -4274,6 +5457,7 @@ async def agent_performance_trends(org_id: str, agent_id: str, window_days: int)
     from api_svc.performance_trends import (
         build_day_buckets,
         compute_baseline_comparisons,
+        compute_cost_by_day,
         compute_daily_points,
         compute_failure_mode_deltas,
     )
@@ -4326,7 +5510,18 @@ async def agent_performance_trends(org_id: str, agent_id: str, window_days: int)
             SELECT e.run_id,
                    DATE_TRUNC('day', pr.processed_at AT TIME ZONE 'UTC')::date AS day,
                    MAX(CASE WHEN e.event_type = 'llm.called' THEN e.payload->>'model' END) AS model,
-                   SUM(COALESCE((e.payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
+                   -- prompt_tokens is carried on BOTH event types for the same
+                   -- call — llm.called has a chars//4 estimate, llm.responded the
+                   -- exact count once the provider reports it. They are kept
+                   -- apart here and overridden (not added) below; summing them in
+                   -- one pass overstated this agent's tokens by 152% against the
+                   -- same runs' totals on the run-detail page.
+                   SUM(CASE WHEN e.event_type = 'llm.responded'
+                            THEN COALESCE((e.payload->>'prompt_tokens')::int, 0) ELSE 0 END)
+                       AS prompt_tokens_responded,
+                   SUM(CASE WHEN e.event_type = 'llm.called'
+                            THEN COALESCE((e.payload->>'prompt_tokens')::int, 0) ELSE 0 END)
+                       AS prompt_tokens_called,
                    SUM(CASE WHEN e.event_type = 'llm.responded'
                             THEN COALESCE((e.payload->>'completion_tokens')::int, 0) ELSE 0 END)
                        AS completion_tokens
@@ -4342,15 +5537,9 @@ async def agent_performance_trends(org_id: str, agent_id: str, window_days: int)
             agent_id,
             window_str,
         )
-        cost_by_day: dict = {}
-        for r in token_rows:
-            day = str(r["day"])
-            cost = estimate_cost(
-                r["model"] or "unknown",
-                int(r["prompt_tokens"] or 0),
-                int(r["completion_tokens"] or 0),
-            )
-            cost_by_day[day] = cost_by_day.get(day, 0.0) + cost
+        # Override-not-sum lives in the pure layer with the rest of the
+        # arithmetic, so it is unit-tested without a database.
+        cost_by_day = compute_cost_by_day(token_rows, estimate_cost)
 
         latency_rows = await conn.fetch(
             """
@@ -4741,7 +5930,7 @@ async def list_api_keys(
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT k.id, k.org_id, k.active,
+            SELECT k.id, k.org_id, k.active, k.key_prefix, k.scopes,
                    k.rate_limit_rpm, k.created_at, o.name AS org_name
             FROM api_keys k
             LEFT JOIN organizations o ON o.id = k.org_id
@@ -4768,12 +5957,15 @@ async def create_api_key(
     org_id: str,
     org_name: Optional[str] = None,
     rate_limit_rpm: int = 600,
+    scopes: Optional[list] = None,
 ) -> dict:
     """Create an org-scoped API key. Not tied to a single agent_id — an org can
     have many agents, discovered dynamically on first ingest."""
-    import secrets as _sec
+    from dunetrace_schemas.keys import generate_api_key, hash_api_key, key_prefix
+    from dunetrace_schemas.scopes import normalise
 
-    key = "dt_" + _sec.token_urlsafe(32)
+    key = generate_api_key()
+    granted = list(normalise(scopes))
     name = org_name or org_id
     if not _pool:
         raise RuntimeError("DB pool not ready")
@@ -4786,13 +5978,16 @@ async def create_api_key(
             )
             row = await conn.fetchrow(
                 """
-                INSERT INTO api_keys (key, org_id, rate_limit_rpm)
-                VALUES ($1, $2, $3)
+                INSERT INTO api_keys
+                    (key, key_hash, key_prefix, org_id, rate_limit_rpm, scopes)
+                VALUES ($1, $1, $2, $3, $4, $5)
                 RETURNING id, created_at
                 """,
-                key,
+                hash_api_key(key),
+                key_prefix(key),
                 org_id,
                 rate_limit_rpm,
+                granted,
             )
     return {
         "id": row["id"],
@@ -4801,6 +5996,7 @@ async def create_api_key(
         "org_id": org_id,
         "org_name": name,
         "rate_limit_rpm": rate_limit_rpm,
+        "scopes": granted,
         "created_at": row["created_at"].isoformat(),
     }
 

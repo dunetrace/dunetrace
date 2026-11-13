@@ -17,9 +17,10 @@ by construction only starts once it has. See
 [policies.md's "Structural signals only" section](policies.md#structural-signals-only)
 for the full explanation.
 
-If you're looking for the 28 in-path structural detectors instead (Tool
-Loop, Retry Storm, Cost Spike, and the rest — the ones that can and do fire
-policies), see [docs/detectors.md](detectors.md).
+If you're looking for the structural detectors instead (Tool Loop, Retry
+Storm, Cost Spike, and the rest — the ones that can and do fire policies),
+see [docs/detectors.md](detectors.md). There are 34 of them; the 31 that can
+be evaluated in-path are the ones `trigger="signal"` policies can match.
 
 ---
 
@@ -43,6 +44,24 @@ policies), see [docs/detectors.md](detectors.md).
 
 Disabled by default — set `SEMANTIC_WORKER_ENABLED=true` to turn it on; this
 preserves existing OSS behavior for anyone not opting in.
+
+**You also need the `semantic` container running.** It's in both
+`docker-compose.yml` and `docker-compose.ghcr.yml`, but with the flag off it
+logs one line and exits 0 — so it shows as `Exited (0)`, which is expected, not
+a failure. Setting the flag and re-running `docker compose up -d` starts it for
+real.
+
+Per-evaluator model overrides are read from `HALLUCINATION_MODEL`,
+`TASK_COMPLETION_MODEL`, `TASK_UNDERSTANDING_FAILURE_MODEL`,
+`OFF_TOPIC_DRIFT_MODEL`, `USER_FRUSTRATION_MODEL`, `CONFUSION_LOOP_MODEL`, and
+`SYCOPHANCY_SIGNAL_MODEL`. Leave one blank to use the provider default chosen by
+`SEMANTIC_LLM_PROVIDER` (`openai`, `anthropic`, or `mistral` — defaults
+`gpt-4o-mini`, `claude-haiku-4-5`, `mistral-small-latest` respectively). Each
+provider reads its own key: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`MISTRAL_API_KEY`. There is no cross-provider fallback — a failure surfaces as a
+failure, and an unrecognised provider name is a startup error. Mistral also
+keeps second opinions in region; see
+[integrations/mistral.md](integrations/mistral.md).
 
 ---
 
@@ -91,8 +110,15 @@ run-level; three (below) operate across a conversation:
   0.21 vs 0.60 between wrong- and right-task; 0% false positives at the default
   0.5 threshold, including partial / ambiguous / multi-part hard negatives) —
   see `scripts/calibration/task_understanding_failure_calibration.md`.
+- **`OFF_TOPIC_DRIFT`** — did the response start on the user's
+  question and then wander off it (unrelated features, marketing, a tangent).
+  Distinct from `TASK_UNDERSTANDING_FAILURE`: drift starts on-topic and loses
+  the thread, rather than misreading the task from the start. Covering multiple
+  related aspects of a broad question is not drift. Calibrated on 100 runs (margin
+  0.44 vs 0.82; 0% false positives including broad multi-aspect answers at the
+  default 0.5 threshold) — see `scripts/calibration/off_topic_drift_calibration.md`.
 
-Two more operate on conversations rather than single runs — see
+The remaining **three** operate on conversations rather than single runs — see
 [Conversation-level evaluation](#conversation-level-evaluation) below:
 
 - **`USER_FRUSTRATION`** — is the user getting frustrated across the
@@ -111,17 +137,11 @@ Two more operate on conversations rather than single runs — see
   legitimate-correction genuinely overlap, it ships precision-first at threshold
   **0.4** (0% false positives, 88% recall) rather than the standard 0.5 — see
   `scripts/calibration/sycophancy_signal_calibration.md`.
-- **`OFF_TOPIC_DRIFT`** (run-level) — did the response start on the user's
-  question and then wander off it (unrelated features, marketing, a tangent).
-  Distinct from `TASK_UNDERSTANDING_FAILURE`: drift starts on-topic and loses
-  the thread, rather than misreading the task from the start. Covering multiple
-  related aspects of a broad question is not drift. Calibrated on 100 runs (margin
-  0.44 vs 0.82; 0% false positives including broad multi-aspect answers at the
-  default 0.5 threshold) — see `scripts/calibration/off_topic_drift_calibration.md`.
 
-LLM provider is configurable per evaluator (`SEMANTIC_LLM_PROVIDER`,
-default OpenAI `gpt-4o-mini` for cost; upgradeable to `gpt-4o` or
-Anthropic's `claude-sonnet-4-6` on demand). No custom Dunetrace-proprietary
+LLM provider is configurable per evaluator (`SEMANTIC_LLM_PROVIDER` — `openai`,
+`anthropic` or `mistral`; default OpenAI `gpt-4o-mini` for cost, upgradeable to
+`gpt-4o` or Anthropic's `claude-sonnet-4-6` on demand, see above for the full
+provider table). No custom Dunetrace-proprietary
 evaluators ship in v1 — only DeepEval's own metrics; a custom evaluator for
 a failure mode DeepEval doesn't cover is a deliberate later step, not a v1
 scope item.
@@ -223,7 +243,7 @@ something no single-run evaluator can see. See
 
 - Not a replacement for structural detection — semantic evaluation
   *augments* it (100% of structurally-flagged runs also get semantic
-  context) and catches a different class of failure, but the 28 structural
+  context) and catches a different class of failure, but the 34 structural
   detectors remain the always-on, zero-cost, zero-LLM first line.
 - Not a runtime guardrail — see the policies cross-link above.
 - Not required — `SEMANTIC_WORKER_ENABLED` defaults to off; everything else

@@ -52,7 +52,10 @@ so operators can extend them as real traffic surfaces new collisions.
 
 ## Ship status
 
-Shadow by default (not in `LIVE_DETECTORS`), matching the convention that new
-detectors gather real-traffic data before promotion — even calibration-clean
-ones. A strong candidate for promotion once shadow traffic confirms the 0% FP
-holds outside the corpus.
+**Live** — listed in `LIVE_DETECTORS`
+(`services/detector/detector_svc/db.py`). Shipped shadow first, per the
+convention that new detectors gather real-traffic data before promotion — even
+calibration-clean ones — and promoted once shadow traffic confirmed the 0% FP
+rate held outside the corpus. To reverse, remove it from `LIVE_DETECTORS`;
+`handoff_patterns` / `excluded_tool_names` in `detectors.yml` are the first
+knobs to reach for if it is noisier than expected.

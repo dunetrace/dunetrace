@@ -15,9 +15,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      # Pin ruff to the pre-commit-config version so CI matches local linting.
+      # An unpinned `pip install ruff` pulls the latest release, whose newly
+      # stabilized rules fail CI on untouched code even when nothing changed.
+      - run: pip install ruff==0.15.11
       - run: ruff check .
       - run: ruff format --check .
+      # Dashboard safety: no inline handlers / javascript: URLs / eval in
+      # dashboard/, every data-action names a key of the ACTIONS registry, and
+      # nginx.conf's CSP script-src hash matches the page's inline <script>.
+      # Stdlib only, nothing to install. A PR that edits the script without
+      # re-running `python scripts/check_dashboard_safety.py --fix` fails here.
+      - run: python scripts/check_dashboard_safety.py
+      - run: python -m unittest scripts.test_check_dashboard_safety
 
   docs-consistency:
     name: Docs consistency (detectors)
@@ -33,6 +43,35 @@ jobs:
       # Fails if docs claim a detector/evaluator that doesn't exist in code.
       - run: python scripts/validate_detector_docs.py
       - run: python -m unittest scripts.test_validate_detector_docs
+      # EventType / Severity / FailureType are generated into both the SDK and
+      # dunetrace_schemas from enum_source.py; fails if either module is stale
+      # (edit the source, run `python scripts/gen_enums.py`). Stdlib only.
+      - run: python scripts/gen_enums.py --check
+      - run: python -m unittest scripts.test_gen_enums
+      # detectors.yml, the detector classes, and the shared parser's _PARAM_MAP
+      # all have to agree: an unmapped YAML key is dropped with a startup
+      # warning nobody reads, and a _PARAM_MAP entry aimed at a renamed
+      # attribute produces no warning at all. Needs PyYAML to read the file and
+      # dunetrace_schemas (hence pydantic) for _PARAM_MAP.
+      - run: pip install -e packages/schemas-py pyyaml
+      - run: python scripts/check_detector_defaults.py
+      - run: python -m unittest scripts.test_check_detector_defaults
+      # Every docs/integrate-*.md must carry a <!--dunetrace:instrument--> block.
+      # The dunetrace-setup skill (dunetrace/skills) generates one reference file
+      # per block; a guide that loses its block silently drops out of the skill's
+      # framework matching table, which is a silent no-op of exactly the kind the
+      # guides themselves warn about. This only proves the guides parse -- the
+      # authoritative drift check runs in the skills repo, which has both trees.
+      - run: python scripts/gen_skill_references.py --out "$(mktemp -d)" --require-all
+      - run: python -m unittest scripts.test_gen_skill_references
+      # The detector coverage manifest the skill reads. This step is the audit:
+      # it fails if a detector is not described in
+      # scripts/detector_event_requirements.json, or if a detector reads a
+      # RunState field that its entry neither requires nor enriches. A new
+      # detector therefore cannot land without saying what instrumentation it
+      # needs, which is what keeps the coverage report's counts honest.
+      - run: python scripts/gen_detector_manifest.py --out "$(mktemp -d)"
+      - run: python -m unittest scripts.test_gen_detector_manifest
 
   sdk-py:
     name: SDK (Python)
@@ -51,11 +90,98 @@ jobs:
           cache-dependency-path: packages/sdk-py/pyproject.toml
       # dev extra provides mypy + pytest-timeout, so no separate installs needed.
       - run: pip install -e "packages/sdk-py[dev,langchain]"
-      # --timeout kills (and dumps the stack of) any single test that hangs,
-      # so a deadlock fails in seconds with a named culprit instead of blocking
-      # the whole run for hours.
-      - run: python -m pytest packages/sdk-py/tests/ -q --timeout=120
+      # Same Makefile target `make test` uses, so the two cannot disagree about
+      # which tests exist. PYTEST_ADDOPTS' --timeout kills (and dumps the stack
+      # of) any single test that hangs, so a deadlock fails in seconds with a
+      # named culprit instead of blocking the whole run for hours.
+      - name: Run tests
+        env:
+          PYTEST_ADDOPTS: --timeout=120
+        run: make test-sdk-py
       - run: python -m mypy packages/sdk-py/dunetrace/ --ignore-missing-imports --no-error-summary --config-file packages/sdk-py/pyproject.toml
+
+  # `make test` runs twelve targets; this workflow's other jobs covered ten of
+  # them. test-schemas (132 tests) and test-schema-parity (4) ran in NO CI job
+  # at all — which is where dunetrace_schemas/metrics.py and the whole
+  # migrations.py runner live, i.e. the shared code every service boots on.
+  schemas:
+    name: Shared schemas
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: packages/schemas-py/pyproject.toml
+      # Two non-obvious installs, both load-bearing:
+      #   * the [metrics] extra (prometheus-client). dunetrace_schemas.metrics
+      #     degrades to no-op metrics without it and sets CollectorRegistry to
+      #     None, so tests/test_metrics.py — which calls it — fails 10 of its
+      #     17 tests rather than skipping. Nothing else in this repo installs
+      #     the extra; the services get prometheus-client via requirements.txt.
+      #   * PyYAML. dunetrace_schemas.detector_config imports yaml lazily and
+      #     falls back to SDK defaults when it is absent, so 16 of
+      #     test_detector_config.py's assertions fail on parsed values.
+      - run: pip install -e "packages/schemas-py[metrics]" PyYAML pytest pytest-timeout
+      # Both targets come from the Makefile so PYTHONPATH has one source of
+      # truth. test-schemas puts packages/sdk-py on it for test_sdk_parity.py,
+      # which imports dunetrace to check the generated enums still match; the
+      # SDK has no required dependencies, so the source tree is enough.
+      - name: Run schemas tests
+        env:
+          PYTEST_ADDOPTS: --timeout=120
+        run: make test-schemas
+      # Cross-service: parses (never imports) every service's DDL and fails if
+      # two of them declare the same table. No PYTHONPATH, stdlib + pytest.
+      - name: Run schema-parity tests
+        env:
+          PYTEST_ADDOPTS: --timeout=120
+        run: make test-schema-parity
+
+  # The pre-commit config carries checks that exist nowhere else in CI — bandit,
+  # detect-private-key and scripts/check_endpoint_conventions.py among them — so
+  # until now they only ran for contributors who had run `pre-commit install`,
+  # and `git commit --no-verify` skipped them for everyone.
+  #
+  # SKIP drops the hooks a dedicated job above already runs (and which would
+  # need that job's whole dependency install to work here). What this job adds
+  # over the rest of the workflow: bandit, gitleaks, detect-private-key,
+  # check-added-large-files, check-yaml/json/case-conflict/merge-conflict and
+  # the org_id-in-URL-path convention check.
+  #
+  # Caveat worth knowing: check-added-large-files and gitleaks both inspect the
+  # git INDEX (`gitleaks protect --staged`), which in a CI checkout is identical
+  # to HEAD — they run and pass here without examining anything. They stay
+  # local-commit guards. Everything else in the list genuinely runs.
+  pre-commit:
+    name: Pre-commit hooks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # Hook environments (ruff, bandit, the gitleaks Go binary) are expensive
+      # to build and change only when the config's pinned revs do.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+      # Pinned for the same reason ruff is above: an unpinned pre-commit can
+      # change hook semantics under untouched code.
+      - run: pip install pre-commit==4.6.0
+      - name: Run hooks
+        env:
+          SKIP: >-
+            ruff,ruff-format,validate-detector-docs,validate-detector-docs-test,
+            sdk-py-mypy,mcp-mypy,ts-typecheck,sdk-py-tests,schemas-py-tests,
+            ingest-tests,detector-tests,explainer-tests,alerts-tests,api-tests,
+            mcp-tests,sdk-ts-tests
+        run: pre-commit run --all-files --show-diff-on-failure
 
   services:
     name: ${{ matrix.service }}
@@ -66,30 +192,23 @@ jobs:
       matrix:
         include:
           - service: ingest
-            pythonpath: packages/sdk-py:packages/schemas-py:services/ingest
             requirements: services/ingest/requirements.txt
             extra: httpx pytest-asyncio
           - service: detector
-            pythonpath: packages/sdk-py:services/detector
             requirements: services/detector/requirements.txt
           - service: explainer
-            pythonpath: packages/sdk-py:services/explainer
             requirements: services/explainer/requirements.txt
           - service: alerts
-            pythonpath: packages/sdk-py:services/explainer:services/alerts
             requirements: services/alerts/requirements.txt
           - service: api
-            pythonpath: packages/sdk-py:services/explainer:services/api
             requirements: services/api/requirements.txt
           # audit Finding 35: semantic + integrations were EXCLUDED from CI, which
           # is why a broken requirements pin (F3) and packaging (F17) shipped
           # undetected. They are now tested like every other service.
           - service: semantic
-            pythonpath: packages/sdk-py:services/explainer:services/semantic
             requirements: services/semantic/requirements.txt
             extra: pytest-asyncio
           - service: integrations
-            pythonpath: packages/sdk-py:services/integrations
             requirements: services/integrations/requirements.txt
             extra: pytest-asyncio
     steps:
@@ -101,11 +220,16 @@ jobs:
           cache-dependency-path: ${{ matrix.requirements }}
       - run: pip install -r ${{ matrix.requirements }} pytest pytest-asyncio pytest-timeout ${{ matrix.extra || '' }}
       - run: pip install -e packages/sdk-py
+      # Calls the Makefile target so PYTHONPATH has exactly ONE source of truth.
+      # Duplicating it here is what let this workflow drift and miss
+      # packages/schemas-py, which broke the moment services began importing
+      # dunetrace_schemas (migrations, key hashing, scopes).
+      # PYTEST_ADDOPTS keeps the timeout that kills and dumps the stack of any
+      # single hung test.
       - name: Run tests
         env:
-          PYTHONPATH: ${{ matrix.pythonpath }}
-        # --timeout kills and dumps the stack of any single hung test.
-        run: python -m pytest services/${{ matrix.service }}/tests/ -v --timeout=120
+          PYTEST_ADDOPTS: --timeout=120
+        run: make test-${{ matrix.service }}
 
   mcp-server:
     name: MCP Server
@@ -151,3 +275,63 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build all service images (no push)
         run: docker compose build
+
+  # Schema ownership: a table touched by more than one service lives in
+  # migrations.py and nowhere else (see that module's docstring). This is a
+  # ratchet: scripts/schema_owners_baseline.json holds the current number of
+  # multi-owner tables / stray ADD COLUMNs and --check fails if either goes up.
+  # Lower the baseline with `python scripts/check_schema_owners.py --baseline`
+  # after moving a table into migrations; the target is 0. Stdlib only.
+  schema-ownership:
+    name: Schema ownership
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/check_schema_owners.py --check
+      - run: python -m unittest scripts.test_check_schema_owners
+
+  # Boot order is the failure mode the whole migration refactor exists to kill:
+  # policies.signature was declared by exactly one service while another's query
+  # selected it inside a try/except returning [], so a cold start in the wrong
+  # order silently disabled every runtime guardrail in the fleet. Nothing else
+  # in CI has a database at all — docker-build only runs `compose build`, which
+  # never starts a container — so a migration that fails only when a particular
+  # service boots first shipped undetected. scripts/verify_schema_boot_order.py
+  # existed for exactly this and was wired into nothing.
+  schema-boot-order:
+    name: Schema boot order (real Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dunetrace
+          POSTGRES_PASSWORD: dunetrace
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dunetrace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # The script boots every service's schema-init in turn, so it needs what
+      # each of them imports at that point: asyncpg, the shared schemas package
+      # and the SDK (explainer_svc and the detector both import dunetrace).
+      - run: pip install asyncpg pydantic PyYAML
+      - run: pip install -e packages/schemas-py -e packages/sdk-py
+      - name: Verify boot order, concurrency, idempotence and upgrade
+        env:
+          DATABASE_URL: postgresql://dunetrace:dunetrace@127.0.0.1:5432/postgres
+        run: make verify-boot-order-existing

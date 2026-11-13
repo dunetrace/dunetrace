@@ -19,8 +19,11 @@ of re-declaring it.
 
 - **No dependency on the `dunetrace` SDK package.** The SDK guarantees zero
   required dependencies of its own — it must not gain a transitive dependency on
-  `pydantic` through this package. `tests/test_sdk_parity.py` keeps the two
-  enum sets in sync via an explicit test, not an import.
+  `pydantic` through this package. The two enum sets are generated from one
+  source — `dunetrace_schemas/enum_source.py`, rendered into `enums.py` here and
+  `dunetrace/_enums.py` in the SDK by `scripts/gen_enums.py` (CI runs
+  `--check`) — and `tests/test_sdk_parity.py` remains as the backstop, not an
+  import.
 - **No dependency from the SDK's hot path onto this package either.** The SDK's
   `AgentEvent`/`FailureSignal`/`RunState` stay plain dataclasses — Pydantic v2
   construction, even with its Rust core, is measurably slower than raw

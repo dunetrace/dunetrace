@@ -13,7 +13,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.db.queries import (
     activate_pack,
     deactivate_pack,
@@ -74,16 +74,12 @@ async def get_org_packs(org_id: str = Depends(require_org)) -> List[EnabledPack]
     summary="Activate a pack for this org",
     status_code=201,
 )
-async def post_activate_pack(pack_name: str, org_id: str = Depends(require_org)) -> dict:
-    # org_id derived from require_org(), not a URL param — see comment on
-    # get_org_packs above. Authorization here is the same org-scoped API key
-    # every other write endpoint in this codebase accepts (POST /v1/policies,
-    # POST /v1/orgs/integrations/github, etc.) — there is no admin/owner role
-    # concept anywhere in this codebase's auth model (api_keys has no role
-    # column), so "requires admin" isn't enforceable today without inventing
-    # a role system disproportionate to a single per-org boolean toggle. Any
-    # valid key for this org can activate/deactivate a pack, matching every
-    # other org-scoped write endpoint.
+async def post_activate_pack(pack_name: str, org_id: str = Depends(require_scope("admin"))) -> dict:
+    # org_id derived from the caller's key, not a URL param — see comment on
+    # get_org_packs above. Activating a pack changes which detectors run for
+    # every agent in the org, so it takes the `admin` scope like every other
+    # org-wide config write (POST /v1/policies, POST /v1/orgs/integrations/*).
+    # An agent's own ingest-only key can list packs but not switch them.
     if not await pack_exists(pack_name):
         raise HTTPException(status_code=404, detail=f"Unknown pack: {pack_name!r}")
 
@@ -102,7 +98,7 @@ async def post_activate_pack(pack_name: str, org_id: str = Depends(require_org))
     summary="Deactivate a pack for this org",
     status_code=204,
 )
-async def delete_deactivate_pack(pack_name: str, org_id: str = Depends(require_org)):
+async def delete_deactivate_pack(pack_name: str, org_id: str = Depends(require_scope("admin"))):
     # org_id derived from require_org(), not a URL param — see comment on
     # get_org_packs above.
     deleted = await deactivate_pack(org_id, pack_name)

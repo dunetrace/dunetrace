@@ -42,6 +42,9 @@ agents; a text agent that never reads the attribute simply ignores it.
                            (str|None from params.reason); agent transfers the call
   inject_recovery_prompt — sets run.recovery_prompt (str, last-wins) from
                            params.prompt; agent speaks/prepends it next turn
+  slow_response_pace     — sets run.response_pace (str, last-wins) from params.pace
+                           (default "slow"); agent slows its turn (filler token
+                           while thinking, lower TTS rate) until it reads "normal"
 
 Human-in-the-loop action (Capability 2) — pairs with the before_tool_call
 trigger:
@@ -66,7 +69,21 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Required, TypedDict, cast
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    List,
+    Literal,
+    Optional,
+    Required,
+    Set,
+    Tuple,
+    TypedDict,
+    cast,
+)
+
+from dunetrace.remote_fetch import RemoteFetchState
 
 # Expression-based conditions (condition.match). Parser + immutable tree; the
 # evaluator lands in Phase 2. Re-exported here so callers keep importing from
@@ -80,6 +97,7 @@ from dunetrace.policies.expressions import (  # noqa: E402,F401
     FIELD_PREFIXES,
     MAX_DEPTH,
     Or,
+    _closest,
     parse_condition,
     parse_match_block,
 )
@@ -117,6 +135,7 @@ class PolicyAction(TypedDict, total=False):
             "stop_current_tts",
             "escalate_to_human",
             "inject_recovery_prompt",
+            "slow_response_pace",
             # Human-in-the-loop (Capability 2)
             "require_approval",
         ]
@@ -125,6 +144,37 @@ class PolicyAction(TypedDict, total=False):
 
 
 logger = logging.getLogger("dunetrace.policies")
+
+# Actions a REMOTE policy may only take when its signature verified.
+#
+# These are the ones that change what a customer's production agent does rather
+# than what Dunetrace records: halting a live run, blocking a tool call on a
+# human, handing the conversation to a person, rewriting the prompt. The stated
+# threat for policy signing is "a compromised or spoofed server halts a live
+# agent", and with no configured secret there is nothing to verify against — so
+# an unverifiable remote policy is downgraded to log-only rather than obeyed.
+#
+# Deliberately remote-only. A policy the customer registered in their own
+# process via dt.add_policy() is their own code and needs no signature.
+#
+# NOTE ON THE RESIDUAL RISK: signing is a shared HMAC secret, so a server that
+# is itself compromised holds the signing key and can still mint a valid stop
+# policy. Closing that needs asymmetric signing (server signs with a private
+# key, SDK verifies with a public one), which needs a crypto library — and the
+# core SDK is deliberately zero-dependency. What this constant buys is that a
+# party who cannot answer with a *correctly signed* payload — a spoofed
+# endpoint, a hijacked DNS entry, a MITM — cannot stop anyone's agent.
+ENFORCING_ACTIONS = frozenset(
+    {
+        "stop",
+        "require_approval",
+        "escalate_to_human",
+        "stop_current_tts",
+        "switch_model",
+        "inject_prompt",
+        "inject_recovery_prompt",
+    }
+)
 
 # ── Token pricing (USD per token, as of 2025) ─────────────────────────────────
 # Matched by prefix — longest match wins. Falls back to _DEFAULT_PRICE.
@@ -137,9 +187,38 @@ _MODEL_PRICES: Dict[str, Dict[str, float]] = {
     "claude-3-5-haiku": {"input": 0.80e-6, "output": 4.00e-6},
     "claude-3-opus": {"input": 15.00e-6, "output": 75.00e-6},
     "gpt-4o-mini": {"input": 0.15e-6, "output": 0.60e-6},
-    "gpt-4o": {"input": 5.00e-6, "output": 15.00e-6},
+    # 2.50/10.00, matching explainer_svc/cost.py. The SDK table carried the
+    # original May-2024 launch price long after it was cut, so a cost_usd
+    # policy threshold evaluated in-process fired at half the real spend
+    # while the server-side rollups for the same run disagreed.
+    "gpt-4o": {"input": 2.50e-6, "output": 10.00e-6},
     "gpt-4-turbo": {"input": 10.00e-6, "output": 30.00e-6},
     "gpt-3.5-turbo": {"input": 0.50e-6, "output": 1.50e-6},
+    # Mistral, verified against https://mistral.ai/pricing/api on 2026-08-08.
+    # Order matters here: _price_for() walks this dict in insertion order and
+    # falls back to a substring test, so "codestral-embed" has to be seen
+    # before "codestral" or the chat rate would win for the embedding model.
+    # Note mistral.ai/pricing (the FAQ page, not /pricing/api) still quotes the
+    # retired $2/$6 Large rate. The per-model cards agree with the numbers here.
+    # Reasoning (magistral) and coding (devstral) families. Verified against
+    # https://mistral.ai/pricing/api on 2026-08-09. No substring collision with
+    # the mistral-* rows: "magistral" does not contain "mistral".
+    "magistral-medium": {"input": 2.00e-6, "output": 5.00e-6},
+    "magistral-small": {"input": 0.50e-6, "output": 1.50e-6},
+    "devstral-medium": {"input": 0.40e-6, "output": 2.00e-6},
+    "devstral-small": {"input": 0.10e-6, "output": 0.30e-6},
+    "mistral-medium": {"input": 1.50e-6, "output": 7.50e-6},
+    "mistral-large": {"input": 0.50e-6, "output": 1.50e-6},
+    "mistral-small": {"input": 0.15e-6, "output": 0.60e-6},
+    "ministral-3b": {"input": 0.10e-6, "output": 0.10e-6},
+    "ministral-8b": {"input": 0.15e-6, "output": 0.15e-6},
+    "ministral-14b": {"input": 0.20e-6, "output": 0.20e-6},
+    "codestral-embed": {"input": 0.15e-6, "output": 0.0},
+    "codestral": {"input": 0.30e-6, "output": 0.90e-6},
+    # Embeddings bill on input only, so output is 0 rather than absent. Leaving
+    # it out would fall through to _DEFAULT_PRICE and charge 12.00e-6 per
+    # output token against a response that has none.
+    "mistral-embed": {"input": 0.10e-6, "output": 0.0},
 }
 _DEFAULT_PRICE: Dict[str, float] = {"input": 3.00e-6, "output": 12.00e-6}
 
@@ -211,6 +290,262 @@ _OPERATORS: Dict[str, Any] = {
 }
 
 
+# ── Registration-time condition validation ────────────────────────────────────
+#
+# Every "never fires" condition below used to register cleanly and then evaluate
+# to False on every step, forever: `_legacy_matches` turns an unknown trigger
+# (metrics.get -> None), an unknown operator (_OPERATORS.get -> None), and a
+# TypeError from comparing mismatched types into the same silent False. A policy
+# built that way looks correct in the dashboard, reports as enabled, and prevents
+# nothing. These checks move that failure to registration time, where a human is
+# looking. Same principle as the require_approval/before_tool_call pairing check
+# in the API's routers/policies.py: dead config is rejected, not tolerated.
+
+#: Triggers `build_metrics()` (plus the two special cases) can actually produce.
+#: The API imports this rather than keeping its own copy — a trigger accepted by
+#: one and unknown to the other is a policy that stores fine and never fires.
+VALID_TRIGGERS: FrozenSet[str] = frozenset(
+    {
+        "tool_call_count",
+        "step_count",
+        "cost_usd",
+        "error_count",
+        "finish_reason",
+        "llm_latency_ms",
+        "signal",
+        # Not in build_metrics: supplied per-call by find_approval_policy().
+        "before_tool_call",
+        # Sentinel for a pure-expression policy; the flat fields are a no-op.
+        "expression",
+    }
+)
+
+#: The mode a policy has unless it says otherwise. Enforcing, deliberately: a
+#: guardrail that does nothing by default is the failure this work removes.
+DEFAULT_MODE = "enforcing"
+DRY_RUN_MODE = "dry_run"
+VALID_MODES: FrozenSet[str] = frozenset({DEFAULT_MODE, DRY_RUN_MODE})
+
+
+#: Derived from the operator table itself, so the two can never disagree.
+VALID_OPERATORS: FrozenSet[str] = frozenset(_OPERATORS)
+
+#: Triggers whose metric is a list rather than a scalar. `contains` is the only
+#: operator that means anything against one — see _reject_list_trigger_operator.
+LIST_VALUED_TRIGGERS: FrozenSet[str] = frozenset({"signal"})
+
+#: What `_legacy_matches` uses when a condition omits `operator`. Validated as if
+#: it had been written out, so {"trigger": "signal", "value": "TOOL_LOOP"} is
+#: rejected too — it is a `gt` against a list, i.e. just as dead.
+DEFAULT_OPERATOR = "gt"
+
+#: Symbolic spellings, which policies do not accept. Custom detectors DO use
+#: these (`_VALID_OPERATORS` in api_svc/routers/custom_detectors.py is
+#: {">=", "<=", ">", "<", "==", "!="}), so a user moving between the two
+#: features reaches for them naturally. difflib will not connect ">" to "gt".
+_OPERATOR_SYMBOL_HINTS: Dict[str, str] = {
+    ">": "gt",
+    ">=": "gte",
+    "<": "lt",
+    "<=": "lte",
+    "==": "eq",
+    "!=": "neq",
+    "=": "eq",
+    "<>": "neq",
+}
+
+
+class PolicyConfigError(ValueError):
+    """Raised at policy registration for a condition that can never fire (or
+    that fires unconditionally). The message names the fix, not just the fault.
+
+    A ValueError like ExpressionError, its sibling for malformed `match` blocks.
+    PolicyEngine.load() catches both and refuses to install the policy rather
+    than letting a remote push seed a dead guardrail.
+    """
+
+
+def _reject_list_trigger_operator(trigger: str, operator: str, value: Any, where: str) -> None:
+    """Guard the one trigger whose metric is a list (`signal`).
+
+    Scoped deliberately to a **string** `value`, which is the documented and
+    universally-used form: every doc, example and dashboard hint writes a
+    failure-type name as a bare string. A list value is left permissive because
+    it is genuinely live — `["TOOL_LOOP"] == ["TOOL_LOOP"]` is True — just
+    order-sensitive and fragile. Rejecting that too would be guessing at intent;
+    rejecting a string is stating a fact.
+    """
+    if trigger not in LIST_VALUED_TRIGGERS or operator == "contains":
+        return
+    if not isinstance(value, str):
+        return
+    if operator == "neq":
+        # Not a no-op — the dangerous direction. [] != "TOOL_LOOP" is True, so
+        # this matches at the FIRST policy check of every run, signals or not.
+        problem = (
+            f"operator {operator!r} matches on every evaluation, so this policy "
+            f"fires on every run — including runs where no signal was detected "
+            f"at all"
+        )
+    elif operator == "eq":
+        problem = f"operator {operator!r} compares that list to a string and can never match"
+    else:
+        problem = (
+            f"operator {operator!r} compares a list to a string, which raises "
+            f"TypeError and evaluates as no match — it can never fire"
+        )
+    raise PolicyConfigError(
+        f"Policy{where}: trigger {trigger!r} produces a list of failure types; "
+        f"{problem}. Use 'contains' with the failure type name, e.g. "
+        f'{{"trigger": "{trigger}", "operator": "contains", "value": "{value}"}}.'
+    )
+
+
+#: Expression prefixes that parse and validate but have no runtime source. The
+#: sole EvaluationContext construction (run_context.py::_build_eval_context)
+#: passes args/run/event only, so these two always resolve absent and any
+#: comparison against them is False forever. They were added ahead of a
+#: server-side metadata channel that does not exist yet; until it does, a policy
+#: referencing them registers, reports enabled, and prevents nothing.
+UNAVAILABLE_PREFIXES: FrozenSet[str] = frozenset({"agent", "org"})
+
+#: The only trigger whose evaluation supplies ``args``. find_approval_policy()
+#: builds a context carrying the call's raw arguments; the step-level path
+#: (run_context.py:1311) passes none, so ``args.*`` is absent everywhere else.
+ARGS_TRIGGER: str = "before_tool_call"
+
+#: ``before_tool_call`` and ``require_approval`` are each other's only partner.
+#: find_approval_policy() filters on BOTH, and ``before_tool_call`` is not in
+#: build_metrics(), so either half alone can never fire. The Customer API
+#: already enforced this pairing (routers/policies.py); the SDK did not, so the
+#: same policy was rejected from the dashboard and accepted from code.
+APPROVAL_ACTION: str = "require_approval"
+
+
+def validate_policy_semantics(
+    condition: Any,
+    action: Any,
+    match_expr: "Optional[ConditionExpression]",
+    *,
+    policy_name: str = "",
+    downgraded_from: Optional[str] = None,
+) -> None:
+    """Raise PolicyConfigError for a policy that parses but can never enforce.
+
+    ``validate_condition`` catches an unfireable *flat* condition. This catches
+    the three ways a fully valid condition still never fires, each of which
+    needs more than the flat fields to see: the expression's field prefixes, the
+    prefix-to-trigger relationship, and the trigger-to-action pairing.
+
+    Same contract as the rest of registration-time validation: a policy that
+    cannot fire is refused here, where a human is reading the error, rather than
+    installed and silently inert. The user's trust is in the absence of an
+    event, so an inert policy is the worst thing this engine can produce.
+    """
+    where = f" {policy_name!r}" if policy_name else ""
+    trigger = (condition or {}).get("trigger") if isinstance(condition, dict) else None
+    action_type = (action or {}).get("type", "log") if isinstance(action, dict) else "log"
+
+    if match_expr is not None:
+        prefixes = {path.split(".", 1)[0] for path in match_expr.field_paths()}
+
+        unavailable = sorted(prefixes & UNAVAILABLE_PREFIXES)
+        if unavailable:
+            named = ", ".join(f"{p}.*" for p in unavailable)
+            raise PolicyConfigError(
+                f"Policy{where}: condition references {named}, which is not available "
+                f"at runtime. Nothing populates {'it' if len(unavailable) == 1 else 'them'}, "
+                f"so every comparison evaluates as absent and this policy can never fire. "
+                f"Available prefixes: args.* (with the {ARGS_TRIGGER!r} trigger), run.*, "
+                f"event.*. Rewrite the condition against one of those, or drop the clause."
+            )
+
+        if "args" in prefixes and trigger != ARGS_TRIGGER:
+            raise PolicyConfigError(
+                f"Policy{where}: condition references args.*, but args is only supplied "
+                f"at the {ARGS_TRIGGER!r} gate and this policy triggers on {trigger!r}. "
+                f"Every args comparison evaluates as absent here, so this policy can "
+                f'never fire. Either set "trigger": "{ARGS_TRIGGER}" (with action '
+                f"{APPROVAL_ACTION!r}), or rewrite the clause against run.* / event.*."
+            )
+
+    # A downgraded policy is inert by design, and that is allowed *because it
+    # is flagged*. load() rewrites an unverifiable require_approval to log,
+    # which trips the pairing rule below; rejecting it there would delete the
+    # policy outright and change downgrade behaviour. The distinction this
+    # phase draws is not inert vs enforcing, it is inert-and-invisible vs
+    # inert-and-labelled. `downgraded_from` is the label, the API reports it as
+    # `degraded`, and the approval gate ignores it either way.
+    if downgraded_from is not None:
+        return
+
+    if trigger == ARGS_TRIGGER and action_type != APPROVAL_ACTION:
+        raise PolicyConfigError(
+            f"Policy{where}: trigger {ARGS_TRIGGER!r} only reaches the approval gate, "
+            f"which handles action {APPROVAL_ACTION!r} and nothing else — action "
+            f"{action_type!r} is never consulted there, and {ARGS_TRIGGER!r} is not a "
+            f"step-level metric, so this policy can never fire. Use action "
+            f"{APPROVAL_ACTION!r}, or trigger on a step-level metric "
+            f"(tool_call_count, step_count, cost_usd, error_count, signal, ...)."
+        )
+
+    if action_type == APPROVAL_ACTION and trigger != ARGS_TRIGGER:
+        raise PolicyConfigError(
+            f"Policy{where}: action {APPROVAL_ACTION!r} is only executed by the "
+            f"approval gate, which considers {ARGS_TRIGGER!r} policies only — this one "
+            f"triggers on {trigger!r}, so it can never fire. Set "
+            f'"trigger": "{ARGS_TRIGGER}" with the tool name as the value.'
+        )
+
+
+def validate_condition(condition: Any, *, policy_name: str = "") -> None:
+    """Raise PolicyConfigError if this flat condition can never fire as written.
+
+    Checks, in order: the trigger is one the engine can supply a metric for; the
+    operator is one the engine implements; and the operator means something
+    against that trigger's metric type. The `match` block is NOT checked here —
+    that is parse_condition's job, which raises ExpressionError.
+
+    Only the flat condition is validated, so a pure-expression policy
+    (trigger="expression") returns after the trigger check.
+    """
+    if not isinstance(condition, dict):
+        raise PolicyConfigError(
+            f"A policy condition must be a mapping, got {type(condition).__name__}."
+        )
+    where = f" {policy_name!r}" if policy_name else ""
+
+    trigger = condition.get("trigger")
+    if trigger not in VALID_TRIGGERS:
+        hint_word = _closest(trigger, VALID_TRIGGERS)
+        hint = f" Did you mean {hint_word!r}?" if hint_word else ""
+        raise PolicyConfigError(
+            f"Policy{where}: unknown trigger {trigger!r}. A policy on an unknown "
+            f"trigger has no metric to read and can never fire. Valid triggers: "
+            f"{sorted(VALID_TRIGGERS)}.{hint}"
+        )
+
+    if trigger == "expression":
+        # The flat operator/value are ignored for this trigger; the whole
+        # condition lives in the match block, validated by parse_condition.
+        return
+
+    raw_operator = condition.get("operator")
+    if raw_operator is not None and raw_operator not in VALID_OPERATORS:
+        hint_word = _OPERATOR_SYMBOL_HINTS.get(raw_operator) or _closest(
+            raw_operator, VALID_OPERATORS
+        )
+        hint = f" Did you mean {hint_word!r}?" if hint_word else ""
+        raise PolicyConfigError(
+            f"Policy{where}: unknown operator {raw_operator!r}. An unrecognised "
+            f"operator is skipped at evaluation, so this policy can never fire. "
+            f"Valid operators: {sorted(VALID_OPERATORS)}.{hint}"
+        )
+
+    operator = raw_operator if raw_operator is not None else DEFAULT_OPERATOR
+    _reject_list_trigger_operator(trigger, operator, condition.get("value"), where)
+
+
 # ── Core data types ───────────────────────────────────────────────────────────
 
 
@@ -227,15 +562,45 @@ class ApprovalDenied(RuntimeError):
     """Raised when a human-in-the-loop approval (Capability 2) resolves to
     anything other than 'granted' — an explicit deny, or a timeout (which is
     fail-closed: no human decided in time, so the guarded tool is blocked).
-    `reason` is the terminal approval status ('denied' or 'timeout')."""
 
-    def __init__(self, tool_name: str, reason: str, approval_id: int, message: str = "") -> None:
+    Attributes:
+      status      the terminal approval status: "denied" | "timeout"
+      note        what the deciding human wrote, or None. None on a timeout by
+                  construction — nobody decided, so nobody wrote anything.
+      decided_by  who decided, when the deciding surface attributed it.
+      tool_name / approval_id
+
+    `note` is the whole point of catching this: it is a human correction
+    delivered into the run with provenance ("wrong Chen — it's Sarah,
+    CUST_8834"). Feed it into the next planning step and retry *within the same
+    run*. Dunetrace does not auto-append it to the prompt — steering stays the
+    agent's job, consistent with every other advisory action.
+
+    Naming note for anyone reading a diff: this attribute was `reason` and held
+    the status. It is `status` now, and `note` is the human's text. One name per
+    concept, no alias — `reason` was the wrong word the moment grants started
+    carrying notes too.
+    """
+
+    def __init__(
+        self,
+        tool_name: str,
+        status: str,
+        approval_id: int,
+        message: str = "",
+        *,
+        note: Optional[str] = None,
+        decided_by: Optional[str] = None,
+    ) -> None:
         self.tool_name = tool_name
-        self.reason = reason  # "denied" | "timeout"
+        self.status = status  # "denied" | "timeout"
         self.approval_id = approval_id
-        super().__init__(
-            message or f"Approval for tool '{tool_name}' was not granted (reason: {reason})"
-        )
+        self.note = note
+        self.decided_by = decided_by
+        detail = f"status: {status}"
+        if note:
+            detail += f"; note: {note}"
+        super().__init__(message or f"Approval for tool '{tool_name}' was not granted ({detail})")
 
 
 @dataclass
@@ -254,11 +619,49 @@ class Policy:
     match_expr: Optional[ConditionExpression] = field(
         default=None, init=False, compare=False, repr=False
     )
+    #: The action this policy asked for, when load() downgraded it to log-only
+    #: for want of a verifiable signature. None on every policy that was not
+    #: downgraded, including deliberately log-only ones.
+    #:
+    #: The downgrade rewrites `action` in place. Without this field the only
+    #: evidence was one WARNING on a daemon thread at fetch time, so the
+    #: dashboard showed a policy whose action IS log and no way to tell it from
+    #: one the user chose to make log-only. Degraded enforcement that looks
+    #: identical to configured enforcement is the failure this phase exists to
+    #: remove.
+    downgraded_from: Optional[str] = field(default=None, compare=False)
+    #: "enforcing" (default) or "dry_run". A dry-run policy evaluates its
+    #: condition exactly as an enforcing one does and records what it would
+    #: have done, then executes nothing. Signed from v3 — see _policy_canonical.
+    mode: str = DEFAULT_MODE
+
+    @property
+    def is_dry_run(self) -> bool:
+        return self.mode == DRY_RUN_MODE
+
+    @property
+    def is_degraded(self) -> bool:
+        """True when this policy is running weaker than it was configured to."""
+        return self.downgraded_from is not None
 
     def __post_init__(self) -> None:
-        # Fail-fast: a malformed `match` raises ExpressionError here (at load),
-        # never at fire time. PolicyEngine.load() catches and skips such policies.
+        # Fail-fast: a condition that can never fire raises PolicyConfigError and
+        # a malformed `match` raises ExpressionError, both here (at load) rather
+        # than at fire time — which for these was never. This is the single choke
+        # point for every SDK registration path: dt.add_policy(), from_dict() on
+        # the remote-fetch path, and direct Policy(...) construction (it is in
+        # dunetrace.__all__). PolicyEngine.load() catches both and skips.
+        validate_condition(self.condition, policy_name=self.name)
         self.match_expr = parse_condition(dict(self.condition), policy_name=self.name)
+        # Runs last because it needs the parsed expression (for its field
+        # prefixes) and the action, neither of which validate_condition sees.
+        validate_policy_semantics(
+            self.condition,
+            self.action,
+            self.match_expr,
+            policy_name=self.name,
+            downgraded_from=self.downgraded_from,
+        )
 
     @property
     def key(self) -> str:
@@ -312,6 +715,8 @@ class Policy:
             action=cast(PolicyAction, dict(d.get("action") or {})),
             enabled=bool(d.get("enabled", True)),
             priority=int(d.get("priority", 100)),
+            downgraded_from=d.get("_downgraded_from"),
+            mode=d.get("mode") or DEFAULT_MODE,
         )
 
 
@@ -334,15 +739,28 @@ class Policy:
 # legacy policies stay v1 forever (byte-identical), so old signatures and older
 # SDKs keep working. Verification is driven by each policy's own sig_version.
 
-CURRENT_SIG_VERSION = 2
+#   v3 — v2 plus the policy's `mode`. Needed because mode decides whether the
+#        policy enforces at all: left unsigned, an attacker who can reach the
+#        policy feed could flip a signed enforcing policy to dry_run and
+#        silently disarm it, which is precisely the failure this engine is
+#        being hardened against. Signed only when mode is non-default, so every
+#        already-signed policy stays byte-identical at v1/v2.
+
+CURRENT_SIG_VERSION = 3
 
 
-def sig_version_for_condition(condition: dict) -> int:
-    """The minimum canonical-form version that can represent this condition.
-    A condition using the new `match` block signs as v2; everything else stays
-    v1 (byte-identical to pre-feature policies)."""
+def sig_version_for_condition(condition: dict, mode: str = DEFAULT_MODE) -> int:
+    """The minimum canonical-form version that can represent this policy.
+
+    A non-default mode signs as v3, a `match` block as v2, everything else
+    stays v1 (byte-identical to pre-feature policies). Taking the lowest
+    version that can carry the policy is what lets old signatures keep
+    verifying while new fields are still authenticated.
+    """
+    if mode and mode != DEFAULT_MODE:
+        return 3
     if isinstance(condition, dict) and condition.get("match") is not None:
-        return CURRENT_SIG_VERSION
+        return 2
     return 1
 
 
@@ -355,6 +773,7 @@ def _policy_canonical(
     action: dict,
     enabled: Any,
     priority: Any,
+    mode: str = DEFAULT_MODE,
 ) -> str:
     # Null-byte separator — safe against colons in agent_id or name.
     fields = [
@@ -366,6 +785,8 @@ def _policy_canonical(
         str(enabled),
         str(priority),
     ]
+    if version >= 3:
+        fields.append(mode or DEFAULT_MODE)
     if version >= 2:
         fields.insert(0, "v%d" % version)  # authenticated domain separation
     return "\x00".join(fields)
@@ -374,10 +795,11 @@ def _policy_canonical(
 def _verify_policy_signature(policy: dict, secret: str) -> bool:
     """Return True if the policy's HMAC-SHA256 signature matches. Always True when secret is empty.
 
-    Policies with an empty signature and a non-empty secret are treated as unsigned
-    (e.g., created before signing was enabled) — they are loaded with a warning rather
-    than silently dropped, to support zero-downtime migration when POLICY_SIGNING_SECRET
-    is first set.
+    An empty signature with a non-empty secret is a FAILURE, not a migration
+    case. Accepting unsigned policies "during migration" meant an attacker who
+    could answer the policy fetch simply omitted the signature field and was
+    obeyed — the verification was optional for exactly the party it was meant
+    to constrain.
 
     The policy's own ``sig_version`` (default 1, for legacy policies with no such
     field) selects the canonical form — so v1-signed policies keep verifying under
@@ -388,19 +810,34 @@ def _verify_policy_signature(policy: dict, secret: str) -> bool:
         return True
     actual_sig = policy.get("signature") or ""
     if not actual_sig:
-        # Unsigned policy — emit a warning but allow through during migration.
-        # Set POLICY_SIGNING_SECRET and re-save all policies to enforce verification.
         logger.warning(
-            "Policy '%s' (id=%s) has no signature — loaded without verification. "
-            "Re-save this policy to sign it.",
+            "Policy '%s' (id=%s) is unsigned but a policy secret is configured — "
+            "rejected. Re-save the policy so the server signs it.",
             policy.get("name"),
             policy.get("id"),
         )
-        return True
+        return False
     try:
         version = int(policy.get("sig_version", 1) or 1)
     except (TypeError, ValueError):
         version = 1
+    mode = policy.get("mode") or DEFAULT_MODE
+    if mode != DEFAULT_MODE and version < 3:
+        # mode is only bound into the hash from v3. A non-default mode carried
+        # on a v1/v2 signature is therefore unauthenticated, and honouring it
+        # would let anyone who can reach the policy feed flip a signed
+        # enforcing policy to dry_run and silently disarm it. Refuse rather
+        # than guess which half the operator meant.
+        logger.warning(
+            "Policy '%s' (id=%s) declares mode %r on a v%d signature, which does not "
+            "cover mode — rejected. Re-save the policy so the server signs it at v3.",
+            policy.get("name"),
+            policy.get("id"),
+            mode,
+            version,
+        )
+        return False
+
     canonical = _policy_canonical(
         version,
         policy.get("id", ""),
@@ -410,6 +847,7 @@ def _verify_policy_signature(policy: dict, secret: str) -> bool:
         policy.get("action", {}),
         policy.get("enabled", True),
         policy.get("priority", 100),
+        mode,
     )
     expected_sig = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected_sig, actual_sig)
@@ -418,18 +856,36 @@ def _verify_policy_signature(policy: dict, secret: str) -> bool:
 # ── Engine ────────────────────────────────────────────────────────────────────
 
 
-class PolicyEngine:
+class PolicyEngine(RemoteFetchState):
     """
     Thread-safe policy evaluator. One instance lives on the Dunetrace client
     and is shared across all concurrent runs.
+
+    The remote-fetch bookkeeping (needs_fetch / begin_fetch / mark_fetched /
+    mark_fetch_failed / end_fetch / bundle_status, the 60s TTL and the
+    2s→15s failure backoff) is inherited from ``RemoteFetchState`` and shared
+    with the detector-config store, so the two refreshes cannot drift.
     """
 
-    _FETCH_TTL = 60.0  # seconds between remote refreshes per agent_id
-
     def __init__(self) -> None:
+        super().__init__()  # _lock, _fetch_times, _fetch_failures, _fetch_in_flight
         self._policies: List[Policy] = []
-        self._lock: threading.Lock = threading.Lock()
-        self._fetch_times: Dict[str, float] = {}  # agent_id → last fetch monotonic
+        # Remote policies keyed by the agent_id they were fetched FOR, not by
+        # the agent_id on the policy — a wildcard ("*") policy comes back on
+        # every agent's fetch and so appears under several keys. Keeping them
+        # separate is what stops one agent's fetch from wiping another's: the
+        # fetch is already per-agent (see needs_fetch/mark_fetched), so a load
+        # that replaced every remote policy left each agent in a two-agent
+        # process unguarded for a fetch interval at a time, alternating.
+        self._remote_by_agent: Dict[str, List[Policy]] = {}
+        #: Last reported degraded set, so _report_degraded() logs on change
+        #: rather than on every 60s refresh.
+        self._degraded_signature: Tuple = ()
+        #: True when any loaded policy is in dry-run mode. Cached because the
+        #: RunContext asks on every policy tick to decide whether to install
+        #: the evaluation observer, and scanning the list there would put an
+        #: O(policies) walk on the hot path.
+        self._has_dry_run: bool = False
         self._generation: int = (
             0  # incremented on every load/add so RunContext can detect staleness
         )
@@ -440,10 +896,18 @@ class PolicyEngine:
         with self._lock:
             self._policies.append(policy)
             self._policies.sort(key=lambda p: p.priority)
+            self._refresh_dry_run_flag()
             self._generation += 1
 
-    def load(self, raw: List[dict], secret: str = "") -> None:
-        """Replace remote-sourced policies with a fresh list from the API.
+    def load(self, raw: List[dict], secret: str = "", agent_id: str = "") -> None:
+        """Replace the remote-sourced policies **for one agent** with a fresh
+        list from the API.
+
+        agent_id is the agent the fetch was made for. Policies fetched for other
+        agents are untouched, so a process running several agents keeps every
+        agent's guardrails loaded at once. Omitting it keeps the historical
+        replace-everything behaviour, which is correct for a single-agent
+        process and for callers that hold no per-agent notion.
 
         When ``secret`` is set, each policy's HMAC-SHA256 signature is verified
         before it is loaded. Policies that fail verification are skipped and logged
@@ -459,8 +923,47 @@ class PolicyEngine:
                         p.get("id"),
                     )
                     continue
+            if not secret:
+                action_type = (p.get("action") or {}).get("type", "log")
+                if action_type in ENFORCING_ACTIONS:
+                    # No secret means no way to tell this policy came from the
+                    # real server, and this action would change what the
+                    # customer's agent does. Record it, don't obey it.
+                    #
+                    # The per-policy warning is emitted by _report_degraded(),
+                    # not here: this loop runs on every 60s refresh and is
+                    # per-agent, so anything it kept to deduplicate would be
+                    # clobbered by the next agent's load. Warning every minute
+                    # about a steady state trains people to filter the message,
+                    # which costs more than the message is worth.
+                    p = {
+                        **p,
+                        "action": {"type": "log"},
+                        # Keep the evidence. The action is genuinely log-only
+                        # now, but the record has to say it was not asked for.
+                        "_downgraded_from": action_type,
+                    }
             try:
                 verified.append(Policy.from_dict(p))
+            except PolicyConfigError as exc:
+                # A condition that can never fire (or always fires). Refuse to
+                # install it rather than seeding a guardrail that prevents
+                # nothing — installing it would be indistinguishable, from the
+                # dashboard, from a working policy.
+                #
+                # ERROR, and deliberately not a raise: this runs on the daemon
+                # thread _fetch_policies() starts, under an
+                # `except Exception: logger.debug(...)` in client.py. Raising
+                # here would be swallowed at DEBUG and kill the fetch for every
+                # other policy in the batch — reproducing the silence this whole
+                # check exists to remove.
+                logger.error(
+                    "Remote policy '%s' (id=%s) was NOT installed — its condition can "
+                    "never fire as written: %s",
+                    p.get("name"),
+                    p.get("id"),
+                    exc,
+                )
             except ExpressionError as exc:
                 # A malformed condition.match block — skip this one policy rather
                 # than failing the whole load. A bad policy never reaches runtime.
@@ -473,18 +976,100 @@ class PolicyEngine:
 
         with self._lock:
             local = [p for p in self._policies if p.id is None]
-            self._policies = sorted(local + verified, key=lambda p: p.priority)
+            if agent_id:
+                self._remote_by_agent[agent_id] = verified
+            else:
+                self._remote_by_agent = {"": verified}
+            # Dedupe by policy id: a wildcard policy is returned by every
+            # agent's fetch, and evaluating it twice would double-count.
+            remote: List[Policy] = []
+            seen_ids = set()
+            for bucket in self._remote_by_agent.values():
+                for policy in bucket:
+                    if policy.id is not None and policy.id in seen_ids:
+                        continue
+                    if policy.id is not None:
+                        seen_ids.add(policy.id)
+                    remote.append(policy)
+            self._policies = sorted(local + remote, key=lambda p: p.priority)
+            self._refresh_dry_run_flag()
             self._generation += 1
-        logger.debug("Policies loaded: %d total (%d remote)", len(self._policies), len(verified))
+        logger.debug(
+            "Policies loaded for %r: %d total (%d remote across %d agent(s))",
+            agent_id or "*",
+            len(self._policies),
+            len(remote),
+            len(self._remote_by_agent),
+        )
+        self._report_degraded()
 
-    def mark_fetched(self, agent_id: str) -> None:
-        self._fetch_times[agent_id] = time.monotonic()
+    def degraded(self) -> List["Policy"]:
+        """Policies running weaker than configured, highest priority first.
 
-    def needs_fetch(self, agent_id: str) -> bool:
-        last = self._fetch_times.get(agent_id)
-        if last is None:
-            return True
-        return (time.monotonic() - last) > self._FETCH_TTL
+        The API and dashboard read this to distinguish a policy that is
+        log-only because someone chose that from one that is log-only because
+        its origin could not be verified.
+        """
+        with self._lock:
+            return [p for p in self._policies if p.is_degraded]
+
+    def _report_degraded(self) -> None:
+        """One summary line whenever the degraded set changes.
+
+        load() runs on every refresh (60s), so logging unconditionally would
+        bury the signal in its own repetition and train people to filter it
+        out. Keyed on the set, so the first load reports and a steady state
+        stays quiet, but a policy newly degrading is announced immediately.
+        """
+        degraded = self.degraded()
+        signature = tuple(sorted((p.id, p.name, p.downgraded_from) for p in degraded))
+        with self._lock:
+            if signature == self._degraded_signature:
+                return
+            previous = set(self._degraded_signature)
+            self._degraded_signature = signature
+        if not degraded:
+            logger.info("Policy enforcement restored: no policies are running degraded.")
+            return
+        for policy in degraded:
+            if (policy.id, policy.name, policy.downgraded_from) in previous:
+                continue
+            logger.warning(
+                "Remote policy '%s' (id=%s) requests %r but no policy secret is "
+                "configured, so its origin cannot be verified — downgraded to "
+                "log-only. Set DUNETRACE_POLICY_SECRET (and POLICY_SIGNING_SECRET "
+                "on the server) to enable enforcing remote policies.",
+                policy.name,
+                policy.id,
+                policy.downgraded_from,
+            )
+        logger.warning(
+            "%d of %d policies are running DEGRADED (downgraded to log-only because "
+            "their origin cannot be verified): %s. These evaluate and record but "
+            "enforce nothing. Set DUNETRACE_POLICY_SECRET on this agent and "
+            "POLICY_SIGNING_SECRET on the server to restore enforcement.",
+            len(degraded),
+            len(self._policies),
+            ", ".join(f"{p.name!r} (wanted {p.downgraded_from})" for p in degraded),
+        )
+
+    def has_dry_run(self) -> bool:
+        """True when any loaded policy is in dry-run mode.
+
+        Dry-run verdicts are the feature's entire output, so they cannot be
+        gated behind the evaluation-reporting opt-in the way ordinary
+        observability is. This is what tells the RunContext to install the
+        observer regardless.
+        """
+        return self._has_dry_run
+
+    def _refresh_dry_run_flag(self) -> None:
+        self._has_dry_run = any(p.is_dry_run for p in self._policies)
+
+    def has_remote_bundle(self, agent_id: str) -> bool:
+        """True once any remote load (network or cache) has run for ``agent_id``."""
+        with self._lock:
+            return agent_id in self._remote_by_agent
 
     def __len__(self) -> int:
         with self._lock:

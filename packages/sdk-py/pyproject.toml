@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace"
-version = "0.5.1"
-description = "Real-time monitoring for AI agents"
+version = "0.5.7"
+description = "The runtime reliability layer for AI agents."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
-authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]
-keywords = ["ai", "agents", "observability", "llm", "monitoring"]
+authors = [{ name = "Dunetrace UG (haftungsbeschränkt)", email = "vikas@dunetrace.com" }]
+keywords = ["ai", "agents", "observability", "llm", "monitoring", "runtime", "agent-reliability"]
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Development Status :: 4 - Beta",
@@ -29,9 +29,14 @@ dependencies = []
 langchain = ["langchain>=1.0", "langgraph>=0.2"]
 haystack = ["haystack-ai>=2.0"]
 openai-agents = ["openai-agents>=0.1,<1.0"]
+# v2 only. v2.0 moved every module under mistralai.client and dropped the
+# top-level __init__.py, so the v1 import paths the patcher targets don't exist.
+mistral = ["mistralai>=2.0"]
 otel = [
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
+    "opentelemetry-api>=1.28.0",
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
 ]
 dev = [
     "pytest>=7",

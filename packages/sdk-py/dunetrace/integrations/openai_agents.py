@@ -149,6 +149,23 @@ class DunetraceTracingProcessor(TracingProcessor):  # type: ignore[misc]
         self, event_type: Any, ctx: _RunCtx, payload: dict, step: Optional[int] = None
     ) -> None:
         """Emit one event, swallowing any exception so the agent is never broken."""
+        # A terminal closes the run, so any stream the caller abandoned must
+        # report itself FIRST — otherwise _StreamProxy.__del__ fires at GC time
+        # and emits llm.responded for a run the detector has already processed
+        # (a completed run never re-enters the poll), so the tokens the customer
+        # paid for are lost. dt.run() does this in its own finally; these
+        # integrations build a RunContext directly and emit their own terminal,
+        # so the flush has to live on the shared emit path rather than at each
+        # call site, where it was simply forgotten. It is idempotent per stream.
+        try:
+            from dunetrace.models import EventType as _ET
+
+            if event_type in (_ET.RUN_COMPLETED, _ET.RUN_ERRORED):
+                flush = getattr(ctx, "_flush_open_streams", None)
+                if callable(flush):
+                    flush()
+        except Exception:  # never let stream bookkeeping break the terminal
+            pass
         try:
             from dunetrace.models import AgentEvent
 

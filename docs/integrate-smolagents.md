@@ -1,5 +1,20 @@
 # Integrating a smolagents Agent with Dunetrace
 
+<!--dunetrace:instrument
+framework: smolagents
+language: python
+install: pip install dunetrace smolagents
+primary_symbol: dunetrace.Dunetrace.run
+mechanism: step-callback
+opens_own_run: false
+requires_run_context: true
+target_file: the module that constructs the CodeAgent and calls agent.run()
+target_example: `main.py`, `src/agent.py`
+target_hints: ["CodeAgent(", "ToolCallingAgent(", "agent.run("]
+emits: [run.started, run.completed, run.errored, tool.called, tool.responded]
+verify_cmd: python main.py  # then check the dashboard
+-->
+
 ## Quick Start
 
 ```bash
@@ -39,6 +54,19 @@ dt.shutdown()
 
 Start the backend once, locally, before running this: `docker compose up -d`.
 
+## Where this goes
+
+Two edits in the same module: `step_callbacks=[...]` on the agent
+constructor, and `dt.run()` around `agent.run()`.
+
+```bash
+grep -rn "CodeAgent(\|ToolCallingAgent(\|agent.run(" --include=*.py .
+```
+
+smolagents exposes no tracing interface, so the callback is the only hook. It
+fires per step and needs the run already open, which is what the `dt.run()`
+wrapper provides.
+
 ## What this does
 
 `smolagents` has no built-in tracing interface, so this uses its `step_callbacks` hook instead: a lightweight function runs at the end of every agent step, inspects it for tool calls, and emits `tool_called`/`tool_responded` to Dunetrace. Wrapping `agent.run()` in `dt.run()` captures the run boundary.
@@ -46,6 +74,39 @@ Start the backend once, locally, before running this: `docker compose up -d`.
 ## Verification
 
 Run your script once, then check the dashboard at `http://localhost:3000` — the run should appear within ~15 seconds. Give the agent a task that fails the same tool call repeatedly to confirm `TOOL_LOOP` fires.
+
+
+### If nothing arrives
+
+Work down this list. The first two cover almost every case.
+
+1. **Is a run open?** This integration attaches to a run that is already open. Outside one it emits nothing, silently. Confirm your top-level call is inside `dt.run(...)` (or a decorator that opens one).
+
+2. **Did the process flush?** Events ship from a background thread. Call
+   `dt.shutdown()` before the process exits, or the buffer dies with it.
+
+3. **Is the backend reachable?** Both should return `{"status":"ok",...}`:
+
+   ```bash
+   curl -s localhost:8001/ready   # ingest
+   curl -s localhost:8002/ready   # customer API
+   ```
+
+4. **Did anything land?** If your agent id is listed here, instrumentation is
+   working and the problem is downstream:
+
+   ```bash
+   curl -s localhost:8002/v1/agents
+   curl -s "localhost:8002/v1/agents/<your-agent-id>/runs?limit=5"
+   ```
+
+5. **Turn on debug logging.** `Dunetrace(debug=True)` logs every event as it is buffered and
+   every batch as it ships.
+
+**Runs appear but no signals?** That is usually correct, not a fault. The
+detector polls every 5 seconds, and a healthy run produces no signals. Several
+detectors also need cross-run baselines and stay dormant until the agent has
+run history. Check `docker compose logs detector` if you expected one.
 
 ---
 
