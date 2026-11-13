@@ -209,7 +209,8 @@ class TestTemplateCoverage(unittest.TestCase):
             _signal(FailureType.MALFORMED_TOOL_CALL, {})
         )
         namespace = {}
-        exec(explanation.suggested_fixes[0].code, namespace)
+        # Execute only the repository-owned example to verify its behavior.
+        exec(explanation.suggested_fixes[0].code, namespace)  # nosec B102
         parse = namespace["parse_tool_args"]
         self.assertEqual(parse('{"value": 1}'), {"value": 1})
         for constant in ("NaN", "Infinity", "-Infinity"):
