@@ -6,13 +6,20 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 try:
     import asyncpg
 except ImportError:  # pragma: no cover - allows tests without db driver
     asyncpg = None  # type: ignore
 
+from dunetrace_schemas.baselines import (
+    BASELINE_LOOKBACK,
+    MIN_BASELINE_RUNS,
+    all_metric_baselines_sql,
+    baselines_from_row,
+    latest_agent_version_sql,
+)
 from ingest_svc.config import settings
 
 logger = logging.getLogger("dunetrace.ingest.db")
@@ -102,90 +109,11 @@ CREATE INDEX IF NOT EXISTS idx_events_agent   ON events(agent_id, received_at DE
 CREATE INDEX IF NOT EXISTS idx_events_type    ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_agent_run ON events(agent_id, run_id);
 
-CREATE TABLE IF NOT EXISTS failure_signals (
-    id             BIGSERIAL PRIMARY KEY,
-    failure_type   TEXT        NOT NULL,
-    severity       TEXT        NOT NULL,
-    run_id         TEXT        NOT NULL,
-    agent_id       TEXT        NOT NULL,
-    agent_version  TEXT        NOT NULL,
-    step_index     INTEGER     NOT NULL,
-    confidence     REAL        NOT NULL,
-    evidence       JSONB       NOT NULL DEFAULT '{}',
-    detected_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    alerted        BOOLEAN     NOT NULL DEFAULT FALSE
-);
-
-CREATE INDEX IF NOT EXISTS idx_signals_agent     ON failure_signals(agent_id, detected_at DESC);
-CREATE INDEX IF NOT EXISTS idx_signals_unalerted ON failure_signals(alerted) WHERE alerted = FALSE;
-
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS co_signal_count INTEGER NOT NULL DEFAULT 0;
-
-CREATE TABLE IF NOT EXISTS companies (
-    id          TEXT PRIMARY KEY,
-    name        TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS api_keys (
-    key         TEXT PRIMARY KEY,
-    agent_id    TEXT        NOT NULL,
-    customer_id TEXT        NOT NULL,
-    active      BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    company_id  TEXT        REFERENCES companies(id) ON DELETE SET NULL
-);
-
-CREATE TABLE IF NOT EXISTS fixes (
-    id                    BIGSERIAL PRIMARY KEY,
-    run_id                TEXT        NOT NULL,
-    signal_id             BIGINT      NOT NULL,
-    fix_content           TEXT        NOT NULL,
-    fix_type              TEXT        NOT NULL DEFAULT 'prompt_addition',
-    applied_via           TEXT        NOT NULL,
-    langfuse_prompt_name  TEXT,
-    langfuse_version      INTEGER,
-    applied_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_fixes_signal_id ON fixes(signal_id);
-CREATE INDEX IF NOT EXISTS idx_fixes_run_id    ON fixes(run_id, applied_at DESC);
-
-CREATE TABLE IF NOT EXISTS policies (
-    id          BIGSERIAL PRIMARY KEY,
-    agent_id    TEXT        NOT NULL DEFAULT '*',
-    name        TEXT        NOT NULL,
-    condition   JSONB       NOT NULL,
-    action      JSONB       NOT NULL,
-    enabled     BOOLEAN     NOT NULL DEFAULT TRUE,
-    priority    INT         NOT NULL DEFAULT 100,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
-
--- Policy evaluation observability (Phase 5). One row per shipped policy.evaluated
--- record (rate-limited SDK-side). `trigger_name` avoids the SQL reserved word
--- `trigger`. Read by the customer API's GET /v1/policies/{id}/evaluations.
-CREATE TABLE IF NOT EXISTS policy_evaluations (
-    id              BIGSERIAL PRIMARY KEY,
-    org_id          TEXT,
-    policy_id       BIGINT,
-    policy_name     TEXT        NOT NULL DEFAULT '',
-    agent_id        TEXT        NOT NULL DEFAULT '',
-    run_id          TEXT,
-    trigger_name    TEXT,
-    trigger_matched BOOLEAN,
-    fired           BOOLEAN,
-    sampled         BOOLEAN     NOT NULL DEFAULT FALSE,
-    reason          TEXT,
-    conditions      JSONB,
-    evaluated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_policy_evals_policy
-    ON policy_evaluations(org_id, policy_id, evaluated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_policy_evals_agent
-    ON policy_evaluations(org_id, agent_id, evaluated_at DESC);
+-- failure_signals, organizations, api_keys, fixes, policies and
+-- policy_evaluations are NOT declared here. Each is touched by at least one
+-- other service, so they belong to dunetrace_schemas.migrations (5, 3, 3/6, 7,
+-- 7, 7 respectively); ensure_schema() applies those before anything below that
+-- touches them runs. Everything in this block is ingest's alone.
 
 CREATE TABLE IF NOT EXISTS deploy_events (
     id           BIGSERIAL PRIMARY KEY,
@@ -207,12 +135,11 @@ CREATE TABLE IF NOT EXISTS rate_limit_workers (
 
 -- Per-agent rate-limit sub-quotas within a key's overall budget (see
 -- rate_limiter.py's module docstring for the "one runaway agent starves its
--- siblings" problem this solves). key_id references api_keys.id, added by
--- api_svc's own migration (services/api/api_svc/db/queries.py's _KEYS_DDL) —
--- not enforced as a DB foreign key here, since that column may not exist yet
--- if ingest_svc starts before api_svc ever has (same cross-service ordering
--- rate_limiter.py's rate_limit_rpm lookup already tolerates). Referential
--- integrity is checked at the admin endpoint's write time instead.
+-- siblings" problem this solves). key_id references api_keys.id (declared by
+-- dunetrace_schemas.migrations, migration 6) — deliberately not enforced as a
+-- DB foreign key: api_keys is a migrations-owned table and this block runs
+-- before migrations do. Referential integrity is checked at the admin
+-- endpoint's write time instead.
 CREATE TABLE IF NOT EXISTS agent_rate_quotas (
     key_id     BIGINT      NOT NULL,
     agent_id   TEXT        NOT NULL,
@@ -248,9 +175,17 @@ CREATE INDEX IF NOT EXISTS idx_otel_receiver_stats_org_hour
 # it was always redundant with customer_id (create_api_key wrote the same value
 # to both).
 #
-# Every other org_id-bearing table below is nullable until _backfill_org_id()
-# populates it from the (now-renamed) api_keys.org_id, then NOT NULL is applied.
-# This runs after _SCHEMA so the tables it touches already exist.
+# The two tables themselves are declared by dunetrace_schemas.migrations (3 and
+# 6). What stays here is the legacy *data* repair — every statement is guarded
+# on the legacy column or table actually being present, so on a fresh install
+# (where neither table exists yet: this runs before migrations) and on an
+# already-repaired one it is a no-op. It runs on every startup rather than once,
+# deliberately: the drifted state it repairs (customer_id stranded next to a
+# NULL org_id, see scripts/test_api_keys_org_migration.py) can be reached again
+# after the migration has already been recorded as applied.
+#
+# events / deploy_events org_id is nullable until _backfill_org_id() populates
+# it from api_keys.org_id, then NOT NULL is applied.
 _MULTI_TENANCY_DDL = """
 DO $$
 BEGIN
@@ -260,28 +195,6 @@ BEGIN
         ALTER TABLE companies RENAME TO organizations;
     END IF;
 END $$;
-
-CREATE TABLE IF NOT EXISTS organizations (
-    id          TEXT PRIMARY KEY,
-    name        TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-INSERT INTO organizations (id, name) VALUES ('default', 'Default Organization')
-ON CONFLICT (id) DO NOTHING;
-
--- Semantic feedback loop opt-in (Phase 1.4.3) — owned by api_svc's own
--- migration (services/api/api_svc/db/queries.py's _SEMANTIC_FEEDBACK_DDL),
--- added here defensively too since this service creates `organizations`
--- first on a fresh install and semantic_svc reads these columns without
--- necessarily waiting on api_svc to have started.
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_enabled BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_auto_suppress BOOLEAN NOT NULL DEFAULT FALSE;
-
--- OTel ingestion opt-out per org (Phase 2). Defaults TRUE so every org that
--- accepts OTLP today keeps working; an admin flips it FALSE to stop accepting a
--- specific org's OTLP traffic (a per-org kill switch on top of rate limiting).
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS otel_ingestion_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
 DO $$
 BEGIN
@@ -296,8 +209,12 @@ BEGIN
     END IF;
 END $$;
 
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE api_keys DROP COLUMN IF EXISTS company_id;
+DO $$
+BEGIN
+    IF to_regclass('public.api_keys') IS NOT NULL THEN
+        ALTER TABLE api_keys DROP COLUMN IF EXISTS company_id;
+    END IF;
+END $$;
 
 -- Installs where org_id was added by some path other than the rename above (so the
 -- rename's "org_id does not exist yet" guard never fired) are left with both columns
@@ -331,31 +248,26 @@ END $$;
 -- api_keys.agent_id is NOT dropped here — _backfill_org_id() below still needs it
 -- to join events/signals/etc to the org that issued the key. It's dropped by
 -- _backfill_org_id() itself, after the join is done. See that function's docstring.
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.table_constraints
-        WHERE table_name = 'api_keys' AND constraint_name = 'api_keys_org_id_fkey'
-    ) THEN
-        ALTER TABLE api_keys
-            ADD CONSTRAINT api_keys_org_id_fkey FOREIGN KEY (org_id) REFERENCES organizations(id);
-    END IF;
-END $$;
+-- (The api_keys.org_id -> organizations(id) foreign key is migration 6's.)
 
 ALTER TABLE events          ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE fixes           ADD COLUMN IF NOT EXISTS org_id TEXT;
 ALTER TABLE deploy_events   ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE policies        ADD COLUMN IF NOT EXISTS org_id TEXT;
--- HMAC canonical-form version (see api_svc _sign_policy). Added defensively here
--- too so fetch_policies' SELECT never fails on a missing column regardless of
--- which service ran its schema first.
-ALTER TABLE policies        ADD COLUMN IF NOT EXISTS signature   TEXT NOT NULL DEFAULT '';
-ALTER TABLE policies        ADD COLUMN IF NOT EXISTS sig_version INT NOT NULL DEFAULT 1;
 
 CREATE INDEX IF NOT EXISTS idx_events_org_agent  ON events(org_id, agent_id, received_at DESC);
-CREATE INDEX IF NOT EXISTS idx_signals_org_agent ON failure_signals(org_id, agent_id, detected_at DESC);
+-- Also created by migration 2, but only if events existed when that migration
+-- ran — which it does not on a fresh install where another service booted
+-- first. events is ingest's table, so ingest makes sure of it.
+CREATE INDEX IF NOT EXISTS idx_events_org_run    ON events(org_id, run_id);
+
+-- Correlation candidate lookup for the ElevenLabs worker (integrations_svc):
+-- tts.generated events for an org in a time window; partial, so it stays
+-- small on a large events table. Declared here because events is ingest's
+-- table. The worker used to create it guarded on the table existing, which on
+-- a worker-first boot meant no index until that worker's next restart —
+-- verified by scripts/verify_schema_boot_order.py, whose idempotence pass
+-- saw the index appear on the second run.
+CREATE INDEX IF NOT EXISTS idx_events_tts_correlation
+    ON events(org_id, timestamp) WHERE event_type = 'tts.generated';
 
 -- External evaluation integration correlation key (Langfuse/LangSmith/
 -- Braintrust — Phase 2). Optional/instrumentation-dependent, same as
@@ -377,9 +289,7 @@ CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events(trace_id) WHERE trace_i
 -- single-turn agents and any run predating this field.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS conversation_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_events_conversation_id ON events(conversation_id) WHERE conversation_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_fixes_org         ON fixes(org_id);
 CREATE INDEX IF NOT EXISTS idx_deploys_org       ON deploy_events(org_id);
-CREATE INDEX IF NOT EXISTS idx_policies_org      ON policies(org_id, enabled);
 """
 
 _ORG_BACKFILL_TABLES = ("events", "failure_signals", "fixes", "deploy_events", "policies")
@@ -560,6 +470,30 @@ async def retention_looks_stale(retention_days: int = 90) -> bool:
         return False
 
 
+async def ensure_event_partitions(months_ahead: int = 3) -> int:
+    """Top up the monthly event partitions from the running process.
+
+    ensure_schema() creates the current month plus `months_ahead` at startup and
+    nothing renewed them afterwards, so a process that stayed up past that
+    horizon began writing into events_default (received_at DEFAULT NOW() has to
+    land somewhere). Two things then broke. prune_old_events skips the default
+    partition by design, so those rows outlived the retention window while
+    signal evidence was still scrubbed on schedule — the single content horizon
+    became two. Worse, the next restart could not create the now-current
+    month's partition at all: PostgreSQL refuses CREATE TABLE ... PARTITION OF
+    while the default partition holds rows that would belong to the new bound,
+    so ingest crash-looped until someone drained it by hand.
+
+    Called from the daily retention loop. Returns the number of partitions that
+    now exist ahead of today; safe to call at any time.
+    """
+    if not _pool:
+        return 0
+    async with _pool.acquire() as conn:
+        await _ensure_event_partitions(conn, months_ahead=months_ahead)
+    return months_ahead + 1
+
+
 async def prune_old_events(retention_days: int = 90) -> int:
     """Drop monthly event partitions whose data is entirely older than retention_days.
 
@@ -687,6 +621,15 @@ CONTENT_EVIDENCE_KEYS: tuple[str, ...] = (
     "output_snippet",  # PREMATURE_TERMINATION — LLM output excerpt
     "missing_entities",  # HANDOFF_CONTEXT_LOSS — entities lifted from parent context
     "tool_error",  # PREMATURE_TERMINATION, UNREAD_TOOL_ERROR — raw error text
+    # UNRESOLVED_AMBIGUITY. Every one of these is lifted verbatim out of a
+    # tool result: the identifiers name real records, and the discriminator
+    # tokens ARE that record's field values (a customer name, a plan, a
+    # business name) — the fact that they are single words rather than a
+    # snippet does not make them less content.
+    "selected_id",
+    "sibling_id",
+    "discriminators_unused",
+    "sibling_matched_in_request",
 )
 
 _SCRUB_BATCH = 10_000
@@ -748,23 +691,45 @@ async def scrub_old_signal_evidence(retention_days: int = 90) -> int:
 
 
 async def ensure_schema() -> None:
-    """Create this service's base tables, then bring the SHARED schema up to
-    date. Idempotent — safe to call on every startup.
+    """Create this service's own tables, bring the SHARED schema up to date,
+    then run the legacy org_id backfill. Idempotent — safe to call on every
+    startup.
 
-    Migrations run last, after the base DDL, because they reshape tables this
-    block creates. They own every definition more than one service touches (see
-    dunetrace_schemas.migrations); anything above is single-owner.
+    Order matters. _SCHEMA and _MULTI_TENANCY_DDL touch only ingest-owned
+    tables (plus fully-guarded legacy renames that no-op unless a pre-v0.5.0
+    column is present), so they run first — migration 2 indexes `events` only
+    if it already exists. Migrations own every definition more than one service
+    touches (see dunetrace_schemas.migrations) and run next. _backfill_org_id
+    runs last because on a pre-v0.5.0 database it reads org_id columns on
+    failure_signals / fixes / policies that migrations 5 and 7 are what add.
+
+    Between the two sits require_schema_version: apply, then require. A
+    returned apply is not proof the database is current — a replica that lost
+    the advisory-lock race to a peer whose apply then failed, or one pointed
+    at a read-only standby, comes back with an older schema — and the
+    backfill must not run against one. Raising here is loud where the old
+    wrong-order start was silent.
     """
-    from dunetrace_schemas.migrations import apply_migrations
+    from dunetrace_schemas.migrations import (
+        CURRENT_SCHEMA_VERSION,
+        apply_migrations,
+        require_schema_version,
+        schema_connection,
+    )
 
     if not _pool:
         return
-    async with _pool.acquire() as conn:
+    # Every statement in this block is unbounded by design: index builds in
+    # _MULTI_TENANCY_DDL, partition creation, the migration bodies, and an
+    # org_id backfill that updates events whole. The pool's 10s command_timeout
+    # cancelled them on any populated database. See schema_connection.
+    async with schema_connection(settings.DATABASE_URL) as conn:
         await conn.execute(_SCHEMA)
         await conn.execute(_MULTI_TENANCY_DDL)
-        await _backfill_org_id(conn)
         await _ensure_event_partitions(conn)
         version = await apply_migrations(conn)
+        await require_schema_version(conn, CURRENT_SCHEMA_VERSION, "ingest")
+        await _backfill_org_id(conn)
     logger.info("Schema ready (shared schema at version %d)", version)
 
 
@@ -838,9 +803,14 @@ async def insert_policy_evaluations(events: list, batch_id: str, org_id: str) ->
     """Persist policy.evaluated observability records into policy_evaluations.
 
     Each event's payload is a PolicyEvaluationRecord dict (policy_name/id, trigger,
-    trigger_matched, fired, conditions, reason, sampled, ts). Best-effort — a
-    failure here never affects the main event-ingest path (they're inserted
-    separately by the router). Returns rows written.
+    trigger_matched, fired, conditions, reason, sampled, ts, and — from SDKs with
+    policy-fetch resilience — policy_bundle_stale / policy_bundle_age_s). Best-
+    effort — a failure here never affects the main event-ingest path (they're
+    inserted separately by the router). Returns rows written.
+
+    The two bundle fields are written as NULL when the payload omits them. NULL
+    means "this SDK did not report it", which must stay distinguishable from
+    "reported fresh" — an old SDK is not evidence its policy bundle was current.
     """
     if not _pool:
         logger.error(
@@ -851,6 +821,8 @@ async def insert_policy_evaluations(events: list, batch_id: str, org_id: str) ->
         rows = []
         for e in events:
             p = getattr(e, "payload", None) or {}
+            bundle_stale = p.get("policy_bundle_stale")
+            bundle_age = p.get("policy_bundle_age_s")
             rows.append(
                 (
                     org_id,
@@ -865,6 +837,20 @@ async def insert_policy_evaluations(events: list, batch_id: str, org_id: str) ->
                     p.get("reason"),
                     json.dumps(p.get("conditions") or []),
                     float(p.get("ts") or getattr(e, "timestamp", 0.0) or 0.0),
+                    None if bundle_stale is None else bool(bundle_stale),
+                    None if bundle_age is None else float(bundle_age),
+                    # Dry-run verdict fields (migration 14). All nullable: an
+                    # SDK older than this ships none of them, and NULL is the
+                    # honest reading of "this row does not know".
+                    p.get("mode"),
+                    p.get("step_index"),
+                    p.get("would_action_type"),
+                    (
+                        json.dumps(p["would_action_params"])
+                        if p.get("would_action_params") is not None
+                        else None
+                    ),
+                    p.get("matched_branch"),
                 )
             )
         if not rows:
@@ -874,9 +860,12 @@ async def insert_policy_evaluations(events: list, batch_id: str, org_id: str) ->
                 """
                 INSERT INTO policy_evaluations
                     (org_id, policy_id, policy_name, agent_id, run_id, trigger_name,
-                     trigger_matched, fired, sampled, reason, conditions, evaluated_at)
+                     trigger_matched, fired, sampled, reason, conditions, evaluated_at,
+                     policy_bundle_stale, policy_bundle_age_s,
+                     mode, step_index, would_action_type, would_action_params,
+                     matched_branch)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
-                        to_timestamp($12))
+                        to_timestamp($12), $13, $14, $15, $16, $17, $18::jsonb, $19)
                 """,
                 rows,
             )
@@ -963,17 +952,100 @@ async def fetch_policies(agent_id: str, org_id: str) -> list:
         return []
 
 
+# ── Detector-config reads (GET /v1/detector-config) ───────────────────────────
+#
+# Both tables are owned by other services (org_enabled_packs: API + detector;
+# run_baseline_metrics: detector). Ingest only reads them, and both reads fail
+# open: a missing table (ingest booted first on an empty DB) or a query error
+# is logged at WARNING and the endpoint serves "no packs" / "no baselines" —
+# the SDK then keeps its class defaults, which is what it did before the
+# endpoint existed. Cached per (org, agent) upstream (ingest_svc/detector_config.py),
+# so a persistent failure warns once per TTL, not once per request.
+
+
+async def fetch_org_enabled_packs(org_id: str) -> list[str]:
+    """Pack names activated for this org (same read as
+    detector_svc.db.fetch_org_enabled_packs). Empty list if none — that is the
+    default state, not an error."""
+    if not _pool:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch("SELECT pack_name FROM org_enabled_packs WHERE org_id = $1", org_id)
+    return [r["pack_name"] for r in rows]
+
+
+async def fetch_latest_agent_version(org_id: str, agent_id: str) -> Optional[str]:
+    """agent_version of the agent's most recently recorded baseline row, or
+    None if it has none. Baselines are keyed per version (a new system prompt
+    is a new agent as far as "normal" goes), so a caller that doesn't know its
+    version is answered for the one the detector saw last."""
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(latest_agent_version_sql(), org_id, agent_id)
+
+
+async def fetch_agent_baselines(
+    org_id: str,
+    agent_id: str,
+    agent_version: str,
+    lookback: int = BASELINE_LOOKBACK,
+    min_runs: int = MIN_BASELINE_RUNS,
+) -> Optional[dict]:
+    """Every P75 baseline for (org, agent, version) in one round trip, keyed
+    as GET /v1/detector-config reports them — see
+    dunetrace_schemas.baselines.BASELINE_RESPONSE_KEYS. None when no metric
+    has `min_runs` clean samples yet.
+
+    Same SQL the detector worker's per-column read is built from
+    (dunetrace_schemas.baselines), so the numbers agree. Reads
+    run_baseline_metrics only: while a pre-existing deployment is still
+    backfilling that table, the detector additionally falls back to its legacy
+    events-derived query below `min_runs`; this read does not, so it reports
+    None a little longer than the detector during that transition.
+    """
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            all_metric_baselines_sql(),
+            org_id,
+            agent_id,
+            agent_version,
+            "",  # no run to exclude — the SDK asks before its run has been recorded
+            lookback,
+        )
+    return baselines_from_row(row, min_runs)
+
+
 async def create_api_key(
-    org_id: str, org_name: str | None = None, rate_limit_rpm: int = 600
-) -> str:
-    """Generate a new API key for an org, upsert the organization, store the key, and return it.
+    org_id: str,
+    org_name: str | None = None,
+    rate_limit_rpm: int = 600,
+    scopes: Sequence[str] | None = None,
+) -> dict:
+    """Generate a new API key for an org, upsert the organization, store the key.
+
+    Returns ``{"key", "key_prefix", "org_id", "org_name", "rate_limit_rpm",
+    "scopes"}`` — ``key`` is the plaintext, shown to the caller once; ``scopes``
+    is what was actually written, after ``dunetrace_schemas.scopes.normalise``.
 
     Keys are org-scoped, not agent-scoped: this key can submit events for any
     agent_id under org_id, discovered on first ingest.
+
+    ``scopes`` is written explicitly rather than left to the column default.
+    Before, this INSERT omitted the column, so ``ARRAY['ingest']`` always applied
+    and the bootstrap endpoint could only ever mint an ingest-only key — on a
+    fresh self-hosted install, where this is the only key-minting path that does
+    not itself need a key, that meant no admin credential could ever exist.
+    ``None`` normalises to the same ingest-only default the Customer API's
+    ``create_api_key`` uses; the bootstrap *route* is what asks for ``admin``.
     """
     from dunetrace_schemas.keys import generate_api_key, hash_api_key, key_prefix
+    from dunetrace_schemas.scopes import normalise
 
     key = generate_api_key()
+    granted = list(normalise(scopes))
     if not _pool:
         raise RuntimeError("DB pool not ready")
     name = org_name or org_id
@@ -991,32 +1063,49 @@ async def create_api_key(
             # the plaintext leaves this function only as the return value,
             # shown to the caller once.
             await conn.execute(
-                "INSERT INTO api_keys (key, key_hash, key_prefix, org_id, rate_limit_rpm) "
-                "VALUES ($1, $1, $2, $3, $4)",
+                "INSERT INTO api_keys "
+                "(key, key_hash, key_prefix, org_id, rate_limit_rpm, scopes) "
+                "VALUES ($1, $1, $2, $3, $4, $5)",
                 hash_api_key(key),
                 key_prefix(key),
                 org_id,
                 rate_limit_rpm,
+                granted,
             )
-    return key
+    return {
+        "key": key,
+        "key_prefix": key_prefix(key),
+        "org_id": org_id,
+        "org_name": name,
+        "rate_limit_rpm": rate_limit_rpm,
+        "scopes": granted,
+    }
 
 
 async def get_agent_quota_by_key(api_key: str, agent_id: str) -> Optional[float]:
     """Look up a per-agent rate-limit quota override (fraction of the key's
     sustained rpm) by the raw key string — the rate limiter's hot path only
     has this, never the numeric key_id. Returns None if no override is set
-    (caller applies its own default)."""
+    (caller applies its own default).
+
+    Joined on key_hash, like verify_api_key. Both minting paths store
+    hash_api_key(key) in BOTH `key` and `key_hash`, so matching the plaintext
+    against `key` never found a row: PUT /admin/keys/{id}/agents/{id}/quota
+    wrote a record this could never read, and every agent silently stayed on
+    the 0.20 default. It failed by returning no rows, so nothing logged."""
     if not _pool:
         return None
+    from dunetrace_schemas.keys import hash_api_key
+
     try:
         async with _pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT q.quota_pct FROM agent_rate_quotas q
                 JOIN api_keys k ON k.id = q.key_id
-                WHERE k.key = $1 AND q.agent_id = $2
+                WHERE k.key_hash = $1 AND q.agent_id = $2
                 """,
-                api_key,
+                hash_api_key(api_key),
                 agent_id,
             )
         return float(row["quota_pct"]) if row else None

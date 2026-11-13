@@ -6,7 +6,8 @@ approval flow:
                                    guarded tool runs) — org from the API key
   GET  /v1/approvals/{id}          poll an approval's status (SDK blocks on this)
   POST /v1/approvals/{id}/decision record a decision (dashboard / API / the SDK
-                                   itself marking a timeout)
+                                   itself marking a timeout), optionally with a
+                                   human `note` that travels back to the agent
 
 Every endpoint is org-scoped from the caller's API key (registered with the
 require_org dependency in main.py) — an approval id alone never lets one org
@@ -23,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api_svc.approvals import DECISION_STATUSES, ApprovalStatus
 from api_svc.auth import require_org, require_scope
@@ -51,10 +52,22 @@ class ApprovalCreate(BaseModel):
     timeout_seconds: int = 300
 
 
+# A decision note is an audit-trail entry, so it is bounded and REJECTED rather
+# than truncated: silently storing half of what a human wrote, and shipping that
+# half back into the agent's next planning step, is worse than making them
+# shorten it. Pydantic validates before the handler body runs, so an oversized
+# note 422s with the decision NOT applied — the note and the decision are one
+# atomic write or neither.
+MAX_NOTE_CHARS = 2000
+
+
 class ApprovalDecision(BaseModel):
     decision: str  # granted | denied | timeout
     decided_by: Optional[str] = None
     decision_channel: Optional[str] = None
+    # Allowed on ANY terminal decision, not just deny — "approved, but watch X"
+    # belongs in the audit trail exactly as much as a refusal does.
+    note: Optional[str] = Field(default=None, max_length=MAX_NOTE_CHARS)
 
 
 def _serialize(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -150,12 +163,18 @@ async def post_approval_decision(
             f"{sorted(s.value for s in DECISION_STATUSES)}",
         )
 
+    # Empty/whitespace-only is no note, not an empty-string note — the surfaces
+    # downstream treat "" and None identically and there is no reason to store
+    # the difference.
+    note = (body.note or "").strip() or None
+
     updated = await set_approval_decision(
         org_id=org_id,
         approval_id=approval_id,
         new_status=target.value,
         decided_by=body.decided_by,
         decision_channel=body.decision_channel,
+        note=note,
     )
     if updated is not None:
         return _serialize(updated)

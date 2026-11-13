@@ -1,7 +1,38 @@
 # DuneTrace — Postgres + Ingest + Detector + Alerts + Customer API
 # Usage: docker compose up -d
 # Customer API: http://localhost:8002  (docs at /docs)
-# Ingest API:   http://localhost:8001  (dev only — in production, traffic goes via auth service)
+# Ingest API:   http://localhost:8001
+# Dashboard:    http://localhost:3000
+#
+# This file is the LOCAL QUICKSTART: every published port is bound to
+# 127.0.0.1 (nothing is reachable from another machine), the Postgres
+# password is the default, and AUTH_MODE defaults to dev — authentication is
+# off, so anyone who can reach a port is an admin of every org. That is fine
+# on loopback and nowhere else. To deploy, layer the production override,
+# which flips ENV/AUTH_MODE to prod, requires POSTGRES_PASSWORD and publishes
+# only the dashboard:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# See docs/operations.md, section "Deploying". ENV and AUTH_MODE are
+# overridable from the environment here too (ENV=prod AUTH_MODE=prod), and
+# every service refuses to start with ENV=prod and AUTH_MODE=dev.
+#
+# Healthchecks target each service's GET /ready (DB reachable at the schema
+# this build needs; for the workers, also "a poll completed recently"), never
+# /health, which is liveness only. The workers serve /ready, /metrics and
+# /health on their METRICS_PORT (set explicitly below so the probe and the
+# server cannot drift apart); none of those ports is published — they are for
+# the healthcheck and an in-network Prometheus scraper. See docs/operations.md,
+# section "Observability".
+#
+# .env IS NOT LOADED INTO CONTAINERS. There is no `env_file:` directive in this
+# file (or in docker-compose.ghcr.yml): compose reads .env only to interpolate
+# ${VAR} into THIS file, so a variable reaches a service exactly when that
+# service's `environment:` block below names it. Adding a line to .env without a
+# matching line here does nothing — which is how setting POLICY_SIGNING_SECRET
+# used to leave every remote enforcing policy silently downgraded to log-only.
+# Each knob is listed against the service(s) whose config.py actually reads it,
+# with the code's own default as the ${VAR:-default} fallback so an unset
+# variable changes nothing.
 #
 # Auth service lives in the private dunetrace-cloud repo.
 # To run the full production stack locally:
@@ -16,7 +47,9 @@ services:
       POSTGRES_PASSWORD: dunetrace
       POSTGRES_DB: dunetrace
     ports:
-      - "5432:5432"
+      # Loopback only — as is every published port in this file. Reaching a
+      # service from another host is a reverse-proxy decision, not a default.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -30,21 +63,56 @@ services:
       context: .
       dockerfile: services/ingest/Dockerfile
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      # Long syntax with create_host_path: false on purpose. With the short
+      # `./x.yml:/app/x.yml:ro` form, a MISSING host file is not an error:
+      # Docker creates an empty DIRECTORY at the source and mounts it over the
+      # path, the YAML loader's try/except swallows the IsADirectoryError, and
+      # the service runs on defaults with one log line as the only trace. The
+      # images now ship these files as real defaults (see the COPY in each
+      # Dockerfile), so this mount is an override — and create_host_path: false
+      # makes a missing source say so instead of inventing a directory.
+      # Served to the SDK at GET /v1/detector-config (read once at first use,
+      # like detector/alerts); restart ingest after editing it.
+      - type: bind
+        source: ./detectors.yml
+        target: /app/detectors.yml
+        read_only: true
+        bind:
+          create_host_path: false
     command: ["uvicorn", "ingest_svc.main:app", "--host", "0.0.0.0", "--port", "8001"]
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
-      ENV: dev
-      AUTH_MODE: dev
+      ENV: ${ENV:-dev}
+      # dev = no API key needed, for the loopback quickstart. Overridable
+      # from the environment; docker-compose.prod.yml pins it to prod.
+      AUTH_MODE: ${AUTH_MODE:-dev}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
       PYTHONPATH: /app/packages/schemas-py:/app/services/ingest
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Retention pass (partition drop + signal-evidence scrub), run at startup
+      # then daily by ingest_svc's lifespan. See docs/operations.md.
+      EVENT_RETENTION_DAYS: ${EVENT_RETENTION_DAYS:-90}
+      # Request limits. INGEST_MAX_BODY_BYTES rejects with 413 before buffering;
+      # RATE_LIMIT_REQUESTS is per IP per minute, RATE_LIMIT_RPM the per-key
+      # default the rate limiter falls back to.
+      INGEST_MAX_BODY_BYTES: ${INGEST_MAX_BODY_BYTES:-10485760}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-500}
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-60}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-600}
+      # Null, not "": pass the host's value through when it is set and leave the
+      # variable unset otherwise, so the value the Dockerfile bakes in at build
+      # time survives. `APP_VERSION: ${APP_VERSION:-}` would overwrite it with
+      # an empty string and send the service back to its hardcoded fallback.
+      APP_VERSION:
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\" || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/ready')\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -56,12 +124,44 @@ services:
       dockerfile: services/detector/Dockerfile
     restart: unless-stopped
     volumes:
-      - ./detectors.yml:/app/detectors.yml:ro
+      - type: bind
+        source: ./detectors.yml
+        target: /app/detectors.yml
+        read_only: true
+        bind:
+          create_host_path: false
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
-      POLL_INTERVAL: 5
-      STALL_TIMEOUT_SECS: 60
+      ENV: ${ENV:-dev}
+      POLL_INTERVAL: ${POLL_INTERVAL:-5}
+      STALL_TIMEOUT_SECS: ${STALL_TIMEOUT_SECS:-60}
+      # /metrics, /ready, /health for the healthcheck below and a scraper
+      METRICS_PORT: 9101
       PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/detector
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      BATCH_SIZE: ${BATCH_SIZE:-100}
+      DETECTOR_CONCURRENCY: ${DETECTOR_CONCURRENCY:-8}
+      # Horizontal sharding by agent_id hash bucket: run N replicas, each with a
+      # distinct SHARD_INDEX. Inert unless you scale this service.
+      SHARD_COUNT: ${SHARD_COUNT:-1}
+      SHARD_INDEX: ${SHARD_INDEX:-0}
+      # Must stay >= STALL_TIMEOUT_SECS or the worker refuses to start.
+      WATERMARK_GRACE_SECS: ${WATERMARK_GRACE_SECS:-3600}
+      PRUNE_BATCH_SIZE: ${PRUNE_BATCH_SIZE:-10000}
+      # Python-class detector plugins are loaded from here at worker startup;
+      # mount the directory as a volume if you set this. See docs/detectors.md.
+      DUNETRACE_CUSTOM_DETECTORS_PATH: ${DUNETRACE_CUSTOM_DETECTORS_PATH:-}
+      # OTel export of signal/policy spans. Read by the SDK *and* by this
+      # service (it is the process that emits those spans), so .env.example
+      # tells you to set them in both places — which only worked for the SDK.
+      DUNETRACE_OTEL_ENABLED: ${DUNETRACE_OTEL_ENABLED:-false}
+      DUNETRACE_OTEL_ENDPOINT: ${DUNETRACE_OTEL_ENDPOINT:-}
+      DUNETRACE_OTEL_PROTOCOL: ${DUNETRACE_OTEL_PROTOCOL:-grpc}
+      DUNETRACE_OTEL_HEADERS: ${DUNETRACE_OTEL_HEADERS:-}
+      DUNETRACE_OTEL_SERVICE_NAME: ${DUNETRACE_OTEL_SERVICE_NAME:-dunetrace}
+      DUNETRACE_OTEL_SAMPLING_RATIO: ${DUNETRACE_OTEL_SAMPLING_RATIO:-1.0}
+      DUNETRACE_OTEL_CAPTURE_CONTENT: ${DUNETRACE_OTEL_CAPTURE_CONTENT:-true}
+      APP_VERSION:
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,7 +169,7 @@ services:
         condition: service_started
     command: ["python", "-m", "detector_svc.worker"]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9101/ready')\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -81,19 +181,56 @@ services:
       dockerfile: services/alerts/Dockerfile
     restart: unless-stopped
     volumes:
-      - ./detectors.yml:/app/detectors.yml:ro
-      - ./docs/config/semantic-evaluators.yml:/app/docs/config/semantic-evaluators.yml:ro
+      - type: bind
+        source: ./detectors.yml
+        target: /app/detectors.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./docs/config/semantic-evaluators.yml
+        target: /app/docs/config/semantic-evaluators.yml
+        read_only: true
+        bind:
+          create_host_path: false
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      ENV: ${ENV:-dev}
+      # Pinned, not ${POLL_INTERVAL:-10}: .env.example documents
+      # POLL_INTERVAL/BATCH_SIZE as the DETECTOR's knobs, and the three
+      # workers that share those names want different values.
       POLL_INTERVAL: 10
+      METRICS_PORT: 9102
       PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/explainer:/app/services/alerts
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-}
       SLACK_MIN_SEVERITY: ${SLACK_MIN_SEVERITY:-LOW}
+      ALERT_DEDUP_WINDOW: ${ALERT_DEDUP_WINDOW:-3600}
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3000}
       DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Delivery retries.
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      RETRY_BACKOFF: ${RETRY_BACKOFF:-2.0}
+      # How long one worker's claim on a signal stays valid. Must exceed the
+      # worst-case delivery time for a batch or a slow-but-alive worker's rows
+      # are stolen and the alert is delivered twice.
+      CLAIM_TIMEOUT_SECS: ${CLAIM_TIMEOUT_SECS:-300}
+      # Sharded independently of the detector. Left unset, alerts_svc/config.py
+      # falls back to the shared SHARD_COUNT/SHARD_INDEX below — so scaling the
+      # detector to N while running ONE alerts worker silently drops alerts for
+      # every agent that does not hash to bucket 0. Set these to say otherwise.
+      ALERTS_SHARD_COUNT: ${ALERTS_SHARD_COUNT:-}
+      ALERTS_SHARD_INDEX: ${ALERTS_SHARD_INDEX:-}
+      SHARD_COUNT: ${SHARD_COUNT:-1}
+      SHARD_INDEX: ${SHARD_INDEX:-0}
+      # Weekly digest. The code default is true, so this preserves it.
+      DIGEST_ENABLED: ${DIGEST_ENABLED:-true}
+      DIGEST_DAY: ${DIGEST_DAY:-0}
+      DIGEST_HOUR: ${DIGEST_HOUR:-9}
+      APP_VERSION:
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,7 +238,7 @@ services:
         condition: service_started
     command: ["python", "-m", "alerts_svc.worker"]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9102/ready')\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -116,11 +253,26 @@ services:
     # would restart-loop it forever.
     restart: on-failure
     volumes:
-      - ./docs/config/semantic-sampling.yml:/app/docs/config/semantic-sampling.yml:ro
-      - ./docs/config/semantic-evaluators.yml:/app/docs/config/semantic-evaluators.yml:ro
+      - type: bind
+        source: ./docs/config/semantic-sampling.yml
+        target: /app/docs/config/semantic-sampling.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./docs/config/semantic-evaluators.yml
+        target: /app/docs/config/semantic-evaluators.yml
+        read_only: true
+        bind:
+          create_host_path: false
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      ENV: ${ENV:-dev}
+      # Pinned per service — see the note on the alerts worker above.
       POLL_INTERVAL: 15
+      METRICS_PORT: 9103
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APP_VERSION:
       SEMANTIC_WORKER_ENABLED: ${SEMANTIC_WORKER_ENABLED:-false}
       SEMANTIC_LLM_PROVIDER: ${SEMANTIC_LLM_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -144,7 +296,7 @@ services:
         condition: service_started
     command: ["python", "-m", "semantic_svc.worker"]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9103/ready')\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -160,10 +312,14 @@ services:
     restart: on-failure
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      ENV: ${ENV:-dev}
       WAKE_INTERVAL: 15
+      INTEGRATIONS_METRICS_PORT: 9104
       INTEGRATIONS_WORKER_ENABLED: ${INTEGRATIONS_WORKER_ENABLED:-false}
       DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
       PYTHONPATH: /app/packages/schemas-py:/app/services/integrations
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APP_VERSION:
     depends_on:
       postgres:
         condition: service_healthy
@@ -171,10 +327,14 @@ services:
         condition: service_started
     command: ["python", "-m", "integrations_svc.worker"]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9104/ready')\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
+      # The only worker that was missing this. Without it the first probe fires
+      # while the process is still applying migrations and opening its pool, so
+      # the container spends its first ~90s reporting unhealthy for no reason.
+      start_period: 20s
 
   elevenlabs:
     build:
@@ -186,10 +346,16 @@ services:
     restart: on-failure
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
+      ENV: ${ENV:-dev}
+      # Its own value, not the integrations worker's — the two containers
+      # share one image and one Settings class but poll at different rates.
       WAKE_INTERVAL: 60
+      ELEVENLABS_METRICS_PORT: 9105
       ELEVENLABS_WORKER_ENABLED: ${ELEVENLABS_WORKER_ENABLED:-false}
       DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
       PYTHONPATH: /app/packages/schemas-py:/app/services/integrations
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APP_VERSION:
     depends_on:
       postgres:
         condition: service_healthy
@@ -197,7 +363,7 @@ services:
         condition: service_started
     command: ["python", "-m", "integrations_svc.elevenlabs_worker"]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import asyncio, asyncpg, os; asyncio.run(asyncpg.connect(os.environ['DATABASE_URL']))\" || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9105/ready')\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -208,11 +374,12 @@ services:
       context: .
       dockerfile: services/api/Dockerfile
     ports:
-      - "8002:8002"
+      - "127.0.0.1:8002:8002"
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://dunetrace:dunetrace@postgres:5432/dunetrace
-      AUTH_MODE: dev
+      ENV: ${ENV:-dev}
+      AUTH_MODE: ${AUTH_MODE:-dev}
       PYTHONPATH: /app/packages/schemas-py:/app/packages/sdk-py:/app/services/explainer:/app/services/api
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -224,16 +391,41 @@ services:
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
       DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
+      # THE security-critical one. api_svc/config.py is the only reader, and it
+      # was named in no compose file — so an operator who followed
+      # docs/policies.md and set it in .env believed remote policy signing was
+      # on while the container never saw the value, leaving every remote stop /
+      # require_approval / switch_model policy downgraded to log-only. Set it to
+      # the same value as the agent's DUNETRACE_POLICY_SECRET.
+      POLICY_SIGNING_SECRET: ${POLICY_SIGNING_SECRET:-}
+      # Same gateway bypass as ingest's: a matching x-internal-token header
+      # skips the api_keys lookup. Unset means no such gateway.
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Which provider the API's OWN LLM features use (native explain, fix
+      # diffs, custom-detector translation, issue summaries). Unset = first
+      # configured key wins. Distinct from SEMANTIC_LLM_PROVIDER.
+      API_LLM_PROVIDER: ${API_LLM_PROVIDER:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      PAGE_SIZE_DEFAULT: ${PAGE_SIZE_DEFAULT:-50}
+      PAGE_SIZE_MAX: ${PAGE_SIZE_MAX:-500}
+      DEFAULT_KEY_RATE_LIMIT_RPM: ${DEFAULT_KEY_RATE_LIMIT_RPM:-600}
+      APP_VERSION:
     volumes:
       # Voice cost rates (Phase 2.2). Optional: the API falls back to built-in
       # defaults if this file is absent. Mounted so operators can edit rates.
-      - ./voice-pricing.yml:/app/voice-pricing.yml:ro
+      - type: bind
+        source: ./voice-pricing.yml
+        target: /app/voice-pricing.yml
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       postgres:
         condition: service_healthy
     command: ["uvicorn", "api_svc.main:app", "--host", "0.0.0.0", "--port", "8002"]
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\" || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/ready')\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -242,7 +434,10 @@ services:
   dashboard:
     image: nginx:alpine
     ports:
-      - "3000:80"
+      # DASHBOARD_BIND is the host interface prefix: the quickstart default is
+      # loopback; docker-compose.prod.yml sets it to "" to publish on all
+      # interfaces (the one public port of the stack).
+      - "${DASHBOARD_BIND-127.0.0.1:}3000:80"
     restart: unless-stopped
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro

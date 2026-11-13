@@ -25,7 +25,7 @@ provider.add_span_processor(
     BatchSpanProcessor(
         OTLPSpanExporter(
             endpoint="https://<your-dunetrace-ingest>/v1/otlp/traces",
-            headers={"Authorization": "Bearer dt_live_..."},
+            headers={"Authorization": "Bearer dt_..."},
         )
     )
 )

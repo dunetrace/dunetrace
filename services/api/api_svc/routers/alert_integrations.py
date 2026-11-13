@@ -18,7 +18,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.crypto import encrypt_credentials
 from api_svc.db.queries import (
     delete_org_alert_integration,
@@ -64,7 +64,7 @@ def _status_response(status: dict | None) -> AlertIntegrationStatus:
 @router.post("/slack", summary="Configure a Slack alert destination for this org", status_code=201)
 async def set_slack_integration(
     body: SlackIntegrationRequest,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> AlertIntegrationStatus:
     try:
         encrypted = encrypt_credentials({"webhook_url": body.webhook_url})
@@ -83,7 +83,7 @@ async def get_slack_integration(org_id: str = Depends(require_org)) -> AlertInte
 
 
 @router.delete("/slack", summary="Remove this org's Slack integration", status_code=204)
-async def remove_slack_integration(org_id: str = Depends(require_org)):
+async def remove_slack_integration(org_id: str = Depends(require_scope("admin"))):
     deleted = await delete_org_alert_integration(org_id, "slack")
     if not deleted:
         raise HTTPException(status_code=404, detail="No Slack integration configured.")
@@ -121,7 +121,7 @@ async def preview_linear_teams(body: LinearPreviewTeamsRequest) -> dict:
 )
 async def set_linear_integration(
     body: LinearIntegrationRequest,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> AlertIntegrationStatus:
     try:
         encrypted = encrypt_credentials(
@@ -144,7 +144,7 @@ async def get_linear_integration(org_id: str = Depends(require_org)) -> AlertInt
 
 
 @router.delete("/linear", summary="Remove this org's Linear integration", status_code=204)
-async def remove_linear_integration(org_id: str = Depends(require_org)):
+async def remove_linear_integration(org_id: str = Depends(require_scope("admin"))):
     deleted = await delete_org_alert_integration(org_id, "linear")
     if not deleted:
         raise HTTPException(status_code=404, detail="No Linear integration configured.")

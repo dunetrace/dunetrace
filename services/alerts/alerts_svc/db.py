@@ -39,47 +39,55 @@ async def close_pool() -> None:
         _pool = None
 
 
-async def ensure_semantic_signal_column() -> None:
-    """Defensively add failure_signals.source (owned by semantic_svc's own
-    schema migration — see services/semantic/semantic_svc/db.py). alerts_svc
-    must be able to SELECT this column regardless of whether the semantic
-    worker has ever run: SEMANTIC_WORKER_ENABLED defaults to false, and if it
-    stays false the column would otherwise never exist, and
-    fetch_unalerted_signals's SELECT would crash with UndefinedColumnError on
-    every install. IF NOT EXISTS makes this a no-op once semantic_svc (or a
-    prior run of this same check) has already created it."""
+async def _apply_shared_migrations() -> None:
+    """Every table this worker reads or writes that another service also
+    touches — failure_signals, processed_runs, organizations, approvals'
+    neighbours, org_alert_integrations, linear_issue_signals — is declared by
+    dunetrace_schemas.migrations, and nowhere in this file. The three
+    ensure_* entry points below all resolve to this one call; each is kept
+    because worker.py's startup sequence names it, and because each used to
+    be a separate "defensive" ALTER that is now a documented no-op.
+
+    Apply, then require. require_schema_version is the guard for a replica
+    that could not apply (a lock timeout, a read-only standby): it raises
+    here, so a too-old schema fails the start rather than the claim scan.
+    ensure_digest_schema and ensure_dedup_schema — the two that declare this
+    worker's own tables, and the first two worker.py calls — run this before
+    their own DDL for the same reason."""
+    from dunetrace_schemas.migrations import (
+        CURRENT_SCHEMA_VERSION,
+        apply_migrations,
+        require_schema_version,
+        schema_connection,
+    )
+
     if not _pool:
         return
-    async with _pool.acquire() as conn:
-        await conn.execute(
-            "ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'structural'"
-        )
+    # Untimed connection — see schema_connection.
+    async with schema_connection(settings.DATABASE_URL) as conn:
+        await apply_migrations(conn)
+        await require_schema_version(conn, CURRENT_SCHEMA_VERSION, "alerts")
+
+
+async def ensure_semantic_signal_column() -> None:
+    """failure_signals.source is migration 5's. This worker used to ALTER it
+    in defensively because the column's "owner" (semantic_svc) is disabled by
+    default and might never run — exactly the start-order dependency the
+    migration runner removed. Kept as a startup hook; applies migrations."""
+    await _apply_shared_migrations()
 
 
 async def ensure_alert_claim_columns() -> None:
-    """Add the claim bookkeeping columns this worker uses to take exclusive
-    ownership of a signal before delivering it.
+    """The claim bookkeeping columns (alert_claimed_at / alert_claimed_by,
+    migration 5) and the claim-scan index (idx_signals_alert_claim,
+    migration 9) this worker uses to take exclusive ownership of a signal
+    before delivering it.
 
     `alerted` alone can't serve as the claim: it's only set *after* a successful
     send, so between the SELECT and the send a second worker sees the same row as
-    unclaimed and delivers a duplicate alert to the customer's Slack. These two
+    unclaimed and delivers a duplicate alert to the customer's Slack. The claim
     columns close that window — see claim_unalerted_signals."""
-    if not _pool:
-        return
-    async with _pool.acquire() as conn:
-        await conn.execute(
-            "ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS alert_claimed_at TIMESTAMPTZ"
-        )
-        await conn.execute(
-            "ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS alert_claimed_by TEXT"
-        )
-        # Sized for the claim scan: the driving predicate is alerted = FALSE,
-        # ordered by detected_at, with the claim state read per candidate row.
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_signals_alert_claim "
-            "ON failure_signals (detected_at, alert_claimed_at) "
-            "WHERE alerted = FALSE"
-        )
+    await _apply_shared_migrations()
 
 
 async def claim_unalerted_signals(
@@ -202,45 +210,13 @@ async def mark_alerted_batch(signal_ids: list[int]) -> None:
 
 
 async def ensure_alert_integrations_schema() -> None:
-    """Shared schema first — the DDL here ALTERs failure_signals, which another
-    service creates. See dunetrace_schemas.migrations."""
-    from dunetrace_schemas.migrations import apply_migrations
-
-    if _pool:
-        async with _pool.acquire() as _c:
-            await apply_migrations(_c)
-
-    """Defensive copy of api_svc's org_alert_integrations/linear_issue_signals
-    DDL (Phase 4.1) — same "whichever service starts first wins" convention
-    as ensure_dedup_schema/ensure_digest_schema above. alerts_svc only ever
-    reads org_alert_integrations (via fetch_org_alert_integration) and
-    writes linear_issue_signals (via record_linear_issue_mapping)."""
-    if not _pool:
-        return
-    async with _pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS org_alert_integrations (
-                id                    BIGSERIAL    PRIMARY KEY,
-                org_id                TEXT         NOT NULL,
-                provider              TEXT         NOT NULL,
-                encrypted_credentials TEXT         NOT NULL,
-                config_json           JSONB        NOT NULL DEFAULT '{}',
-                enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
-                created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-                updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-                UNIQUE (org_id, provider)
-            );
-            CREATE TABLE IF NOT EXISTS linear_issue_signals (
-                id              BIGSERIAL    PRIMARY KEY,
-                org_id          TEXT         NOT NULL,
-                signal_id       BIGINT       NOT NULL,
-                linear_issue_id TEXT         NOT NULL,
-                created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-                UNIQUE (linear_issue_id)
-            );
-            """
-        )
+    """org_alert_integrations (read here via fetch_org_alert_integration,
+    written by the API's config CRUD) and linear_issue_signals (written here
+    via record_linear_issue_mapping, read by the API's Linear webhook
+    receiver) are migration 9's. This file used to carry a "defensive copy"
+    of the API's DDL for both under the whichever-starts-first convention;
+    the copy is gone."""
+    await _apply_shared_migrations()
 
 
 async def fetch_org_alert_integration(org_id: str, provider: str) -> dict | None:
@@ -336,9 +312,13 @@ async def ensure_digest_schema() -> None:
     Each org gets its own weekly digest send, gated independently — the digest
     aggregates that org's own runs/signals/issues only, so a shared Slack/webhook
     destination never sees another org's data mixed into one message.
+
+    Shared schema first: worker.py calls this before anything else, so it is
+    where the schema-version gate has to sit for it to run before any DDL.
     """
     if not _pool:
         return
+    await _apply_shared_migrations()
     async with _pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS digest_log (
@@ -721,6 +701,7 @@ async def ensure_dedup_schema() -> None:
     """
     if not _pool:
         return
+    await _apply_shared_migrations()
     async with _pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS alert_dedup (
@@ -819,12 +800,23 @@ async def increment_suppressed_count(
         )
 
 
-async def fetch_run_tokens(run_ids: list[str]) -> dict[str, dict]:
-    """Fetch total prompt+completion tokens and model for a batch of run_ids.
+async def fetch_run_tokens(runs: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """Fetch total prompt+completion tokens and model for a batch of runs,
+    each identified by its (org_id, run_id) pair.
+
     prompt_tokens may be in llm.called (direct SDK) or llm.responded (LangChain);
-    completion_tokens are always in llm.responded. Sum both event types."""
-    if not _pool or not run_ids:
+    completion_tokens are always in llm.responded. Sum both event types.
+
+    Takes pairs rather than bare run_ids because run_id is caller-supplied and
+    collides across tenants: matching on run_id alone summed BOTH tenants'
+    llm.called/llm.responded events into one figure and picked MIN(model) across
+    them, so the token count and model name in an org's Slack alert could come
+    partly from another org's run. A claim batch legitimately spans orgs, so the
+    pairs are unnested and joined on both columns."""
+    if not _pool or not runs:
         return {}
+    org_ids = [org_id for org_id, _ in runs]
+    run_ids = [run_id for _, run_id in runs]
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -847,13 +839,17 @@ async def fetch_run_tokens(run_ids: list[str]) -> dict[str, dict]:
                 END AS prompt_tokens,
                 SUM(COALESCE((r.payload->>'completion_tokens')::integer, 0)) AS completion_tokens,
                 (SELECT MIN(c.payload->>'model') FROM events c
-                 WHERE c.run_id = r.run_id AND c.event_type = 'llm.called'
-                   AND c.payload->>'model' IS NOT NULL) AS model
+                 WHERE c.run_id = r.run_id AND c.org_id = r.org_id
+                   AND c.event_type = 'llm.called'
+                   AND c.payload->>'model' IS NOT NULL) AS model,
+                r.org_id
             FROM events r
-            WHERE r.run_id = ANY($1::text[])
-              AND r.event_type IN ('llm.called', 'llm.responded')
-            GROUP BY r.run_id
+            JOIN unnest($1::text[], $2::text[]) AS w(org_id, run_id)
+              ON r.org_id = w.org_id AND r.run_id = w.run_id
+            WHERE r.event_type IN ('llm.called', 'llm.responded')
+            GROUP BY r.org_id, r.run_id
             """,
+            org_ids,
             run_ids,
         )
-    return {r["run_id"]: dict(r) for r in rows}
+    return {(r["org_id"], r["run_id"]): dict(r) for r in rows}

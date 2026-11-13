@@ -52,7 +52,7 @@ pattern is to grab the run once and reference it from each handler.
 # ── ILLUSTRATIVE — adapt callback names to your framework ──────────────
 from dunetrace import Dunetrace
 
-dt = Dunetrace(api_key="dt_live_...", api_url="https://your-dunetrace-host")
+dt = Dunetrace(api_key="dt_...", api_url="https://your-dunetrace-host")
 dt.enable_pack("voice")   # once per org, not per call
 
 def handle_call(session):

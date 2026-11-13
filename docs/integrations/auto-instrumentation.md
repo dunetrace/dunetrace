@@ -8,9 +8,26 @@ framework clients so their calls are tracked automatically — no manual
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace(api_key="dt_live_...")
+dt = Dunetrace(api_key="dt_...")
 dt.init(agent_id="my-agent")   # patches every installed supported framework
+
+# Patching alone emits nothing. The patches attach to an OPEN run, so the
+# top-level call has to be wrapped:
+with dt.run("my-agent", user_input=question):
+    answer = my_agent(question)
 ```
+
+> **Patching is half the job.** Every target except `crewai` is a silent no-op
+> outside an open run: the call succeeds, returns normally, and emits **no
+> events and no warning**. If you add `auto_instrument()` and see nothing in the
+> dashboard, this is almost always why. `crewai` is the one exception, because
+> it patches `Crew.kickoff`/`Agent.kickoff` and can open its own run. Full
+> reasoning in [Why LangChain needs `dt.run()` but CrewAI
+> doesn't](#why-langchain-needs-dtrun-but-crewai-doesnt) below.
+>
+> A run context comes from any one of: `with dt.run(...)`, the `@dt.agent` /
+> `@dt.trace` decorators, or `DunetraceASGIMiddleware` /
+> `DunetraceWSGIMiddleware`.
 
 Supported frameworks: `openai`, `anthropic`, `mistral`, `botocore` (AWS
 Bedrock), `httpx`, `requests`, `langchain` (covers LangGraph), `crewai`. Pass `frameworks=[...]` to either call
@@ -31,6 +48,35 @@ model-specific format, and reading it here would hand your code an empty
 stream. `InvokeModelWithResponseStream` reads the model-agnostic
 `amazon-bedrock-invocationMetrics` object Bedrock appends to the final chunk.
 Non-Bedrock boto3 calls (S3, SQS, …) pass straight through.
+
+---
+
+## Confirming the patch is actually recording
+
+Patching succeeds silently whether or not it ends up emitting anything, so check
+for events rather than for the absence of an error. This prints what the SDK
+would ship, with no backend and no LLM account:
+
+```python
+from dunetrace import Dunetrace, CallableExporter
+
+seen = []
+dt = Dunetrace(endpoint=None, exporters=[CallableExporter(lambda e: seen.append(e.event_type.value))])
+dt.auto_instrument()
+
+with dt.run("smoke-test", model="gpt-4o"):
+    your_agent_entry_point("hello")
+
+print(seen)
+```
+
+A working setup prints at least `['run.started', ..., 'run.completed']` with
+`llm.called` / `llm.responded` in between. If you see only the two run events,
+the patch is installed but your LLM client is not one of the patched targets, or
+the call happens in a different process.
+
+If you see nothing at all, no run was open. That is the failure this page exists
+to describe.
 
 ---
 
@@ -168,6 +214,10 @@ still recorded normally.
 Streamed LLM calls are recorded too, for `openai`, `anthropic` and `mistral`
 alike. `llm.called` is emitted when the call is made; `llm.responded` when the
 stream finishes, carrying the accumulated token counts, output text and latency.
+The output text is subject to the SDK's per-field cap (`max_field_chars`, default
+8192, env `DUNETRACE_MAX_FIELD_CHARS`); a cut field carries `output_truncated`
+and `output_original_length` beside it, and `output_length` is always the real
+size — see the SDK README's "What leaves the process".
 
 The stream you get back is a transparent proxy: a real iterator and a context
 manager, with everything else falling through to the underlying stream, so

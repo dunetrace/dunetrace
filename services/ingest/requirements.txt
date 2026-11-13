@@ -4,3 +4,18 @@ asyncpg==0.29.0
 pydantic==2.10.4
 python-dotenv>=1.2.2
 opentelemetry-proto==1.34.1
+# PIN STYLE (shared across services): a package used by more than one image
+# floats on a floor, so every image resolves the SAME version at build time.
+# `==` is reserved for the few places where the version itself is load-bearing
+# (deepeval's pydantic/python-dotenv ranges, mistralai>=2). PyYAML was `==6.0.2`
+# in detector/ingest/semantic and floating in alerts/api, which is the opposite
+# of what an exact pin is for: it guaranteed divergence the moment 6.0.3 shipped.
+# detectors.yml parser for GET /v1/detector-config (dunetrace_schemas.detector_config).
+# Import-guarded: without it the endpoint serves an empty override map and warns.
+PyYAML>=6.0
+# GET /metrics via dunetrace_schemas.metrics. Import-guarded there: without it
+# every metric is a no-op and /metrics says so in its body.
+# Floats, like the other five services (see the PIN STYLE note above): an
+# exact pin here alone would have put ingest on a different prometheus-client
+# from every other image on the next release.
+prometheus-client>=0.20

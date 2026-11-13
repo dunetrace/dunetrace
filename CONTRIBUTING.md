@@ -9,8 +9,8 @@ clone to a merged PR.
   most are "add one structural detector," which is a clean, self-contained change.
 - **Adding a detector?** Follow the step-by-step
   [Adding a detector guide](docs/contributing/adding-a-detector.md) — it walks the
-  full registration path (the one thing newcomers usually miss is enum parity,
-  covered there).
+  full registration path (the one thing newcomers usually miss is regenerating
+  the `FailureType` enums, covered there).
 - Comment on the issue to get it assigned before you start.
 
 For anything larger (a new integration, an architecture change), open an issue
@@ -59,10 +59,14 @@ pre-commit install
 pre-commit run --all-files   # to check everything up front
 ```
 
-CI runs the same checks. The most common first-PR failure is the **`FailureType`
-enum parity** test — if you add a detector, add its enum member to **both**
-`packages/sdk-py/dunetrace/models.py` and
-`packages/schemas-py/dunetrace_schemas/enums.py`. The detector guide covers this.
+CI runs the same checks. The most common first-PR failure is the **generated
+`FailureType` enum** check — if you add a detector, add its member to
+`packages/schemas-py/dunetrace_schemas/enum_source.py` (the single source of
+truth) and run `python scripts/gen_enums.py`, which rewrites both
+`packages/sdk-py/dunetrace/_enums.py` and
+`packages/schemas-py/dunetrace_schemas/enums.py`. Never edit those two by hand —
+`python scripts/gen_enums.py --check` fails CI if they are stale. The detector
+guide covers this.
 
 ## Opening the PR
 

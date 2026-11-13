@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from dunetrace.detectors import (
     CUSTOM_DETECTOR_REGISTRY,
@@ -24,6 +25,7 @@ from detector_svc.config_loader import load_custom_detector_budget
 from detector_svc.custom_detector import evaluate_custom_detector
 from detector_svc.custom_python_detectors import load_custom_detector_plugins
 from detector_svc.baseline_metrics import build_baseline_metrics
+import detector_svc.db as _db
 from detector_svc.db import (
     LIVE_DETECTORS,
     advance_watermark,
@@ -72,6 +74,17 @@ from detector_svc.run_graph import (
     build_ancestor_chain,
     find_cycle,
 )
+from dunetrace_schemas.metrics import (
+    DEFAULT_LATENCY_BUCKETS,
+    counter,
+    db_ready,
+    gauge,
+    histogram,
+    register_standard,
+    set_schema_version,
+    start_metrics_server,
+)
+from dunetrace_schemas.migrations import CURRENT_SCHEMA_VERSION, current_version
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -84,6 +97,79 @@ logger = logging.getLogger("dunetrace.detector")
 _CUSTOM_DETECTOR_BUDGET = load_custom_detector_budget()
 
 _COOCCURRENCE_MULTIPLIERS = {1: 1.0, 2: 1.15, 3: 1.30}
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+# Served on METRICS_PORT by dunetrace_schemas.metrics (no-ops when
+# prometheus_client is absent, so nothing here can stop the worker).
+
+register_standard("detector", settings.APP_VERSION)
+
+BACKLOG_RUNS = gauge(
+    "dunetrace_detector_backlog_runs",
+    "Runs (completed + stalled) the last poll found waiting for detection.",
+)
+POLL_SATURATED = gauge(
+    "dunetrace_detector_poll_saturated",
+    "1 when the last poll's completed or stalled query hit BATCH_SIZE (more work "
+    "behind it, watermark held), else 0.",
+)
+POLL_SECONDS = histogram(
+    "dunetrace_detector_poll_seconds",
+    "Wall-clock duration of one poll cycle (fetch + process every run found).",
+    buckets=DEFAULT_LATENCY_BUCKETS,
+)
+RUNS_PROCESSED = counter(
+    "dunetrace_detector_runs_processed_total",
+    "Runs handed to process_run, by outcome: signals (>=1 signal written), clean, "
+    "failed (retry budget spent, recorded with processing_error) or retry "
+    "(left unmarked for the next poll).",
+    ("result",),
+)
+EXCEPTIONS = counter(
+    "dunetrace_detector_exceptions_total",
+    "Exceptions caught by the worker, by site.",
+    ("where",),
+)
+SIGNALS = counter(
+    "dunetrace_detector_signals_total",
+    "failure_signals rows written (built-in, JSON-config custom and plugin), "
+    "by failure type and shadow flag.",
+    ("failure_type", "shadow"),
+)
+# Pre-create the closed label sets so each series exists (at 0) from the first
+# scrape — rate() over a series that only appears on its first increment
+# misses that increment. failure_type is open-ended and is left lazy.
+for _result in ("signals", "clean", "failed", "retry"):
+    RUNS_PROCESSED.labels(result=_result)
+for _where in (
+    "poll",
+    "process_run_detect",
+    "process_run_write",
+    "process_run_unhandled",
+    "custom_detector",
+):
+    EXCEPTIONS.labels(where=_where)
+
+# Readiness: the loop must have completed a poll recently. A wedged loop (an
+# await that never returns, a CPU-bound detector) stops refreshing this, and
+# /ready reports not-ready once it is older than POLL_STALE_FACTOR x
+# POLL_INTERVAL. Monotonic seconds; set at startup so the window starts then.
+POLL_STALE_FACTOR = 3
+# A poll that is STILL RUNNING gets this much longer before it reads as wedged.
+# Without it readiness was computed purely from the last COMPLETED cycle against
+# a 15s window (3 x the 5s compose interval), while one cycle legitimately
+# processes up to BATCH_SIZE completed plus BATCH_SIZE stalled runs, each ~15
+# sequential round-trips, through a pool of 5. So the worker reported unhealthy
+# for most of every busy cycle — exactly when a backlog existed — and an
+# orchestrator acting on that restarted the busiest worker and handed it a
+# larger backlog. The alerts worker already solved this by allowing an in-flight
+# poll its claim timeout; this is the same idea with a bound of its own.
+POLL_INFLIGHT_GRACE_SECS = 300.0
+_last_poll_at: float | None = None
+# Monotonic stamp of when the current (or last) poll STARTED. Distinguishing
+# "in flight" from "finished" is the whole point: a slow cycle and a wedged loop
+# are indistinguishable from completion times alone.
+_poll_started_at: float | None = None
 
 
 def _resolve_custom_detector_class(detector_name: str):
@@ -136,6 +222,45 @@ def _apply_hard_override(signals: list[FailureSignal], risk) -> None:
     for sig in signals:
         sig.severity = sev
         sig.confidence = round(min(1.0, risk.confidence), 4)
+
+
+# A run the SDK's buffer shed events from is incomplete: a tool loop with its
+# early calls missing looks clean, a run missing run.started has no tools list,
+# and whatever DID fire was decided on partial data. Its signals are recorded —
+# they are still worth looking at — but held in shadow, capped, and marked, so
+# nothing downstream (alerts, issues, baselines, the risk engine) treats a
+# verdict on partial data as a live one.
+_INCOMPLETE_CONFIDENCE_CAP = 0.5
+_INCOMPLETE_SEVERITY_CAP = Severity.MEDIUM
+_SEVERITIES_ABOVE_CAP = frozenset({Severity.CRITICAL.value, Severity.HIGH.value})
+
+
+def _incomplete_marker(dropped_events: int) -> dict:
+    return {"dropped_events": dropped_events, "reason": "sdk_buffer_shed"}
+
+
+def _mark_incomplete(signal: FailureSignal, dropped_events: int) -> None:
+    """Cap a built-in / plugin signal decided on a shed run and mark its evidence."""
+    if not isinstance(signal.evidence, dict):
+        signal.evidence = {}
+    signal.evidence["incomplete_data"] = _incomplete_marker(dropped_events)
+    signal.confidence = round(min(signal.confidence, _INCOMPLETE_CONFIDENCE_CAP), 4)
+    if signal.severity.value in _SEVERITIES_ABOVE_CAP:
+        signal.severity = _INCOMPLETE_SEVERITY_CAP
+
+
+def _mark_incomplete_custom(result: dict, dropped_events: int) -> None:
+    """Same treatment for a JSON-config custom detector's result dict."""
+    evidence = dict(result.get("evidence") or {})
+    evidence["incomplete_data"] = _incomplete_marker(dropped_events)
+    result["evidence"] = evidence
+    try:
+        confidence = float(result.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    result["confidence"] = round(min(confidence, _INCOMPLETE_CONFIDENCE_CAP), 4)
+    if str(result.get("severity", "")).upper() in _SEVERITIES_ABOVE_CAP:
+        result["severity"] = _INCOMPLETE_SEVERITY_CAP.value
 
 
 def _injection_signal_from_events(
@@ -212,6 +337,7 @@ async def _delegation_signal_from_chain(
     agent_version: str,
     parent_run_id: str,
     detector: DelegationLoopDetector,
+    org_id: str,
 ) -> FailureSignal | None:
     """Cross-run graph evaluation for DELEGATION_LOOP. Walks this run's
     parent_run_id chain (one lightweight lineage fetch per hop), builds the
@@ -223,7 +349,14 @@ async def _delegation_signal_from_chain(
         agent_version=agent_version,
         parent_run_id=parent_run_id,
     )
-    chain = await build_ancestor_chain(start, fetch_run_lineage)
+
+    # The chain walker takes a one-argument fetcher; bind this run's org so
+    # every hop stays inside it. An unscoped hop walks into another tenant's
+    # delegation graph, because run_id is caller-supplied.
+    async def _lineage(rid: str):
+        return await fetch_run_lineage(rid, org_id)
+
+    chain = await build_ancestor_chain(start, _lineage)
     if len(chain) < 2:
         return None
     cycle = find_cycle(build_agent_delegation_edges(chain))
@@ -358,6 +491,59 @@ def _emit_otel_findings(
         logger.debug("OTel findings emission skipped for run_id=%s: %s", run_id, exc)
 
 
+async def _handle_processing_failure(
+    exc: Exception,
+    *,
+    run_id: str,
+    agent_id: str,
+    agent_version: str,
+    trigger: str,
+    org_id: str,
+    event_count: int,
+    stage: str,
+) -> int:
+    """The shared failure path for both halves of process_run. Always returns 0.
+
+    A run is deliberately NOT marked processed on the first failures. Neither
+    half is pure computation — the detect half holds seven baseline queries, a
+    detector lookup, a parent fetch and a lineage walk; the write half is a
+    sequence of inserts — so the common failure in both is transient. Marking
+    such a run processed wrote signal_count=0, a permanent "clean run" verdict
+    nothing could revisit, because a completed run never gains events and so
+    never re-enters the poll. Leaving it unmarked means the next poll retries it,
+    bounded by run_processing_failures.
+
+    Once the budget is spent the run IS recorded, with processing_error set, so
+    it reads as failed rather than as indistinguishable from clean.
+    """
+    logger.exception("Run processing failed in the %s half. run_id=%s", stage, run_id)
+    EXCEPTIONS.labels(where=f"process_run_{stage}").inc()
+    attempts = await record_processing_failure(run_id, org_id, repr(exc))
+    if attempts < MAX_PROCESSING_ATTEMPTS:
+        logger.warning(
+            "Run %s will be retried (attempt %d of %d)",
+            run_id,
+            attempts,
+            MAX_PROCESSING_ATTEMPTS,
+        )
+        RUNS_PROCESSED.labels(result="retry").inc()
+        return 0
+    logger.error("Run %s failed detection %d times — recording as failed", run_id, attempts)
+    await mark_run_processed(
+        run_id,
+        agent_id,
+        agent_version,
+        trigger,
+        0,
+        org_id,
+        event_count=event_count,
+        processing_error=repr(exc)[:2000],
+    )
+    await clear_processing_failures(run_id, org_id)
+    RUNS_PROCESSED.labels(result="failed").inc()
+    return 0
+
+
 async def process_run(
     run_id: str,
     agent_id: str,
@@ -365,21 +551,36 @@ async def process_run(
     trigger: str,
     org_id: str,
 ) -> int:
-    events = await fetch_run_events(run_id)
+    events = await fetch_run_events(run_id, org_id)
     if not events:
         await mark_run_processed(run_id, agent_id, agent_version, trigger, 0, org_id)
+        RUNS_PROCESSED.labels(result="clean").inc()
         return 0
 
     # audit Finding 15: if this run was already processed and new events have since
     # arrived, re-detect ADDITIVELY — write only failure types not already recorded
     # for the run (so a benign run that later turns out to have looped gets its
     # signal, without duplicating existing signals or re-alerting them).
-    prior = await fetch_run_state(run_id)
-    is_reprocess = prior is not None
-    existing_types: set = prior["signal_types"] if prior else set()
+    prior = await fetch_run_state(run_id, org_id)
+    is_reprocess = prior["processed"]
+    # Always the types already STORED for this run, even when processed_runs has
+    # no row — see fetch_run_state. That is what makes a retry after a partial
+    # write idempotent instead of duplicating every signal it already wrote.
+    existing_types: set = prior["signal_types"]
 
+    incomplete = False
     try:
         state = build_run_state(events)
+        incomplete = state.dropped_events > 0
+        if incomplete:
+            logger.info(
+                "Run %s is incomplete: the SDK buffer shed %d of its events under overload. "
+                "Its signals are held in shadow with capped confidence/severity and it is "
+                "excluded from issue tracking and baselines. agent_id=%s",
+                run_id,
+                state.dropped_events,
+                agent_id,
+            )
         (
             state.baseline_p75_steps,
             state.baseline_p75_latency_tool,
@@ -413,7 +614,7 @@ async def process_run(
                 (d for d in detectors if isinstance(d, HandoffContextLossDetector)), None
             )
             if handoff_detector is not None:
-                parent_events = await fetch_run_events(parent_run_id)
+                parent_events = await fetch_run_events(parent_run_id, org_id)
                 handoff = _handoff_signal_from_events(
                     events, parent_events, run_id, agent_id, agent_version, handoff_detector
                 )
@@ -425,7 +626,7 @@ async def process_run(
             )
             if delegation_detector is not None:
                 delegation = await _delegation_signal_from_chain(
-                    run_id, agent_id, agent_version, parent_run_id, delegation_detector
+                    run_id, agent_id, agent_version, parent_run_id, delegation_detector, org_id
                 )
                 if delegation:
                     signals.append(delegation)
@@ -447,7 +648,32 @@ async def process_run(
                     exc,
                 )
 
-        risk = RiskEngine().evaluate(signals, state)
+        # Shadow signals must not influence LIVE ones. A detector is in shadow
+        # precisely because its precision is unvalidated, so letting it change
+        # another signal's confidence, severity or co_signal_count means an
+        # unvalidated detector is already affecting production output — which
+        # is the one thing shadow mode exists to prevent. The shadow flag is
+        # applied at WRITE time (LIVE_DETECTORS in db.py), which is far too late
+        # for the three calls below; they run on the full list.
+        #
+        # Custom detectors are excluded here too: a plugin signal carries
+        # FailureType.CUSTOM and its own shadow decision, so it is not
+        # LIVE_DETECTORS-gated and cannot be assumed live.
+        #
+        # A shed (incomplete) run has NO live signals: every one of them is
+        # written in shadow below, so none may feed the hard override or the
+        # co-occurrence boost either.
+        live_signals = (
+            []
+            if incomplete
+            else [
+                s
+                for s in signals
+                if s.failure_type != FailureType.CUSTOM and s.failure_type.value in LIVE_DETECTORS
+            ]
+        )
+
+        risk = RiskEngine().evaluate(live_signals, state)
         logger.debug(
             "RiskEngine. run_id=%s confidence=%.2f active=%d severity=%s scores=%s",
             run_id,
@@ -456,219 +682,256 @@ async def process_run(
             risk.severity or "normal",
             risk.scores,
         )
-        _apply_hard_override(signals, risk)
-        _apply_cooccurrence_boost(signals)
+        _apply_hard_override(live_signals, risk)
+        _apply_cooccurrence_boost(live_signals)
     except Exception as exc:
-        logger.exception("Run processing failed. run_id=%s", run_id)
-        # Deliberately NOT marked processed on the first failures. This block is
-        # not pure computation — it holds seven baseline queries, a detector
-        # lookup, a parent fetch and a lineage walk, all DB round-trips — so the
-        # common failure here is transient. Marking it processed wrote
-        # signal_count=0, a permanent "clean run" verdict nothing could revisit,
-        # because a completed run never gains events and so never re-enters the
-        # poll. Leaving it unmarked means the next poll retries it.
-        attempts = await record_processing_failure(run_id, repr(exc))
-        if attempts < MAX_PROCESSING_ATTEMPTS:
-            logger.warning(
-                "Run %s will be retried (attempt %d of %d)",
-                run_id,
-                attempts,
-                MAX_PROCESSING_ATTEMPTS,
-            )
-            return 0
-        # Budget spent: a deterministically-undetectable run must not be retried
-        # on every poll forever. Record it as processed WITH the error, so it is
-        # visible as failed rather than indistinguishable from clean.
-        logger.error("Run %s failed detection %d times — recording as failed", run_id, attempts)
-        await mark_run_processed(
-            run_id,
-            agent_id,
-            agent_version,
-            trigger,
-            0,
-            org_id,
+        return await _handle_processing_failure(
+            exc,
+            run_id=run_id,
+            agent_id=agent_id,
+            agent_version=agent_version,
+            trigger=trigger,
+            org_id=org_id,
             event_count=len(events),
-            processing_error=repr(exc)[:2000],
+            stage="detect",
         )
-        await clear_processing_failures(run_id)
-        return 0
 
-    count = 0
-    for signal in signals:
-        plugin_name = (
-            signal.evidence.get("detector_name")
-            if signal.failure_type == FailureType.CUSTOM
-            else None
-        )
-        # audit Finding 15: dedup writes by (run_id, failure_type). Skip a type
-        # already recorded for this run — makes re-detection additive and
-        # idempotent (no duplicate signals, no re-alert of an existing one).
-        stored_type = plugin_name if plugin_name else signal.failure_type.value
-        if stored_type in existing_types:
-            continue
-        if plugin_name:
-            # A third-party Python-class custom detector (see
-            # custom_python_detectors.py) — FailureType is a closed enum, so
-            # it can't carry the plugin's own identity; evidence["detector_name"]
-            # does instead, same convention JSON-config custom detectors already
-            # use. Written via the same TEXT-failure_type path as those, not
-            # write_signals() (which is enum-constrained and LIVE_DETECTORS-gated,
-            # neither of which apply to a plugin the built-in allowlist has never
-            # heard of).
-            plugin_cls = _resolve_custom_detector_class(plugin_name)
-            shadow = plugin_cls.SHADOW_BY_DEFAULT if plugin_cls else True
-            await write_custom_signal(
-                failure_type=plugin_name,
-                severity=signal.severity.value,
-                run_id=signal.run_id,
-                agent_id=signal.agent_id,
-                agent_version=signal.agent_version,
-                step_index=signal.step_index,
-                confidence=signal.confidence,
-                evidence=signal.evidence,
-                shadow=shadow,
-                org_id=org_id,
+    # The write half is guarded too. It used to sit OUTSIDE the try above,
+    # so a transient failure here — a pool timeout on the third of three
+    # write_signals calls — escaped process_run without recording a failure
+    # and without marking the run processed. The next poll five seconds
+    # later saw an unprocessed run and wrote the first two signals again,
+    # every poll, for as long as the pressure lasted. fetch_run_state now
+    # reads already-stored failure types regardless of processed_runs, so
+    # the retry this schedules is idempotent.
+    try:
+        if incomplete:
+            for signal in signals:
+                _mark_incomplete(signal, state.dropped_events)
+
+        count = 0
+        for signal in signals:
+            plugin_name = (
+                signal.evidence.get("detector_name")
+                if signal.failure_type == FailureType.CUSTOM
+                else None
             )
-            count += 1
-            continue
-
-        is_live = signal.failure_type.value in LIVE_DETECTORS
-        written = await write_signals([signal], shadow=not is_live, org_id=org_id)
-        count += written
-
-    # OTel export (Phase 4): emit dunetrace.signal.* / dunetrace.policy.* child
-    # spans into each run's trace so signals decided here show up in the
-    # customer's OTel backend alongside the SDK-emitted run/LLM/tool spans. Only
-    # LIVE, newly-fired signals (same filter issue tracking uses) so shadow
-    # detectors and reprocess duplicates don't leak. No-op when OTel is disabled.
-    live_new_signals = [
-        s
-        for s in signals
-        if s.failure_type.value in LIVE_DETECTORS and s.failure_type.value not in existing_types
-    ]
-    _emit_otel_findings(run_id, org_id, live_new_signals, events, is_reprocess)
-
-    # Issue persistence: track open/resolved lifecycle per (org_id, agent_id, failure_type).
-    # audit Finding 15: on a reprocess, only NEW fired types matter, and the
-    # consecutive-clean-runs counter must NOT be advanced again for a run it already
-    # counted — so advance_clean_runs runs on first-process only.
-    fired_types = [
-        s.failure_type.value
-        for s in signals
-        if s.failure_type.value in LIVE_DETECTORS and s.failure_type.value not in existing_types
-    ]
-    try:
-        if fired_types:
-            await upsert_fired_issues(org_id, agent_id, fired_types)
-        if not is_reprocess:
-            await advance_clean_runs(org_id, agent_id, fired_types)
-    except Exception as exc:
-        logger.warning("Issue tracking failed for run_id=%s: %s", run_id, exc)
-
-    # Conversation modeling (Phase 3.1): register this run in the runs
-    # registry, and — when the SDK's dt.run(conversation_id=...) was set —
-    # its owning conversation. Isolated in its own try/except, same as issue
-    # tracking above, so a bug here never blocks built-in detection.
-    try:
-        conversation_external_id = next(
-            (e.get("conversation_id") for e in events if e.get("conversation_id")), None
-        )
-        started_at = next(
-            (e["timestamp"] for e in events if e["event_type"] == "run.started"),
-            events[0]["timestamp"],
-        )
-        await upsert_run_and_conversation(
-            run_id, org_id, agent_id, agent_version, started_at, conversation_external_id
-        )
-    except Exception as exc:
-        logger.warning("Conversation registry update failed for run_id=%s: %s", run_id, exc)
-
-    # Custom detectors — run after built-ins, tracked separately.
-    # audit Finding 15: skip on reprocess — the custom signal is already deduped by
-    # the type-filter above, and re-running would duplicate custom_detector_results.
-    try:
-        custom_defs = await fetch_custom_detectors(org_id, agent_id) if not is_reprocess else None
-        if custom_defs:
-            cdr_records = []
-            for cd in custom_defs:
-                result = evaluate_custom_detector(
-                    cd["config"],
-                    state,
-                    evaluation_budget_ms=_CUSTOM_DETECTOR_BUDGET["evaluation_budget_ms"],
-                    regex_timeout_ms=_CUSTOM_DETECTOR_BUDGET["regex_timeout_ms"],
+            # audit Finding 15: dedup writes by (run_id, failure_type). Skip a type
+            # already recorded for this run — makes re-detection additive and
+            # idempotent (no duplicate signals, no re-alert of an existing one).
+            stored_type = plugin_name if plugin_name else signal.failure_type.value
+            if stored_type in existing_types:
+                continue
+            if plugin_name:
+                # A third-party Python-class custom detector (see
+                # custom_python_detectors.py) — FailureType is a closed enum, so
+                # it can't carry the plugin's own identity; evidence["detector_name"]
+                # does instead, same convention JSON-config custom detectors already
+                # use. Written via the same TEXT-failure_type path as those, not
+                # write_signals() (which is enum-constrained and LIVE_DETECTORS-gated,
+                # neither of which apply to a plugin the built-in allowlist has never
+                # heard of).
+                plugin_cls = _resolve_custom_detector_class(plugin_name)
+                shadow = plugin_cls.SHADOW_BY_DEFAULT if plugin_cls else True
+                await write_custom_signal(
+                    failure_type=plugin_name,
+                    severity=signal.severity.value,
+                    run_id=signal.run_id,
+                    agent_id=signal.agent_id,
+                    agent_version=signal.agent_version,
+                    step_index=signal.step_index,
+                    confidence=signal.confidence,
+                    evidence=signal.evidence,
+                    shadow=shadow or incomplete,
+                    org_id=org_id,
                 )
-                fired = result is not None
-                cdr_records.append(
-                    {
-                        "detector_id": cd["id"],
-                        "run_id": run_id,
-                        "agent_id": agent_id,
-                        "fired": fired,
-                    }
-                )
-                if fired:
-                    await write_custom_signal(
-                        failure_type=result["failure_type"],
-                        severity=result["severity"],
-                        run_id=run_id,
-                        agent_id=agent_id,
-                        agent_version=agent_version,
-                        step_index=result["step_index"],
-                        confidence=result["confidence"],
-                        evidence=result["evidence"],
-                        shadow=cd["shadow"],
-                        org_id=org_id,
+                _count_signal(plugin_name, shadow or incomplete)
+                count += 1
+                continue
+
+            is_live = signal.failure_type.value in LIVE_DETECTORS
+            shadow = incomplete or not is_live
+            written = await write_signals([signal], shadow=shadow, org_id=org_id)
+            if written:
+                _count_signal(signal.failure_type.value, shadow, written)
+            count += written
+
+        # OTel export (Phase 4): emit dunetrace.signal.* / dunetrace.policy.* child
+        # spans into each run's trace so signals decided here show up in the
+        # customer's OTel backend alongside the SDK-emitted run/LLM/tool spans. Only
+        # LIVE, newly-fired signals (same filter issue tracking uses) so shadow
+        # detectors and reprocess duplicates don't leak. No-op when OTel is disabled.
+        live_new_signals = [
+            s
+            for s in signals
+            if not incomplete
+            and s.failure_type.value in LIVE_DETECTORS
+            and s.failure_type.value not in existing_types
+        ]
+        _emit_otel_findings(run_id, org_id, live_new_signals, events, is_reprocess)
+
+        # Issue persistence: track open/resolved lifecycle per (org_id, agent_id, failure_type).
+        # audit Finding 15: on a reprocess, only NEW fired types matter, and the
+        # consecutive-clean-runs counter must NOT be advanced again for a run it already
+        # counted — so advance_clean_runs runs on first-process only.
+        #
+        # An incomplete run is "unknown", not clean and not fired: its signals are
+        # all shadow (so fired_types is empty), and it must not advance the clean
+        # counter either — five shed runs in a row would otherwise auto-resolve an
+        # issue nobody verified.
+        fired_types = [
+            s.failure_type.value
+            for s in signals
+            if not incomplete
+            and s.failure_type.value in LIVE_DETECTORS
+            and s.failure_type.value not in existing_types
+        ]
+        try:
+            if fired_types:
+                await upsert_fired_issues(org_id, agent_id, fired_types)
+            if not is_reprocess and not incomplete:
+                await advance_clean_runs(org_id, agent_id, fired_types)
+        except Exception as exc:
+            logger.warning("Issue tracking failed for run_id=%s: %s", run_id, exc)
+
+        # Conversation modeling (Phase 3.1): register this run in the runs
+        # registry, and — when the SDK's dt.run(conversation_id=...) was set —
+        # its owning conversation. Isolated in its own try/except, same as issue
+        # tracking above, so a bug here never blocks built-in detection.
+        try:
+            conversation_external_id = next(
+                (e.get("conversation_id") for e in events if e.get("conversation_id")), None
+            )
+            started_at = next(
+                (e["timestamp"] for e in events if e["event_type"] == "run.started"),
+                events[0]["timestamp"],
+            )
+            await upsert_run_and_conversation(
+                run_id, org_id, agent_id, agent_version, started_at, conversation_external_id
+            )
+        except Exception as exc:
+            logger.warning("Conversation registry update failed for run_id=%s: %s", run_id, exc)
+
+        # Custom detectors — run after built-ins, tracked separately.
+        # audit Finding 15: skip on reprocess — the custom signal is already deduped by
+        # the type-filter above, and re-running would duplicate custom_detector_results.
+        try:
+            custom_defs = (
+                await fetch_custom_detectors(org_id, agent_id) if not is_reprocess else None
+            )
+            if custom_defs:
+                cdr_records = []
+                for cd in custom_defs:
+                    result = evaluate_custom_detector(
+                        cd["config"],
+                        state,
+                        evaluation_budget_ms=_CUSTOM_DETECTOR_BUDGET["evaluation_budget_ms"],
+                        regex_timeout_ms=_CUSTOM_DETECTOR_BUDGET["regex_timeout_ms"],
                     )
-                    count += 1
-            await record_custom_detector_results(cdr_records, org_id)
-    except Exception as exc:
-        logger.warning("Custom detector processing failed for run_id=%s: %s", run_id, exc)
+                    fired = result is not None
+                    cdr_records.append(
+                        {
+                            "detector_id": cd["id"],
+                            "run_id": run_id,
+                            "agent_id": agent_id,
+                            "fired": fired,
+                        }
+                    )
+                    if fired:
+                        if incomplete:
+                            _mark_incomplete_custom(result, state.dropped_events)
+                        await write_custom_signal(
+                            failure_type=result["failure_type"],
+                            severity=result["severity"],
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            agent_version=agent_version,
+                            step_index=result["step_index"],
+                            confidence=result["confidence"],
+                            evidence=result["evidence"],
+                            shadow=cd["shadow"] or incomplete,
+                            org_id=org_id,
+                        )
+                        _count_signal(result["failure_type"], cd["shadow"] or incomplete)
+                        count += 1
+                await record_custom_detector_results(cdr_records, org_id)
+        except Exception as exc:
+            EXCEPTIONS.labels(where="custom_detector").inc()
+            logger.warning("Custom detector processing failed for run_id=%s: %s", run_id, exc)
 
-    # Baseline metrics: store this run's scalars so the P75 baselines can be
-    # computed from them later instead of re-derived from raw events, which are
-    # pruned at EVENT_RETENTION_DAYS (see baseline_metrics.py). Written from the
-    # same RunState the detectors just consumed, so a stored metric cannot drift
-    # from the metric it will be compared against.
-    #
-    # `clean` mirrors the baseline's own definition: a run that fired a LIVE
-    # signal is not a reference for normal. fired_types is already filtered to
-    # LIVE_DETECTORS, and on a reprocess it holds only newly-fired types — so
-    # `existing_types` is consulted too, or a re-detected run that had already
-    # signalled would be recorded as clean.
-    try:
-        had_live_signal = bool(fired_types) or any(ft in LIVE_DETECTORS for ft in existing_types)
-        await write_baseline_metrics(
-            org_id,
-            run_id,
-            agent_id,
-            agent_version,
-            not had_live_signal,
-            build_baseline_metrics(state),
+        # Baseline metrics: store this run's scalars so the P75 baselines can be
+        # computed from them later instead of re-derived from raw events, which are
+        # pruned at EVENT_RETENTION_DAYS (see baseline_metrics.py). Written from the
+        # same RunState the detectors just consumed, so a stored metric cannot drift
+        # from the metric it will be compared against.
+        #
+        # `clean` mirrors the baseline's own definition: a run that fired a LIVE
+        # signal is not a reference for normal. fired_types is already filtered to
+        # LIVE_DETECTORS, and on a reprocess it holds only newly-fired types — so
+        # `existing_types` is consulted too, or a re-detected run that had already
+        # signalled would be recorded as clean.
+        #
+        # An incomplete run's step and token counts are truncated, so it is neither
+        # a reference for normal nor evidence of a failure — it contributes nothing.
+        try:
+            if not incomplete:
+                had_live_signal = bool(fired_types) or any(
+                    ft in LIVE_DETECTORS for ft in existing_types
+                )
+                await write_baseline_metrics(
+                    org_id,
+                    run_id,
+                    agent_id,
+                    agent_version,
+                    not had_live_signal,
+                    build_baseline_metrics(state),
+                )
+        except Exception as exc:
+            logger.warning("Baseline metrics failed for run_id=%s: %s", run_id, exc)
+
+        # State metrics (Capability 3, Phase 3.3): precompute per-state time totals
+        # for this run so api_svc can build cross-run analytics without re-reading
+        # raw events. Own try/except — a bug here never blocks detection.
+        try:
+            summary = summarize_states(events)
+            await write_run_state_metrics(
+                run_id, org_id, agent_id, summary["run_started_ts"], summary["states"]
+            )
+        except Exception as exc:
+            logger.warning("State metrics failed for run_id=%s: %s", run_id, exc)
+
+        await mark_run_processed(
+            run_id, agent_id, agent_version, trigger, count, org_id, event_count=len(events)
         )
+        # A run that eventually succeeded leaves no failure history behind, so its
+        # next failure (if any) starts with a full retry budget.
+        await clear_processing_failures(run_id, org_id)
+        RUNS_PROCESSED.labels(result="signals" if count else "clean").inc()
+        return count
     except Exception as exc:
-        logger.warning("Baseline metrics failed for run_id=%s: %s", run_id, exc)
-
-    # State metrics (Capability 3, Phase 3.3): precompute per-state time totals
-    # for this run so api_svc can build cross-run analytics without re-reading
-    # raw events. Own try/except — a bug here never blocks detection.
-    try:
-        summary = summarize_states(events)
-        await write_run_state_metrics(
-            run_id, org_id, agent_id, summary["run_started_ts"], summary["states"]
+        return await _handle_processing_failure(
+            exc,
+            run_id=run_id,
+            agent_id=agent_id,
+            agent_version=agent_version,
+            trigger=trigger,
+            org_id=org_id,
+            event_count=len(events),
+            stage="write",
         )
-    except Exception as exc:
-        logger.warning("State metrics failed for run_id=%s: %s", run_id, exc)
-
-    await mark_run_processed(
-        run_id, agent_id, agent_version, trigger, count, org_id, event_count=len(events)
-    )
-    # A run that eventually succeeded leaves no failure history behind, so its
-    # next failure (if any) starts with a full retry budget.
-    await clear_processing_failures(run_id)
-    return count
 
 
 async def poll_once() -> tuple[int, int]:
+    global _poll_started_at
+    started = time.monotonic()
+    _poll_started_at = started
+    try:
+        return await _poll_once()
+    finally:
+        POLL_SECONDS.observe(time.monotonic() - started)
+
+
+async def _poll_once() -> tuple[int, int]:
     watermark = await get_watermark(settings.SHARD_INDEX, settings.SHARD_COUNT)
     completed = await fetch_completed_runs(
         limit=settings.BATCH_SIZE,
@@ -690,6 +953,11 @@ async def poll_once() -> tuple[int, int]:
     # step over runs that were never processed. Draining first and advancing
     # later costs a few redundant scans; advancing early loses runs.
     drained = len(completed) < settings.BATCH_SIZE and len(stalled) < settings.BATCH_SIZE
+    # What this poll saw, not a table COUNT: a real backlog count would be one
+    # more scan per poll of the same window, and "found BATCH_SIZE, watermark
+    # held" already says the queue is deeper than one poll can drain.
+    BACKLOG_RUNS.set(len(runs))
+    POLL_SATURATED.set(0 if drained else 1)
     if drained:
         await advance_watermark(
             settings.SHARD_INDEX, settings.WATERMARK_GRACE_SECS, settings.SHARD_COUNT
@@ -718,8 +986,30 @@ async def poll_once() -> tuple[int, int]:
                 r["org_id"],
             )
 
-    results = await asyncio.gather(*[process_run_bounded(r) for r in runs])
-    return len(runs), sum(results)
+    # return_exceptions=True, deliberately. Plain gather propagates the FIRST
+    # exception immediately but does NOT cancel its siblings: they keep running
+    # as detached tasks while _poll_cycle catches, skips the _last_poll_at
+    # refresh, sleeps POLL_INTERVAL and starts a fresh poll — which re-selects
+    # the very runs still in flight (they are still NOT EXISTS processed_runs)
+    # and processes each a second time, concurrently with its own orphan. One
+    # reproducibly-failing run also pinned /ready at 503 for a worker that was
+    # otherwise healthy, because the liveness stamp only advances on a clean
+    # cycle. Collecting the failures here keeps the batch whole: process_run
+    # already records its own retry budget, so a run that raised past that is a
+    # worker bug worth a loud line, not a reason to abandon 99 siblings.
+    results = await asyncio.gather(*[process_run_bounded(r) for r in runs], return_exceptions=True)
+    signals = 0
+    for run, result in zip(runs, results):
+        if isinstance(result, BaseException):
+            EXCEPTIONS.labels(where="process_run_unhandled").inc()
+            logger.error(
+                "Run %s raised past process_run's own guards: %r",
+                run["run_id"],
+                result,
+            )
+            continue
+        signals += result
+    return len(runs), signals
 
 
 _PRUNE_INTERVAL = 24 * 60 * 60  # once a day
@@ -769,9 +1059,137 @@ async def _prune_loop() -> None:
         await asyncio.sleep(_PRUNE_INTERVAL)
 
 
+# The closed set of built-in failure types. Anything else — a JSON-config
+# custom detector or a Python-class plugin — is counted as "custom".
+_BUILTIN_FAILURE_TYPES = frozenset(ft.value for ft in FailureType)
+
+
+def _count_signal(failure_type: str, shadow: bool, amount: int = 1) -> None:
+    """Count one written signal, with the failure_type label bounded.
+
+    A custom detector's name is free TEXT an org supplies through
+    POST /v1/custom-detectors, and this worker is shared by every tenant — so
+    passing it straight through made the label set unbounded and
+    caller-controlled: 200 orgs x 5 detectors is 1000+ counter children (twice
+    that with the shadow label), held in the registry for the life of the
+    process, re-emitted on every scrape, with nothing bounding the name's
+    length and deleting the detector never reclaiming the series.
+
+    Per-detector counts are not lost: custom_detector_results records every
+    evaluation per run, and custom_detectors.shadow_fire_count aggregates them
+    — both org-scoped, both queryable, neither pinned in process memory.
+    """
+    label = failure_type if failure_type in _BUILTIN_FAILURE_TYPES else "custom"
+    SIGNALS.labels(failure_type=label, shadow="true" if shadow else "false").inc(amount)
+
+
+def _poll_age_seconds(now: float | None = None) -> float | None:
+    """Seconds since the last successful poll; None before startup."""
+    if _last_poll_at is None:
+        return None
+    return (time.monotonic() if now is None else now) - _last_poll_at
+
+
+def _poll_stale_after_seconds() -> float:
+    return POLL_STALE_FACTOR * float(settings.POLL_INTERVAL)
+
+
+def _poll_is_in_flight() -> bool:
+    """True while a poll has started and not yet refreshed the success stamp."""
+    if _poll_started_at is None:
+        return False
+    return _last_poll_at is None or _poll_started_at > _last_poll_at
+
+
+def poll_is_stale(now: float | None = None) -> bool:
+    """True when the poll loop is wedged or was never started.
+
+    A poll still IN FLIGHT is judged against POLL_INFLIGHT_GRACE_SECS instead of
+    the completion window, so a long-but-healthy cycle is not mistaken for a
+    dead one. A finished poll is judged against POLL_STALE_FACTOR x
+    POLL_INTERVAL as before.
+    """
+    now = time.monotonic() if now is None else now
+    if _poll_is_in_flight():
+        started = _poll_started_at
+        assert started is not None  # _poll_is_in_flight guarantees it
+        return (now - started) > max(_poll_stale_after_seconds(), POLL_INFLIGHT_GRACE_SECS)
+    age = _poll_age_seconds(now)
+    return age is None or age > _poll_stale_after_seconds()
+
+
+async def readiness_check() -> tuple[bool, dict]:
+    """GET /ready: DB reachable at the required schema version AND the poll
+    loop is alive. Runs on the worker's own event loop (scheduled there by the
+    metrics thread), so a loop that is wedged never answers and the probe
+    times out to 503 on its own."""
+    ok, info = await db_ready(_db._pool, CURRENT_SCHEMA_VERSION)
+    age = _poll_age_seconds()
+    stale = poll_is_stale()
+    in_flight = _poll_is_in_flight()
+    info["poll"] = "stale" if stale else "ok"
+    info["in_flight"] = in_flight
+    info["last_poll_age_seconds"] = None if age is None else round(age, 1)
+    info["poll_stale_after_seconds"] = (
+        max(_poll_stale_after_seconds(), POLL_INFLIGHT_GRACE_SECS)
+        if in_flight
+        else _poll_stale_after_seconds()
+    )
+    return ok and not stale, info
+
+
+async def _poll_cycle() -> None:
+    """One iteration of the worker loop: poll, refresh the liveness stamp on
+    success, count and log a failure. Never raises."""
+    global _last_poll_at
+    try:
+        runs, signals = await poll_once()
+        _last_poll_at = time.monotonic()
+        if runs:
+            logger.info("Cycle complete. runs=%d signals=%d", runs, signals)
+    except Exception:
+        EXCEPTIONS.labels(where="poll").inc()
+        # logger.exception, not logger.error("...: %s", exc): several
+        # exceptions this loop can raise stringify to nothing —
+        # asyncpg's connection errors among them — so "%s" produced a
+        # bare "Poll cycle failed:" with no cause and no traceback. The
+        # only way to attribute those was correlating timestamps against
+        # an outage by hand.
+        logger.exception("Poll cycle failed")
+
+
+async def _record_schema_version() -> None:
+    """Point dunetrace_schema_version at what this worker actually observed.
+    Best-effort: ensure_detector_schema already guaranteed >= CURRENT."""
+    version = CURRENT_SCHEMA_VERSION
+    try:
+        if _db._pool is not None:
+            async with _db._pool.acquire() as conn:
+                version = await current_version(conn)
+    except Exception as exc:
+        logger.debug("schema version read for metrics failed: %s", exc)
+    set_schema_version(version)
+
+
+def start_metrics(loop: asyncio.AbstractEventLoop | None = None):
+    """Start /metrics + /ready + /health on settings.METRICS_PORT (0 disables).
+    Returns the server or None; a failure is logged, never raised — metrics are
+    observability, not a dependency of detection."""
+    global _last_poll_at
+    if _last_poll_at is None:
+        _last_poll_at = time.monotonic()  # the staleness window starts now
+    try:
+        return start_metrics_server(settings.METRICS_PORT, readiness_check, loop)
+    except Exception:
+        logger.exception("Metrics server failed to start; continuing without it")
+        return None
+
+
 async def run_worker() -> None:
     await init_pool()
     await ensure_detector_schema()
+    await _record_schema_version()
+    metrics_server = start_metrics(asyncio.get_running_loop())
     loaded = load_custom_detector_plugins()
     if loaded:
         logger.info("Loaded %d custom detector plugin file(s).", loaded)
@@ -795,23 +1213,18 @@ async def run_worker() -> None:
     prune_task = asyncio.create_task(_prune_loop())
     try:
         while True:
-            try:
-                runs, signals = await poll_once()
-                if runs:
-                    logger.info("Cycle complete. runs=%d signals=%d", runs, signals)
-            except Exception:
-                # logger.exception, not logger.error("...: %s", exc): several
-                # exceptions this loop can raise stringify to nothing —
-                # asyncpg's connection errors among them — so "%s" produced a
-                # bare "Poll cycle failed:" with no cause and no traceback. The
-                # only way to attribute those was correlating timestamps against
-                # an outage by hand.
-                logger.exception("Poll cycle failed")
+            await _poll_cycle()
             await asyncio.sleep(settings.POLL_INTERVAL)
     except asyncio.CancelledError:
         logger.info("Detector worker cancelled")
     finally:
         prune_task.cancel()
+        if metrics_server is not None:
+            try:
+                metrics_server.shutdown()
+                metrics_server.server_close()
+            except Exception:
+                logger.debug("metrics server shutdown failed", exc_info=True)
         await close_pool()
 
 

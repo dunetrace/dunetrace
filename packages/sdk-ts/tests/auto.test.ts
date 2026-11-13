@@ -617,6 +617,186 @@ describe("autoInstrument — streaming", () => {
   });
 });
 
+// ── APIPromise surface ────────────────────────────────────────────────────────
+
+/**
+ * A stand-in for the `APIPromise` that `openai` and `@anthropic-ai/sdk` return
+ * from `create()`, modelled on their implementation: a Promise subclass that
+ * satisfies the base with a no-op executor, caches `parse()`, and overrides
+ * `then()` to delegate to it. `.withResponse()` / `.asResponse()` are the
+ * documented way to read rate-limit headers and the request id.
+ *
+ * Neither vendor package is a devDependency — deliberately, so the suite stays
+ * offline and dependency-free — so this fake is what stands in for their return
+ * type. It uses `#private` fields on purpose: both SDKs do, and a Proxy that
+ * routed property reads through its receiver instead of its target would throw
+ * `TypeError: Cannot read private member` the first time one was touched.
+ */
+interface FakeHttpResponse {
+  status: number;
+  headers: Record<string, string>;
+}
+
+class FakeAPIPromise<T> extends Promise<T> {
+  #inner: Promise<{ data: T; response: FakeHttpResponse }>;
+  #parsed: Promise<T> | undefined;
+
+  constructor(inner: Promise<{ data: T; response: FakeHttpResponse }>) {
+    super((resolve) => { resolve(null as never); });
+    this.#inner = inner;
+  }
+
+  /** Both SDKs set this so Promise-internal derivations don't re-enter the
+   *  custom constructor, whose signature is not `(executor)`. */
+  static get [Symbol.species](): PromiseConstructor {
+    return Promise;
+  }
+
+  parse(): Promise<T> {
+    this.#parsed ??= this.#inner.then((r) => r.data);
+    return this.#parsed;
+  }
+
+  asResponse(): Promise<FakeHttpResponse> {
+    return this.#inner.then((r) => r.response);
+  }
+
+  async withResponse(): Promise<{ data: T; response: FakeHttpResponse }> {
+    const [data, response] = await Promise.all([this.parse(), this.asResponse()]);
+    return { data, response };
+  }
+
+  override then<A = T, B = never>(
+    onOk?: ((value: T) => A | PromiseLike<A>) | null,
+    onErr?: ((reason: unknown) => B | PromiseLike<B>) | null,
+  ): Promise<A | B> {
+    return this.parse().then(onOk, onErr);
+  }
+}
+
+const FAKE_RESPONSE: FakeHttpResponse = {
+  status: 200,
+  headers: { "x-request-id": "req_abc123", "x-ratelimit-remaining-requests": "58" },
+};
+
+class APIPromiseCompletions {
+  /** NOT async — the real SDKs return the APIPromise synchronously. */
+  create(opts: Record<string, unknown>): FakeAPIPromise<unknown> {
+    if (opts["__throw"]) {
+      return new FakeAPIPromise<unknown>(Promise.reject(new Error("upstream 500")));
+    }
+    const data = opts["stream"]
+      ? fakeOpenAIStream(OPENAI_CHUNKS)
+      : {
+          choices: [{ message: { content: "hello there" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 11, completion_tokens: 7 },
+        };
+    return new FakeAPIPromise<unknown>(Promise.resolve({ data, response: FAKE_RESPONSE }));
+  }
+}
+
+class APIPromiseOpenAI {
+  static Chat = { Completions: APIPromiseCompletions };
+  chat = { completions: new APIPromiseCompletions() };
+}
+
+describe("autoInstrument — APIPromise surface", () => {
+  let original: typeof APIPromiseCompletions.prototype.create;
+
+  beforeEach(() => {
+    original = APIPromiseCompletions.prototype.create;
+  });
+
+  afterEach(() => {
+    restore(APIPromiseCompletions.prototype, "create", original);
+  });
+
+  it("keeps .withResponse() reachable on a non-streaming call", async () => {
+    const dt = newClient();
+    autoInstrument({ openai: APIPromiseOpenAI, targets: ["openai"] });
+
+    await dt.run("agent-api-promise", {}, async () => {
+      const pending = new APIPromiseOpenAI().chat.completions.create({
+        model: "gpt-4o", messages: [],
+      });
+
+      // The regression: an `async function` wrapper resolved this to a bare
+      // Promise and every one of these members was gone.
+      expect(typeof pending.withResponse).toBe("function");
+      expect(typeof pending.asResponse).toBe("function");
+      expect(typeof pending.parse).toBe("function");
+
+      const { data, response } = await pending.withResponse();
+      expect(response.headers["x-request-id"]).toBe("req_abc123");
+      expect((data as { choices: unknown[] }).choices).toHaveLength(1);
+    });
+
+    // Instrumentation is observed from the side, so it fires whichever accessor
+    // the caller used — .withResponse() never goes through then().
+    expect(eventsOfType("llm.called")).toHaveLength(1);
+    expect(eventsOfType("llm.responded")).toHaveLength(1);
+    expect(eventsOfType("llm.responded")[0].payload["output"]).toBe("hello there");
+  });
+
+  it("hands back the SDK's own object on a non-streaming call, not a copy", async () => {
+    const dt = newClient();
+    autoInstrument({ openai: APIPromiseOpenAI, targets: ["openai"] });
+
+    await dt.run("agent-api-promise", {}, async () => {
+      const pending = new APIPromiseOpenAI().chat.completions.create({
+        model: "gpt-4o", messages: [],
+      });
+      expect(pending).toBeInstanceOf(FakeAPIPromise);
+      // Still a perfectly ordinary awaitable.
+      const resp = await pending;
+      expect((resp as { usage: { prompt_tokens: number } }).usage.prompt_tokens).toBe(11);
+    });
+
+    expect(eventsOfType("llm.called")).toHaveLength(1);
+  });
+
+  it("keeps .withResponse() reachable on a streaming call, and still observes the stream", async () => {
+    const dt = newClient();
+    autoInstrument({ openai: APIPromiseOpenAI, targets: ["openai"] });
+
+    await dt.run("agent-api-promise", {}, async () => {
+      const pending = new APIPromiseOpenAI().chat.completions.create({
+        model: "gpt-4o", messages: [], stream: true,
+      });
+
+      // Streaming is the one path that must replace the resolved value, so the
+      // vendor surface is put back over it with a proxy rather than preserved
+      // outright. instanceof and the extra members survive that.
+      expect(pending).toBeInstanceOf(FakeAPIPromise);
+      expect(typeof pending.withResponse).toBe("function");
+      // Reads a #private field through the proxy — the hazard the proxy's
+      // bind-to-target rule exists for.
+      expect((await pending.asResponse()).status).toBe(200);
+
+      const stream = await pending;
+      for await (const _ of stream as AsyncIterable<unknown>) { /* drain */ }
+    });
+
+    const responded = eventsOfType("llm.responded")[0];
+    expect(eventsOfType("llm.called")).toHaveLength(1);
+    expect(responded.payload["output"]).toBe("Hello");
+    expect(responded.payload["completion_tokens"]).toBe(3);
+  });
+
+  it("propagates a rejected APIPromise untouched and emits no llm.responded", async () => {
+    const dt = newClient();
+    autoInstrument({ openai: APIPromiseOpenAI, targets: ["openai"] });
+
+    await dt.run("agent-api-promise", {}, async () => {
+      await expect(
+        new APIPromiseOpenAI().chat.completions.create({ model: "gpt-4o", __throw: true }),
+      ).rejects.toThrow("upstream 500");
+    });
+
+    expect(eventsOfType("llm.responded")).toHaveLength(0);
+  });
+});
+
 // ── HTTP ──────────────────────────────────────────────────────────────────────
 
 describe("instrumentHttp", () => {

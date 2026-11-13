@@ -158,7 +158,7 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "detector_svc.worker.build_run_state",
-                return_value=MagicMock(baseline_p75_steps=None),
+                return_value=MagicMock(baseline_p75_steps=None, dropped_events=0),
             ),
             patch(
                 "detector_svc.worker.fetch_step_count_baseline",
@@ -195,7 +195,7 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "detector_svc.worker.build_run_state",
-                return_value=MagicMock(baseline_p75_steps=None),
+                return_value=MagicMock(baseline_p75_steps=None, dropped_events=0),
             ),
             patch(
                 "detector_svc.worker.fetch_step_count_baseline",
@@ -230,7 +230,7 @@ class TestWorkerIssueIntegration(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "detector_svc.worker.build_run_state",
-                return_value=MagicMock(baseline_p75_steps=None),
+                return_value=MagicMock(baseline_p75_steps=None, dropped_events=0),
             ),
             patch(
                 "detector_svc.worker.fetch_step_count_baseline",

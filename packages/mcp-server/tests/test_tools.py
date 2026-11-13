@@ -1451,14 +1451,84 @@ class TestGetInstrumentationGuideExtra(unittest.TestCase):
         out = srv.get_instrumentation_guide("lc_graph")
         self.assertIn("DunetraceCallbackHandler", out)
 
-    def test_crewai_unknown(self):
+    def test_crewai_is_supported(self):
+        """Was asserted as unknown. CrewAI is a first-class integration and the
+        guide tool now answers for it, so the old expectation encoded the gap."""
         out = srv.get_instrumentation_guide("crewai")
-        self.assertIn("Unknown framework", out)
-        self.assertIn("langchain", out)
+        self.assertNotIn("Unknown framework", out)
+        self.assertIn("DunetraceCrewCallback", out)
 
-    def test_autogen_unknown(self):
+    def test_autogen_is_supported(self):
         out = srv.get_instrumentation_guide("autogen")
+        self.assertNotIn("Unknown framework", out)
+        self.assertIn("DunetraceAutoGenObserver", out)
+
+    def test_every_supported_framework_returns_a_guide(self):
+        """No key may resolve to an empty or not-found response."""
+        for key in srv._GUIDE_DOCS:
+            with self.subTest(framework=key):
+                out = srv.get_instrumentation_guide(key)
+                self.assertNotIn("Unknown framework", out)
+                self.assertNotIn("(doc not found", out)
+                self.assertGreater(len(out), 200, f"{key} returned a stub")
+
+    def test_every_alias_resolves(self):
+        for alias, key in srv._ALIASES.items():
+            with self.subTest(alias=alias):
+                self.assertIn(key, srv._GUIDE_DOCS)
+
+    def test_a_guide_key_is_never_aliased_to_a_different_guide(self):
+        """Caught a real bug: adding `"dify": "dify"` left a pre-existing
+        `"dify": "otel"` further down the same dict. The later literal wins in
+        Python, so `dify` silently kept returning the OTel guide. Every test
+        above still passed, because `otel` is a valid key that returns a long
+        guide with no error. Only ruff's F601 saw it."""
+        for key in srv._GUIDE_DOCS:
+            with self.subTest(framework=key):
+                self.assertEqual(
+                    srv._ALIASES.get(key),
+                    key,
+                    f"{key!r} is a guide key but routes to {srv._ALIASES.get(key)!r}",
+                )
+
+    def test_alias_table_has_no_duplicate_literals(self):
+        """A duplicate key is invisible at runtime; read it from the source."""
+        import ast
+        import collections
+        import inspect
+
+        tree = ast.parse(inspect.getsource(srv))
+        for node in ast.walk(tree):
+            target = getattr(node, "target", None)
+            if isinstance(node, ast.AnnAssign) and getattr(target, "id", "") == "_ALIASES":
+                keys = [k.value for k in node.value.keys]
+                dupes = [k for k, c in collections.Counter(keys).items() if c > 1]
+                self.assertFalse(dupes, f"_ALIASES has duplicate keys: {dupes}")
+                return
+        self.fail("_ALIASES not found in server.py")
+
+    def test_each_framework_returns_its_own_guide(self):
+        """Not just 'a' guide. The dify bug returned the wrong one."""
+        expected = {
+            "crewai": "DunetraceCrewCallback",
+            "dify": "dify_client",
+            "vercel-ai": "wrapGenerateText",
+            "llamaindex": "retrieval_called",
+            "smolagents": "step_callbacks",
+            "openai-agents": "add_dunetrace_processor",
+            "pydantic-ai": "pydantic_ai",
+            "litellm": "litellm",
+            "autogen": "DunetraceAutoGenObserver",
+        }
+        for framework, needle in expected.items():
+            with self.subTest(framework=framework):
+                self.assertIn(needle, srv.get_instrumentation_guide(framework))
+
+    def test_unknown_framework_lists_what_is_supported(self):
+        out = srv.get_instrumentation_guide("cobol")
         self.assertIn("Unknown framework", out)
+        for key in ("langchain", "crewai", "vercel-ai"):
+            self.assertIn(key, out)
 
     def test_py_alias(self):
         out = srv.get_instrumentation_guide("py")
@@ -1957,6 +2027,40 @@ class TestGetIssue(unittest.TestCase):
             out = srv.get_issue(999)
         self.assertIn("Error:", out)
 
+    def test_renders_a_dunetrace_native_suggested_policy(self):
+        """GET /v1/issues/{id} returns `suggested_policy` for the four
+        dunetrace_native failure types (TOOL_LOOP among them) — the fix is a
+        runtime guardrail, not a diff, and the caller needs to see what it does."""
+        data = dict(
+            self.ISSUE_DETAIL,
+            fix_category="dunetrace_native",
+            suggested_fix=("Dunetrace-native fix: a runtime policy Dunetrace enforces itself."),
+            suggested_policy={
+                "name": "Auto-suggested: stop recurring TOOL_LOOP",
+                "agent_id": "support-bot",
+                "condition": {"trigger": "tool_call_count", "operator": "gte", "value": 6},
+                "action": {"type": "stop"},
+                "priority": 100,
+                "enabled": True,
+            },
+        )
+        with patch("dunetrace_mcp.client.get", return_value=data):
+            out = srv.get_issue(7)
+        self.assertIn("SUGGESTED POLICY", out)
+        self.assertIn("tool_call_count gte 6", out)
+        self.assertIn("stop", out)
+
+    def test_no_policy_section_for_a_customer_code_fix(self):
+        with patch("dunetrace_mcp.client.get", return_value=self.ISSUE_DETAIL):
+            out = srv.get_issue(7)
+        self.assertNotIn("SUGGESTED POLICY", out)
+
+    def test_malformed_policy_does_not_raise(self):
+        data = dict(self.ISSUE_DETAIL, suggested_policy={"condition": "expr", "action": None})
+        with patch("dunetrace_mcp.client.get", return_value=data):
+            out = srv.get_issue(7)
+        self.assertIn("SUGGESTED POLICY", out)
+
 
 class TestSearchIssues(unittest.TestCase):
     """Smoke tests for search_issues (Phase 4.2)."""
@@ -2081,6 +2185,222 @@ class TestAgoISOString(unittest.TestCase):
 
     def test_none_still_works(self):
         self.assertEqual(srv._ago(None), "—")
+
+
+# ── security regressions ──────────────────────────────────────────────────────
+
+
+class TestPathSegmentEscaping(unittest.TestCase):
+    """Regression: tool ids were interpolated into request paths unescaped.
+
+    httpx resolves relative path segments before sending, so
+    f"/v1/runs/{run_id}" with run_id="../../v1/keys" was literally
+    GET /v1/keys — the read-only-gated server fetching the org's API keys with
+    the operator's own bearer token and handing them to the model. The model
+    picks these ids while reading untrusted agent output (signal evidence, tool
+    arguments, LLM text), so "the run id" is attacker-controlled text.
+    """
+
+    def test_httpx_still_resolves_dot_dot(self):
+        """The premise. If httpx ever stops normalising, this test says so —
+        but seg() would still be correct, so it is not load-bearing for safety."""
+        import httpx
+
+        self.assertEqual(
+            str(httpx.Request("GET", "http://h/v1/runs/../../v1/keys").url),
+            "http://h/v1/keys",
+        )
+
+    def test_seg_neutralises_traversal(self):
+        from dunetrace_mcp import client
+        import httpx
+
+        path = f"/v1/runs/{client.seg('../../v1/keys')}"
+        self.assertEqual(str(httpx.Request("GET", "http://h" + path).url), "http://h" + path)
+        self.assertNotIn("/v1/keys", str(httpx.Request("GET", "http://h" + path).url))
+
+    def test_seg_neutralises_bare_dot_segments(self):
+        """quote() leaves "." and ".." intact (both are unreserved), and httpx
+        resolves a bare ".." segment too — so seg() encodes the dots."""
+        from dunetrace_mcp import client
+        import httpx
+
+        for raw in ("..", "."):
+            path = f"/v1/runs/{client.seg(raw)}"
+            self.assertEqual(str(httpx.Request("GET", "http://h" + path).url), "http://h" + path)
+
+    def test_seg_encodes_query_and_fragment_starters(self):
+        from dunetrace_mcp import client
+
+        self.assertEqual(client.seg("x?limit=1000"), "x%3Flimit%3D1000")
+        self.assertEqual(client.seg("x#frag"), "x%23frag")
+        self.assertEqual(client.seg("a&b=c"), "a%26b%3Dc")
+
+    def test_seg_keeps_a_legitimate_id_usable(self):
+        """A real id containing a safe special character must still work — it
+        round-trips percent-encoded and Starlette decodes it back."""
+        from urllib.parse import unquote
+        from dunetrace_mcp import client
+
+        for raw in ("run-abc-123", "run/2026-01", "agent:prod v2", "run+1", "café-agent"):
+            self.assertEqual(unquote(client.seg(raw)), raw)
+
+    def test_url_rejects_an_unescaped_path(self):
+        """Backstop for a call site that forgets seg()."""
+        from dunetrace_mcp import client
+
+        with self.assertRaises(RuntimeError) as ctx:
+            client.get("/v1/runs/../../v1/keys")
+        self.assertIn("Refusing unescaped API path", str(ctx.exception))
+
+        for bad in ("/v1/runs/..", "/v1/x?y=1", "/v1/x#f", "v1/relative"):
+            with self.assertRaises(RuntimeError):
+                client.get(bad)
+
+    def test_get_run_detail_cannot_reach_another_endpoint(self):
+        with patch("dunetrace_mcp.client.get", return_value=RUN_DETAIL) as mock_get:
+            srv.get_run_detail("../../v1/keys")
+        requested = mock_get.call_args_list[0][0][0]
+        self.assertNotIn("/v1/keys", requested)
+        self.assertTrue(requested.startswith("/v1/runs/"))
+        self.assertNotIn("/", requested[len("/v1/runs/") :])
+
+    def test_agent_id_is_escaped(self):
+        with patch("dunetrace_mcp.client.get", return_value={"signals": []}) as mock_get:
+            srv.get_agent_signals("../../v1/keys")
+        requested = mock_get.call_args_list[0][0][0]
+        self.assertNotIn("/v1/keys", requested)
+        self.assertIn("%2F", requested)
+
+    def test_signal_id_is_escaped(self):
+        with patch("dunetrace_mcp.client.get", return_value={}) as mock_get:
+            srv.get_fix_status("42")
+        self.assertEqual(mock_get.call_args_list[0][0][0], "/v1/signals/42/fix-status")
+
+
+class TestIdShapeValidation(unittest.TestCase):
+    """The second layer: an id whose shape is already known is refused by name
+    rather than silently escaped into a 404, so the operator sees the attempt."""
+
+    def test_numeric_id_rejects_a_crafted_path(self):
+        self.assertEqual(srv._seg_numeric(5, "policy_id"), "5")
+        self.assertEqual(srv._seg_numeric(" 5 ", "policy_id"), "5")  # whitespace tolerated
+        for bad in ("../custom-detectors/5", "5/../6", "abc", "", "-1", "0", "5.0", "\u0665"):
+            with self.assertRaises(ValueError):
+                srv._seg_numeric(bad, "policy_id")
+
+    def test_opaque_id_rejects_only_what_can_never_be_an_id(self):
+        self.assertEqual(srv._seg_opaque("run-1", "run_id"), "run-1")
+        self.assertEqual(srv._seg_opaque("run/2026", "run_id"), "run%2F2026")
+        for bad in ("", "   ", "a" * 300, "a\nb", "a\x00b"):
+            with self.assertRaises(ValueError):
+                srv._seg_opaque(bad, "run_id")
+
+    def test_failure_type_must_be_upper_snake(self):
+        self.assertEqual(srv._seg_failure_type("tool_loop"), "TOOL_LOOP")
+        for bad in ("../../keys", "TOOL-LOOP", "", "9LOOP", "TOOL LOOP"):
+            with self.assertRaises(ValueError):
+                srv._seg_failure_type(bad)
+
+    def test_delete_policy_refuses_a_crafted_id_without_issuing_a_request(self):
+        """`delete_policy(policy_id="../custom-detectors/5")` used to issue
+        DELETE /v1/custom-detectors/5 — a tool the operator believes only
+        touches policies deleting a detector."""
+        with patch("dunetrace_mcp.client.delete") as mock_delete:
+            out = srv.delete_policy("../custom-detectors/5")
+        mock_delete.assert_not_called()
+        self.assertIn("Error", out)
+        self.assertIn("policy_id", out)
+
+
+class TestSSEBinding(unittest.TestCase):
+    """Regression: `--sse` bound whatever the installed `mcp` defaulted to
+    (0.0.0.0 through 1.9.0, 127.0.0.1 from 1.9.4) with no authentication in any
+    version, and offered no way to say which."""
+
+    def setUp(self):
+        self._host = srv.mcp.settings.host
+        self._port = srv.mcp.settings.port
+
+    def tearDown(self):
+        srv.mcp.settings.host = self._host
+        srv.mcp.settings.port = self._port
+
+    def _run(self, argv):
+        import sys as _sys
+
+        with patch.object(_sys, "argv", argv):
+            with patch.object(srv.mcp, "run") as mock_run:
+                srv.main()
+        return mock_run
+
+    def test_sse_defaults_to_loopback(self):
+        self._run(["dunetrace-mcp", "--sse"])
+        self.assertEqual(srv.mcp.settings.host, "127.0.0.1")
+        self.assertTrue(srv._is_loopback(srv.mcp.settings.host))
+
+    def test_host_flag_is_honoured(self):
+        self._run(["dunetrace-mcp", "--sse", "--host", "0.0.0.0"])
+        self.assertEqual(srv.mcp.settings.host, "0.0.0.0")
+
+    def test_non_loopback_bind_warns_on_stderr(self):
+        import io
+        import contextlib
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self._run(["dunetrace-mcp", "--sse", "--host", "0.0.0.0"])
+        out = buf.getvalue()
+        self.assertIn("0.0.0.0", out)
+        self.assertIn("NOT loopback", out)
+        self.assertIn("no authentication", out)
+
+    def test_loopback_bind_is_silent(self):
+        import io
+        import contextlib
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self._run(["dunetrace-mcp", "--sse"])
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_warning_calls_out_the_write_tools_when_they_are_enabled(self):
+        exposed = srv._bind_warning("0.0.0.0", readonly=False)
+        self.assertIn("WRITE tools", exposed)
+        self.assertIn("create_policy", exposed)
+        read_only = srv._bind_warning("0.0.0.0", readonly=True)
+        self.assertNotIn("WRITE tools", read_only)
+
+    def test_is_loopback(self):
+        for host in ("127.0.0.1", "127.0.1.5", "::1", "[::1]", "localhost", "LOCALHOST"):
+            self.assertTrue(srv._is_loopback(host), host)
+        for host in ("0.0.0.0", "", "::", "10.0.0.4", "example.com", "192.168.1.9"):
+            self.assertFalse(srv._is_loopback(host), host)
+
+    def test_installed_mcp_defaults_to_loopback(self):
+        """The pyproject floor (mcp>=1.9.4) exists so the library default is
+        safe even for anything that bypasses main()."""
+        from mcp.server.fastmcp import FastMCP
+
+        self.assertTrue(srv._is_loopback(FastMCP("bind-probe").settings.host))
+
+    def test_dependency_floor_is_not_lowered(self):
+        import pathlib
+        import re as _re
+        import tomllib
+
+        pyproject = pathlib.Path(srv.__file__).resolve().parents[1] / "pyproject.toml"
+        if not pyproject.exists():  # installed wheel, not a checkout
+            self.skipTest("pyproject.toml not present in an installed package")
+        deps = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+        pin = next(d for d in deps if d.startswith("mcp"))
+        floor = _re.search(r">=\s*([0-9]+(?:\.[0-9]+)*)", pin).group(1)
+        self.assertGreaterEqual(
+            tuple(int(p) for p in floor.split(".")),
+            (1, 9, 4),
+            "FastMCP's Settings.host only became 127.0.0.1 in 1.9.4; a lower "
+            "floor lets the same command bind every interface, unauthenticated.",
+        )
 
 
 if __name__ == "__main__":

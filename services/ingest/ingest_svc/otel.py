@@ -64,7 +64,16 @@ def protobuf_to_resource_spans(raw: bytes) -> list[dict]:
 
     req = ExportTraceServiceRequest()
     req.ParseFromString(raw)
-    body = MessageToDict(req)
+    # use_integers_for_enums is REQUIRED, not a preference. Proto3 JSON renders
+    # an enum as its NAME, so status.code came out as "STATUS_CODE_ERROR" while
+    # otlp_to_events() compares it to the integer 2 (the shape the OTLP/JSON
+    # spec uses and every JSON fixture sends). The comparison was therefore
+    # always false on this path: every errored root span mapped to run.completed
+    # and every failed tool span to success=True. Protobuf is the default for
+    # OTLPSpanExporter and the OTel Collector — the reason this path exists — so
+    # error-driven detection (RETRY_STORM, CASCADING_TOOL_FAILURE,
+    # FIRST_STEP_FAILURE) was silently dead for every collector-fed tenant.
+    body = MessageToDict(req, use_integers_for_enums=True)
     resource_spans = body.get("resourceSpans", [])
     _fix_ids_to_hex(resource_spans)
     return resource_spans

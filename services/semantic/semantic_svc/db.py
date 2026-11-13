@@ -57,29 +57,66 @@ async def close_pool() -> None:
 
 # ── Schema additions ───────────────────────────────────────────────────────────
 
-# NOTE: ingest_svc owns the core schema (events, failure_signals). This service
-# adds only what it needs on top, same convention as detector_svc/alerts_svc.
+# NOTE: every table this worker shares with the API — failure_signals (and its
+# `source` column), organizations and its per-org flags/quotas, signal_groups,
+# signal_group_members, signal_group_overrides, org_semantic_evaluation_usage,
+# semantic_evaluation_log — is declared by dunetrace_schemas.migrations (5, 6
+# and 10), which ensure_semantic_schema() applies first. What is declared below
+# is this worker's alone: sampling decisions, per-agent config and counters.
 
 _SEMANTIC_SCHEMA = """
 -- Tracks which runs the semantic worker has already made a sampling decision
 -- for. Recorded even when a run is skipped (sampled=FALSE) so a skipped run
 -- isn't re-evaluated every poll cycle forever.
+--
+-- Keyed (org_id, run_id), the same composite key `runs` and `processed_runs`
+-- carry, and for the same reason: run_id is caller-supplied (the SDK exposes
+-- `run_id=`, the OTLP path derives it from a caller-supplied trace id), so two
+-- tenants legitimately hold the same one. On a bare run_id key the first
+-- tenant's row made ON CONFLICT DO NOTHING swallow the second's, and
+-- fetch_unevaluated_runs' anti-join then read that row as "already decided" —
+-- so the second tenant's run was never sampled for evaluation, silently and
+-- permanently (a completed run gains no further events, so it never
+-- re-enters the poll).
 CREATE TABLE IF NOT EXISTS semantic_processed_runs (
-    run_id        TEXT PRIMARY KEY,
+    run_id        TEXT        NOT NULL,
     agent_id      TEXT        NOT NULL,
     agent_version TEXT        NOT NULL,
     org_id        TEXT        NOT NULL,
     sampled       BOOLEAN     NOT NULL,
     sample_reason TEXT,
-    processed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    processed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (org_id, run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_semantic_processed_runs_agent
     ON semantic_processed_runs(agent_id, processed_at DESC);
 
--- Distinguishes structural detector signals from semantic evaluator signals in
--- the shared failure_signals table. Existing rows (all structural, written
--- before this column existed) default to 'structural'.
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'structural';
+-- Repair the PRIMARY KEY on a table created before the key became composite.
+-- CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so such a
+-- deployment would keep the single-column key on run_id while
+-- mark_run_processed upserts ON CONFLICT (org_id, run_id) — which raises
+-- InvalidColumnReferenceError on every poll tick and crash-loops the worker,
+-- and until then keeps swallowing the colliding tenant's run. Same guarded
+-- shape as detector_svc's detector_watermarks pkey repair. Guarded on the
+-- current key being single-column, so it no-ops on a fresh install. Safe to
+-- run: org_id has always been NOT NULL here and run_id was already unique
+-- under the old key, so the widened key cannot collide on existing rows and
+-- no row is dropped.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        WHERE c.relname = 'semantic_processed_runs'
+          AND i.indisprimary
+          AND i.indnatts = 1
+    ) THEN
+        ALTER TABLE semantic_processed_runs DROP CONSTRAINT semantic_processed_runs_pkey;
+        ALTER TABLE semantic_processed_runs
+            ADD CONSTRAINT semantic_processed_runs_pkey PRIMARY KEY (org_id, run_id);
+    END IF;
+END $$;
 
 -- Per-agent adaptive sampling overrides (Phase 1.2). Mirrors the existing
 -- agent_rate_quotas / agent_detector_overrides convention — a side table
@@ -114,129 +151,21 @@ CREATE TABLE IF NOT EXISTS semantic_evaluation_usage (
     PRIMARY KEY (org_id, agent_id, month)
 );
 
--- Signal grouping/dedup (Phase 1.4.2). One row per distinct recurring
--- pattern — (org_id, agent_id, evaluator, root_cause_hash). root_cause_hash
--- is a crude hash of the evaluator's reasoning text (see grouping.py); this
--- is a DIFFERENT concept from detector_svc's `issues` table (keyed on the
--- closed FailureType enum, not applicable here — semantic evaluators have no
--- fixed type enum, only free-text reasoning to group on).
--- root_cause_sample is a human-readable (normalized, truncated) copy of the
--- first reasoning seen for this group, for dashboard display — the hash
--- itself isn't reversible/readable.
-CREATE TABLE IF NOT EXISTS signal_groups (
-    id                BIGSERIAL    PRIMARY KEY,
-    org_id            TEXT         NOT NULL,
-    agent_id          TEXT         NOT NULL,
-    evaluator         TEXT         NOT NULL,
-    root_cause_hash   TEXT         NOT NULL,
-    root_cause_sample TEXT         NOT NULL,
-    first_seen        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    last_seen         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    signal_count      INTEGER      NOT NULL DEFAULT 0,
-    UNIQUE (org_id, agent_id, evaluator, root_cause_hash)
-);
-CREATE INDEX IF NOT EXISTS idx_signal_groups_org_agent ON signal_groups(org_id, agent_id);
-
--- Membership: which failure_signals rows belong to which group.
--- "affected_run_ids" (per the brief) is derived by joining this table to
--- failure_signals via signal_id, rather than a JSON array column — queryable
--- and consistent with how the rest of this schema prefers relational tables
--- over JSON arrays for anything that needs indexing (e.g. custom_detector_results).
--- signal_id has no DB foreign key to failure_signals(id) — that table is
--- owned by ingest_svc, and nothing in this codebase ever deletes a
--- failure_signals row, so referential integrity is a non-issue in practice;
--- same "not enforced as a DB constraint" call already made for
--- agent_rate_quotas.key_id (services/ingest/ingest_svc/db/postgres.py).
-CREATE TABLE IF NOT EXISTS signal_group_members (
-    id         BIGSERIAL   PRIMARY KEY,
-    group_id   BIGINT      NOT NULL REFERENCES signal_groups(id) ON DELETE CASCADE,
-    signal_id  BIGINT      NOT NULL,
-    run_id     TEXT        NOT NULL,
-    added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_signal_group_members_group ON signal_group_members(group_id, added_at DESC);
-CREATE INDEX IF NOT EXISTS idx_signal_group_members_signal ON signal_group_members(signal_id);
-
--- Phase 1.4.3 — feedback loop. Primarily owned by api_svc's own migration
--- (services/api/api_svc/db/queries.py's _SEMANTIC_FEEDBACK_DDL); added here
--- defensively too since this worker reads both without depending on api_svc
--- (or even ingest_svc, which normally creates `organizations` first) having
--- started first — hence the CREATE TABLE IF NOT EXISTS below, not just the
--- ALTER, matching this schema's usual "whichever starts first wins" rule.
-CREATE TABLE IF NOT EXISTS organizations (
-    id          TEXT PRIMARY KEY,
-    name        TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_enabled BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_auto_suppress BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS signal_group_overrides (
-    group_id   BIGINT      PRIMARY KEY REFERENCES signal_groups(id) ON DELETE CASCADE,
-    fp_count   INTEGER     NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- Phase 1.5 — org-level billing quota. Primarily owned by api_svc's own
--- migration (services/api/api_svc/db/queries.py's _SEMANTIC_QUOTA_DDL); added
--- here defensively too, same reasoning as the Phase 1.4.3 organizations
--- columns above — this worker reads/writes both without depending on api_svc
--- having started first.
--- semantic_evaluation_quota: monthly cap on evaluations across ALL of this
---   org's agents combined — the mandatory plan-tier ceiling. Distinct from
---   agent_semantic_config.budget_monthly (Phase 1.2), which is an optional,
---   per-agent, customer-configurable sub-limit; both are enforced
---   independently in worker.py.
--- allow_semantic_overage: FALSE (default) stops sampling once the org quota
---   is hit; TRUE keeps sampling (and counting, for billing) past it.
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_evaluation_quota INTEGER NOT NULL DEFAULT 1000;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS allow_semantic_overage BOOLEAN NOT NULL DEFAULT FALSE;
-
--- Org-level monthly usage counter. Deliberately NOT derived from
--- semantic_evaluation_usage (Phase 1.2) — that table is only incremented for
--- agents with a configured budget_monthly, so summing it would silently
--- undercount usage from every agent without one (the common case). This
--- counter increments on every sampled run, unconditionally, regardless of
--- per-agent config. Same 'YYYY-MM' UTC calendar-month bucket as
--- semantic_evaluation_usage — no per-org billing-cycle anchor date exists
--- anywhere in this codebase to hook into instead.
-CREATE TABLE IF NOT EXISTS org_semantic_evaluation_usage (
-    org_id     TEXT    NOT NULL,
-    month      TEXT    NOT NULL,
-    eval_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (org_id, month)
-);
-
--- Per-evaluation cost/token log — every evaluate() call, fired or not.
--- failure_signals.evidence only ever captures cost for evaluations that
--- FIRED (evaluate()'s EvalResult.cost_usd is discarded otherwise in
--- worker.py's _run_evaluators) — most evaluations on healthy runs don't
--- fire, so billing math built only from failure_signals would badly
--- undercount real spend. This table is the honest source for cost/usage
--- reporting; failure_signals stays a table of actual findings only.
-CREATE TABLE IF NOT EXISTS semantic_evaluation_log (
-    id                BIGSERIAL   PRIMARY KEY,
-    org_id            TEXT        NOT NULL,
-    agent_id          TEXT        NOT NULL,
-    evaluator         TEXT        NOT NULL,
-    fired             BOOLEAN     NOT NULL,
-    prompt_tokens     INTEGER     NOT NULL,
-    completion_tokens INTEGER     NOT NULL,
-    cost_usd          REAL        NOT NULL,
-    evaluated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_semantic_evaluation_log_org_time ON semantic_evaluation_log(org_id, evaluated_at);
+-- Signal grouping/dedup (signal_groups, signal_group_members), the
+-- false-positive feedback overrides (signal_group_overrides), the org-level
+-- monthly counter (org_semantic_evaluation_usage) and the per-evaluation cost
+-- log (semantic_evaluation_log) are migration 10's: this worker writes all
+-- five and the API reads them, so they are declared once, there. The feedback
+-- flags and quota columns on organizations are migration 6's.
 
 -- Phase 3.2 — conversation-level evaluation (UserFrustrationEvaluator) has
--- its own quota, separate from semantic_evaluation_quota/org_semantic_
--- evaluation_usage above, since it's deliberately more expensive per call
--- (up to MIN_CONVERSATION_RUNS runs' worth of context, not one run's) and
--- must not silently eat the per-run budget or vice versa. Same
--- insert-then-conditional-UPDATE race-safe pattern as
--- consume_org_semantic_quota; same 'YYYY-MM' UTC calendar-month bucket.
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS conversation_evaluation_quota INTEGER NOT NULL DEFAULT 200;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS allow_conversation_overage BOOLEAN NOT NULL DEFAULT FALSE;
-
+-- its own quota (organizations.conversation_evaluation_quota /
+-- allow_conversation_overage, migration 6), separate from
+-- semantic_evaluation_quota/org_semantic_evaluation_usage above, since it's
+-- deliberately more expensive per call (up to MIN_CONVERSATION_RUNS runs'
+-- worth of context, not one run's) and must not silently eat the per-run
+-- budget or vice versa. Same insert-then-conditional-UPDATE race-safe pattern
+-- as consume_org_semantic_quota; same 'YYYY-MM' UTC calendar-month bucket.
 CREATE TABLE IF NOT EXISTS org_conversation_evaluation_usage (
     org_id     TEXT    NOT NULL,
     month      TEXT    NOT NULL,
@@ -252,16 +181,27 @@ async def ensure_semantic_schema() -> None:
     Migrations own every definition more than one service touches, so this runs
     before the local DDL below — booting semantic against an empty database used
     to crash on a table another service happened to create first.
-    """
-    from dunetrace_schemas.migrations import apply_migrations
 
-    if _pool:
-        async with _pool.acquire() as _c:
-            await apply_migrations(_c)
+    Apply, then require. require_schema_version is the guard for a replica
+    that could not apply (a lock timeout, a read-only standby): it raises
+    before any local DDL runs, so a too-old schema fails the start here rather
+    than the first query that reads a column it lacks.
+    """
+    from dunetrace_schemas.migrations import (
+        CURRENT_SCHEMA_VERSION,
+        apply_migrations,
+        require_schema_version,
+        schema_connection,
+    )
 
     if not _pool:
         return
-    async with _pool.acquire() as conn:
+    # Untimed connection — see schema_connection.
+    async with schema_connection(settings.DATABASE_URL) as _c:
+        await apply_migrations(_c)
+        await require_schema_version(_c, CURRENT_SCHEMA_VERSION, "semantic")
+
+    async with schema_connection(settings.DATABASE_URL) as conn:
         await conn.execute(_SEMANTIC_SCHEMA)
     logger.info("Semantic schema ready")
 
@@ -288,8 +228,12 @@ async def fetch_unevaluated_runs(limit: int) -> list[dict]:
                 e.org_id
             FROM events e
             WHERE e.event_type IN ('run.completed', 'run.errored')
+              -- p.org_id is not redundant: run_id collides across tenants, so
+              -- an anti-join on run_id alone made one org's sampling decision
+              -- permanently hide another org's run from evaluation.
               AND NOT EXISTS (
-                  SELECT 1 FROM semantic_processed_runs p WHERE p.run_id = e.run_id
+                  SELECT 1 FROM semantic_processed_runs p
+                  WHERE p.run_id = e.run_id AND p.org_id = e.org_id
               )
             ORDER BY e.run_id, e.received_at ASC
             LIMIT $1
@@ -299,30 +243,44 @@ async def fetch_unevaluated_runs(limit: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def has_structural_signal(run_id: str) -> bool:
+async def has_structural_signal(org_id: str, run_id: str) -> bool:
     """Whether detector_svc already wrote a structural failure_signals row for
     this run. Used by the Phase 1.2 sampling engine's "100% of runs where
-    structural signals fired" rule."""
+    structural signals fired" rule.
+
+    org_id is required, not optional: run_id is caller-supplied and collides
+    across tenants, so unscoped this reports another org's structural failure
+    and spends this org's LLM evaluation budget on a clean run (and the
+    inverse — a genuinely failing run reading as clean — whenever the other
+    org's row is the only one)."""
     async with _pool.acquire() as conn:
         return await conn.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM failure_signals WHERE run_id = $1 AND source = 'structural')",
+            "SELECT EXISTS (SELECT 1 FROM failure_signals "
+            "WHERE run_id = $1 AND org_id = $2 AND source = 'structural')",
             run_id,
+            org_id,
         )
 
 
-async def has_retrieval_event(run_id: str) -> bool:
+async def has_retrieval_event(org_id: str, run_id: str) -> bool:
     """Whether this run has any retrieval.called/retrieval.responded event.
     Used by the "20% of runs where retrieval events occurred" sampling rule —
-    RAG is the highest hallucination-risk case in the general population."""
+    RAG is the highest hallucination-risk case in the general population.
+
+    org_id scopes the read for the same reason has_structural_signal does:
+    a colliding run_id from another tenant must not decide this tenant's
+    sampling."""
     async with _pool.acquire() as conn:
         return await conn.fetchval(
             """
             SELECT EXISTS (
                 SELECT 1 FROM events
-                WHERE run_id = $1 AND event_type IN ('retrieval.called', 'retrieval.responded')
+                WHERE run_id = $1 AND org_id = $2
+                  AND event_type IN ('retrieval.called', 'retrieval.responded')
             )
             """,
             run_id,
+            org_id,
         )
 
 
@@ -430,16 +388,22 @@ async def fetch_org_conversation_quota_settings(org_id: str) -> dict:
     }
 
 
-async def fetch_run_conversation_id(run_id: str) -> str | None:
+async def fetch_run_conversation_id(org_id: str, run_id: str) -> str | None:
     """Cheap single-column lookup — used to decide whether a run belongs to
     a conversation at all, without the cost of fetching its full event list
     (that only happens once conversation-level evaluation is actually going
-    to run, in fetch_run_events per sibling run)."""
+    to run, in fetch_run_events per sibling run).
+
+    org_id keeps the LIMIT 1 from picking a colliding run_id's row in another
+    tenant: the conversation id it returns is fed straight to
+    fetch_conversation_run_ids, so an unscoped hit would pull this org's
+    evaluation window around a foreign conversation identifier."""
     async with _pool.acquire() as conn:
         return await conn.fetchval(
-            "SELECT conversation_id FROM events WHERE run_id = $1 "
+            "SELECT conversation_id FROM events WHERE run_id = $1 AND org_id = $2 "
             "AND conversation_id IS NOT NULL LIMIT 1",
             run_id,
+            org_id,
         )
 
 
@@ -681,14 +645,18 @@ async def mark_run_processed(
     sample_reason: str | None,
 ) -> None:
     """Record the sampling decision for this run. Prevents re-deciding on every
-    poll cycle, whether or not the run was actually evaluated."""
+    poll cycle, whether or not the run was actually evaluated.
+
+    The conflict target is the full (org_id, run_id) key — on the bare run_id
+    it used to carry, another tenant's decision for the same caller-supplied
+    run_id silently swallowed this one and the run was never evaluated."""
     async with _pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO semantic_processed_runs
                 (run_id, agent_id, agent_version, org_id, sampled, sample_reason)
             VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (run_id) DO NOTHING
+            ON CONFLICT (org_id, run_id) DO NOTHING
             """,
             run_id,
             agent_id,
@@ -699,20 +667,27 @@ async def mark_run_processed(
         )
 
 
-async def fetch_run_events(run_id: str) -> list[dict]:
+async def fetch_run_events(org_id: str, run_id: str) -> list[dict]:
     """All events for a run, ordered by step_index then timestamp. Mirrors
     detector_svc.db.fetch_run_events's shape exactly (read independently —
-    semantic_svc has no dependency on detector_svc)."""
+    semantic_svc has no dependency on detector_svc).
+
+    org_id is mandatory and is the most important one in this module: these
+    rows are the evaluator prompt. Unscoped, a colliding run_id spliced the
+    other tenant's system prompt, LLM output and tool content into the payload
+    sent to the configured evaluator provider, and the reasoning quoting it
+    landed in this tenant's failure_signals.evidence."""
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT event_type, run_id, agent_id, agent_version, step_index, timestamp,
                    payload, conversation_id
             FROM events
-            WHERE run_id = $1
+            WHERE run_id = $1 AND org_id = $2
             ORDER BY step_index ASC, timestamp ASC
             """,
             run_id,
+            org_id,
         )
     return [
         {

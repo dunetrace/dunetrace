@@ -6,6 +6,11 @@ the system prompt, tool output, retrieval content and LLM output text. Replay
 runs on the API side, so five detectors that read those fields saw them as
 absent and reported "resolved" for any modification, including a no-op.
 
+This file is the API half; the detector half is
+``services/detector/tests/test_run_builder_parity.py``. Each service asserts
+its own module IS ``dunetrace.run_builder``, in the suite where that module is
+importable, so neither assertion has to skip.
+
 Run:
     PYTHONPATH=packages/sdk-py:services/explainer:services/api \
       python -m pytest services/api/tests/test_run_builder_parity.py -v
@@ -74,15 +79,14 @@ class TestBuildersAreOneImplementation(unittest.TestCase):
     def test_api_builder_is_the_canonical_one(self):
         self.assertIs(api_builder.build_run_state, canonical.build_run_state)
 
-    def test_detector_builder_is_the_canonical_one(self):
-        # Imported lazily: detector_svc is not on the API's own PYTHONPATH in
-        # every environment, and the point of this assertion is the shared
-        # module, not the detector package.
-        try:
-            import detector_svc.run_builder as detector_builder
-        except ImportError:
-            self.skipTest("detector_svc not on PYTHONPATH")
-        self.assertIs(detector_builder.build_run_state, canonical.build_run_state)
+    # The detector half of this guard lives in
+    # services/detector/tests/test_run_builder_parity.py, where detector_svc is
+    # importable. It used to sit here behind
+    # `except ImportError: self.skipTest("detector_svc not on PYTHONPATH")` —
+    # and detector_svc is on no CI job's PYTHONPATH for this suite, so the
+    # assertion never ran anywhere while its passing sibling made the class
+    # look covered. Both halves compare against dunetrace.run_builder, so
+    # between them the two services are still pinned to one implementation.
 
 
 class TestReplayStateIsFullFidelity(unittest.TestCase):

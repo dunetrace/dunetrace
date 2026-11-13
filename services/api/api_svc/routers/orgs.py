@@ -8,7 +8,7 @@ import logging
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.db.queries import (
     get_organization_semantic_feedback,
     get_org_semantic_usage,
@@ -48,7 +48,7 @@ async def get_semantic_feedback_settings(
 )
 async def set_semantic_feedback_settings(
     body: SemanticFeedbackSettings,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> SemanticFeedbackSettings:
     """Opt-in, per the Phase 1.4 brief: both fields default to FALSE until an
     org explicitly turns this on via the dashboard. auto_suppress only takes

@@ -1,22 +1,23 @@
-# Trial-tier strict limits
+# Runaway tool use on an already-struggling run
 #
-# Stop a run that makes too many tool calls, but apply the stricter cap only to
-# lower-value tiers/plans — trial agents and free/starter orgs. Paid, higher-tier
-# usage is left alone by this policy.
+# Stop a run that makes too many tool calls, but only when the run is also
+# showing signs of trouble. A high call count on an otherwise healthy run is
+# often legitimate; a high call count alongside repeated failures or runaway
+# spend is not.
 #
 # Demonstrates:
 #   * a pure-expression policy (trigger: expression) — no metric/tool-name flat
 #     condition, the whole condition lives in `match`
-#   * AND of a run-metric threshold with an OR of two metadata conditions
+#   * AND of a run-metric threshold with an OR of two further conditions
 #
-# NOTE: agent.* and org.* have no runtime source yet (see BACKLOG.md), so this
-# policy will not fire until that metadata is populated — it is included to show
-# the tier-gating shape. run.tool_call_count IS wired today; to gate purely on
-# call count now, drop the `or:` block.
+# Every prefix used here resolves at runtime, so this policy fires as written.
+# `agent.*` and `org.*` do not resolve and are rejected at registration — see
+# docs/policies/condition-expressions.md. Tier and plan gating needs a
+# server-side metadata channel that does not exist yet (BACKLOG.md).
 #
 # See docs/policies/condition-expressions.md.
 
-name: trial-tier-tool-call-cap
+name: struggling-run-tool-call-cap
 agent_id: "*"
 priority: 20
 enabled: true
@@ -25,11 +26,11 @@ condition:
   trigger: expression            # pure-expression policy — no flat trigger
   match:
     run.tool_call_count: {gt: 8}     # more than 8 tool calls in the run...
-    or:                              # ...AND the caller is a lower tier/plan
-      - agent.tier: {eq: "trial"}
-      - org.plan: {in: ["free", "starter"]}
+    or:                              # ...AND the run is already going badly
+      - run.error_count: {gte: 2}    # repeated tool failures
+      - run.cost_usd: {gt: 5.0}      # or runaway spend
 
 action:
   type: stop
   params:
-    message: "Trial/free tier tool-call limit reached — stopping the run."
+    message: "Tool-call limit reached on a run that is already failing — stopping."

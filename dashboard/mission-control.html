@@ -586,6 +586,52 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 .policy-toggle.off{background:var(--wire2)}
 .policy-name{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--chalk);min-width:180px}
 .policy-rule{font-size:12px;color:var(--chalk3);flex:1;font-family:'IBM Plex Mono',monospace}
+/* Dry run: the card sits directly under its policy row and reads as one unit
+   with it, not as a separate panel. Muted on purpose — a policy that is not
+   enforcing should not compete visually with one that is. */
+/* Signal → step context. Reads as a continuation of the signal card that
+   opened it, not as a separate tool. Focused steps are lit; the context steps
+   either side are dimmed so the eye lands on the right one. */
+.sig-focus-btn{margin-top:.6rem;background:none;border:1px solid var(--wire);color:var(--blue);font-family:'IBM Plex Mono',monospace;font-size:10px;padding:4px 8px;border-radius:3px;cursor:pointer}
+.sig-focus-btn:hover{border-color:var(--blue)}
+.focus-wrap{margin-top:1.5rem;background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem}
+.focus-nav{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.9rem}
+.focus-tab{background:var(--s2);border:1px solid var(--wire);color:var(--chalk4);font-family:'IBM Plex Mono',monospace;font-size:10px;padding:3px 9px;border-radius:3px;cursor:pointer}
+.focus-tab.on{border-color:var(--orange);color:var(--orange)}
+.focus-why{background:var(--s2);border-left:2px solid var(--orange);padding:.7rem .9rem;border-radius:3px;margin-bottom:1rem}
+.focus-why-h{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--orange);margin-bottom:.35rem}
+.focus-why-b{font-size:12px;color:var(--chalk2);line-height:1.5}
+.focus-ev{margin-top:.5rem;font-size:10px;color:var(--chalk4);line-height:1.7}
+.focus-evk{color:var(--blue)}
+.focus-step{border:1px solid var(--wire);border-radius:5px;padding:.6rem .8rem;margin-bottom:.5rem;opacity:.55}
+.focus-step.on{opacity:1;border-color:var(--orange);background:var(--s2)}
+.focus-step-h{display:flex;align-items:center;gap:.6rem;margin-bottom:.4rem}
+.focus-step-n{font-size:10px;color:var(--chalk4);letter-spacing:1px;text-transform:uppercase}
+.focus-step-t{font-size:11px;color:var(--chalk2)}
+.focus-step-badge{font-size:8px;letter-spacing:1px;background:var(--orange);color:#fff;padding:1px 6px;border-radius:2px}
+.focus-field{display:flex;gap:.6rem;font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.6;align-items:baseline}
+.focus-fk{color:var(--chalk4);min-width:96px;flex-shrink:0}
+.focus-fv{color:var(--chalk2);word-break:break-word;white-space:pre-wrap}
+.focus-trunc{color:var(--chalk4);font-style:italic}
+.focus-verdict{margin-top:.5rem;padding:.45rem .7rem;background:rgba(120,140,170,.12);border:1px solid rgba(120,140,170,.3);border-radius:3px;font-size:11px;color:var(--chalk2)}
+.focus-verdict-tag{font-size:8px;letter-spacing:1px;color:var(--blue);border:1px solid rgba(120,140,170,.45);padding:1px 5px;border-radius:2px;margin-right:.5rem}
+.focus-gap{text-align:center;font-size:10px;color:var(--chalk4);padding:.6rem;border:1px dashed var(--wire);border-radius:4px;margin-bottom:.5rem}
+.focus-empty{font-size:11px;color:var(--chalk4)}
+.policy-mode-badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:600;padding:2px 8px;border-radius:2px;text-transform:uppercase;letter-spacing:1px;flex-shrink:0}
+.policy-mode-badge.dry{background:rgba(120,140,170,.18);color:var(--blue);border:1px solid rgba(120,140,170,.35)}
+.policy-mode-badge.degraded{background:rgba(200,120,40,.18);color:var(--orange);border:1px solid rgba(200,120,40,.45)}
+.dryrun-card{margin:-2px 0 .75rem 0;padding:.75rem 1rem .85rem;background:var(--s1);border:1px solid var(--wire);border-top:none;border-radius:0 0 6px 6px}
+.dryrun-loading,.dryrun-empty{font-size:11px;color:var(--chalk4);line-height:1.5}
+.dryrun-head{display:flex;align-items:baseline;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap}
+.dryrun-stat{font-family:'IBM Plex Mono',monospace;font-size:20px;font-weight:600;color:var(--chalk1)}
+.dryrun-of{font-size:11px;color:var(--chalk4)}
+.dryrun-promote{margin-left:auto;font-size:10px;padding:4px 10px}
+.dryrun-row{display:flex;gap:.6rem;font-size:11px;line-height:1.7;align-items:baseline}
+.dryrun-k{color:var(--chalk4);min-width:82px;flex-shrink:0;text-transform:uppercase;font-size:9px;letter-spacing:1px}
+.dryrun-v{color:var(--chalk2);word-break:break-word}
+.dryrun-n{color:var(--chalk4)}
+.dryrun-v a{color:var(--blue);text-decoration:none}
+.dryrun-v a:hover{text-decoration:underline}
 .policy-action-badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:600;padding:2px 8px;border-radius:2px;text-transform:uppercase;letter-spacing:1px;flex-shrink:0}
 .pa-stop{background:rgba(229,62,62,.12);color:var(--red)}
 .pa-switch{background:rgba(212,146,10,.12);color:var(--amber)}
@@ -609,6 +655,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 .search-wrap{position:relative;flex:1;max-width:340px;margin:0 1.5rem}
 .search-input{width:100%;background:var(--s2);border:1px solid var(--wire2);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:5px 10px;border-radius:4px;outline:none;box-sizing:border-box}
 .search-input:focus{border-color:var(--blue)}
+#theme-toggle{background:none;border:1px solid var(--wire2);border-radius:4px;padding:4px 8px;cursor:pointer;color:var(--chalk4);font-size:14px;line-height:1;transition:border-color .15s,color .15s}
+#theme-toggle:hover{color:var(--chalk2);border-color:var(--chalk4)}
+#tok-rate-input{width:72px;background:var(--s3);border:1px solid var(--wire2);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:2px 5px;border-radius:3px;outline:none}
+#tok-rate-input:focus{border-color:var(--amber)}
 .search-dropdown{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--s1);border:1px solid var(--wire2);border-radius:4px;z-index:200;max-height:280px;overflow-y:auto}
 .search-item{padding:7px 12px;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3);display:flex;gap:8px;align-items:center}
 .search-item:hover{background:var(--s2);color:var(--chalk2)}
@@ -719,11 +769,11 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <span class="brand-name">DUNETRACE</span>
   </div>
   <div class="search-wrap">
-    <input id="search-input" class="search-input" placeholder="Search runs, agents, failures…" oninput="runSearch(this.value)" onblur="setTimeout(()=>closeSearch(),200)">
+    <input id="search-input" class="search-input" placeholder="Search runs, agents, failures…" data-action="searchInput" data-on="input blur">
     <div id="search-dropdown" class="search-dropdown" style="display:none"></div>
   </div>
   <div class="top-right">
-    <button id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" style="background:none;border:1px solid var(--wire2);border-radius:4px;padding:4px 8px;cursor:pointer;color:var(--chalk4);font-size:14px;line-height:1;transition:border-color .15s,color .15s" onmouseover="this.style.color='var(--chalk2)';this.style.borderColor='var(--chalk4)'" onmouseout="this.style.color='var(--chalk4)';this.style.borderColor='var(--wire2)'">☀</button>
+    <button id="theme-toggle" data-action="toggleTheme" title="Toggle light/dark mode">☀</button>
     <div class="live-badge"><div class="live-dot"></div>LIVE</div>
     <div class="top-time mono" id="clock">00:00:00 UTC</div>
   </div>
@@ -733,22 +783,22 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <nav id="sidebar">
   <div class="sb-section">
     <div class="sb-label">Monitor</div>
-    <div class="sb-item active" onclick="nav('overview',this)">
+    <div class="sb-item active" data-nav="overview" data-action="navTo" data-args='["overview"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
       Overview
       <span class="sb-count sc-red" id="badge-overview">—</span>
     </div>
-    <div class="sb-item" onclick="nav('runs',this)">
+    <div class="sb-item" data-nav="runs" data-action="navTo" data-args='["runs"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M2 8h9M2 12h6"/></svg>
       All runs
       <span class="sb-count sc-amber" id="badge-runs">—</span>
     </div>
-    <div class="sb-item" onclick="nav('incidents',this)">
+    <div class="sb-item" data-nav="incidents" data-action="navTo" data-args='["incidents"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2L2 13h12L8 2z"/><path d="M8 6v4M8 11v1"/></svg>
       Incidents
       <span class="sb-count sc-red" id="badge-incidents">—</span>
     </div>
-    <div class="sb-item" onclick="nav('alerts',this)">
+    <div class="sb-item" data-nav="alerts" data-action="navTo" data-args='["alerts"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2l1.4 2.8 3.1.45-2.25 2.19.53 3.1L8 9l-2.78 1.54.53-3.1L3.5 5.25l3.1-.45z"/></svg>
       Alerts
       <span class="sb-count sc-red" id="badge-alerts">—</span>
@@ -756,71 +806,71 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   </div>
   <div class="sb-section">
     <div class="sb-label">Analyse</div>
-    <div class="sb-item" onclick="nav('analytics',this)">
+    <div class="sb-item" data-nav="analytics" data-action="navTo" data-args='["analytics"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 12l3-4 3 2 3-5 3 3"/></svg>
       Analytics
     </div>
-    <div class="sb-item" onclick="nav('heatmap',this)">
+    <div class="sb-item" data-nav="heatmap" data-action="navTo" data-args='["heatmap"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="4" height="4" rx=".5"/><rect x="6" y="1" width="4" height="4" rx=".5"/><rect x="11" y="1" width="4" height="4" rx=".5"/><rect x="1" y="6" width="4" height="4" rx=".5"/><rect x="6" y="6" width="4" height="4" rx=".5"/><rect x="11" y="6" width="4" height="4" rx=".5"/><rect x="1" y="11" width="4" height="4" rx=".5"/><rect x="6" y="11" width="4" height="4" rx=".5"/><rect x="11" y="11" width="4" height="4" rx=".5"/></svg>
       Risk heatmap
     </div>
-    <div class="sb-item" onclick="nav('agents',this)">
+    <div class="sb-item" data-nav="agents" data-action="navTo" data-args='["agents"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5.5" cy="5" r="2.5"/><path d="M1 13c0-2.8 1.9-4.5 4.5-4.5S10 10.2 10 13"/><circle cx="12" cy="5" r="2"/><path d="M12 9.5c1.8.4 3 1.5 3 3.5"/></svg>
       Agents
       <span class="sb-count" id="badge-agents" style="background:var(--s3);color:var(--chalk4)">—</span>
     </div>
-    <div class="sb-item" onclick="nav('conversations',this)">
+    <div class="sb-item" data-nav="conversations" data-action="navTo" data-args='["conversations"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h9a1.5 1.5 0 0 1 1.5 1.5V9A1.5 1.5 0 0 1 11 10.5H6l-3 3V10.5h-1A1.5 1.5 0 0 1 .5 9V4.5A1.5 1.5 0 0 1 2 3z"/></svg>
       Conversations
     </div>
-    <div class="sb-item" onclick="nav('calls',this)">
+    <div class="sb-item" data-nav="calls" data-action="navTo" data-args='["calls"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 2.5c0 5 5.5 10.5 10.5 10.5l1.5-2.5-3-2-1.5 1.5C9 8.5 7.5 7 6.5 5.5L8 4 6 1 3.5 2.5z"/></svg>
       Calls
     </div>
-    <div class="sb-item" onclick="nav('voice-analytics',this)">
+    <div class="sb-item" data-nav="voice-analytics" data-action="navTo" data-args='["voice-analytics"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v14M4 4v8M12 4v8M1 6.5v3M15 6.5v3"/></svg>
       Voice analytics
     </div>
-    <div class="sb-item" onclick="nav('tokens',this)">
+    <div class="sb-item" data-nav="tokens" data-action="navTo" data-args='["tokens"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="4" width="14" height="8" rx="1.5"/><path d="M5 8h6M8 6v4"/></svg>
       Token usage
     </div>
   </div>
   <div class="sb-section">
     <div class="sb-label">Debug</div>
-    <div class="sb-item" onclick="nav('compare',this)">
+    <div class="sb-item" data-nav="compare" data-action="navTo" data-args='["compare"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 2h8M4 14h8M1 8h14M5 5l-3 3 3 3M11 5l3 3-3 3"/></svg>
       Compare runs
     </div>
   </div>
   <div class="sb-section">
     <div class="sb-label">Configure</div>
-    <div class="sb-item" onclick="nav('config',this)">
+    <div class="sb-item" data-nav="config" data-action="navTo" data-args='["config"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/></svg>
       Detectors
     </div>
-    <div class="sb-item" onclick="nav('packs',this)">
+    <div class="sb-item" data-nav="packs" data-action="navTo" data-args='["packs"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
       Packs
     </div>
-    <div class="sb-item" onclick="nav('integrations',this)">
+    <div class="sb-item" data-nav="integrations" data-action="navTo" data-args='["integrations"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 10l4-4M5.5 8.5l-2 2a2.5 2.5 0 003.5 3.5l2-2M10.5 7.5l2-2a2.5 2.5 0 00-3.5-3.5l-2 2"/></svg>
       Integrations
     </div>
-    <div class="sb-item" onclick="nav('otel-receiver',this)">
+    <div class="sb-item" data-nav="otel-receiver" data-action="navTo" data-args='["otel-receiver"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 8h3l2-4 2 8 2-4h3"/></svg>
       OTel Receiver
     </div>
-    <div class="sb-item" onclick="nav('approvals',this)">
+    <div class="sb-item" data-nav="approvals" data-action="navTo" data-args='["approvals"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8.5l3.5 3.5L13 5"/></svg>
       Approvals
     </div>
-    <div class="sb-item" onclick="nav('policies',this)">
+    <div class="sb-item" data-nav="policies" data-action="navTo" data-args='["policies"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 8l2 2 4-4"/></svg>
       Policies
       <span class="sb-count" id="badge-policies" style="background:rgba(74,158,222,0.1);color:var(--blue)">—</span>
     </div>
-    <div class="sb-item" onclick="nav('keys',this)">
+    <div class="sb-item" data-nav="keys" data-action="navTo" data-args='["keys"]'>
       <svg class="sb-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6" cy="9" r="3.5"/><path d="M8.5 6.5l5-5M12 4l1.5 1.5M10 2l1.5 1.5"/></svg>
       API keys
     </div>
@@ -832,14 +882,14 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- D7 Error banner -->
 <div id="error-banner" style="display:none;background:rgba(229,62,62,0.08);border:1px solid rgba(229,62,62,0.3);border-radius:6px;padding:10px 16px;margin-bottom:1rem;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--red);align-items:center;justify-content:space-between">
-  Failed to load data. Check that the backend is running.
-  <button onclick="document.getElementById('error-banner').style.display='none'" style="background:none;border:none;color:var(--red);cursor:pointer;margin-left:1rem;font-size:14px;line-height:1">✕</button>
+  <span id="error-banner-msg">Failed to load data. Check that the backend is running.</span>
+  <button id="error-banner-close" data-action="hideElement" data-args='["error-banner"]' style="background:none;border:none;color:var(--red);cursor:pointer;margin-left:1rem;font-size:14px;line-height:1">✕</button>
 </div>
 
 <!-- D3 Pattern drill-down modal -->
-<div id="pattern-modal" class="modal-overlay" onclick="if(event.target===this)closePatternModal()">
+<div id="pattern-modal" class="modal-overlay" data-action="closePatternModalFromOverlay">
   <div class="modal-box">
-    <button class="modal-close" onclick="closePatternModal()">✕</button>
+    <button class="modal-close" data-action="closePatternModal">✕</button>
     <div class="modal-title" id="pattern-modal-title">FAILURE PATTERN DETAIL</div>
     <div id="pattern-modal-body"><div class="loading">loading…</div></div>
   </div>
@@ -849,7 +899,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <div id="page-overview" class="page active">
   <div class="trend-controls">
     <span class="trend-lbl">Trend vs</span>
-    <select class="trend-select" id="trend-window" onchange="updateTrendDeltas()">
+    <select class="trend-select" id="trend-window" data-action="updateTrendDeltas" data-on="change">
       <option value="3600">last hour</option>
       <option value="86400" selected>yesterday</option>
       <option value="604800">last week</option>
@@ -1010,7 +1060,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
   <div class="sec-head">
     <span class="sec-title">Live run feed</span>
-    <span class="sec-action" onclick="nav('runs',document.querySelector('[onclick*=runs]'))">view all →</span>
+    <span class="sec-action" data-action="navTo" data-args='["runs"]'>view all →</span>
   </div>
   <div class="table-card">
     <table class="run-table">
@@ -1050,13 +1100,13 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- ── RUN DETAIL PAGE ── -->
 <div id="page-detail" class="page">
-  <div class="back-btn" id="detail-back-btn" onclick="nav('overview',document.querySelector('[onclick*=overview]'))">← back to overview</div>
+  <div class="back-btn" id="detail-back-btn" data-action="navTo" data-args='["overview"]'>← back to overview</div>
 
   <div class="run-detail-header" id="detail-header">
     <div class="rdh-left">
       <div style="display:flex;align-items:center;gap:8px">
         <div class="rdh-run-id mono" id="detail-run-id">loading…</div>
-        <button class="filter-btn" onclick="copyRunId()" id="copy-run-btn" title="Copy run ID" style="font-size:9px;padding:2px 8px">copy ID</button>
+        <button class="filter-btn" data-action="copyRunId" id="copy-run-btn" title="Copy run ID" style="font-size:9px;padding:2px 8px">copy ID</button>
       </div>
       <div class="rdh-title" id="detail-title">—</div>
       <div class="rdh-meta" id="detail-meta"></div>
@@ -1077,10 +1127,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
   <!-- TABS -->
   <div class="detail-tabs">
-    <div class="dtab active" onclick="switchTab('analysis',this)">Analysis</div>
-    <div class="dtab" onclick="switchTab('graph',this)">Run graph</div>
-    <div class="dtab" onclick="switchTab('states',this)">State machine</div>
-    <div class="dtab" onclick="switchTab('events',this)">Event log</div>
+    <div class="dtab active" data-action="switchTab" data-args='["analysis"]' data-tab="analysis">Analysis</div>
+    <div class="dtab" data-action="switchTab" data-args='["graph"]' data-tab="graph">Run graph</div>
+    <div class="dtab" data-action="switchTab" data-args='["states"]' data-tab="states">State machine</div>
+    <div class="dtab" data-action="switchTab" data-args='["events"]' data-tab="events">Event log</div>
   </div>
 
   <!-- TAB: ANALYSIS -->
@@ -1094,6 +1144,8 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="signals-grid" id="detail-signals-grid">
       <div class="loading" style="grid-column:1/-1">loading…</div>
     </div>
+    <!-- Signal → step context. Hidden until a run with signals loads. -->
+    <div class="focus-wrap" id="detail-focus" style="display:none"></div>
     <!-- Delegation graph. Rendered by renderDelegationGraph() only when this run
          carries a DELEGATION_LOOP signal; hidden (and empty) for every other
          run, so nothing here costs anything on the common path. -->
@@ -1114,9 +1166,9 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <div class="explain-text" id="detail-explain-text">—</div>
       <div class="explain-list" id="detail-explain-list"></div>
       <div id="explain-row" style="display:none;margin-top:.75rem;align-items:center;gap:.75rem;flex-wrap:wrap">
-        <button class="act-btn act-secondary" id="explain-btn" onclick="explainSignal()" style="font-size:12px;padding:5px 12px">Dunetrace Root Cause Analysis</button>
+        <button class="act-btn act-secondary" id="explain-btn" data-action="explainSignal" style="font-size:12px;padding:5px 12px">Dunetrace Root Cause Analysis</button>
         <span id="explain-status" style="display:none;font-size:12px;color:var(--chalk3)">analyzing…</span>
-        <button class="act-btn" id="open-pr-btn" onclick="openPROnGitHub()" style="display:none;font-size:12px;padding:5px 12px">Open PR on GitHub ↗</button>
+        <button class="act-btn" id="open-pr-btn" data-action="openPROnGitHub" style="display:none;font-size:12px;padding:5px 12px">Open PR on GitHub ↗</button>
         <span id="pr-status" style="display:none;font-size:12px;color:var(--chalk3)">creating PR…</span>
         <a id="pr-link" style="display:none;font-size:12px;color:var(--green);text-decoration:none" target="_blank" rel="noopener">View PR ↗</a>
       </div>
@@ -1129,14 +1181,14 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       </div>
       <div class="replay-mods" id="replay-mods-list"></div>
       <div style="display:flex;align-items:center;gap:10px">
-        <button class="act-btn act-secondary" id="replay-run-btn" onclick="runReplay()" style="font-size:12px;padding:5px 12px">Run simulation</button>
+        <button class="act-btn act-secondary" id="replay-run-btn" data-action="runReplay" style="font-size:12px;padding:5px 12px">Run simulation</button>
         <span id="replay-status" style="display:none;font-size:12px;color:var(--chalk3)">simulating…</span>
       </div>
       <div class="replay-result" id="replay-result" style="display:none"></div>
     </div>
     <div class="actions-row">
-      <button class="act-btn act-secondary" onclick="switchTab('events',document.querySelectorAll('.dtab')[3])">View event log</button>
-      <button class="act-btn act-secondary" onclick="switchTab('graph',document.querySelectorAll('.dtab')[1])">View run graph</button>
+      <button class="act-btn act-secondary" data-action="showDetailTab" data-args='["events"]'>View event log</button>
+      <button class="act-btn act-secondary" data-action="showDetailTab" data-args='["graph"]'>View run graph</button>
     </div>
   </div>
 
@@ -1183,7 +1235,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
         <div>Payload summary</div>
       </div>
       <div style="display:flex;gap:8px;margin:.5rem .75rem;align-items:center">
-        <input id="event-filter" class="search-input" style="max-width:180px" placeholder="Filter by step or type…" oninput="filterEventLog(this.value)">
+        <input id="event-filter" class="search-input" style="max-width:180px" placeholder="Filter by step or type…" data-action="filterEventLog" data-on="input">
         <span style="font-size:10px;color:var(--chalk4)" id="event-filter-count"></span>
       </div>
       <div id="detail-event-rows">
@@ -1194,7 +1246,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       ↑ click any row to expand payload
     </div>
     <div class="actions-row">
-      <button class="act-btn act-secondary" onclick="copyRunId()">Copy run_id</button>
+      <button class="act-btn act-secondary" data-action="copyRunId">Copy run_id</button>
     </div>
   </div>
 </div>
@@ -1205,13 +1257,13 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <span class="sec-title">Active signals — grouped by failure type</span>
     <div style="display:flex;gap:12px;align-items:center">
       <div class="gp-bar">
-        <button class="gp-btn" data-p="1d" onclick="setGlobalPeriod('1d')">1D</button>
-        <button class="gp-btn gp-btn-active" data-p="7d" onclick="setGlobalPeriod('7d')">7D</button>
-        <button class="gp-btn" data-p="30d" onclick="setGlobalPeriod('30d')">30D</button>
-        <button class="gp-btn" data-p="all" onclick="setGlobalPeriod('all')">All</button>
+        <button class="gp-btn" data-p="1d" data-action="setGlobalPeriod" data-args='["1d"]'>1D</button>
+        <button class="gp-btn gp-btn-active" data-p="7d" data-action="setGlobalPeriod" data-args='["7d"]'>7D</button>
+        <button class="gp-btn" data-p="30d" data-action="setGlobalPeriod" data-args='["30d"]'>30D</button>
+        <button class="gp-btn" data-p="all" data-action="setGlobalPeriod" data-args='["all"]'>All</button>
       </div>
-      <span style="font-size:11px;color:var(--chalk4)" id="acked-count"></span><button class="filter-btn" onclick="unackAll()" id="unack-btn" style="display:none">restore all</button>
-      <button class="filter-btn" onclick="downloadSignalsCsv()">Download CSV</button>
+      <span style="font-size:11px;color:var(--chalk4)" id="acked-count"></span><button class="filter-btn" data-action="unackAll" id="unack-btn" style="display:none">restore all</button>
+      <button class="filter-btn" data-action="downloadSignalsCsv">Download CSV</button>
     </div>
   </div>
   <div id="alerts-container">
@@ -1224,10 +1276,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="sec-head" style="margin-bottom:1.5rem">
     <span class="sec-title">Analytics</span>
     <div class="gp-bar">
-      <button class="gp-btn" data-p="1d" onclick="setGlobalPeriod('1d')">1D</button>
-      <button class="gp-btn gp-btn-active" data-p="7d" onclick="setGlobalPeriod('7d')">7D</button>
-      <button class="gp-btn" data-p="30d" onclick="setGlobalPeriod('30d')">30D</button>
-      <button class="gp-btn" data-p="all" onclick="setGlobalPeriod('all')">All</button>
+      <button class="gp-btn" data-p="1d" data-action="setGlobalPeriod" data-args='["1d"]'>1D</button>
+      <button class="gp-btn gp-btn-active" data-p="7d" data-action="setGlobalPeriod" data-args='["7d"]'>7D</button>
+      <button class="gp-btn" data-p="30d" data-action="setGlobalPeriod" data-args='["30d"]'>30D</button>
+      <button class="gp-btn" data-p="all" data-action="setGlobalPeriod" data-args='["all"]'>All</button>
     </div>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.5rem">
@@ -1302,10 +1354,10 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="sec-head">
     <span class="sec-title">Risk heatmap — failure type × agent</span>
     <div class="gp-bar">
-      <button class="gp-btn" data-p="1d" onclick="setGlobalPeriod('1d')">1D</button>
-      <button class="gp-btn gp-btn-active" data-p="7d" onclick="setGlobalPeriod('7d')">7D</button>
-      <button class="gp-btn" data-p="30d" onclick="setGlobalPeriod('30d')">30D</button>
-      <button class="gp-btn" data-p="all" onclick="setGlobalPeriod('all')">All</button>
+      <button class="gp-btn" data-p="1d" data-action="setGlobalPeriod" data-args='["1d"]'>1D</button>
+      <button class="gp-btn gp-btn-active" data-p="7d" data-action="setGlobalPeriod" data-args='["7d"]'>7D</button>
+      <button class="gp-btn" data-p="30d" data-action="setGlobalPeriod" data-args='["30d"]'>30D</button>
+      <button class="gp-btn" data-p="all" data-action="setGlobalPeriod" data-args='["all"]'>All</button>
     </div>
   </div>
   <div class="table-card" style="padding:1.25rem">
@@ -1328,14 +1380,14 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="sec-head">
     <span class="sec-title">All runs</span>
     <div style="display:flex;gap:6px">
-      <button id="runs-filter-day"   class="filter-btn filter-btn-active" onclick="setRunsFilter('day')">Day</button>
-      <button id="runs-filter-week"  class="filter-btn" onclick="setRunsFilter('week')">Week</button>
-      <button id="runs-filter-month" class="filter-btn" onclick="setRunsFilter('month')">Month</button>
+      <button id="runs-filter-day"   class="filter-btn filter-btn-active" data-action="setRunsFilter" data-args='["day"]'>Day</button>
+      <button id="runs-filter-week"  class="filter-btn" data-action="setRunsFilter" data-args='["week"]'>Week</button>
+      <button id="runs-filter-month" class="filter-btn" data-action="setRunsFilter" data-args='["month"]'>Month</button>
     </div>
   </div>
   <div class="runs-filter-row" id="runs-filter-row">
-    <input id="runs-search" class="search-input" style="max-width:220px" placeholder="Search run ID or agent…" oninput="setRunsSearch(this.value)">
-    <select id="runs-sev" class="trend-select" onchange="setRunsSevFilter(this.value)">
+    <input id="runs-search" class="search-input" style="max-width:220px" placeholder="Search run ID or agent…" data-action="setRunsSearch" data-on="input">
+    <select id="runs-sev" class="trend-select" data-action="setRunsSevFilter" data-on="change">
       <option value="">All severities</option>
       <option value="CRITICAL">Critical</option>
       <option value="HIGH">High</option>
@@ -1343,7 +1395,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <option value="LOW">Low</option>
       <option value="CLEAN">Clean</option>
     </select>
-    <select id="runs-agent" class="trend-select" onchange="setRunsAgentFilter(this.value)">
+    <select id="runs-agent" class="trend-select" data-action="setRunsAgentFilter" data-on="change">
       <option value="">All agents</option>
     </select>
   </div>
@@ -1365,7 +1417,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       Detector thresholds are set in <code style="color:var(--chalk2)">detectors.yml</code> and loaded
       by the detector worker at startup — restart it to apply a change.
       <div style="color:var(--chalk4);margin-top:.75rem">
-        This page previously showed sliders for 3 of the 31 detectors. They persisted nowhere and the
+        This page previously showed sliders for 3 of the 34 detectors. They persisted nowhere and the
         preview beneath them never read their values, so it implied you were tuning detection when you
         were not. Removed rather than left decorative. Per-agent overrides
         (<code>confidence_floor</code>, <code>silenced</code>, <code>snoozed_until</code>) exist in
@@ -1377,7 +1429,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <!-- ── CUSTOM DETECTORS ── -->
   <div class="sec-head" style="margin-top:2rem">
     <span class="sec-title">Custom detectors</span>
-    <button class="btn-primary" onclick="openCustomDetectorForm()" id="cd-new-btn">+ New detector</button>
+    <button class="btn-primary" data-action="openCustomDetectorForm" id="cd-new-btn">+ New detector</button>
   </div>
 
   <!-- Create form -->
@@ -1388,16 +1440,16 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <select id="cd-agent-id" style="background:var(--s2);border:1px solid var(--wire);border-radius:4px;padding:.4rem .6rem;font-size:12px;color:var(--chalk2)">
         <option value="*">All agents</option>
       </select>
-      <button class="btn-primary" onclick="previewCustomDetector()" id="cd-preview-btn">Preview</button>
-      <button class="act-btn act-secondary" onclick="closeCustomDetectorForm()">Cancel</button>
+      <button class="btn-primary" data-action="previewCustomDetector" id="cd-preview-btn">Preview</button>
+      <button class="act-btn act-secondary" data-action="closeCustomDetectorForm">Cancel</button>
     </div>
 
     <!-- Preview result -->
     <div id="cd-preview-result" style="display:none;margin-top:1.25rem;padding-top:1.25rem;border-top:1px solid var(--wire)">
       <div id="cd-preview-content"></div>
       <div id="cd-save-row" style="display:none;margin-top:1rem;gap:.5rem">
-        <button class="btn-primary" onclick="saveCustomDetector()">Save in shadow mode</button>
-        <button class="act-btn act-secondary" onclick="document.getElementById('cd-preview-result').style.display='none'">Edit description</button>
+        <button class="btn-primary" data-action="saveCustomDetector">Save in shadow mode</button>
+        <button class="act-btn act-secondary" data-action="hideElement" data-args='["cd-preview-result"]'>Edit description</button>
       </div>
     </div>
   </div>
@@ -1458,7 +1510,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <div id="page-approvals" class="page">
   <div class="sec-head">
     <span class="sec-title">Approvals</span>
-    <button class="act-btn act-secondary" onclick="loadApprovals()" style="font-size:11px">Refresh</button>
+    <button class="act-btn act-secondary" data-action="loadApprovals" style="font-size:11px">Refresh</button>
   </div>
   <p style="font-size:12px;color:var(--chalk4);margin:-.5rem 0 1rem">
     Human-in-the-loop approvals. When a <code>require_approval</code> policy gates a tool call,
@@ -1475,9 +1527,9 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="sec-head">
     <span class="sec-title">Agent health overview</span>
     <div style="display:flex;gap:6px">
-      <button class="filter-btn filter-btn-active" id="sort-health"   onclick="setAgentSort('health')">Health score</button>
-      <button class="filter-btn"                   id="sort-failrate" onclick="setAgentSort('failrate')">Fail rate</button>
-      <button class="filter-btn"                   id="sort-lastseen" onclick="setAgentSort('lastseen')">Last seen</button>
+      <button class="filter-btn filter-btn-active" id="sort-health"   data-action="setAgentSort" data-args='["health"]'>Health score</button>
+      <button class="filter-btn"                   id="sort-failrate" data-action="setAgentSort" data-args='["failrate"]'>Fail rate</button>
+      <button class="filter-btn"                   id="sort-lastseen" data-action="setAgentSort" data-args='["lastseen"]'>Last seen</button>
     </div>
   </div>
   <div id="agents-grid" class="agent-cards">
@@ -1491,13 +1543,13 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div class="compare-controls">
     <div class="cmp-run-select">
       <label>Run A — baseline</label>
-      <select class="cmp-select" id="cmp-run-a" onchange="renderCompare()">
+      <select class="cmp-select" id="cmp-run-a" data-action="renderCompare" data-on="change">
         <option value="">— select run —</option>
       </select>
     </div>
     <div class="cmp-run-select">
       <label>Run B — compare</label>
-      <select class="cmp-select" id="cmp-run-b" onchange="renderCompare()">
+      <select class="cmp-select" id="cmp-run-b" data-action="renderCompare" data-on="change">
         <option value="">— select run —</option>
       </select>
     </div>
@@ -1511,7 +1563,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <div id="page-policies" class="page">
   <div class="sec-head">
     <span class="sec-title">Runtime policies</span>
-    <button class="btn-primary" onclick="openPolicyForm()">+ New policy</button>
+    <button class="btn-primary" data-action="openPolicyForm">+ New policy</button>
   </div>
 
   <!-- Policy list -->
@@ -1534,7 +1586,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.75rem;margin-bottom:1.25rem">
       <div>
         <div class="cfg-label">Trigger</div>
-        <select id="pf-trigger" class="cfg-input" style="width:100%" onchange="updatePolicyFormHints()">
+        <select id="pf-trigger" class="cfg-input" style="width:100%" data-action="updatePolicyFormHints" data-on="change">
           <option value="tool_call_count">Tool call count</option>
           <option value="step_count">Step count</option>
           <option value="cost_usd">Cost (USD)</option>
@@ -1564,7 +1616,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem;margin-bottom:1.5rem">
       <div>
         <div class="cfg-label">Action type</div>
-        <select id="pf-action" class="cfg-input" style="width:100%" onchange="updatePolicyFormHints()">
+        <select id="pf-action" class="cfg-input" style="width:100%" data-action="updatePolicyFormHints" data-on="change">
           <option value="stop">Stop run (raises PolicyViolation)</option>
           <option value="switch_model">Switch model</option>
           <option value="inject_prompt">Inject prompt fix</option>
@@ -1577,8 +1629,8 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       </div>
     </div>
     <div style="display:flex;gap:.75rem;align-items:center">
-      <button class="btn-primary" onclick="submitPolicyForm()">Save policy</button>
-      <button class="btn-secondary" onclick="closePolicyForm()">Cancel</button>
+      <button class="btn-primary" data-action="submitPolicyForm">Save policy</button>
+      <button class="btn-secondary" data-action="closePolicyForm">Cancel</button>
       <span id="pf-error" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--red)"></span>
     </div>
   </div>
@@ -1587,19 +1639,19 @@ input[type=range]{accent-color:var(--orange);background:transparent}
   <div style="background:var(--s1);border:1px solid var(--wire);border-radius:8px;padding:1.25rem">
     <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);letter-spacing:2px;text-transform:uppercase;margin-bottom:1rem">Policy examples</div>
     <div style="display:grid;gap:.75rem">
-      <div class="policy-example" onclick="fillExample('tool_call_count','gt','5','stop','')">
+      <div class="policy-example" data-action="fillExample" data-args='["tool_call_count","gt","5","stop",""]'>
         <div class="pe-rule">tool_call_count &gt; 5 → <span style="color:var(--red)">stop</span></div>
         <div class="pe-desc">Hard cap on tool calls — prevents runaway loops</div>
       </div>
-      <div class="policy-example" onclick="fillExample('cost_usd','gt','0.50','switch_model','gpt-4o-mini')">
+      <div class="policy-example" data-action="fillExample" data-args='["cost_usd","gt","0.50","switch_model","gpt-4o-mini"]'>
         <div class="pe-rule">cost_usd &gt; $0.50 → <span style="color:var(--amber)">switch_model</span> → gpt-4o-mini</div>
         <div class="pe-desc">Automatically downgrade to cheaper model mid-run when cost threshold is hit</div>
       </div>
-      <div class="policy-example" onclick="fillExample('signal','eq','TOOL_LOOP','inject_prompt','Stop repeating the same tool calls. Summarize what you have found and provide a final answer.')">
+      <div class="policy-example" data-action="fillExample" data-args='["signal","eq","TOOL_LOOP","inject_prompt","Stop repeating the same tool calls. Summarize what you have found and provide a final answer."]'>
         <div class="pe-rule">signal = TOOL_LOOP → <span style="color:var(--blue)">inject_prompt</span></div>
         <div class="pe-desc">Inject a corrective instruction when a loop is detected in real-time</div>
       </div>
-      <div class="policy-example" onclick="fillExample('finish_reason','eq','length','log','')">
+      <div class="policy-example" data-action="fillExample" data-args='["finish_reason","eq","length","log",""]'>
         <div class="pe-rule">finish_reason = length → <span style="color:var(--chalk3)">log</span></div>
         <div class="pe-desc">Record every LLM truncation event for later analysis</div>
       </div>
@@ -1615,16 +1667,13 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       <div style="display:flex;align-items:center;gap:6px">
         <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4)">cost rate $</span>
         <input id="tok-rate-input" type="number" min="0" step="0.0001" placeholder="auto"
-          style="width:72px;background:var(--s3);border:1px solid var(--wire2);color:var(--chalk2);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:2px 5px;border-radius:3px;outline:none"
-          oninput="onTokenRateInput()"
-          onfocus="this.style.borderColor='var(--amber)'"
-          onblur="this.style.borderColor='var(--wire2)'">
+          data-action="onTokenRateInput" data-on="input">
         <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4)">/1k tokens (blank = per-model)</span>
       </div>
       <div class="gp-bar">
-        <button class="gp-btn" data-tw="1d" onclick="setTokenWindow('1d',this)">1D</button>
-        <button class="gp-btn gp-btn-active" data-tw="7d" onclick="setTokenWindow('7d',this)">7D</button>
-        <button class="gp-btn" data-tw="30d" onclick="setTokenWindow('30d',this)">30D</button>
+        <button class="gp-btn" data-tw="1d" data-action="setTokenWindow" data-args='["1d"]'>1D</button>
+        <button class="gp-btn gp-btn-active" data-tw="7d" data-action="setTokenWindow" data-args='["7d"]'>7D</button>
+        <button class="gp-btn" data-tw="30d" data-action="setTokenWindow" data-args='["30d"]'>30D</button>
       </div>
     </div>
   </div>
@@ -1684,7 +1733,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <div id="page-keys" class="page">
   <div class="sec-head">
     <span class="sec-title">API keys</span>
-    <button class="btn-primary" onclick="openKeyForm()">+ New key</button>
+    <button class="btn-primary" data-action="openKeyForm">+ New key</button>
   </div>
 
   <!-- Key table -->
@@ -1710,8 +1759,8 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--green);letter-spacing:2px;text-transform:uppercase;margin-bottom:.6rem">Key created — copy it now, it won't be shown again</div>
     <div style="display:flex;align-items:center;gap:.75rem">
       <code id="key-created-value" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--chalk1);background:var(--s3);padding:6px 10px;border-radius:4px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></code>
-      <button class="btn-secondary" onclick="copyNewKey()" id="key-copy-btn">Copy</button>
-      <button class="btn-secondary" onclick="document.getElementById('key-created-banner').style.display='none'" style="padding:4px 10px">Dismiss</button>
+      <button class="btn-secondary" data-action="copyNewKey" id="key-copy-btn">Copy</button>
+      <button class="btn-secondary" data-action="hideElement" data-args='["key-created-banner"]' style="padding:4px 10px">Dismiss</button>
     </div>
   </div>
 
@@ -1750,8 +1799,8 @@ input[type=range]{accent-color:var(--orange);background:transparent}
       </div>
     </div>
     <div style="display:flex;gap:.75rem;align-items:center">
-      <button class="btn-primary" onclick="submitKeyForm()">Create key</button>
-      <button class="btn-secondary" onclick="closeKeyForm()">Cancel</button>
+      <button class="btn-primary" data-action="submitKeyForm">Create key</button>
+      <button class="btn-secondary" data-action="closeKeyForm">Cancel</button>
       <span id="kf-error" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--red)"></span>
     </div>
   </div>
@@ -1759,7 +1808,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- ── AGENT DETAIL PAGE (D2/D4) ── -->
 <div id="page-agent-detail" class="page">
-  <div class="back-btn" id="agent-detail-back-btn" onclick="nav('agents',document.querySelector('[onclick*=agents]'))">← back to agents</div>
+  <div class="back-btn" id="agent-detail-back-btn" data-action="navTo" data-args='["agents"]'>← back to agents</div>
   <div class="run-detail-header" id="agent-detail-header">
     <div class="rdh-left">
       <div class="rdh-run-id mono" id="agent-detail-id">—</div>
@@ -1768,11 +1817,11 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     </div>
   </div>
   <div class="detail-tabs">
-    <div class="dtab active" onclick="switchAgentTab('overview',this)">Overview</div>
-    <div class="dtab" onclick="switchAgentTab('fixes',this)">Fixes</div>
-    <div class="dtab" onclick="switchAgentTab('issues',this)">Issues</div>
-    <div class="dtab" onclick="switchAgentTab('trends',this)">Trends</div>
-    <div class="dtab" onclick="switchAgentTab('states',this)">States</div>
+    <div class="dtab active" data-action="switchAgentTab" data-args='["overview"]'>Overview</div>
+    <div class="dtab" data-action="switchAgentTab" data-args='["fixes"]'>Fixes</div>
+    <div class="dtab" data-action="switchAgentTab" data-args='["issues"]'>Issues</div>
+    <div class="dtab" data-action="switchAgentTab" data-args='["trends"]'>Trends</div>
+    <div class="dtab" data-action="switchAgentTab" data-args='["states"]'>States</div>
   </div>
   <div id="adtab-overview" class="dtab-panel active">
     <div id="agent-detail-overview-body"><div class="loading">loading…</div></div>
@@ -1787,9 +1836,9 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="sec-head" style="margin-bottom:1rem">
       <span class="sec-title">Performance trends</span>
       <div class="gp-bar">
-        <button class="gp-btn" data-w="7" onclick="setAgentTrendWindow(7)">7D</button>
-        <button class="gp-btn gp-btn-active" data-w="30" onclick="setAgentTrendWindow(30)">30D</button>
-        <button class="gp-btn" data-w="90" onclick="setAgentTrendWindow(90)">90D</button>
+        <button class="gp-btn" data-w="7" data-action="setAgentTrendWindow" data-args='[7]'>7D</button>
+        <button class="gp-btn gp-btn-active" data-w="30" data-action="setAgentTrendWindow" data-args='[30]'>30D</button>
+        <button class="gp-btn" data-w="90" data-action="setAgentTrendWindow" data-args='[90]'>90D</button>
       </div>
     </div>
     <div id="agent-detail-trends-body"><div class="loading">loading…</div></div>
@@ -1798,9 +1847,9 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     <div class="sec-head" style="margin-bottom:1rem">
       <span class="sec-title">State analytics</span>
       <div class="gp-bar">
-        <button class="gp-btn" data-sw="7" onclick="setAgentStateWindow(7)">7D</button>
-        <button class="gp-btn gp-btn-active" data-sw="30" onclick="setAgentStateWindow(30)">30D</button>
-        <button class="gp-btn" data-sw="90" onclick="setAgentStateWindow(90)">90D</button>
+        <button class="gp-btn" data-sw="7" data-action="setAgentStateWindow" data-args='[7]'>7D</button>
+        <button class="gp-btn gp-btn-active" data-sw="30" data-action="setAgentStateWindow" data-args='[30]'>30D</button>
+        <button class="gp-btn" data-sw="90" data-action="setAgentStateWindow" data-args='[90]'>90D</button>
       </div>
     </div>
     <p style="font-size:12px;color:var(--chalk4);margin:-.5rem 0 1rem">
@@ -1815,12 +1864,12 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 <div id="page-conversations" class="page">
   <div class="sec-head"><span class="sec-title">Conversations</span></div>
   <div class="runs-filter-row" id="conversations-filter-row">
-    <select id="conv-agent" class="trend-select" onchange="setConvAgentFilter(this.value)">
+    <select id="conv-agent" class="trend-select" data-action="setConvAgentFilter" data-on="change">
       <option value="">All agents</option>
     </select>
-    <input id="conv-user-search" class="search-input" style="max-width:240px" placeholder="user_id (rarely populated yet)" oninput="setConvUserFilter(this.value)">
+    <input id="conv-user-search" class="search-input" style="max-width:240px" placeholder="user_id (rarely populated yet)" data-action="setConvUserFilter" data-on="input">
     <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--chalk3);cursor:pointer">
-      <input type="checkbox" id="conv-frustration-only" onchange="setConvFrustrationFilter(this.checked)"> has frustration signal
+      <input type="checkbox" id="conv-frustration-only" data-action="setConvFrustrationFilter" data-on="change"> has frustration signal
     </label>
   </div>
   <div class="table-card">
@@ -1835,7 +1884,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- ── CONVERSATION DETAIL PAGE (Phase 3.3) ── -->
 <div id="page-conversation-detail" class="page">
-  <div class="back-btn" id="conv-detail-back-btn" onclick="nav('conversations',document.querySelector('[onclick*=conversations]'))">← back to conversations</div>
+  <div class="back-btn" id="conv-detail-back-btn" data-action="navTo" data-args='["conversations"]'>← back to conversations</div>
   <div class="run-detail-header" id="conv-detail-header">
     <div class="rdh-left">
       <div class="rdh-run-id mono" id="conv-detail-id">loading…</div>
@@ -1866,22 +1915,22 @@ input[type=range]{accent-color:var(--orange);background:transparent}
     call is one conversation (one or more runs) for a voice agent.
   </p>
   <div class="runs-filter-row" id="calls-filter-row">
-    <select id="calls-agent" class="trend-select" onchange="setCallAgentFilter(this.value)">
+    <select id="calls-agent" class="trend-select" data-action="setCallAgentFilter" data-on="change">
       <option value="">All agents</option>
     </select>
-    <select id="calls-status" class="trend-select" onchange="setCallStatusFilter(this.value)">
+    <select id="calls-status" class="trend-select" data-action="setCallStatusFilter" data-on="change">
       <option value="">All outcomes</option>
       <option value="natural">Natural end</option>
       <option value="dropped">Dropped</option>
       <option value="escalated">Escalated</option>
     </select>
-    <select id="calls-cost" class="trend-select" onchange="setCallCostFilter(this.value)">
+    <select id="calls-cost" class="trend-select" data-action="setCallCostFilter" data-on="change">
       <option value="">Any cost</option>
       <option value="low">&lt; $0.10</option>
       <option value="medium">$0.10 – $1</option>
       <option value="high">&gt; $1</option>
     </select>
-    <select id="calls-range" class="trend-select" onchange="setCallRangeFilter(this.value)">
+    <select id="calls-range" class="trend-select" data-action="setCallRangeFilter" data-on="change">
       <option value="">All time</option>
       <option value="1">Last 24h</option>
       <option value="7">Last 7 days</option>
@@ -1900,7 +1949,7 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 
 <!-- ── CALL DETAIL PAGE (Phase 2.1) ── -->
 <div id="page-call-detail" class="page">
-  <div class="back-btn" onclick="nav('calls',document.querySelector('[onclick*=\'calls\']'))">← back to calls</div>
+  <div class="back-btn" data-action="navTo" data-args='["calls"]'>← back to calls</div>
   <div class="run-detail-header">
     <div class="rdh-left">
       <div class="rdh-run-id mono" id="call-detail-id">loading…</div>
@@ -1938,6 +1987,43 @@ input[type=range]{accent-color:var(--orange);background:transparent}
 const API = 'http://localhost:8002';
 const KEY = 'dt_dev_test';
 
+// ── Browser storage (fault tolerant) ─────────────────────────────────────────
+// Every read and write of localStorage in this file goes through these four
+// helpers. A bare localStorage access is a single point of failure for the whole
+// dashboard: this is one <script>, so a throw anywhere during its evaluation
+// aborts it before a single function is defined or a single listener registered
+// — the page becomes permanent empty chrome with one console error and no
+// recovery, and because the CSP script-src is a bare hash with no
+// 'unsafe-inline' no fallback script can even report it. All of these throw for
+// real: the localStorage *getter itself* raises SecurityError in a browser
+// configured to block site data, JSON.parse raises on a quota-truncated or
+// externally edited value, and new Set() raises on a value that parses to a
+// non-iterable. Storage holds conveniences here (acked signals, theme choice) —
+// losing it must cost exactly those and nothing else.
+function lsGet(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); return true; }
+  catch (e) { console.warn('[dunetrace] localStorage write failed:', key, e); return false; }
+}
+function lsRemove(key) {
+  try { localStorage.removeItem(key); } catch (e) { /* nothing to undo */ }
+}
+// Read a JSON array back as a Set of strings, tolerating every shape a
+// truncated, corrupted or foreign value can take. An unreadable value is
+// dropped rather than left to fail the same way on the next load.
+function lsGetSet(key) {
+  try {
+    const parsed = JSON.parse(lsGet(key) || '[]');
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch (e) {
+    console.warn('[dunetrace] discarding unreadable localStorage value:', key, e);
+    lsRemove(key);
+    return new Set();
+  }
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 let _agents        = [];   // [{agent_id, run_count, signal_count, critical_count, high_count, failure_types, _runs, _signals, _shadowSignals, _openIssues}]
 let _healthScores  = {};   // { agent_id: {score, components, sample_runs} }
@@ -1962,11 +2048,182 @@ let _runsSearch     = '';                 // #5 run search
 let _runsSevFilter  = '';                 // #5 sev filter
 let _runsAgentFilter = '';               // #5 agent filter
 let _agentSort      = 'health';           // #8 agent sort
-let _ackedSignals   = new Set(JSON.parse(localStorage.getItem('dt_acked') || '[]'));  // #7 ack
+let _ackedSignals   = lsGetSet('dt_acked');  // #7 ack
 let fixVerdicts         = {};    // D1: { signalId: verdict }
 let _curAgentDetailId   = null;  // D2/D4: active agent-detail page
 let _curAgentTrendWindow = 30;   // Phase 4.4: active performance-trends window (7|30|90)
 let _issuesLoaded       = false; // D4: lazy-loaded open-issue counts
+
+// ── Delegated event dispatcher ────────────────────────────────────────────────
+// Rendered markup must not carry inline handlers (onclick=fn('${x}')): a strict
+// CSP whose script-src is only the hash of this <script> blocks them, and putting a
+// caller-controlled agent_id / run_id / failure_type inside a JS string inside an
+// HTML attribute needed two escapers to agree (the old JS-string escaper left `"`
+// and HTML entities alone, so a value could break out of the attribute). Instead an
+// element declares
+//   data-action="showDetail"           a key of ACTIONS — the explicit allowlist;
+//                                      names are never resolved through window[name]
+//   data-args='["run-1","agent-a"]'    JSON array of arguments, rendered through attr()
+//   data-stop="1"                      call event.stopPropagation() before dispatching
+//   data-on="change"                   dispatch on that event type instead of click:
+//                                      change | input | blur | focus | mouseover | mouseout
+//                                      — space-separated for more than one ("input blur")
+// and one document-level listener per event type calls
+//   ACTIONS[name].apply(element, [...args, event])
+// Render the attribute pair with actionAttrs(name, ...args). A bad JSON payload or
+// an unknown name is logged to the console and ignored — never thrown.
+// Adapters for handlers that read the element: the dispatcher passes it as `this`
+// and the event last, so fn(this.value) becomes withValue(fn) and fn(x, this)
+// becomes a one-line method. Method shorthand does not bind its own name, so
+// `switchTab(id) { switchTab(id, this); }` calls the top-level function.
+const withValue   = fn => function (...rest) { return fn.call(this, this.value, ...rest); };
+const withChecked = fn => function (...rest) { return fn.call(this, this.checked, ...rest); };
+
+const ACTIONS = {
+  // Direct: the handler takes only its declared arguments.
+  showDetail,
+  openAgentDetail,
+  openPatternDrillDown,
+  enablePolicyFromIncident,
+  toggleTokenRow,
+  navTo,
+  toggleTheme,
+  closePatternModal,
+  updateTrendDeltas,
+  copyRunId,
+  promotePolicy,
+  loadDryRunSummary,
+  focusSignal,
+  explainSignal,
+  openPROnGitHub,
+  runReplay,
+  setGlobalPeriod,
+  unackAll,
+  downloadSignalsCsv,
+  setRunsFilter,
+  openCustomDetectorForm,
+  previewCustomDetector,
+  closeCustomDetectorForm,
+  saveCustomDetector,
+  loadApprovals,
+  setAgentSort,
+  renderCompare,
+  openPolicyForm,
+  updatePolicyFormHints,
+  submitPolicyForm,
+  closePolicyForm,
+  fillExample,
+  onTokenRateInput,
+  openKeyForm,
+  copyNewKey,
+  submitKeyForm,
+  closeKeyForm,
+  setAgentTrendWindow,
+  setAgentStateWindow,
+  ackGroup,
+  createSuggestedPolicy,
+  copyFixToClipboard,
+  togglePolicy,
+  deletePolicy,
+  showConversationDetail,
+  showCallDetail,
+  revokeKey,
+  activateCustomDetector,
+  pauseCustomDetector,
+  resumeCustomDetector,
+  deleteCustomDetector,
+  activatePackUI,
+  deactivatePackUI,
+  otelSetEnabled,
+  removeElevenLabs,
+  saveElevenLabs,
+  loadElevenLabsGenerations,
+  decideApproval,
+  // Element-reading handlers: fn(this.value) / fn(this.checked).
+  filterEventLog:          withValue(filterEventLog),
+  setRunsSearch:           withValue(setRunsSearch),
+  setRunsSevFilter:        withValue(setRunsSevFilter),
+  setRunsAgentFilter:      withValue(setRunsAgentFilter),
+  setConvAgentFilter:      withValue(setConvAgentFilter),
+  setConvUserFilter:       withValue(setConvUserFilter),
+  setConvFrustrationFilter: withChecked(setConvFrustrationFilter),
+  setCallAgentFilter:      withValue(setCallAgentFilter),
+  setCallStatusFilter:     withValue(setCallStatusFilter),
+  setCallCostFilter:       withValue(setCallCostFilter),
+  setCallRangeFilter:      withValue(setCallRangeFilter),
+  // Element-reading handlers: fn(x, this) / fn(this, event).
+  switchTab(id)        { switchTab(id, this); },
+  switchAgentTab(id)   { switchAgentTab(id, this); },
+  setTokenWindow(w)    { setTokenWindow(w, this); },
+  otelCopyId(id)       { otelCopyId(id, this); },
+  toggleGroup()        { toggleGroup(this); },
+  toggleEvent(e)       { toggleEvent(this, e); },
+  // Composite actions that used to be two statements inside one onclick.
+  showDetailFromPattern(runId, agentId) { closePatternModal(); showDetail(runId, agentId); },
+  viewAllRunsForAgent(agentId) {
+    _runsAgentFilter = agentId;
+    navTo('runs');
+    const s = document.getElementById('runs-agent');
+    if (s) s.value = agentId;
+    renderRuns();
+  },
+  // "View event log" / "View run graph" buttons in the analysis panel: select the
+  // run-detail tab by name rather than by its index in the page.
+  showDetailTab(id) { switchTab(id, document.querySelector('#page-detail .dtab[data-tab="' + id + '"]')); },
+  hideElement(id) { const el = document.getElementById(id); if (el) el.style.display = 'none'; },
+  // Pattern modal overlay: close only on a click on the backdrop itself, not the box.
+  closePatternModalFromOverlay(e) { if (e.target === this) closePatternModal(); },
+  // Replay modification checkbox: highlight its <label> while checked.
+  toggleReplayMod() { const mod = this.closest('.replay-mod'); if (mod) mod.classList.toggle('active', this.checked); },
+  // Global search box: data-on="input blur" — run the search on input, close the
+  // dropdown shortly after blur (the delay lets a result click land first).
+  searchInput(e) {
+    if (e.type === 'blur') setTimeout(() => closeSearch(), 200);
+    else runSearch(this.value);
+  },
+  // Global search result: the {action, args} pair chosen at render time, then close the dropdown.
+  searchSelect(action, args, e) {
+    dispatchAction(this, action, Array.isArray(args) ? args : [], e);
+    closeSearch();
+  },
+};
+
+function dispatchAction(el, name, args, e) {
+  const fn = Object.prototype.hasOwnProperty.call(ACTIONS, name) ? ACTIONS[name] : null;
+  if (typeof fn !== 'function') { console.warn('[actions] unknown action:', name); return; }
+  return fn.apply(el, [...args, e]);
+}
+
+function _parseActionArgs(el) {
+  const raw = el.dataset.args;
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [v];
+  } catch (err) {
+    console.warn('[actions] bad data-args on', el, err);
+    return [];
+  }
+}
+
+function _handleDelegated(e) {
+  let el = e.target instanceof Element ? e.target.closest('[data-action]') : null;
+  // Skip elements bound to another event type (e.g. a data-on="change" <select> inside a clickable row).
+  while (el && !(el.dataset.on || 'click').split(' ').includes(e.type)) el = el.parentElement && el.parentElement.closest('[data-action]');
+  if (!el) return;
+  if (el.dataset.stop === '1') e.stopPropagation();
+  dispatchAction(el, el.dataset.action, _parseActionArgs(el), e);
+}
+
+['click', 'change', 'input', 'mouseover', 'mouseout'].forEach(t => document.addEventListener(t, _handleDelegated));
+['blur', 'focus'].forEach(t => document.addEventListener(t, _handleDelegated, true));  // these do not bubble
+
+// Render `data-action="…" data-args="…"` for the dispatcher above. Arguments are
+// JSON-encoded then attribute-escaped, so a caller-controlled id cannot break out.
+function actionAttrs(name, ...args) {
+  if (!Object.prototype.hasOwnProperty.call(ACTIONS, name)) console.warn('[actions] actionAttrs(): unknown action', name);
+  return `data-action="${attr(name)}" data-args="${attr(JSON.stringify(args))}"`;
+}
 
 // ── API helpers ───────────────────────────────────────────────────────────────
 async function apiFetch(path) {
@@ -2118,17 +2375,17 @@ function renderTokens() {
   }
 
   tbody.innerHTML = rows.map(r => `
-    <tr style="cursor:pointer" onclick="toggleTokenRow(this,${jsVal(r.agent_id)})">
+    <tr style="cursor:pointer" ${actionAttrs('toggleTokenRow', r.agent_id)}>
       <td class="mono" style="font-weight:600">${esc(r.agent_id)}</td>
-      <td class="mono">${r.run_count} <span style="color:var(--amber)">(${r.failed_runs})</span></td>
+      <td class="mono">${esc(r.run_count)} <span style="color:var(--amber)">(${esc(r.failed_runs)})</span></td>
       <td class="mono">${fmtTok(r.total_tok)}</td>
       <td class="mono" style="color:var(--amber)">${fmtTok(r.failed_tok)}</td>
       <td class="mono" style="color:#e67e22">${fmtTok(r.excess_tok)} <span style="color:${r.epColor};font-size:10px">(${r.ep}%)</span></td>
       <td class="mono" style="color:var(--green)">${r.prevented_tok ? fmtTok(r.prevented_tok) : '—'}</td>
       <td class="mono">${fmtUsd(r.total_cost)}</td>
-      <td class="mono" style="color:var(--chalk4);font-size:10px">${r.top_ft ? r.top_ft.replace(/_/g,' ') : '—'}</td>
+      <td class="mono" style="color:var(--chalk4);font-size:10px">${r.top_ft ? esc(r.top_ft.replace(/_/g,' ')) : '—'}</td>
     </tr>
-    <tr id="tok-detail-${esc(r.agent_id)}" style="display:none">
+    <tr id="tok-detail-${attr(r.agent_id)}" style="display:none">
       <td colspan="8" style="padding:0 0 8px 0;background:var(--s2)">
         <table class="run-table" style="margin:0;border-top:none">
           <thead style="background:var(--s2)"><tr>
@@ -2142,7 +2399,7 @@ function renderTokens() {
               <td class="mono" style="padding-left:2rem">${esc(ft.failure_type.replace(/_/g,' '))}</td>
               <td class="mono" style="color:var(--amber)">${fmtTok(ft.wasted_tokens)}</td>
               <td class="mono" style="color:var(--red)">${fmtUsd(ft._cost)}</td>
-              <td class="mono">${ft.affected_runs}</td>
+              <td class="mono">${esc(ft.affected_runs)}</td>
             </tr>`).join('')}
           </tbody>
         </table>
@@ -2151,7 +2408,7 @@ function renderTokens() {
   `).join('');
 }
 
-function toggleTokenRow(tr, agentId) {
+function toggleTokenRow(agentId) {
   const detail = document.getElementById('tok-detail-' + agentId);
   if (!detail) return;
   detail.style.display = detail.style.display === 'none' ? '' : 'none';
@@ -2195,10 +2452,89 @@ function toggleTokenRow(tr, agentId) {
   else document.addEventListener('DOMContentLoaded', setup);
 })();
 
-async function loadAll() {
+// The caps the old per-agent URLs imposed (limit=200 runs, limit=500 signals).
+// Kept identical, and now applied server-side by the API's per_agent_limit
+// (ROW_NUMBER partitioned by agent_id), so every downstream view sees exactly
+// the population it always did.
+const PER_AGENT_RUN_CAP    = 200;
+const PER_AGENT_SIGNAL_CAP = 500;
+const BULK_PAGE            = 500;  // = PAGE_SIZE_MAX on the API
+const BULK_CONCURRENCY     = 6;    // the browser's per-origin connection cap
+
+// Page through an org-wide list endpoint.
+//
+// Concurrency is capped at BULK_CONCURRENCY and the two callers run one after
+// the other on purpose. Overlapping them asks for 12 requests in flight: six
+// queue in the browser, and the extra load pushed the API from ~0.3s a page to
+// ~13.7s — past apiFetch's 10s abort, which fails the whole load. Sequential is
+// both faster here and the only form that stays under that timeout.
+// Pages bulkFetch swallowed during the current pass, and how many it asked for.
+// Swallowing a failed page is the right call — one bad page must not empty the
+// whole dashboard — but a silently short load is not a complete one: a single
+// timed-out signals page removes up to BULK_PAGE rows from the analytics counts,
+// the alert groups, the heatmap, computeIncidents() and every clean/failed
+// verdict on the page, and the only trace used to be a console.warn nobody sees.
+// _loadAllOnce raises the banner when either of these is non-empty, so the page
+// says out loud that its numbers are understated.
+let _loadFaults        = [];
+let _loadPagesFetched  = 0;
+
+async function bulkFetch(basePath, key) {
+  // Page 1 first: its `page.total` says how many more there are. The remainder
+  // then go out in batches rather than one after another (9.5s -> 2.5s).
+  // A failure on this first page is NOT swallowed: it throws out to
+  // _loadAllOnce's catch, which raises the full error banner.
+  _loadPagesFetched++;
+  const first = await apiFetch(`${basePath}limit=${BULK_PAGE}&offset=0`);
+  const rows  = first[key] || [];
+  const total = first.page?.total ?? rows.length;
+
+  const offsets = [];
+  for (let o = BULK_PAGE; o < total; o += BULK_PAGE) offsets.push(o);
+
+  for (let i = 0; i < offsets.length; i += BULK_CONCURRENCY) {
+    const pages = await Promise.all(
+      offsets.slice(i, i + BULK_CONCURRENCY).map(async o => {
+        _loadPagesFetched++;
+        try {
+          return (await apiFetch(`${basePath}limit=${BULK_PAGE}&offset=${o}`))[key] || [];
+        } catch (e) {
+          console.warn('[dunetrace] bulk page failed', key, o, e);
+          _loadFaults.push(key);
+          return [];   // one bad page must not empty the whole dashboard
+        }
+      }));
+    pages.forEach(pg => rows.push(...pg));
+  }
+  return rows;
+}
+
+// Auto-refresh fires every 15s and one pass can take longer than that — the
+// comment above records a measured 13.7s page, and apiFetch aborts at 10s — so
+// two passes really do overlap. That corrupts every count on the page:
+// _loadAllOnce resets a._runs/a._signals early, then many awaits later rebuilds
+// byAgent from whatever _agents holds and pushes rows in, so both passes end up
+// pushing into the *second* pass's agent objects while only the second reset
+// ran. Every run and signal is then counted twice — duplicated table rows,
+// doubled sidebar badges, doubled incident counts — while the Overview headline
+// (summed from the API's own a.run_count) stays correct and the page
+// contradicts itself. A call made while a pass is in flight joins that pass
+// instead of starting a second one, so awaiting callers still resolve when the
+// data is actually there.
+let _loadAllInFlight = null;
+
+function loadAll() {
+  if (_loadAllInFlight) return _loadAllInFlight;
+  _loadAllInFlight = _loadAllOnce().finally(() => { _loadAllInFlight = null; });
+  return _loadAllInFlight;
+}
+
+async function _loadAllOnce() {
   _healthScoresLoaded = false;
   _tokenStatsLoaded   = false;
   _issuesLoaded       = false;
+  _loadFaults         = [];
+  _loadPagesFetched   = 0;
   try {
     hideErrorBanner();
     // Fetch ALL agents (was limit=50): the Overview headline stats sum per-agent
@@ -2208,34 +2544,47 @@ async function loadAll() {
     _agents = agentsData.agents || [];
     _agents.forEach(a => { a._runs = []; a._signals = []; a._shadowSignals = []; });
 
-    // The heavier per-agent runs/signals load (for the runs/analytics/heatmap
-    // detail views) is bounded by a safety cap so a very large org doesn't fire
-    // hundreds of requests on load. At typical sizes every agent still loads, so
-    // the detail views stay consistent with the headline. Most-active agents first.
-    const DETAIL_AGENT_CAP = 250;
-    const detailAgents = _agents.length <= DETAIL_AGENT_CAP
-      ? _agents
-      : [..._agents].sort((a, b) => (b.signal_count || 0) - (a.signal_count || 0)).slice(0, DETAIL_AGENT_CAP);
+    // Two org-wide reads replace one request pair PER AGENT. The old shape fired
+    // 1 + 2N requests and browsers allow only 6 per origin, so the rest queued:
+    // request COUNT was the cost, each carrying ~50ms of fixed overhead whatever
+    // its size. Measured on this dataset: 138 requests / 7.9s -> 32 / 3.8s.
+    //
+    // per_agent_limit is what lets one request stand in for one-per-agent. A
+    // plain global newest-N window cannot: the newest 8,000 runs came from 37 of
+    // 135 agents, so the rest would have loaded empty. Windowed per agent the
+    // rows are the set the fan-out fetched, with every agent present.
+    //
+    // explain=false drops the per-row explainer prose — ~75% of the signals
+    // payload, and only read when a human opens one signal (a 500-row page goes
+    // 357ms -> 105ms). renderExplain()/renderSignalCards() on the run-detail
+    // page get their prose from GET /v1/runs/{id}, which is untouched.
+    const runRows = await bulkFetch('/v1/runs?per_agent_limit=' + PER_AGENT_RUN_CAP + '&', 'runs');
+    const sigRows = await bulkFetch('/v1/signals?include_shadow=true&explain=false&per_agent_limit='
+                                    + PER_AGENT_SIGNAL_CAP + '&', 'signals');
 
-    // Health scores are deferred — loaded lazily on first visit to the Agents page.
-    await Promise.all(detailAgents.map(async a => {
-      try {
-        const [rd, sd] = await Promise.all([
-          apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/runs?limit=200'),
-          apiFetch('/v1/agents/' + encodeURIComponent(a.agent_id) + '/signals?limit=500&include_shadow=true'),
-        ]);
-        a._runs          = rd.runs || [];
-        const allSigs    = sd.signals || [];
-        a._signals       = allSigs.filter(s => !s.shadow);
-        a._shadowSignals = allSigs.filter(s =>  s.shadow);
-      } catch(e) {
-        a._runs = []; a._signals = []; a._shadowSignals = [];
-      }
-    }));
+    // Regroup onto the agent objects the detail views already read from, so
+    // nothing downstream needs to know the load shape changed.
+    const byAgent = new Map(_agents.map(a => [a.agent_id, a]));
+    runRows.forEach(r => { const a = byAgent.get(r.agent_id); if (a) a._runs.push(r); });
+    sigRows.forEach(s => {
+      const a = byAgent.get(s.agent_id);
+      if (a) (s.shadow ? a._shadowSignals : a._signals).push(s);
+    });
 
     _allRuns       = _agents.flatMap(a => (a._runs || []).map(r => ({ ...r, _agentId: a.agent_id })));
     _allSigs       = _agents.flatMap(a => a._signals || []);
     _allShadowSigs = _agents.flatMap(a => a._shadowSignals || []);
+
+    // Render whatever arrived — but say so when some of it did not.
+    if (_loadFaults.length) {
+      const kinds = [...new Set(_loadFaults)].sort().join(' and ');
+      showErrorBanner(
+        'Showing partial data — ' + _loadFaults.length + ' of ' + _loadPagesFetched +
+        ' data pages failed to load (' + kinds + '). Up to ' + (_loadFaults.length * BULK_PAGE) +
+        ' rows are missing, so counts, rates, incidents and clean/failed verdicts below are ' +
+        'understated. The next auto-refresh retries.',
+        'warn');
+    }
 
     populateRunsAgentDropdown();
     renderOverview();
@@ -2328,7 +2677,7 @@ function renderOverview() {
       return c > (best?.cnt||0) ? {id: a.agent_id, cnt: c} : best;
     }, null);
     const topAgentId = topAgent?.id || '';
-    return `<div class="failure-item" onclick="openAgentDetail(${jsVal(topAgentId)})">
+    return `<div class="failure-item" ${actionAttrs('openAgentDetail', topAgentId)}>
       <div class="fi-bar" style="background:${color}"></div>
       <span class="fi-name">${ftLabel(ft)}</span>
       <span class="fi-count">${cnt} signals</span>
@@ -2375,11 +2724,19 @@ function renderRuns() {
   }
 
   // Apply severity filter
+  //
+  // CLEAN is the server's verdict (runHasSignals), never the emptiness of
+  // _allSigs: the runs list and the signals list are windowed on different
+  // axes (newest PER_AGENT_RUN_CAP runs vs newest PER_AGENT_SIGNAL_CAP signals,
+  // per agent), so a failed run whose signals fell past the signal cap used to
+  // filter in as clean here exactly as it rendered a green CLEAN badge below.
+  // A named severity still needs the signal OBJECTS, which a run past the cap
+  // has none of — such a run is excluded rather than guessed at, which is the
+  // same "don't print a verdict you can't back" rule runRow applies.
   if (_runsSevFilter) {
     filtered = filtered.filter(r => {
-      const signals = _allSigs.filter(s => s.run_id === r.run_id);
-      if (_runsSevFilter === 'CLEAN') return signals.length === 0;
-      return signals.some(s => s.severity === _runsSevFilter);
+      if (_runsSevFilter === 'CLEAN') return !runHasSignals(r);
+      return _allSigs.some(s => s.run_id === r.run_id && s.severity === _runsSevFilter);
     });
   }
 
@@ -2394,28 +2751,74 @@ function renderRuns() {
     : '<tr><td colspan="11" class="loading">no runs in this period</td></tr>';
 }
 
+// Whether a run failed, and how many live signals it has, according to the
+// SERVER — not according to what happens to be loaded client-side.
+//
+// _allRuns is each agent's newest PER_AGENT_RUN_CAP runs; _allSigs is each
+// agent's newest PER_AGENT_SIGNAL_CAP signals. Different caps, different
+// windows, so `_allSigs.filter(s => s.run_id === r.run_id).length === 0` is
+// NOT evidence that a run was clean — it is equally consistent with a run
+// whose signals fell past the signal cap. Deriving the CLEAN badge from that
+// emptiness printed a green pass on failed runs. showDetail was already fixed
+// for this defect (it reads runData.signals from GET /v1/runs/{id}); the same
+// fix never reached runRow.
+//
+// Both fields are set on every row by the API
+// (services/api/api_svc/routers/runs.py), and signal_count there is the live,
+// non-shadow, org-scoped count for that run — the same population _allSigs
+// holds, so the two are directly comparable. The fallbacks exist only for a
+// response that predates the fields.
+function runHasSignals(r) {
+  if (typeof r.has_signals === 'boolean') return r.has_signals;
+  if (typeof r.signal_count === 'number') return r.signal_count > 0;
+  return _allSigs.some(s => s.run_id === r.run_id);
+}
+
+function runSignalCount(r, loaded) {
+  if (typeof r.signal_count === 'number') return r.signal_count;
+  if (typeof r.has_signals === 'boolean') return r.has_signals ? Math.max(loaded, 1) : 0;
+  return loaded;
+}
+
 function runRow(r) {
-  const signals = _allSigs.filter(s => s.run_id === r.run_id);
-  const maxConf = signals.length ? Math.max(...signals.map(s => s.confidence)) : 0;
-  const sev     = signals.length ? topSev(signals) : null;
+  const signals  = _allSigs.filter(s => s.run_id === r.run_id);
+  const hasSigs  = runHasSignals(r);
+  const sigCount = runSignalCount(r, signals.length);
+  // Severity, confidence and failure-type labels genuinely need the signal
+  // OBJECTS, which the caps may not have loaded for this run. When the server
+  // says the run has signals but none are local, report the true count and an
+  // explicitly non-committal severity rather than a verdict nothing backs.
+  const detailed = hasSigs && signals.length > 0;
+  const maxConf = detailed ? Math.max(...signals.map(s => s.confidence)) : 0;
+  const sev     = detailed ? topSev(signals) : null;
   const dur     = (r.completed_at && r.started_at)
     ? fmtDur(r.completed_at - r.started_at) : '—';
-  const fts     = [...new Set(signals.map(s => s.failure_type))].map(ftLabel).join(', ') || '—';
+  const fts     = detailed
+    ? ([...new Set(signals.map(s => s.failure_type))].map(ftLabel).join(', ') || '—')
+    : '—';
   const agentId = r.agent_id || r._agentId || '';
-  const riskColor = maxConf >= 0.8 ? 'var(--red)' : maxConf >= 0.5 ? 'var(--amber)' : maxConf > 0 ? 'var(--orange)' : 'var(--green)';
+  // Green is a claim about the run; unknown risk is grey, not green.
+  const riskColor = !hasSigs ? 'var(--green)'
+    : !detailed ? 'var(--chalk4)'
+    : maxConf >= 0.8 ? 'var(--red)' : maxConf >= 0.5 ? 'var(--amber)' : maxConf > 0 ? 'var(--orange)' : 'var(--chalk4)';
+  const sevCell = sev
+    ? `<span class="sev-badge sb-${attr(sev.toLowerCase())}">${esc(sev)}</span>`
+    : hasSigs
+      ? `<span class="sev-badge" style="background:var(--s3);color:var(--chalk3)" title="The server reports ${attr(String(sigCount))} signal(s) on this run, but none fall inside the loaded window (newest ${attr(String(PER_AGENT_SIGNAL_CAP))} signals per agent). Open the run for its severity.">SIGNALS</span>`
+      : '<span class="sev-badge sb-low">CLEAN</span>';
 
-  return `<tr onclick="showDetail(${jsVal(r.run_id)},${jsVal(agentId)})">
-    <td><span class="run-id">${shortId(r.run_id)}</span></td>
+  return `<tr ${actionAttrs('showDetail', r.run_id, agentId)}>
+    <td><span class="run-id">${esc(shortId(r.run_id))}</span></td>
     <td>${esc(agentId)}</td>
-    <td class="mono">${signals.length}</td>
-    <td>${sev ? `<span class="sev-badge sb-${sev.toLowerCase()}">${sev}</span>` : '<span class="sev-badge sb-low">CLEAN</span>'}</td>
+    <td class="mono">${esc(sigCount)}</td>
+    <td>${sevCell}</td>
     <td style="font-size:11px">${fts}</td>
     <td class="mono" style="font-size:11px;color:var(--chalk4)">${r.started_at ? timeAgo(r.started_at) : '—'}</td>
     <td class="mono">${dur}</td>
-    <td class="mono">${r.step_count || 0}</td>
-    <td class="mono" style="font-size:11px;color:${riskColor}">${signals.length && r.total_tokens ? fmtTok(r.total_tokens) : '—'}</td>
-    <td class="mono" style="font-size:11px;color:${riskColor}">${signals.length && r.cost_usd ? fmtUsd(r.cost_usd) : '—'}</td>
-    <td><button class="view-btn" onclick="showDetail(${jsVal(r.run_id)},${jsVal(agentId)});event.stopPropagation()">View →</button></td>
+    <td class="mono">${esc(r.step_count || 0)}</td>
+    <td class="mono" style="font-size:11px;color:${riskColor}">${hasSigs && r.total_tokens ? fmtTok(r.total_tokens) : '—'}</td>
+    <td class="mono" style="font-size:11px;color:${riskColor}">${hasSigs && r.cost_usd ? fmtUsd(r.cost_usd) : '—'}</td>
+    <td><button class="view-btn" ${actionAttrs('showDetail', r.run_id, agentId)} data-stop="1">View →</button></td>
   </tr>`;
 }
 
@@ -2470,24 +2873,24 @@ function renderAlerts() {
       const sv = topSev(s);
       const r  = _allRuns.find(x => x.run_id === rid);
       const tk = fmtTok(realTok(r));
-      return `<div class="ag-run-item" onclick="showDetail(${jsVal(rid)},${jsVal(agentId)})">
-        <span class="run-id">${shortId(rid)}</span>
+      return `<div class="ag-run-item" ${actionAttrs('showDetail', rid, agentId)}>
+        <span class="run-id">${esc(shortId(rid))}</span>
         <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
         <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--amber)">~${tk}</span>
         <span style="margin-left:8px">conf ${c}</span>
-        <span class="sev-badge sb-${sv.toLowerCase()}" style="margin-left:8px">${sv}</span>
+        <span class="sev-badge sb-${attr(sv.toLowerCase())}" style="margin-left:8px">${esc(sv)}</span>
       </div>`;
     }).join('');
 
     return `<div class="alert-group">
-      <div class="ag-header" onclick="toggleGroup(this)">
+      <div class="ag-header" data-action="toggleGroup">
         <div class="ag-sev" style="background:${color}"></div>
         <span class="ag-title">${ftLabel(ft)}</span>
         <span class="ag-count">${uniqRuns.length} run${uniqRuns.length !== 1 ? 's' : ''}</span>
         <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--amber);margin-left:4px">~${fmtTok(wasted)} wasted</span>
         <span class="ag-time mono">${latStr}</span>
         <span class="ag-expand">${open ? 'collapse ↑' : 'expand ↓'}</span>
-        <button class="ack-btn" onclick="ackGroup(event,[${sigIds.join(',')}])">dismiss</button>
+        <button class="ack-btn" ${actionAttrs('ackGroup', sigIds)} data-stop="1">dismiss</button>
       </div>
       <div class="ag-runs${open}">${runItems}</div>
     </div>`;
@@ -2503,7 +2906,25 @@ function renderAnalytics() {
   const runTotal  = fRuns.length;
   const sigTotal  = fSigs.length;
   const critTotal = fSigs.filter(s => s.severity === 'CRITICAL').length;
-  const rate      = runTotal ? (sigTotal / runTotal).toFixed(2) : '0.00';
+
+  // Signals per run — numerator and denominator from the SAME population.
+  //
+  // sigTotal / runTotal divided two different samples: fSigs is each agent's
+  // newest PER_AGENT_SIGNAL_CAP (500) signals, fRuns its newest
+  // PER_AGENT_RUN_CAP (200) runs. For any agent at the run cap the denominator
+  // is truncated while the numerator is not, so the ratio read up to 2.5x high
+  // per agent and worse once agents at the cap are pooled with agents below it.
+  // Substituting a.run_count is the same defect mirrored, not a fix: that field
+  // is all-time while the numerator is a period window.
+  //
+  // Every run row carries the server's own live (non-shadow) signal_count for
+  // THAT run, so summing it across exactly the runs in the denominator makes
+  // both sides one sample by construction. Runs the API sent no count for are
+  // dropped from both sides rather than silently counted as zero — and if
+  // nothing is left the number is not shown at all.
+  const ratedRuns = fRuns.filter(r => typeof r.signal_count === 'number');
+  const ratedSigs = ratedRuns.reduce((n, r) => n + r.signal_count, 0);
+  const rate      = ratedRuns.length ? (ratedSigs / ratedRuns.length).toFixed(2) : '—';
 
   const periodLabel = _globalPeriod === '1d' ? 'last 24h' : _globalPeriod === '7d' ? 'last 7 days' : _globalPeriod === '30d' ? 'last 30 days' : 'all time';
 
@@ -2520,7 +2941,17 @@ function renderAnalytics() {
   const critSubEl = document.querySelector('#analytics-critical-count')?.closest('.stat-card')?.querySelector('.stat-sub');
   if (critSubEl) critSubEl.textContent = periodLabel;
   const rateSubEl = document.querySelector('#analytics-signal-rate')?.closest('.stat-card')?.querySelector('.stat-sub');
-  if (rateSubEl) rateSubEl.textContent = 'signals per run · ' + periodLabel;
+  // Name the sample the rate was measured over, so it is visibly not sigTotal
+  // over runTotal — those two cards are different populations and will not
+  // divide out to this number.
+  if (rateSubEl) {
+    rateSubEl.textContent = ratedRuns.length
+      ? `signals per run · over ${ratedRuns.length} run${ratedRuns.length !== 1 ? 's' : ''} · ${periodLabel}`
+      : 'signals per run · no measurable runs in period';
+    rateSubEl.title = ratedRuns.length
+      ? `${ratedSigs} live signal(s) across the ${ratedRuns.length} run(s) in this sample, counted per-run by the API. The Signals card above counts a different sample (each agent's newest ${PER_AGENT_SIGNAL_CAP} signals), so it does not divide into this figure.`
+      : '';
+  }
 
   updateCostSaved();
 
@@ -2544,7 +2975,7 @@ function renderAnalytics() {
     ? ptSorted.map(([ft, d]) => {
         const uniqRuns = ftRunMap[ft] ? ftRunMap[ft].size : 0;
         const wasted = wastedTok([...(ftRunMap[ft] || new Set())]);
-        return `<tr style="cursor:pointer" onclick="openPatternDrillDown(${jsVal(ft)})">
+        return `<tr style="cursor:pointer" ${actionAttrs('openPatternDrillDown', ft)}>
           <td>${ftLabel(ft)}</td>
           <td class="mono" title="${d.count} signals across ${uniqRuns} unique run${uniqRuns !== 1 ? 's' : ''}">${d.count} <span style="font-size:10px;color:var(--chalk4)">(${uniqRuns} runs)</span></td>
           <td class="mono">${d.agents.size}</td>
@@ -2672,7 +3103,7 @@ async function showDetail(runId, agentId) {
   const backBtn = document.getElementById('detail-back-btn');
   if (backBtn) {
     backBtn.textContent = '← back to ' + _prevPage;
-    backBtn.onclick = () => nav(_prevPage, document.querySelector('[onclick*="' + _prevPage + '"]'));
+    backBtn.dataset.args = JSON.stringify([_prevPage]);  // markup carries data-action="navTo"
   }
 
   nav('detail', null);
@@ -2712,6 +3143,10 @@ async function showDetail(runId, agentId) {
     // run that had actually failed. A false clean verdict is the worst error an
     // observability tool can make, and the correct data was already in hand.
     const runData = await apiFetch('/v1/runs/' + encodeURIComponent(runId));
+    // Held for the focus view, which re-renders when you move between signals
+    // without refetching the run.
+    _curRunData = runData;
+    _focusSignalId = null;
     const events  = runData.events || [];
     const signals = runData.signals || [];
     renderRunDetail(runData, events, signals);
@@ -2755,7 +3190,7 @@ function renderRunDetail(run, events, signals) {
   const recEv = (events || []).find(e => e.event_type === 'recording.available');
   if (recEv && (recEv.payload || {}).url) {
     document.getElementById('detail-meta').insertAdjacentHTML('beforeend',
-      `<div class="rdh-meta-item">Recording <a href="${esc(recEv.payload.url)}" target="_blank" rel="noopener" style="color:var(--blue)">▶ open</a></div>`);
+      `<div class="rdh-meta-item">Recording <a href="${attr(safeUrl(recEv.payload.url))}" target="_blank" rel="noopener" style="color:var(--blue)">▶ open</a></div>`);
   }
 
   const riskColor = maxConf >= 0.8 ? 'var(--red)' : maxConf >= 0.5 ? 'var(--amber)' : 'var(--green)';
@@ -2764,7 +3199,7 @@ function renderRunDetail(run, events, signals) {
 
   if (sev) {
     document.getElementById('detail-sev-badge').innerHTML =
-      `<span class="sev-badge sb-${sev.toLowerCase()}">${sev}</span>`;
+      `<span class="sev-badge sb-${attr(sev.toLowerCase())}">${esc(sev)}</span>`;
   }
 
   // Boost indicator
@@ -2782,10 +3217,12 @@ function renderRunDetail(run, events, signals) {
   if (run.conversation_id) {
     convBanner.style.display = 'block';
     convBanner.textContent = '🗨 Part of conversation #' + run.conversation_id + ' →';
-    convBanner.onclick = () => showConversationDetail(run.conversation_id);
+    convBanner.dataset.action = 'showConversationDetail';
+    convBanner.dataset.args = JSON.stringify([run.conversation_id]);
   } else {
     convBanner.style.display = 'none';
-    convBanner.onclick = null;
+    delete convBanner.dataset.action;
+    delete convBanner.dataset.args;
   }
 
   // Timeline
@@ -2847,7 +3284,7 @@ function renderTimeline(events, signals) {
       ? `<div class="ts-connector${isLoop || isFail ? ' bad' : ''}"></div>` : '';
 
     return `<div class="ts-step">
-      <div class="ts-node ${cls}">${String(st.step).padStart(2,'0')}${badge}</div>
+      <div class="ts-node ${cls}">${esc(String(st.step).padStart(2,'0'))}${badge}</div>
       <div class="ts-label">${esc(lbl)}</div>
       ${sub ? `<div class="ts-sublabel">${esc(sub)}</div>` : ''}
     </div>${conn}`;
@@ -2875,9 +3312,137 @@ function renderSignalCards(signals) {
       <div class="sig-name">${esc(s.failure_type)} <span class="sig-score-val" style="color:${col}">${c.toFixed(2)}</span></div>
       <div class="score-bar-track"><div class="score-bar-fill ${cls}" style="width:${Math.round(c*100)}%"></div></div>
       <div style="font-size:11px;color:var(--chalk4);margin-top:6px">${esc(evid)}</div>
-      <div id="verdict-${s.id}">${verdictBadgeHtml(fixVerdicts[s.id])}</div>
+      <div id="verdict-${attr(s.id)}">${verdictBadgeHtml(fixVerdicts[s.id])}</div>
+      <button class="sig-focus-btn" ${actionAttrs('focusSignal', s.id)}>Show me the step →</button>
     </div>`;
   }).join('');
+}
+
+// ── Signal → step context ─────────────────────────────────────────────────────
+//
+// A fired signal says something went wrong. This says what the step actually
+// contained. Scope is deliberately narrow: not a trace browser, not search.
+// The signal is the entry point and the answer is the steps around it.
+//
+// The focus range comes from the API (signal.focus), not from reading evidence
+// here. Which evidence key holds the step span differs per detector, and a
+// second copy of that mapping in this file would drift silently — focusing the
+// wrong step rather than failing.
+
+let _curRunData    = null;
+let _focusSignalId = null;
+const FOCUS_CONTEXT = 2;    // steps of context either side of the focus range
+const MAX_FOCUS_EVENTS = 40;   // hard cap on step cards; middle collapses
+
+function focusSignal(signalId) {
+  _focusSignalId = signalId;
+  renderFocus();
+  const el = document.getElementById('detail-focus');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function stepSummary(ev) {
+  // What the detector saw, per event type. Only the fields that type carries.
+  const p = ev.payload || {};
+  switch (ev.event_type) {
+    case 'tool.called':     return [['tool', p.tool_name], ['args', p.args]];
+    case 'tool.responded':  return [['tool', p.tool_name], ['ok', String(p.success)],
+                                    ['error', p.error], ['output', p.output],
+                                    ['output_length', p.output_length]];
+    case 'llm.called':      return [['model', p.model], ['prompt_tokens', p.prompt_tokens]];
+    case 'llm.responded':   return [['finish', p.finish_reason], ['completion_tokens', p.completion_tokens],
+                                    ['latency_ms', p.latency_ms], ['output', p.output]];
+    case 'retrieval.called':    return [['index', p.index_name], ['query', p.query]];
+    case 'retrieval.responded': return [['index', p.index_name], ['results', p.result_count],
+                                        ['top_score', p.top_score], ['content', p.content]];
+    case 'memory.written':  return [['key', p.key], ['source', p.source], ['value', p.value]];
+    case 'memory.read':     return [['key', p.key]];
+    case 'run.started':     return [['model', p.model], ['tools', (p.tools || []).join(', ')],
+                                    ['input', p.input_text]];
+    case 'run.completed':   return [['exit', p.exit_reason], ['steps', p.total_steps]];
+    case 'run.errored':     return [['error', p.error], ['type', p.error_type]];
+    case 'external.signal': return [['signal', p.signal_name], ['source', p.source]];
+    default:                return Object.entries(p).slice(0, 6);
+  }
+}
+
+function focusFieldHtml(k, v) {
+  if (v === undefined || v === null || v === '') return '';
+  let s = typeof v === 'string' ? v : JSON.stringify(v);
+  const long = s.length > 400;
+  if (long) s = s.slice(0, 400) + '…';
+  return `<div class="focus-field"><span class="focus-fk">${esc(k)}</span>` +
+         `<span class="focus-fv">${esc(s)}${long ? ' <span class="focus-trunc">(truncated)</span>' : ''}</span></div>`;
+}
+
+function renderFocus() {
+  const wrap = document.getElementById('detail-focus');
+  if (!wrap) return;
+  const signals = _curRunData?.signals || [];
+  if (!signals.length) { wrap.style.display = 'none'; return; }
+
+  const sig = signals.find(s => s.id === _focusSignalId) || signals[0];
+  _focusSignalId = sig.id;
+  const focus = sig.focus || { first_step: sig.step_index, last_step: sig.step_index };
+  const lo = Math.min(focus.first_step, focus.last_step);
+  const hi = Math.max(focus.first_step, focus.last_step);
+
+  let events = (_curRunData.events || [])
+    .filter(e => e.step_index >= lo - FOCUS_CONTEXT && e.step_index <= hi + FOCUS_CONTEXT);
+
+  // Runs with many steps stay usable. The window bounds most cases already,
+  // but a detector whose evidence spans the whole run (a scattershot pattern
+  // across 400 steps) would otherwise put 400 step cards in the DOM and make
+  // the view useless exactly when it is most needed. Head and tail, with the
+  // middle collapsed and counted.
+  let omitted = 0;
+  if (events.length > MAX_FOCUS_EVENTS) {
+    const keep = Math.floor(MAX_FOCUS_EVENTS / 2);
+    omitted = events.length - keep * 2;
+    events = events.slice(0, keep).concat([{ _gap: omitted }], events.slice(-keep));
+  }
+  const verdicts = _curRunData.dry_run_verdicts || [];
+
+  wrap.style.display = 'block';
+  wrap.innerHTML = `
+    <div class="sec-head" style="margin-bottom:.75rem">
+      <span class="sec-title">What happened at step ${esc(String(lo))}${hi !== lo ? '–' + esc(String(hi)) : ''}</span>
+    </div>
+    ${signals.length > 1 ? `<div class="focus-nav mono">${signals.map(s =>
+        `<button class="focus-tab ${s.id === sig.id ? 'on' : ''}" ${actionAttrs('focusSignal', s.id)}>${esc(s.failure_type)}</button>`
+      ).join('')}</div>` : ''}
+    <div class="focus-why">
+      <div class="focus-why-h mono">Why ${esc(sig.failure_type)} fired here</div>
+      <div class="focus-why-b">${esc(evidenceSummary(sig))}</div>
+      ${Object.keys(sig.evidence || {}).length ? `<div class="focus-ev mono">${
+        Object.entries(sig.evidence).slice(0, 8).map(([k, v]) =>
+          `<span class="focus-evk">${esc(k)}</span> ${esc(typeof v === 'string' ? v : JSON.stringify(v))}`
+        ).join('<br>')}</div>` : ''}
+    </div>
+    ${events.length ? events.map(ev => {
+      if (ev._gap) return `<div class="focus-gap mono">… ${esc(String(ev._gap))} more steps in this range, not shown …</div>`;
+      const inFocus = ev.step_index >= lo && ev.step_index <= hi;
+      const v = verdicts.filter(x => x.step_index === ev.step_index);
+      return `<div class="focus-step ${inFocus ? 'on' : ''}">
+        <div class="focus-step-h mono">
+          <span class="focus-step-n">step ${esc(String(ev.step_index))}</span>
+          <span class="focus-step-t">${esc(ev.event_type)}</span>
+          ${inFocus ? '<span class="focus-step-badge">TRIGGERED HERE</span>' : ''}
+        </div>
+        ${stepSummary(ev).map(([k, val]) => focusFieldHtml(k, val)).join('')}
+        ${v.map(x => `<div class="focus-verdict mono">
+          <span class="focus-verdict-tag">DRY RUN</span>
+          <b>${esc(x.policy_name)}</b> would have ${esc(x.would_action_type)}${
+            x.would_action_params ? ' — ' + esc(Object.entries(x.would_action_params).map(([a,b]) => a+'='+b).join(' ')) : ''
+          }${x.matched_branch ? ` <span class="focus-evk">on ${esc(x.matched_branch)}</span>` : ''}
+        </div>`).join('')}
+      </div>`;
+    }).join('') : `<div class="focus-empty mono">No events stored for these steps.</div>`}
+    ${verdicts.filter(x => x.step_index === null || x.step_index === undefined).map(x =>
+      `<div class="focus-verdict mono" style="margin-top:.5rem">
+        <span class="focus-verdict-tag">DRY RUN</span>
+        <b>${esc(x.policy_name)}</b> would have ${esc(x.would_action_type)} on this run (step not recorded)
+      </div>`).join('')}`;
 }
 
 let _explainSignalId   = null;
@@ -2886,6 +3451,7 @@ let _explainStaticLang = 'python';
 let _explainLastData   = null;   // last explain API response, used by openPROnGitHub()
 
 function renderExplain(signals) {
+  renderFocus();
   const explainRow    = document.getElementById('explain-row');
   const explainResult = document.getElementById('explain-result');
 
@@ -2943,6 +3509,7 @@ const _REPLAY_MODS = [
   { type: 'reduce_context',    label: 'Cap context growth',         targets: ['CONTEXT_BLOAT'] },
   { type: 'fix_rag_retrieval', label: 'Fix empty retrieval',        targets: ['RAG_EMPTY_RETRIEVAL'] },
   { type: 'add_final_answer',  label: 'Add terminal answer',        targets: ['GOAL_ABANDONMENT'] },
+  { type: 'fix_model_downgrade', label: 'Pin to strongest model',  targets: ['MODEL_FALLBACK_DRIFT'] },
 ];
 
 function initReplayPanel(runId, signals) {
@@ -2966,7 +3533,7 @@ function initReplayPanel(runId, signals) {
     const checked  = relevant ? 'checked' : '';
     const active   = relevant ? ' active' : '';
     return `<label class="replay-mod${active}" data-mod="${esc(m.type)}">
-      <input type="checkbox" ${checked} onchange="this.closest('.replay-mod').classList.toggle('active',this.checked)">
+      <input type="checkbox" ${checked} data-action="toggleReplayMod" data-on="change">
       ${esc(m.label)}
     </label>`;
   }).join('');
@@ -3061,7 +3628,7 @@ async function explainSignal() {
 <span style="color:var(--chalk3)">then </span><span style="color:#a8f0c0">${esc(act.type || 'log')}</span>
 <span style="color:var(--chalk3)">for  </span><span style="color:#a8f0c0">${esc(p.agent_id || '*')}</span></pre>
             <div style="display:flex;gap:.6rem;align-items:center;margin-top:.6rem">
-              <button class="btn-primary" style="padding:4px 12px;font-size:11px" onclick="createSuggestedPolicy()">Create this policy</button>
+              <button class="btn-primary" style="padding:4px 12px;font-size:11px" data-action="createSuggestedPolicy">Create this policy</button>
               <span id="suggested-policy-status" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4)"></span>
             </div>
             <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--chalk4);margin-top:.5rem">
@@ -3139,7 +3706,7 @@ async function explainSignal() {
       const copyable = fixPatch || fixContent;
       const copyHtml = copyable ? `
         <div style="display:flex;gap:.6rem;align-items:center;margin-top:.6rem">
-          <button class="btn-secondary" style="padding:4px 12px;font-size:11px" onclick="copyFixToClipboard()">Copy fix</button>
+          <button class="btn-secondary" style="padding:4px 12px;font-size:11px" data-action="copyFixToClipboard">Copy fix</button>
           <span id="copy-fix-status" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk4)"></span>
         </div>` : '';
 
@@ -3247,7 +3814,7 @@ async function openPROnGitHub() {
       prLink.textContent   = data.detail || 'Failed to create PR';
     } else {
       prStat.style.display = 'none';
-      prLink.href          = data.pr_url;
+      prLink.href          = safeUrl(data.pr_url);
       prLink.textContent   = `View PR #${data.pr_number} ↗`;
       prLink.style.color   = 'var(--green)';
       prLink.style.display = '';
@@ -3281,9 +3848,9 @@ function buildEventRows(events, startTs) {
       `<div class="ev-kv"><span class="ev-k">${esc(k)}</span><span class="ev-v">${esc(String(v))}</span></div>`
     ).join('');
 
-    return `<div class="event-row-wrap" onclick="toggleEvent(this,event)">
+    return `<div class="event-row-wrap" data-action="toggleEvent">
       <div class="event-row">
-        <div class="ev-step">${e.step_index}</div>
+        <div class="ev-step">${esc(e.step_index)}</div>
         <div class="ev-type ${typeCls}">${esc(e.event_type)}</div>
         <div class="ev-time">${esc(offset)}</div>
         <div>${status}</div>
@@ -3821,10 +4388,10 @@ function payloadSummary(e) {
   const parts = [];
   if (p.model)              parts.push('model=' + esc(p.model));
   if (p.tool_name)          parts.push('tool=' + esc(p.tool_name));
-  if (p.prompt_tokens)      parts.push('prompt_tokens=' + p.prompt_tokens);
-  if (p.completion_tokens)  parts.push('completion_tokens=' + p.completion_tokens);
-  if (p.latency_ms != null) parts.push('latency=' + p.latency_ms + 'ms');
-  if (p.output_length)      parts.push('output_len=' + p.output_length);
+  if (p.prompt_tokens)      parts.push('prompt_tokens=' + esc(p.prompt_tokens));
+  if (p.completion_tokens)  parts.push('completion_tokens=' + esc(p.completion_tokens));
+  if (p.latency_ms != null) parts.push('latency=' + esc(p.latency_ms) + 'ms');
+  if (p.output_length)      parts.push('output_len=' + esc(p.output_length));
   if (p.input_text)         parts.push('input=<span class="ev-raw">' + esc(p.input_text.length > 40 ? p.input_text.slice(0,40)+'…' : p.input_text) + '</span>');
   if (p.args)               parts.push('args=<span class="ev-raw">' + esc(p.args.length > 40 ? p.args.slice(0,40)+'…' : p.args) + '</span>');
   if (p.output && p.output.length > 0)
@@ -3880,6 +4447,7 @@ const FT_DESCRIPTIONS = {
   RAG_EMPTY_RETRIEVAL:'Retrieval returned no results — knowledge base gap',
   STEP_COUNT_INFLATION:'Far more steps than baseline — inefficiency or runaway loop',
   FIRST_STEP_FAILURE:'Failed on the very first step — likely config or setup issue',
+  UNRESOLVED_AMBIGUITY:'Irreversible action on 1 of N lookup candidates the request never distinguished — fires on a correct guess too',
 };
 
 function ftLabel(ft) {
@@ -3911,14 +4479,32 @@ function timeAgo(ts) {
   return Math.round(sec/3600) + 'h ago';
 }
 
+// Text-node escaper: use for anything interpolated between tags.
 function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-// Safe for inline JS string arguments in onclick="fn(${jsVal(x)})" — single-quoted so
-// double-quoted HTML attributes don't break. Escapes backslash and single-quote.
-function jsVal(s) {
-  return "'" + String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+// Attribute-value escaper: use for anything interpolated inside a quoted HTML
+// attribute (title="…", value="…", data-args="…"). Same character set as esc()
+// today; kept separate so a template shows which context a value lands in and so
+// the two can diverge if attribute context ever needs more. Never build an inline
+// handler attribute (onclick=…) from a value — use actionAttrs() and the dispatcher instead.
+function attr(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// URL guard for href/src values that come from the API (recording URLs, provider
+// dashboard links, PR links). Only http(s) and relative URLs pass; anything with
+// another scheme (javascript:, data:, vbscript:…) collapses to ''. Control chars
+// and whitespace are stripped first because browsers ignore them when parsing a
+// scheme, so "java\nscript:" would otherwise slip past a naive prefix test.
+// Still wrap the result in attr() at the interpolation site.
+function safeUrl(u) {
+  const t = String(u ?? '').replace(/[\x00-\x20\x7f]/g, '');
+  if (!t) return '';
+  const m = t.match(/^([a-z][a-z0-9+.-]*):/i);
+  if (m) return /^https?$/i.test(m[1]) ? t : '';
+  return t;
 }
 
 function copyRunId() {
@@ -3950,6 +4536,13 @@ function nav(id, el) {
   if (id === 'otel-receiver') loadOtelReceiver();
   if (id === 'approvals') loadApprovals();
   if (id === 'conversations') { populateConvAgentDropdown(); loadConversations(); }
+}
+
+// Navigate to a page by name and highlight its sidebar entry. Every "go to page"
+// control (sidebar items, back buttons, "view all →") dispatches this; the
+// sidebar entry is found by its data-nav, never by matching a handler attribute.
+function navTo(page) {
+  nav(page, document.querySelector('.sb-item[data-nav="' + page + '"]'));
 }
 
 // ── Detail tabs ───────────────────────────────────────────────────────────────
@@ -4001,13 +4594,13 @@ function renderStateTimeline(data) {
         <div style="flex:1;background:var(--wire);border-radius:3px;height:14px">
           <div style="width:${w}%;background:${c};height:100%;border-radius:3px;opacity:${barOpacity}"></div>
         </div>
-        <span style="width:88px;flex-shrink:0;text-align:right;font-size:11px;color:var(--chalk4)">${(s.duration_ms || 0)}ms${s.closed ? '' : ' *'}</span>
+        <span style="width:88px;flex-shrink:0;text-align:right;font-size:11px;color:var(--chalk4)">${esc(s.duration_ms || 0)}ms${s.closed ? '' : ' *'}</span>
       </div>`;
   }).join('');
 
   const byState = (data.summary && data.summary.by_state) || {};
   const summ = Object.keys(byState).map(st =>
-    `<span style="color:${_STATE_COLORS[st] || 'var(--chalk4)'}">${esc(st)} ${byState[st]}ms</span>`
+    `<span style="color:${_STATE_COLORS[st] || 'var(--chalk4)'}">${esc(st)} ${esc(byState[st])}ms</span>`
   ).join(' &nbsp;·&nbsp; ');
   const summaryHtml = summ
     ? `<div style="font-size:11px;color:var(--chalk3);margin-bottom:1rem;padding-bottom:.75rem;border-bottom:1px solid var(--wire)">${summ}</div>`
@@ -4217,14 +4810,14 @@ function renderAgents() {
       return `${k}: ${v.score}/${v.max}  val=${v.value ?? '—'}${base}`;
     }).join('\n') : '';
 
-    return `<div class="agent-card" onclick="openAgentDetail(${jsVal(a.agent_id)})" title="Click to filter runs by this agent">
+    return `<div class="agent-card" ${actionAttrs('openAgentDetail', a.agent_id)} title="Click to filter runs by this agent">
       <div class="ac-top-bar" style="background:${color}"></div>
       <div class="ac-header">
         <div style="min-width:0">
           <div class="ac-id" title="${esc(a.agent_id)}">${esc(a.agent_id)}</div>
           <div class="ac-fail-rate" style="color:${color}">${failRate}%</div>
         </div>
-        ${hsPct !== null ? `<div class="health-badge" title="Health score (30d)\n${hsTip}">
+        ${hsPct !== null ? `<div class="health-badge" title="Health score (30d)\n${attr(hsTip)}">
           <div class="health-score" style="color:${hsColor}">${hsPct}</div>
           <div class="health-lbl" style="color:${hsColor}">health</div>
           <div class="health-bar"><div class="health-bar-fill" style="width:${hsPct}%;background:${hsColor}"></div></div>
@@ -4233,20 +4826,20 @@ function renderAgents() {
       <div class="ac-dominant">${dominant ? ftLabel(dominant[0]) + ' dominant' : 'no failures yet'}</div>
       <div class="ac-stats-row">
         <div class="ac-stat">
-          <div class="ac-stat-val">${totalRuns}</div>
+          <div class="ac-stat-val">${esc(totalRuns)}</div>
           <div class="ac-stat-lbl">Runs</div>
         </div>
         <div class="ac-stat">
-          <div class="ac-stat-val" style="color:var(--red)">${a.critical_count || 0}</div>
+          <div class="ac-stat-val" style="color:var(--red)">${esc(a.critical_count || 0)}</div>
           <div class="ac-stat-lbl">Critical</div>
         </div>
         <div class="ac-stat">
-          <div class="ac-stat-val" style="color:var(--orange)">${a.high_count || 0}</div>
+          <div class="ac-stat-val" style="color:var(--orange)">${esc(a.high_count || 0)}</div>
           <div class="ac-stat-lbl">High</div>
         </div>
       </div>
       ${!baselineReady && hsPct !== null ? `<div style="margin-top:.6rem;font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);line-height:1.5;border-top:1px solid var(--wire);padding-top:.5rem">
-        Health score based on detector signals only —<br>baseline calibrating (${sampleRuns}/30 runs)
+        Health score based on detector signals only —<br>baseline calibrating (${esc(sampleRuns)}/30 runs)
       </div>` : ''}
       ${shadowCnt ? `<div style="margin-top:.75rem;display:flex;align-items:center;gap:6px">
         <span class="shadow-badge">SHADOW</span>
@@ -4293,15 +4886,15 @@ function renderShadowSection() {
       const runItems = uniqRuns.slice(0, 5).map(rid => {
         const s = sigs.filter(x => x.run_id === rid);
         const c = Math.max(...s.map(x => x.confidence)).toFixed(2);
-        return `<div class="ag-run-item" onclick="showDetail(${jsVal(rid)},${jsVal(agentId)})">
-          <span class="run-id">${shortId(rid)}</span>
+        return `<div class="ag-run-item" ${actionAttrs('showDetail', rid, agentId)}>
+          <span class="run-id">${esc(shortId(rid))}</span>
           <span style="font-size:11px;color:var(--chalk4)">${esc(agentId)}</span>
           <span style="margin-left:auto">conf ${c}</span>
           <span class="shadow-badge" style="margin-left:8px">SHADOW</span>
         </div>`;
       }).join('');
       return `<div class="alert-group shadow-sig-card">
-        <div class="ag-header" onclick="toggleGroup(this)">
+        <div class="ag-header" data-action="toggleGroup">
           <div class="ag-sev" style="background:var(--blue);outline:1px dashed var(--blue);outline-offset:1px"></div>
           <span class="ag-title">${ftLabel(ft)}</span>
           <span class="shadow-badge" style="margin-left:6px">SHADOW</span>
@@ -4316,19 +4909,49 @@ function renderShadowSection() {
 }
 
 // ── Compare runs ──────────────────────────────────────────────────────────────
+// Neither the dropdown labels nor the panels may take a run's signals from
+// _allSigs. That array is capped at PER_AGENT_SIGNAL_CAP (500) per agent while
+// _allRuns is capped at PER_AGENT_RUN_CAP (200), so on a busy agent an older
+// run stays selectable long after its signals have fallen off the signal page —
+// and the older run is precisely the pre-deploy baseline this whole page exists
+// to compare against. Client-filtering that array showed the baseline as
+// "✓ clean — no signals fired" and then reported every failure type the two runs
+// shared as "New in B", inverting the regression verdict in the one feature
+// whose entire purpose is regression attribution. Panels read each run's own
+// signals from GET /v1/runs/{id} (org-scoped, uncapped, the same source
+// showDetail has always used); the labels read the server's own signal_count
+// off the run row.
+const _cmpRunCache = new Map();   // run_id -> run detail; cleared on every load pass
+let   _cmpToken    = 0;           // last selection wins if two fetches overlap
+
+async function _cmpFetchRun(runId) {
+  if (_cmpRunCache.has(runId)) return _cmpRunCache.get(runId);
+  const data = await apiFetch('/v1/runs/' + encodeURIComponent(runId));
+  _cmpRunCache.set(runId, data);
+  return data;
+}
+
 function populateCompareDropdowns() {
   const selA = document.getElementById('cmp-run-a');
   const selB = document.getElementById('cmp-run-b');
+  // Bound staleness of the panel cache to one refresh interval: a run that was
+  // still in flight when it was first fetched can gain signals afterwards.
+  _cmpRunCache.clear();
   if (!selA || !selB) return;
   const valA = selA.value, valB = selB.value;
   const opts = [..._allRuns]
     .sort((a, b) => b.started_at - a.started_at)
     .slice(0, 150)
     .map(r => {
-      const sigs = _allSigs.filter(s => s.run_id === r.run_id);
-      const tag  = sigs.length ? ` [${topSev(sigs)}]` : ' [CLEAN]';
-      const aid  = r.agent_id || r._agentId || '';
-      return `<option value="${esc(r.run_id)}">${esc(shortId(r.run_id))} · ${esc(aid)}${tag}</option>`;
+      // has_signals / signal_count come from the API per run row and are the
+      // live, org-scoped truth for that run. Severity is deliberately not shown:
+      // it can only be derived from the signal rows themselves, which are not in
+      // hand for every listed run, and a guessed severity here would disagree
+      // with the panel the option opens.
+      const n   = runSignalCount(r, 0);
+      const tag = runHasSignals(r) ? ` [${n} SIGNAL${n === 1 ? '' : 'S'}]` : ' [CLEAN]';
+      const aid = r.agent_id || r._agentId || '';
+      return `<option value="${attr(r.run_id)}">${esc(shortId(r.run_id))} · ${esc(aid)}${esc(tag)}</option>`;
     }).join('');
   const blank = '<option value="">— select run —</option>';
   selA.innerHTML = blank + opts;
@@ -4337,7 +4960,7 @@ function populateCompareDropdowns() {
   if (valB) selB.value = valB;
 }
 
-function renderCompare() {
+async function renderCompare() {
   const idA    = document.getElementById('cmp-run-a')?.value;
   const idB    = document.getElementById('cmp-run-b')?.value;
   const panels = document.getElementById('compare-panels');
@@ -4350,11 +4973,29 @@ function renderCompare() {
     panels.innerHTML = '<div class="cmp-placeholder">Select two different runs to compare.</div>';
     return;
   }
-  const runA  = _allRuns.find(r => r.run_id === idA);
-  const runB  = _allRuns.find(r => r.run_id === idB);
-  if (!runA || !runB) return;
-  const sigsA = _allSigs.filter(s => s.run_id === idA);
-  const sigsB = _allSigs.filter(s => s.run_id === idB);
+
+  const token = ++_cmpToken;
+  panels.innerHTML = '<div class="cmp-placeholder">loading both runs…</div>';
+
+  let runA, runB;
+  try {
+    [runA, runB] = await Promise.all([_cmpFetchRun(idA), _cmpFetchRun(idB)]);
+  } catch (e) {
+    if (token !== _cmpToken) return;
+    // No partial comparison: a run whose signals could not be loaded would read
+    // as clean, which is the exact failure this fetch replaced.
+    panels.innerHTML = `<div class="cmp-placeholder">Could not load run detail (${esc(e.message)}).
+      A comparison is only meaningful with both runs' real signals, so nothing is shown. Try again.</div>`;
+    return;
+  }
+  if (token !== _cmpToken) return;   // a newer selection is already rendering
+  if (!runA || !runB) {
+    panels.innerHTML = '<div class="cmp-placeholder">One of the selected runs no longer exists.</div>';
+    return;
+  }
+
+  const sigsA = runA.signals || [];
+  const sigsB = runB.signals || [];
 
   panels.innerHTML = `<div class="cmp-panels">
     ${_cmpPanel(runA, sigsA, 'A — Baseline', null, null)}
@@ -4405,7 +5046,7 @@ function _cmpPanel(run, sigs, label, baseRun, baseSigs) {
       <div class="cmp-sigs-title">Signals fired</div>
       ${sigs.length
         ? sigs.map(s => `<div class="cmp-sig-row cmp-sig-live">
-            <span class="sev-badge sb-${s.severity.toLowerCase()}">${s.severity}</span>
+            <span class="sev-badge sb-${attr(s.severity.toLowerCase())}">${esc(s.severity)}</span>
             <span style="flex:1;font-family:'IBM Plex Mono',monospace;font-size:10px">${esc(s.failure_type)}</span>
             <span style="color:var(--chalk4);font-family:'IBM Plex Mono',monospace;font-size:10px">conf ${s.confidence.toFixed(2)}</span>
           </div>`).join('')
@@ -4413,7 +5054,7 @@ function _cmpPanel(run, sigs, label, baseRun, baseSigs) {
       }
     </div>
     <div style="margin-top:1rem">
-      <button class="view-btn" onclick="showDetail(${jsVal(run.run_id)},${jsVal(agentId)});event.stopPropagation()">Open full detail →</button>
+      <button class="view-btn" ${actionAttrs('showDetail', run.run_id, agentId)} data-stop="1">Open full detail →</button>
     </div>
   </div>`;
 }
@@ -4670,7 +5311,7 @@ function renderTopDrivers() {
       </div>
       <div class="driver-right">
         <span class="driver-conf" style="color:${confCol}">${avgConf.toFixed(2)}</span>
-        <span class="driver-sev" style="background:${sevBg};color:${color}">${g.severity.slice(0, 4)}</span>
+        <span class="driver-sev" style="background:${sevBg};color:${color}">${esc(g.severity.slice(0, 4))}</span>
       </div>
     </div>`;
   }).join('');
@@ -4822,14 +5463,99 @@ function renderPolicies() {
     const aType = p.action?.type || 'log';
     return `<div class="policy-row">
       <button class="policy-toggle ${p.enabled ? 'on' : 'off'}" title="${p.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}"
-        onclick="togglePolicy(${p.id})"></button>
+        ${actionAttrs('togglePolicy', p.id)}></button>
       <div class="policy-name">${esc(p.name)}</div>
       <div class="policy-rule mono">${esc(policyRuleText(p))}</div>
       <div class="policy-action-badge ${actionBadgeClass(aType)}">${esc(actionLabel(p))}</div>
+      ${modeBadge(p)}
       ${p.agent_id !== '*' ? `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--chalk4);padding:2px 8px;background:var(--s2);border-radius:2px">${esc(p.agent_id)}</div>` : ''}
-      <button class="policy-del" title="Delete" onclick="deletePolicy(${p.id})">✕</button>
-    </div>`;
+      <button class="policy-del" title="Delete" ${actionAttrs('deletePolicy', p.id)}>✕</button>
+    </div>
+    ${p.mode === 'dry_run' ? `<div class="dryrun-card" id="dryrun-${esc(String(p.id))}">
+      <div class="dryrun-loading mono">Loading what this would have done…</div>
+    </div>` : ''}`;
   }).join('');
+  // Each dry-run policy loads its own summary. Sequential on purpose: a page
+  // with a dozen dry-run policies should not open a dozen parallel requests.
+  _policies.filter(p => p.mode === 'dry_run').reduce(
+    (chain, p) => chain.then(() => loadDryRunSummary(p.id)), Promise.resolve());
+}
+
+// ── Dry run ───────────────────────────────────────────────────────────────────
+//
+// One card per dry-run policy, answering "is this correctly tuned" without
+// opening anything else: how often it would have fired, out of what, doing
+// what, matched on what, and on which runs.
+//
+// Every number here is read from the API, never derived in the page. The rule
+// exists because the dashboard bugs worth remembering were all a locally
+// computed ratio whose numerator and denominator came from different
+// populations, and a fire rate is exactly that shape.
+
+function modeBadge(p) {
+  if (p.mode === 'dry_run') {
+    return `<div class="policy-mode-badge dry" title="Evaluates and records, enforces nothing">DRY RUN</div>`;
+  }
+  if (p.enforcement === 'degraded') {
+    return `<div class="policy-mode-badge degraded" title="${attr(p.enforcement_reason || '')}">DEGRADED</div>`;
+  }
+  return '';
+}
+
+function pct(rate) {
+  // null means "no runs in the window to compare against", which is a
+  // different answer from 0% and must not render as one.
+  return rate === null || rate === undefined ? '—' : (rate * 100).toFixed(1) + '%';
+}
+
+async function loadDryRunSummary(policyId, days) {
+  const el = document.getElementById('dryrun-' + policyId);
+  if (!el) return;
+  const win = days || 14;
+  try {
+    const s = await apiFetch(`/v1/policies/${policyId}/dry-run-summary?days=${win}`);
+    el.innerHTML = renderDryRunSummary(s);
+  } catch (e) {
+    el.innerHTML = `<div class="dryrun-loading mono">Could not load dry-run verdicts: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderDryRunSummary(s) {
+  if (!s.would_fire_runs) {
+    return `<div class="dryrun-empty mono">
+      No firings in the last ${esc(String(s.window_days))} days. Either the condition is
+      not being met, or this agent has not run. Nothing to promote yet.
+    </div>`;
+  }
+  const params = s.would_action_params
+    ? Object.entries(s.would_action_params).map(([k, v]) => `${k}=${v}`).join(' ')
+    : '';
+  return `<div class="dryrun-head">
+      <span class="dryrun-stat">${esc(String(s.would_fire_runs))}</span>
+      <span class="dryrun-of mono">of ${esc(String(s.total_runs))} runs
+        (${esc(pct(s.fire_rate))}) in the last ${esc(String(s.window_days))} days</span>
+      <button class="btn-primary dryrun-promote" ${actionAttrs('promotePolicy', s.policy_id, s.policy_name)}>
+        Promote to enforcing
+      </button>
+    </div>
+    <div class="dryrun-row mono"><span class="dryrun-k">Would have</span>
+      <span class="dryrun-v">${esc(s.would_action_type || '—')}${params ? ' — ' + esc(params) : ''}</span></div>
+    ${s.branches.length ? `<div class="dryrun-row mono"><span class="dryrun-k">Matched on</span>
+      <span class="dryrun-v">${s.branches.map(b =>
+        `${esc(b.branch)} <span class="dryrun-n">(${esc(String(b.runs))})</span>`).join(' · ')}</span></div>` : ''}
+    ${s.samples.length ? `<div class="dryrun-row mono"><span class="dryrun-k">Runs</span>
+      <span class="dryrun-v">${s.samples.map(x =>
+        `<a href="#" ${actionAttrs('showDetail', x.run_id, x.agent_id)}>${esc(x.run_id.slice(0, 8))}</a>` +
+        (x.step_index === null || x.step_index === undefined ? '' : ` <span class="dryrun-n">step ${esc(String(x.step_index))}</span>`)
+      ).join(' · ')}</span></div>` : ''}`;
+}
+
+async function promotePolicy(id, name) {
+  if (!confirm(`Promote "${name}" to enforcing?\n\nIt will start acting on live runs. Its dry-run history is kept.`)) return;
+  try {
+    await apiPut(`/v1/policies/${id}`, { mode: 'enforcing' });
+    await loadAndRenderPolicies();
+  } catch (e) { alert('Promote failed: ' + e.message); }
 }
 
 async function togglePolicy(id) {
@@ -4886,6 +5612,20 @@ function updatePolicyFormHints() {
     signal:          'Signal name (e.g. TOOL_LOOP)',
   };
   if (labelEl) labelEl.textContent = triggerHints[trigger] || 'Value';
+
+  // The `signal` metric is a LIST of detected failure types, so `contains` is
+  // the only operator that means anything against it — `eq` compares list to
+  // string and never matches, the ordering operators raise TypeError (also
+  // never match). The API rejects those with a 422 now; don't offer them here
+  // and make the user discover it by failing to save.
+  const opEl = document.getElementById('pf-operator');
+  if (opEl) {
+    const listValued = trigger === 'signal';
+    for (const opt of opEl.options) {
+      opt.disabled = listValued && opt.value !== 'contains';
+    }
+    if (listValued) opEl.value = 'contains';
+  }
 
   const needsParam = action === 'switch_model' || action === 'inject_prompt';
   paramLabel.style.display = needsParam ? '' : 'none';
@@ -4962,10 +5702,10 @@ function runSearch(q) {
     if (results.length >= 8) return;
     const agentId = r.agent_id || r._agentId || '';
     if (r.run_id.toLowerCase().includes(lq)) {
-      results.push({ tag: 'RUN', label: shortId(r.run_id) + ' · ' + esc(agentId), action: `showDetail(${jsVal(r.run_id)},${jsVal(agentId)})` });
+      results.push({ tag: 'RUN', label: shortId(r.run_id) + ' · ' + agentId, action: 'showDetail', args: [r.run_id, agentId] });
     } else if (agentId.toLowerCase().includes(lq) && !seenAgents.has(agentId)) {
       seenAgents.add(agentId);
-      results.push({ tag: 'AGENT', label: esc(agentId), action: `openAgentDetail(${jsVal(agentId)})` });
+      results.push({ tag: 'AGENT', label: agentId, action: 'openAgentDetail', args: [agentId] });
     }
   });
 
@@ -4976,16 +5716,16 @@ function runSearch(q) {
     if (!ftSeen.has(s.failure_type) && s.failure_type.toLowerCase().replace(/_/g,' ').includes(lq)) {
       ftSeen.add(s.failure_type);
       const agentId = s.agent_id || '';
-      results.push({ tag: 'FAILURE', label: s.failure_type.replace(/_/g,' ').toLowerCase(), action: `nav('alerts',document.querySelector('[onclick*=alerts]'))` });
+      results.push({ tag: 'FAILURE', label: s.failure_type.replace(/_/g,' ').toLowerCase(), action: 'navTo', args: ['alerts'] });
     }
   });
 
   if (!results.length) { dropdown.style.display = 'none'; return; }
 
   dropdown.innerHTML = results.slice(0, 8).map(r =>
-    `<div class="search-item" onclick="${r.action}; closeSearch()">
-      <span class="search-item-tag">${r.tag}</span>
-      <span>${r.label}</span>
+    `<div class="search-item" ${actionAttrs('searchSelect', r.action, r.args)}>
+      <span class="search-item-tag">${esc(r.tag)}</span>
+      <span>${esc(r.label)}</span>
     </div>`
   ).join('');
   dropdown.style.display = 'block';
@@ -5073,10 +5813,10 @@ function renderConversationsTable(conversations) {
     const sig = c.has_frustration_signal
       ? '<span class="sev-badge sb-high">⚠ FRUSTRATION</span>'
       : '<span style="color:var(--chalk4)">—</span>';
-    return `<tr style="cursor:pointer" onclick="showConversationDetail(${c.id})">
+    return `<tr style="cursor:pointer" ${actionAttrs('showConversationDetail', c.id)}>
       <td class="mono">${esc(c.external_id)}</td>
       <td>${esc(c.agent_id)}</td>
-      <td>${c.run_count}</td>
+      <td>${esc(c.run_count)}</td>
       <td>${timeAgo(c.last_run_at)}</td>
       <td>${sig}</td>
     </tr>`;
@@ -5114,7 +5854,7 @@ function populateCallsAgentDropdown() {
 function callStatusBadge(s) {
   const map = { natural: ['NATURAL','var(--green)'], dropped: ['DROPPED','var(--red)'], escalated: ['ESCALATED','var(--amber)'] };
   const [label, color] = map[s] || [s, 'var(--chalk4)'];
-  return `<span style="color:${color};font-weight:600;font-size:10px">${label}</span>`;
+  return `<span style="color:${color};font-weight:600;font-size:10px">${esc(label)}</span>`;
 }
 
 async function loadCalls() {
@@ -5144,8 +5884,8 @@ function renderCallsTable(calls) {
   tbody.innerHTML = calls.map(c => {
     const talk = c.agent_talk_ratio == null ? '—' : Math.round(c.agent_talk_ratio*100) + '%';
     const sil  = Math.round((c.silence_pct||0)*100) + '%';
-    const sigs = c.voice_signal_count ? `<span style="color:var(--amber)">${c.voice_signal_count}</span>` : '<span style="color:var(--chalk4)">0</span>';
-    return `<tr style="cursor:pointer" onclick="showCallDetail(${c.id})">
+    const sigs = c.voice_signal_count ? `<span style="color:var(--amber)">${esc(c.voice_signal_count)}</span>` : '<span style="color:var(--chalk4)">0</span>';
+    return `<tr style="cursor:pointer" ${actionAttrs('showCallDetail', c.id)}>
       <td class="mono">${esc(c.external_id)}</td>
       <td>${esc(c.agent_id)}</td>
       <td class="mono">${fmtDur(c.duration_seconds)}</td>
@@ -5220,12 +5960,12 @@ function renderCallDetail(call) {
       const url = recs[0].url;
       let html = recs.map(r => {
         const meta = [r.storage_provider, r.format, r.duration_seconds ? fmtT(r.duration_seconds) : null].filter(Boolean).join(' · ');
-        return `<a href="${esc(r.url)}" target="_blank" rel="noopener" style="color:var(--blue)">▶ recording</a>` + (meta ? ` <span style="color:var(--chalk4)">(${esc(meta)})</span>` : '');
+        return `<a href="${attr(safeUrl(r.url))}" target="_blank" rel="noopener" style="color:var(--blue)">▶ recording</a>` + (meta ? ` <span style="color:var(--chalk4)">(${esc(meta)})</span>` : '');
       }).join('<br>');
       const jumps = call.signal_jumps || [];
       if (jumps.length && url) {
         html += '<div style="margin-top:6px;color:var(--chalk4)">jump to signal: ' + jumps.map(j =>
-          `<a href="${esc(url)}#t=${j.seconds}" target="_blank" rel="noopener" style="color:var(--amber);margin-right:10px">${esc(j.failure_type.replace(/_/g,' '))} @ ${fmtT(j.seconds)}</a>`
+          `<a href="${attr(safeUrl(url))}#t=${Number(j.seconds) || 0}" target="_blank" rel="noopener" style="color:var(--amber);margin-right:10px">${esc(j.failure_type.replace(/_/g,' '))} @ ${fmtT(j.seconds)}</a>`
         ).join('') + '</div>';
       }
       recEl.innerHTML = html;
@@ -5245,7 +5985,7 @@ function renderCallDetail(call) {
     let detail = '';
     if (e.event_type === 'transcription.received') detail = esc((p.text||'').slice(0,80));
     else if (e.event_type === 'tts.generated')     detail = esc((p.text||'').slice(0,80)) + (p.truncated ? ' [truncated]' : '');
-    else if (e.event_type === 'voice_activity.detected') detail = esc(p.type||'') + (p.duration_ms ? ` (${p.duration_ms}ms)` : '');
+    else if (e.event_type === 'voice_activity.detected') detail = esc(p.type||'') + (p.duration_ms ? ` (${esc(p.duration_ms)}ms)` : '');
     else if (e.event_type === 'turn_taking.changed') detail = esc(p.action||'');
     const at = e.at ? new Date(e.at*1000).toISOString().slice(11,19) : '—';
     return `<tr><td class="mono" style="font-size:10px">${at}</td><td style="font-size:10px">${esc(e.event_type.replace(/\./g,' '))}</td><td style="font-size:11px;color:var(--chalk3)">${detail}</td></tr>`;
@@ -5308,7 +6048,7 @@ function renderConversationDetail(conv) {
   const tbody = document.getElementById('conv-detail-runs-tbody');
   tbody.innerHTML = conv.runs.map((r, i) => {
     const started = new Date(r.started_at * 1000).toISOString().replace('T',' ').slice(0,19) + ' UTC';
-    return `<tr style="cursor:pointer" onclick="showDetail(${jsVal(r.run_id)}, ${jsVal(conv.agent_id)})">
+    return `<tr style="cursor:pointer" ${actionAttrs('showDetail', r.run_id, conv.agent_id)}>
       <td>${i + 1}</td>
       <td class="mono">${esc(r.run_id)}</td>
       <td>${started}</td>
@@ -5318,22 +6058,36 @@ function renderConversationDetail(conv) {
 }
 
 // ── Signal acknowledgment (#7) ─────────────────────────────────────────────────
-function ackGroup(event, ids) {
-  event.stopPropagation();
+// Acks are keyed by signal id and nothing ever expires them, so the stored value
+// grew without bound — which is one of the ways reading it back can fail, since a
+// write past the origin's quota can leave a truncated value that no longer
+// parses. Keep the newest ACK_LIMIT ids: a Set iterates in insertion order, so
+// the oldest fall off the front. An ack older than that many signals has no one
+// left looking at it.
+const ACK_LIMIT = 2000;
+
+function persistAcked() {
+  if (_ackedSignals.size > ACK_LIMIT) {
+    _ackedSignals = new Set([..._ackedSignals].slice(-ACK_LIMIT));
+  }
+  lsSet('dt_acked', JSON.stringify([..._ackedSignals]));
+}
+
+function ackGroup(ids) {
   ids.forEach(id => _ackedSignals.add(String(id)));
-  localStorage.setItem('dt_acked', JSON.stringify([..._ackedSignals]));
+  persistAcked();
   renderAlerts();
 }
 
 function ackSignal(sigId, btn) {
   _ackedSignals.add(String(sigId));
-  localStorage.setItem('dt_acked', JSON.stringify([..._ackedSignals]));
+  persistAcked();
   renderAlerts();
 }
 
 function unackAll() {
   _ackedSignals.clear();
-  localStorage.removeItem('dt_acked');
+  lsRemove('dt_acked');
   renderAlerts();
 }
 
@@ -5397,11 +6151,13 @@ async function handleDeepLink() {
 // ── Theme toggle ──────────────────────────────────────────────────────────────
 function toggleTheme() {
   const light = document.body.classList.toggle('light');
-  localStorage.setItem('dt-theme', light ? 'light' : 'dark');
+  lsSet('dt-theme', light ? 'light' : 'dark');
   document.getElementById('theme-toggle').textContent = light ? '🌙' : '☀';
 }
+// Runs during script evaluation, so an unguarded read here aborted the whole
+// file just as surely as the acked-signals one did.
 (function initTheme() {
-  const saved = localStorage.getItem('dt-theme');
+  const saved = lsGet('dt-theme');
   if (saved === 'light') {
     document.body.classList.add('light');
     const btn = document.getElementById('theme-toggle');
@@ -5430,12 +6186,14 @@ function renderKeys() {
     return;
   }
   tbody.innerHTML = _keys.map(k => {
-    const ago = k.created_at ? timeAgo(k.created_at) : '—';
+    // KeyOut.created_at is an ISO-8601 string (api_svc/routers/keys.py); timeAgo() takes unix seconds.
+    const createdTs = k.created_at ? Date.parse(k.created_at) / 1000 : NaN;
+    const ago = Number.isFinite(createdTs) ? timeAgo(createdTs) : '—';
     const statusBadge = k.active
       ? '<span style="color:var(--green);font-size:10px">● active</span>'
       : '<span style="color:var(--chalk4);font-size:10px">● revoked</span>';
     const revokeBtn = k.active
-      ? `<button class="act-btn act-danger" style="padding:3px 10px;font-size:10px" onclick="revokeKey(${k.id})">Revoke</button>`
+      ? `<button class="act-btn act-danger" style="padding:3px 10px;font-size:10px" ${actionAttrs('revokeKey', k.id)}>Revoke</button>`
       : '';
     // Only the prefix is ever stored in the clear — the secret is hashed, so
     // this is the only thing distinguishing two keys after creation.
@@ -5450,7 +6208,7 @@ function renderKeys() {
       <td><code style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk2)">${prefix}</code></td>
       <td style="font-size:12px">${org}</td>
       <td>${scopes}</td>
-      <td style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3)">${k.rate_limit_rpm} rpm</td>
+      <td style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--chalk3)">${esc(k.rate_limit_rpm)} rpm</td>
       <td style="font-size:11px;color:var(--chalk4)">${ago}</td>
       <td>${statusBadge}</td>
       <td style="text-align:right">${revokeBtn}</td>
@@ -5521,7 +6279,9 @@ function copyNewKey() {
 loadAll().then(handleDeepLink);
 // Two-requests-per-agent fan-out. Skipped while the tab is hidden — this used
 // to run unconditionally every 15s forever, including in background tabs, and
-// there is no clearInterval anywhere in the file.
+// there is no clearInterval anywhere in the file. A tick that lands while the
+// previous pass is still running joins it rather than starting a second one:
+// see the in-flight guard on loadAll().
 setInterval(() => { if (!document.hidden) loadAll(); }, 15000);
 
 // ── Custom detectors ──────────────────────────────────────────────────────────
@@ -5594,7 +6354,7 @@ async function previewCustomDetector() {
       const conditions = (data.conditions || []).map(c =>
         'field' in c
           ? `<span class="mono" style="font-size:11px;color:var(--chalk2)">${esc(c.field)} ${esc(c.operator)} "${esc(String(c.value))}"${c.case_sensitive === false ? ' (any case)' : ''}</span>`
-          : `<span class="mono" style="font-size:11px;color:var(--chalk2)">${esc(c.metric)} ${esc(c.operator)} ${c.threshold}</span>`
+          : `<span class="mono" style="font-size:11px;color:var(--chalk2)">${esc(c.metric)} ${esc(c.operator)} ${esc(c.threshold)}</span>`
       ).join(' <span style="color:var(--chalk4)">AND</span> ');
       content.innerHTML = `
         <div style="display:grid;grid-template-columns:120px 1fr;gap:.5rem .75rem;font-size:12px">
@@ -5665,34 +6425,34 @@ function renderCustomDetectorCard(d) {
   const conditions = (d.config.conditions || []).map(c =>
     'field' in c
       ? `<code style="font-size:11px">${esc(c.field)} ${esc(c.operator)} "${esc(String(c.value))}"</code>`
-      : `<code style="font-size:11px">${esc(c.metric)} ${esc(c.operator)} ${c.threshold}</code>`
+      : `<code style="font-size:11px">${esc(c.metric)} ${esc(c.operator)} ${esc(c.threshold)}</code>`
   ).join(' AND ');
   const shadowNote = d.status === 'shadow' && d.total_runs > 0
-    ? `<div style="font-size:11px;color:var(--chalk4);margin-top:.4rem">Evaluated on ${d.total_runs} runs — would have fired ${d.shadow_fire_count} times${fireRate !== null ? ` (${fireRate}%)` : ''}</div>`
+    ? `<div style="font-size:11px;color:var(--chalk4);margin-top:.4rem">Evaluated on ${esc(d.total_runs)} runs — would have fired ${esc(d.shadow_fire_count)} times${fireRate !== null ? ` (${fireRate}%)` : ''}</div>`
     : d.status === 'shadow' && d.total_runs === 0
     ? `<div style="font-size:11px;color:var(--chalk4);margin-top:.4rem">Waiting for first run to evaluate…</div>`
     : '';
   const activateBtn = d.status === 'shadow'
-    ? `<button class="act-btn act-secondary" onclick="activateCustomDetector(${d.id})" style="font-size:11px">Activate</button>`
+    ? `<button class="act-btn act-secondary" ${actionAttrs('activateCustomDetector', d.id)} style="font-size:11px">Activate</button>`
     : d.status === 'active'
-    ? `<button class="act-btn act-secondary" onclick="pauseCustomDetector(${d.id})" style="font-size:11px">Pause</button>`
-    : `<button class="act-btn act-secondary" onclick="resumeCustomDetector(${d.id})" style="font-size:11px">Resume</button>`;
+    ? `<button class="act-btn act-secondary" ${actionAttrs('pauseCustomDetector', d.id)} style="font-size:11px">Pause</button>`
+    : `<button class="act-btn act-secondary" ${actionAttrs('resumeCustomDetector', d.id)} style="font-size:11px">Resume</button>`;
   return `
     <div class="table-card" style="padding:1.25rem;margin-bottom:.75rem">
       <div style="display:flex;justify-content:space-between;align-items:flex-start">
         <div style="flex:1;min-width:0">
           <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.35rem">
             <span class="mono" style="font-size:12px;color:var(--orange)">${esc(d.name)}</span>
-            <span style="font-size:10px;color:${statusColor};padding:1px 6px;border-radius:3px;border:1px solid ${statusColor}">${statusLabel}</span>
+            <span style="font-size:10px;color:${statusColor};padding:1px 6px;border-radius:3px;border:1px solid ${statusColor}">${esc(statusLabel)}</span>
           </div>
           <div style="font-size:12px;color:var(--chalk3);margin-bottom:.4rem">${esc(d.description)}</div>
           <div style="font-size:11px;color:var(--chalk4)">Condition: ${conditions}</div>
           ${shadowNote}
-          ${d.status === 'shadow' ? '<span id="cd-shadow-api-' + d.id + '"></span>' : ''}
+          ${d.status === 'shadow' ? '<span id="cd-shadow-api-' + attr(d.id) + '"></span>' : ''}
         </div>
         <div style="display:flex;gap:.4rem;align-items:center;margin-left:1rem;flex-shrink:0">
           ${activateBtn}
-          <button class="act-btn" style="font-size:11px;color:var(--red);background:transparent;border:1px solid rgba(255,80,80,0.2)" data-cd-id="${d.id}" data-cd-name="${esc(d.name)}" onclick="deleteCustomDetector(parseInt(this.dataset.cdId,10),this.dataset.cdName)">Delete</button>
+          <button class="act-btn" style="font-size:11px;color:var(--red);background:transparent;border:1px solid rgba(255,80,80,0.2)" ${actionAttrs('deleteCustomDetector', d.id, d.name)}>Delete</button>
         </div>
       </div>
     </div>`;
@@ -5746,8 +6506,8 @@ function renderPackCard(pack, isEnabled) {
   const statusLabel = isEnabled ? 'enabled' : 'not enabled';
   const detectorList = (pack.detector_names || []).map(n => `<code style="font-size:11px">${esc(n)}</code>`).join(' · ');
   const actionBtn = isEnabled
-    ? `<button class="act-btn act-secondary" data-pack-name="${esc(pack.name)}" onclick="deactivatePackUI(this.dataset.packName)" style="font-size:11px">Disable</button>`
-    : `<button class="act-btn" data-pack-name="${esc(pack.name)}" onclick="activatePackUI(this.dataset.packName)" style="font-size:11px">Enable</button>`;
+    ? `<button class="act-btn act-secondary" ${actionAttrs('deactivatePackUI', pack.name)} style="font-size:11px">Disable</button>`
+    : `<button class="act-btn" ${actionAttrs('activatePackUI', pack.name)} style="font-size:11px">Enable</button>`;
   return `
     <div class="table-card" style="padding:1.25rem;margin-bottom:.75rem">
       <div style="display:flex;justify-content:space-between;align-items:flex-start">
@@ -5790,9 +6550,6 @@ async function deactivatePackUI(packName) {
 
 const _OTEL_BORDER = '1px solid rgba(255,255,255,.08)';
 
-function _otelEsc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
 function _otelBtn(size) {
   const p = size === 'sm' ? '3px 8px' : '6px 12px', f = size === 'sm' ? '11px' : '12px';
   return 'background:transparent;border:1px solid rgba(255,255,255,.15);color:var(--chalk2);border-radius:6px;padding:' + p + ';font-size:' + f + ';cursor:pointer';
@@ -5827,8 +6584,8 @@ function _otelYaml(k) {
 }
 function _otelRow(id, display, copyVal) {
   return '<div style="display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.25);border:' + _OTEL_BORDER + ';border-radius:6px;padding:8px 10px">' +
-    '<code id="' + id + '"' + (copyVal ? ' data-copy="' + _otelEsc(copyVal) + '"' : '') + ' style="font-size:12px;flex:1;overflow-x:auto;white-space:nowrap">' + _otelEsc(display) + '</code>' +
-    '<button onclick="otelCopyId(\'' + id + '\',this)" style="' + _otelBtn('sm') + '">copy</button></div>';
+    '<code id="' + id + '"' + (copyVal ? ' data-copy="' + attr(copyVal) + '"' : '') + ' style="font-size:12px;flex:1;overflow-x:auto;white-space:nowrap">' + esc(display) + '</code>' +
+    '<button ' + actionAttrs('otelCopyId', id) + ' style="' + _otelBtn('sm') + '">copy</button></div>';
 }
 function _otelSetupPanel() {
   const key = (typeof KEY !== 'undefined') ? KEY : '';
@@ -5841,9 +6598,9 @@ function _otelSetupPanel() {
     '<div style="font-size:11px;color:var(--chalk4);margin:12px 0 3px">API key</div>' +
     _otelRow('otel-key', _otelMaskKey(key), key || 'YOUR_API_KEY') +
     '<div style="font-size:11px;color:var(--chalk4);margin:12px 0 3px">Collector config</div>' +
-    '<pre id="otel-yaml" style="background:rgba(0,0,0,.25);border:' + _OTEL_BORDER + ';border-radius:6px;padding:10px;font-size:11px;overflow-x:auto;margin:0"><code>' + _otelEsc(yaml) + '</code></pre>' +
+    '<pre id="otel-yaml" style="background:rgba(0,0,0,.25);border:' + _OTEL_BORDER + ';border-radius:6px;padding:10px;font-size:11px;overflow-x:auto;margin:0"><code>' + esc(yaml) + '</code></pre>' +
     '<div style="margin-top:10px;display:flex;gap:8px">' +
-      '<button onclick="otelCopyId(\'otel-yaml\',this)" style="' + _otelBtn() + '">copy collector config</button>' +
+      '<button ' + actionAttrs('otelCopyId', 'otel-yaml') + ' style="' + _otelBtn() + '">copy collector config</button>' +
       '<a href="https://github.com/dunetrace/dunetrace/blob/main/docs/integrations/otel-ingestion.md" target="_blank" style="' + _otelBtn() + ';text-decoration:none">docs</a>' +
     '</div></div>';
 }
@@ -5853,7 +6610,7 @@ function _otelToggle(enabled) {
   return '<div style="display:flex;align-items:center;justify-content:space-between;border:' + _OTEL_BORDER + ';border-radius:8px;padding:10px 14px;margin-bottom:16px">' +
     '<div><div style="font-size:13px;font-weight:600">OTel ingestion</div>' +
     '<div style="font-size:11px;color:var(--chalk4)">' + (on ? 'Accepting spans for this org.' : 'Disabled. Incoming OTLP spans are rejected with 403.') + ' Changes apply within a few minutes.</div></div>' +
-    '<button onclick="otelSetEnabled(' + (!on) + ')" style="' + _otelBtn() + (on ? '' : ';color:var(--orange);border-color:var(--orange)') + '">' + (on ? 'Disable' : 'Enable') + '</button></div>';
+    '<button ' + actionAttrs('otelSetEnabled', !on) + ' style="' + _otelBtn() + (on ? '' : ';color:var(--orange);border-color:var(--orange)') + '">' + (on ? 'Disable' : 'Enable') + '</button></div>';
 }
 
 async function loadOtelReceiver() {
@@ -5884,7 +6641,7 @@ async function loadOtelReceiver() {
   if (anomalies.length) {
     html += '<div style="border:1px solid #b45309;background:rgba(180,83,9,.12);border-radius:8px;padding:10px 12px;margin-bottom:16px">';
     html += anomalies.map(a =>
-      '<div style="font-size:12px;color:#f59e0b">⚠ ' + a.type.replace(/_/g, ' ') + ' — ' + a.detail + '</div>'
+      '<div style="font-size:12px;color:#f59e0b">⚠ ' + esc(String(a.type || '').replace(/_/g, ' ')) + ' — ' + esc(a.detail) + '</div>'
     ).join('');
     html += '</div>';
   }
@@ -5901,8 +6658,8 @@ async function loadOtelReceiver() {
   html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:18px">';
   html += tiles.map(([k, v]) =>
     '<div style="border:' + border + ';border-radius:8px;padding:10px 12px">' +
-    '<div style="font-size:11px;color:var(--chalk4)">' + k + '</div>' +
-    '<div style="font-size:20px;font-weight:600">' + v + '</div></div>'
+    '<div style="font-size:11px;color:var(--chalk4)">' + esc(k) + '</div>' +
+    '<div style="font-size:20px;font-weight:600">' + esc(v) + '</div></div>'
   ).join('');
   html += '</div>';
 
@@ -5911,7 +6668,7 @@ async function loadOtelReceiver() {
   if (reasons.length) {
     html += '<div style="margin-bottom:18px">' + reasons.map(r =>
       '<div style="display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:' + border + '">' +
-      '<span style="color:var(--chalk4)">' + r.replace(/_/g, ' ') + '</span><span>' + rej[r] + '</span></div>'
+      '<span style="color:var(--chalk4)">' + esc(r.replace(/_/g, ' ')) + '</span><span>' + esc(rej[r]) + '</span></div>'
     ).join('') + '</div>';
   } else {
     html += '<div style="font-size:12px;color:var(--chalk4);margin-bottom:18px">No rejections in the last 24h.</div>';
@@ -5923,9 +6680,9 @@ async function loadOtelReceiver() {
     html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="color:var(--chalk4);text-align:left">' +
       '<th style="padding:4px 0">Hour</th><th>Received</th><th>Translated</th><th>Rejected</th></tr></thead><tbody>';
     html += series.map(h =>
-      '<tr><td style="padding:4px 0">' + new Date(h.hour_bucket).toLocaleString() + '</td>' +
-      '<td>' + (h.spans_received || 0) + '</td><td>' + (h.events_translated || 0) + '</td>' +
-      '<td>' + (h.spans_rejected || 0) + '</td></tr>'
+      '<tr><td style="padding:4px 0">' + esc(new Date(h.hour_bucket).toLocaleString()) + '</td>' +
+      '<td>' + esc(h.spans_received || 0) + '</td><td>' + esc(h.events_translated || 0) + '</td>' +
+      '<td>' + esc(h.spans_rejected || 0) + '</td></tr>'
     ).join('');
     html += '</tbody></table>';
   } else {
@@ -5965,7 +6722,7 @@ function renderElevenLabsCard(s) {
   // "connected" while nothing is actually coming through.
   const failing = configured && s.consecutive_failures > 0;
   const health = failing
-    ? `<div style="font-size:11px;color:var(--orange);margin-top:.5rem">Last ${s.consecutive_failures} poll(s) failed. Dunetrace keeps retrying. Your other data is unaffected.</div>`
+    ? `<div style="font-size:11px;color:var(--orange);margin-top:.5rem">Last ${esc(s.consecutive_failures)} poll(s) failed. Dunetrace keeps retrying. Your other data is unaffected.</div>`
     : '';
   const pollMins = configured && s.poll_interval_secs ? (s.poll_interval_secs / 60) : 5;
   const lastSuccess = configured && s.last_success_at
@@ -5977,7 +6734,7 @@ function renderElevenLabsCard(s) {
        </div>`
     : '';
   const actions = configured
-    ? `<button class="act-btn act-secondary" onclick="removeElevenLabs()" style="font-size:11px">Disconnect</button>`
+    ? `<button class="act-btn act-secondary" data-action="removeElevenLabs" style="font-size:11px">Disconnect</button>`
     : '';
   return `
     <div class="table-card" style="padding:1.25rem;margin-bottom:.75rem">
@@ -6009,7 +6766,7 @@ function renderElevenLabsCard(s) {
             <input id="el-poll-min" type="number" min="1" max="60" value="${esc(String(pollMins))}"
               style="width:100%;box-sizing:border-box;font-size:12px;padding:.5rem;background:var(--wire);border:1px solid var(--wire2,var(--wire));border-radius:4px;color:var(--chalk1,inherit)">
           </div>
-          <button class="act-btn" id="el-save-btn" onclick="saveElevenLabs()" style="font-size:11px">${configured ? 'Update' : 'Connect'}</button>
+          <button class="act-btn" id="el-save-btn" data-action="saveElevenLabs" style="font-size:11px">${configured ? 'Update' : 'Connect'}</button>
         </div>
         <div id="el-save-msg" style="font-size:11px;margin-top:.5rem"></div>
         <div style="font-size:11px;color:var(--chalk4);margin-top:.5rem">
@@ -6098,12 +6855,12 @@ async function loadRunElevenLabs(runId) {
         <div style="font-size:12px;color:var(--chalk2)">
           <span style="color:var(--orange)">${elVoiceLabel(g)}</span>
           <span style="color:var(--chalk4)">·</span> ${esc(g.model || '—')}
-          <span style="color:var(--chalk4)">·</span> ${g.character_count} chars${elVerifyBadge(g)}
+          <span style="color:var(--chalk4)">·</span> ${esc(g.character_count)} chars${elVerifyBadge(g)}
         </div>
         <div style="font-size:12px">
           <span style="font-weight:600">${fmtUsd(g.cost_usd || 0)}</span>
-          <span style="color:var(--chalk4)">(${g.cost_credits != null ? g.cost_credits + ' credits' : '—'})</span>
-          <a href="${esc(g.dashboard_url)}" target="_blank" rel="noopener" title="generation ${esc(g.generation_id)}" style="color:var(--blue);margin-left:8px">ElevenLabs ↗</a>
+          <span style="color:var(--chalk4)">(${g.cost_credits != null ? esc(g.cost_credits) + ' credits' : '—'})</span>
+          <a href="${attr(safeUrl(g.dashboard_url))}" target="_blank" rel="noopener" title="generation ${attr(g.generation_id)}" style="color:var(--blue);margin-left:8px">ElevenLabs ↗</a>
         </div>
       </div>
     </div>`).join('');
@@ -6130,7 +6887,7 @@ async function loadCallElevenLabsCost(callId) {
   el.innerHTML =
     `<span style="color:var(--orange)">ElevenLabs (actual)</span> ` +
     `<span style="font-weight:600">${fmtUsdCall(c.cost_usd || 0)}</span> ` +
-    `<span style="color:var(--chalk4)">· ${c.cost_credits} credits · ${c.generation_count} generation(s)</span>`;
+    `<span style="color:var(--chalk4)">· ${esc(c.cost_credits)} credits · ${esc(c.generation_count)} generation(s)</span>`;
 }
 
 // Integrations page: correlated-generations explorer with filters.
@@ -6158,10 +6915,10 @@ async function loadElevenLabsGenerations() {
     <tr>
       <td>${elVoiceLabel(g)}${elVerifyBadge(g)}</td>
       <td>${esc(g.model || '—')}</td>
-      <td style="text-align:right">${g.character_count}</td>
+      <td style="text-align:right">${esc(g.character_count)}</td>
       <td style="text-align:right">${fmtUsd(g.cost_usd || 0)}</td>
-      <td>${g.run_id ? `<a onclick="showDetail('${esc(g.run_id)}','${esc(g.agent_id||'')}')" style="color:var(--blue);cursor:pointer" class="mono">${esc(g.run_id.slice(0,8))}</a>` : '—'}</td>
-      <td><a href="${esc(g.dashboard_url)}" target="_blank" rel="noopener" title="generation ${esc(g.generation_id)}" style="color:var(--blue)">↗</a></td>
+      <td>${g.run_id ? `<a ${actionAttrs('showDetail', g.run_id, g.agent_id || '')} style="color:var(--blue);cursor:pointer" class="mono">${esc(g.run_id.slice(0,8))}</a>` : '—'}</td>
+      <td><a href="${attr(safeUrl(g.dashboard_url))}" target="_blank" rel="noopener" title="generation ${attr(g.generation_id)}" style="color:var(--blue)">↗</a></td>
     </tr>`).join('');
 }
 
@@ -6178,7 +6935,7 @@ function renderElevenLabsExplorer() {
           <input id="el-filter-model" placeholder="any" style="font-size:12px;padding:.4rem;background:var(--wire);border:1px solid var(--wire);border-radius:4px;color:inherit"></div>
         <div><label style="display:block;font-size:11px;color:var(--chalk4)">Min credits (high-cost)</label>
           <input id="el-filter-mincredits" type="number" min="0" placeholder="any" style="width:140px;font-size:12px;padding:.4rem;background:var(--wire);border:1px solid var(--wire);border-radius:4px;color:inherit"></div>
-        <button class="act-btn" onclick="loadElevenLabsGenerations()" style="font-size:11px">Apply</button>
+        <button class="act-btn" data-action="loadElevenLabsGenerations" style="font-size:11px">Apply</button>
       </div>
       <table class="run-table" style="width:100%;font-size:12px">
         <thead><tr>
@@ -6215,10 +6972,10 @@ async function loadVaCost() {
   if (!s.call_count) { el.innerHTML = _vaHeader('Expensive TTS on failed conversations') + '<div style="font-size:12px;color:var(--chalk4)">No correlated ElevenLabs cost yet.</div>'; return; }
   const rows = (d.calls || []).filter(c => c.cost_usd > 0).slice(0, 25).map(c => `
     <tr style="${c.unsuccessful ? 'background:rgba(224,108,80,0.06)' : ''}">
-      <td class="mono"><a onclick="showCallDetail(${c.conversation_id})" style="color:var(--blue);cursor:pointer">${esc(c.external_id || ('#'+c.conversation_id))}</a></td>
+      <td class="mono"><a ${actionAttrs('showCallDetail', c.conversation_id)} style="color:var(--blue);cursor:pointer">${esc(c.external_id || ('#'+c.conversation_id))}</a></td>
       <td style="text-align:right">${fmtUsd(c.cost_usd)}</td>
-      <td style="text-align:right">${c.credits}</td>
-      <td>${c.unsuccessful ? `<span style="color:var(--orange)">flagged · ${c.signal_count} signal(s)</span>` : '<span style="color:var(--green)">clean</span>'}</td>
+      <td style="text-align:right">${esc(c.credits)}</td>
+      <td>${c.unsuccessful ? `<span style="color:var(--orange)">flagged · ${esc(c.signal_count)} signal(s)</span>` : '<span style="color:var(--green)">clean</span>'}</td>
     </tr>`).join('');
   el.innerHTML = _vaHeader('Expensive TTS on failed conversations') + `
     <div style="display:flex;gap:1.5rem;flex-wrap:wrap;margin-bottom:1rem">
@@ -6246,7 +7003,7 @@ async function loadVaVoice() {
   const rows = voices.map(v => `
     <tr>
       <td><span style="color:var(--orange)">${esc(v.voice_name || v.voice_id)}</span> <span class="mono" style="color:var(--chalk4);font-size:10px">${esc(v.voice_id)}</span></td>
-      <td style="text-align:right">${v.run_count}</td>
+      <td style="text-align:right">${esc(v.run_count)}</td>
       <td style="text-align:right">${_vaPct(v.signal_rate)}${v.insufficient_data ? ' <span style="color:var(--amber)" title="Fewer than 20 runs — not yet a reliable comparison">⚠</span>' : ''}</td>
     </tr>`).join('');
   el.innerHTML = _vaHeader('Voice choice impact') + `
@@ -6267,12 +7024,12 @@ async function loadVaTruncation() {
   catch(e) { _vaEmpty(el, 'Connect ElevenLabs to see truncation impact.'); return; }
   el.innerHTML = _vaHeader('TTS truncation downstream impact');
   if (d.insufficient_data) {
-    el.innerHTML += `<div style="font-size:12px;color:var(--chalk4)">Not enough data to compare yet (truncated runs: ${d.truncated_runs}, clean runs: ${d.clean_runs}). Need more correlated runs with and without truncation.</div>`;
+    el.innerHTML += `<div style="font-size:12px;color:var(--chalk4)">Not enough data to compare yet (truncated runs: ${esc(d.truncated_runs)}, clean runs: ${esc(d.clean_runs)}). Need more correlated runs with and without truncation.</div>`;
     return;
   }
   const liftColor = d.lift > 0 ? 'var(--orange)' : 'var(--green)';
   el.innerHTML += `
-    <div style="font-size:11px;color:var(--chalk4);margin-bottom:1rem">Frustration/abandonment signal rate on runs where TTS was truncated vs runs where it was not, within the ElevenLabs-correlated population (${d.population} runs).</div>
+    <div style="font-size:11px;color:var(--chalk4);margin-bottom:1rem">Frustration/abandonment signal rate on runs where TTS was truncated vs runs where it was not, within the ElevenLabs-correlated population (${esc(d.population)} runs).</div>
     <div style="display:flex;gap:1.5rem;flex-wrap:wrap">
       ${_vaStat('Truncated runs → frustration', _vaPct(d.truncated_frustration_rate), 'var(--orange)')}
       ${_vaStat('Clean runs → frustration', _vaPct(d.clean_frustration_rate), 'var(--green)')}
@@ -6324,21 +7081,42 @@ function renderApprovalCard(a) {
           ${args}
         </div>
         <div style="display:flex;gap:.4rem;align-items:center;margin-left:1rem;flex-shrink:0">
-          <button class="act-btn" data-aid="${a.id}" onclick="decideApproval(this.dataset.aid,'granted')" style="font-size:11px">Approve</button>
-          <button class="act-btn act-secondary" data-aid="${a.id}" onclick="decideApproval(this.dataset.aid,'denied')" style="font-size:11px">Deny</button>
+          <button class="act-btn" ${actionAttrs('decideApproval', a.id, 'granted')} style="font-size:11px">Approve</button>
+          <button class="act-btn act-secondary" ${actionAttrs('decideApproval', a.id, 'denied')} style="font-size:11px">Deny</button>
         </div>
       </div>
+      <!-- Shown for BOTH decisions, not just deny. "approved, but watch X"
+           belongs in the audit trail exactly as much as a refusal does, and a
+           note that only appears once you've chosen Deny teaches the operator
+           it is a deny-only field. -->
+      <textarea id="approval-note-${esc(a.id)}" rows="2" maxlength="2000"
+        placeholder="Optional note — travels back to the agent"
+        style="width:100%;margin-top:.75rem;background:var(--s0);color:var(--chalk2);border:1px solid var(--wire);border-radius:4px;padding:.5rem;font-family:'IBM Plex Mono',monospace;font-size:11px;resize:vertical"></textarea>
     </div>`;
 }
 
 async function decideApproval(approvalId, decision) {
+  const box = document.getElementById('approval-note-' + approvalId);
+  const note = box && box.value ? box.value.trim() : '';
+  // maxlength on the textarea is a convenience, not the enforcement: the API
+  // rejects >2000 with a 422 and does NOT apply the decision. Surface that
+  // rather than silently refreshing, or the operator sees the approval still
+  // pending with no idea why.
+  if (note.length > 2000) {
+    alert('Note is ' + note.length + ' characters; the limit is 2000. '
+        + 'Shorten it and decide again — nothing has been recorded.');
+    return;
+  }
+  const body = { decision: decision, decided_by: 'dashboard', decision_channel: 'dashboard' };
+  if (note) body.note = note;
   try {
-    await apiPost('/v1/approvals/' + encodeURIComponent(approvalId) + '/decision',
-      { decision: decision, decided_by: 'dashboard', decision_channel: 'dashboard' });
+    await apiPost('/v1/approvals/' + encodeURIComponent(approvalId) + '/decision', body);
     await loadApprovals();
   } catch(e) {
     // A 409 means it was already decided (raced the SDK's timeout or a Slack click) —
     // refresh so the list reflects reality rather than surfacing a scary error.
+    // The note goes with the losing decision, by design: it rides the decision
+    // write and there is no note-update path.
     await loadApprovals();
   }
 }
@@ -6413,16 +7191,16 @@ function renderPatternDrillDown(body, ft, data, agentId) {
   const tools = (data.evidence_aggregates || []).filter(e => e.tool).map(t =>
     `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">
       <span class="mono" style="color:var(--orange);flex:1">${esc(t.tool)}</span>
-      <span class="mono" style="color:var(--chalk4)">avg ${t.avg_count != null ? t.avg_count : (t.count || 0)}x</span>
+      <span class="mono" style="color:var(--chalk4)">avg ${esc(t.avg_count != null ? t.avg_count : (t.count || 0))}x</span>
     </div>`
   ).join('') || '<div style="font-size:11px;color:var(--chalk4)">no tool data</div>';
 
   const coSigs = (data.co_occurring || []).map(c =>
-    `<span class="sev-badge" style="background:var(--s3);color:var(--chalk3);margin-right:4px;margin-bottom:4px">${esc((c.failure_type || '').replace(/_/g, ' '))}${c.co_count ? ' (' + c.co_count + ')' : ''}</span>`
+    `<span class="sev-badge" style="background:var(--s3);color:var(--chalk3);margin-right:4px;margin-bottom:4px">${esc((c.failure_type || '').replace(/_/g, ' '))}${c.co_count ? ' (' + esc(c.co_count) + ')' : ''}</span>`
   ).join('');
 
   const exampleRuns = (data.top_runs || []).slice(0, 3).map(r =>
-    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail(${jsVal(r.run_id)},${jsVal(agentId)})">${shortId(r.run_id)}</span>`
+    `<span class="run-id" style="cursor:pointer;margin-right:8px" ${actionAttrs('showDetailFromPattern', r.run_id, agentId)}>${esc(shortId(r.run_id))}</span>`
   ).join('');
 
   body.innerHTML =
@@ -6459,7 +7237,7 @@ function renderPatternDrillDownLocal(body, ft, agentId) {
 
   const uniqRuns   = [...new Set(sigs.map(s => s.run_id))];
   const exampleRuns = uniqRuns.slice(0, 3).map(rid =>
-    `<span class="run-id" style="cursor:pointer;margin-right:8px" onclick="closePatternModal();showDetail(${jsVal(rid)},${jsVal(agentId)})">${shortId(rid)}</span>`
+    `<span class="run-id" style="cursor:pointer;margin-right:8px" ${actionAttrs('showDetailFromPattern', rid, agentId)}>${esc(shortId(rid))}</span>`
   ).join('');
 
   body.innerHTML =
@@ -6490,7 +7268,7 @@ async function loadShadowStats(id) {
     const fires = data.fire_count || 0;
     const pct   = total > 0 ? ((fires / total) * 100).toFixed(1) : '0.0';
     if (total > 0) {
-      el.innerHTML = ` &nbsp;·&nbsp; <span style="color:var(--chalk2)">Would fire on ${fires} of ${total} runs (${pct}%)</span>`;
+      el.innerHTML = ` &nbsp;·&nbsp; <span style="color:var(--chalk2)">Would fire on ${esc(fires)} of ${esc(total)} runs (${esc(pct)}%)</span>`;
     }
   } catch(e) {
     // shadow-stats is optional
@@ -6522,9 +7300,28 @@ function downloadSignalsCsv() {
 }
 
 // ── D7: Error banner helpers ───────────────────────────────────────────────────
-function showErrorBanner() {
+// level 'error' (default, red) — nothing loaded; level 'warn' (amber) — something
+// loaded but not all of it. The second level exists because bulkFetch swallows a
+// failed page on purpose, and a short load that renders as a complete one is a
+// worse failure than an empty dashboard: the numbers look authoritative and are
+// wrong. Message text is set with textContent, so it needs no escaping.
+function showErrorBanner(msg, level) {
   const el = document.getElementById('error-banner');
-  if (el) el.style.display = 'flex';
+  if (!el) return;
+  const warn = level === 'warn';
+  const rgb  = warn ? '212,146,10'   : '229,62,62';
+  const fg   = warn ? 'var(--amber)' : 'var(--red)';
+  el.style.background = 'rgba(' + rgb + ',0.08)';
+  el.style.border     = '1px solid rgba(' + rgb + ',0.3)';
+  el.style.color      = fg;
+  const btn = document.getElementById('error-banner-close');
+  if (btn) btn.style.color = fg;
+  const body = document.getElementById('error-banner-msg');
+  // Literal, not a module const: this function is reachable from the bootstrap
+  // loadAll() call above, which starts before the rest of this file has been
+  // evaluated — a top-level const here would be in its temporal dead zone.
+  if (body) body.textContent = msg || 'Failed to load data. Check that the backend is running.';
+  el.style.display = 'flex';
 }
 
 function hideErrorBanner() {
@@ -6583,7 +7380,7 @@ function renderStateAnalytics(data) {
         <div style="flex:1;background:var(--wire);border-radius:3px;height:14px">
           <div style="width:${w}%;background:${c};height:100%;border-radius:3px"></div>
         </div>
-        <span style="width:200px;flex-shrink:0;text-align:right;font-size:11px;color:var(--chalk4)">avg ${st.avg_ms}ms · p95 ${st.p95_ms}ms · ${st.run_count} runs</span>
+        <span style="width:200px;flex-shrink:0;text-align:right;font-size:11px;color:var(--chalk4)">avg ${esc(st.avg_ms)}ms · p95 ${esc(st.p95_ms)}ms · ${esc(st.run_count)} runs</span>
       </div>`;
   }).join('');
 
@@ -6592,8 +7389,8 @@ function renderStateAnalytics(data) {
   if (outliers.length) {
     const items = outliers.map(o =>
       `<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--chalk3);padding:.25rem 0">
-         <span class="mono" style="cursor:pointer;color:var(--orange)" onclick="showDetail('${esc(o.run_id)}','${esc(_curAgentDetailId)}')">${esc(shortId(o.run_id))}</span>
-         <span>${esc(o.state)} — ${o.total_ms}ms (${o.ratio}× the ${o.baseline_ms}ms median)</span>
+         <span class="mono" style="cursor:pointer;color:var(--orange)" ${actionAttrs('showDetail', o.run_id, _curAgentDetailId)}>${esc(shortId(o.run_id))}</span>
+         <span>${esc(o.state)} — ${esc(o.total_ms)}ms (${esc(o.ratio)}× the ${esc(o.baseline_ms)}ms median)</span>
        </div>`).join('');
     outHtml = `
       <div style="margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--wire)">
@@ -6602,7 +7399,7 @@ function renderStateAnalytics(data) {
       </div>`;
   }
 
-  return `<div style="font-size:11px;color:var(--chalk4);margin-bottom:1rem">${data.run_count} runs in the last ${data.window_days} days</div>` + rows + outHtml;
+  return `<div style="font-size:11px;color:var(--chalk4);margin-bottom:1rem">${esc(data.run_count)} runs in the last ${esc(data.window_days)} days</div>` + rows + outHtml;
 }
 
 function loadAgentDetailOverview(agentId) {
@@ -6615,16 +7412,36 @@ function loadAgentDetailOverview(agentId) {
   if (ttl) ttl.textContent = 'Agent: ' + agentId;
   if (!a) { if (body) body.innerHTML = '<div class="loading">agent not found</div>'; return; }
 
-  const totalRuns = a.run_count || (a._runs ? a._runs.length : 0);
+  // Deliberately the same arithmetic as the agent card in renderAgents(): the
+  // two views describe the same agent and must not contradict each other.
+  //
+  // Fail rate takes numerator and denominator from the SAME sample (the loaded
+  // runs). It used to divide the signal-bearing runs of the newest-200 page by
+  // a.run_count, which is all-time — so a 20,000-run agent failing 40% of the
+  // time rendered 0% here while its own card on the Agents page rendered 40%.
+  const ratedRuns = a._runs ? a._runs.length : 0;
   const failRuns  = a._runs ? a._runs.filter(r => r.has_signals).length : 0;
-  const failRate  = totalRuns ? Math.round(failRuns / totalRuns * 100) : 0;
+  const failRate  = ratedRuns ? Math.round(failRuns / ratedRuns * 100) : 0;
+  const totalRuns = a.run_count || ratedRuns;
+  // Say so when the rate is measured over a sample rather than all history.
+  const rateScope = (a.run_count && a.run_count > ratedRuns)
+    ? `last ${ratedRuns} runs` : 'all runs';
   const lastSeen  = a.last_seen ? timeAgo(a.last_seen) : '—';
   const sigs      = a._signals || [];
-  const critical  = sigs.filter(s => s.severity === 'CRITICAL').length;
-  const high      = sigs.filter(s => s.severity === 'HIGH').length;
+  // Signals/Critical/High are the server's per-agent totals — the same fields
+  // the card renders. Counting a._signals instead understated them by whatever
+  // fell past PER_AGENT_SIGNAL_CAP, and paired an all-time Runs figure with a
+  // capped signal figure in one row. The recent-signals table below still reads
+  // a._signals: it lists individual rows, which need the objects, and is
+  // explicitly only the newest few.
+  const sigCount  = typeof a.signal_count   === 'number' ? a.signal_count   : sigs.length;
+  const critical  = typeof a.critical_count === 'number' ? a.critical_count
+                                                        : sigs.filter(s => s.severity === 'CRITICAL').length;
+  const high      = typeof a.high_count     === 'number' ? a.high_count
+                                                        : sigs.filter(s => s.severity === 'HIGH').length;
 
   if (meta) meta.innerHTML = [
-    ['Runs', totalRuns], ['Fail rate', failRate + '%'], ['Signals', sigs.length],
+    ['Runs', totalRuns], ['Fail rate', failRate + '% (' + rateScope + ')'], ['Signals', sigCount],
     ['Critical', critical], ['High', high], ['Last seen', lastSeen],
   ].map(([k, v]) => `<div class="rdh-meta-item">${k} <span>${esc(String(v))}</span></div>`).join('');
 
@@ -6632,11 +7449,11 @@ function loadAgentDetailOverview(agentId) {
   const sigsHtml = recentSigs.length
     ? `<div class="table-card"><table class="run-table">
         <thead><tr><th>Failure Type</th><th>Severity</th><th>Confidence</th><th>Run</th><th>Detected</th></tr></thead>
-        <tbody>${recentSigs.map(s => `<tr style="cursor:pointer" onclick="showDetail(${jsVal(s.run_id)},${jsVal(agentId)})">
+        <tbody>${recentSigs.map(s => `<tr style="cursor:pointer" ${actionAttrs('showDetail', s.run_id, agentId)}>
           <td>${ftLabel(s.failure_type)}</td>
-          <td><span class="sev-badge sb-${s.severity.toLowerCase()}">${s.severity}</span></td>
+          <td><span class="sev-badge sb-${attr(s.severity.toLowerCase())}">${esc(s.severity)}</span></td>
           <td class="mono">${s.confidence.toFixed(2)}</td>
-          <td><span class="run-id">${shortId(s.run_id)}</span></td>
+          <td><span class="run-id">${esc(shortId(s.run_id))}</span></td>
           <td class="mono" style="font-size:11px;color:var(--chalk4)">${timeAgo(s.detected_at)}</td>
         </tr>`).join('')}</tbody>
       </table></div>`
@@ -6644,7 +7461,7 @@ function loadAgentDetailOverview(agentId) {
 
   if (body) body.innerHTML =
     `<div class="sec-head" style="margin-bottom:.75rem"><span class="sec-title">Recent signals</span>
-      <button class="filter-btn" onclick="_runsAgentFilter=${jsVal(agentId)};nav('runs',document.querySelector('[onclick*=runs]'));const s=document.getElementById('runs-agent');if(s)s.value=${jsVal(agentId)};renderRuns()">View all runs →</button>
+      <button class="filter-btn" ${actionAttrs('viewAllRunsForAgent', agentId)}>View all runs →</button>
     </div>` + sigsHtml;
 }
 
@@ -6701,12 +7518,12 @@ async function loadAgentIssues(agentId) {
         ${list.map(i => {
           const tsToAge = ts => ts ? timeAgo(typeof ts === 'string' ? new Date(ts).getTime() / 1000 : ts) : '—';
           return `<div class="issue-item">
-            <span class="issue-status-badge ${cls}">${i.status.toUpperCase()}</span>
+            <span class="issue-status-badge ${cls}">${esc(i.status.toUpperCase())}</span>
             <div style="flex:1;min-width:0">
               <div style="font-size:13px;font-weight:500;color:var(--chalk2)">${ftLabel(i.failure_type)}</div>
               <div class="mono" style="font-size:10px;color:var(--chalk4)">first ${tsToAge(i.first_seen)} · last ${tsToAge(i.last_seen)}</div>
             </div>
-            <span class="mono" style="font-size:11px;color:var(--chalk4);flex-shrink:0">${i.occurrence_count || 0} occurrences</span>
+            <span class="mono" style="font-size:11px;color:var(--chalk4);flex-shrink:0">${esc(i.occurrence_count || 0)} occurrences</span>
           </div>`;
         }).join('')}
       </div>`;
@@ -6734,6 +7551,15 @@ function setAgentTrendWindow(days) {
 function trendBarChart(points, valueFn, opts) {
   opts = opts || {};
   const vals = points.map(valueFn).filter(v => v !== null && v !== undefined);
+  // A series that is null/0 all the way across renders as a row of zero-height
+  // bars — a blank box indistinguishable from a chart that failed to load, which
+  // is exactly how the cost and latency charts read for any agent whose events
+  // carry no token counts or no latency_ms. Say which it is. Only charts that
+  // pass emptyNote opt in: an all-zero signal RATE is a real, good answer and
+  // must keep rendering as a flat line of empty bars.
+  if (opts.emptyNote && !vals.some(v => v > 0)) {
+    return `<div class="loading" style="height:60px;display:flex;align-items:center">${esc(opts.emptyNote)}</div>`;
+  }
   const maxVal = Math.max(...vals, opts.minMax || 0.0001);
   const bars = points.map(p => {
     const v = valueFn(p);
@@ -6807,11 +7633,11 @@ async function loadAgentTrends(agentId, windowDays) {
         </div>
         <div class="chart-card">
           <div class="chart-title mono">COST OVER TIME (EST. $)</div>
-          ${trendBarChart(points, p => p.cost_usd, {fmt: v => '$'+v.toFixed(3), color:'rgba(46,184,114,0.28)', border:'rgba(46,184,114,0.7)'})}
+          ${trendBarChart(points, p => p.cost_usd, {fmt: v => '$'+v.toFixed(3), color:'rgba(46,184,114,0.28)', border:'rgba(46,184,114,0.7)', emptyNote: 'No token usage recorded in this window — cost is estimated from the token counts on llm.called / llm.responded events.'})}
         </div>
         <div class="chart-card">
           <div class="chart-title mono">AVG LLM LATENCY (MS)</div>
-          ${trendBarChart(points, p => p.avg_latency_ms, {fmt: v => Math.round(v)+'ms', color:'rgba(74,158,222,0.28)', border:'rgba(74,158,222,0.7)'})}
+          ${trendBarChart(points, p => p.avg_latency_ms, {fmt: v => Math.round(v)+'ms', color:'rgba(74,158,222,0.28)', border:'rgba(74,158,222,0.7)', emptyNote: 'No LLM latency recorded in this window — needs latency_ms on llm.responded events.'})}
         </div>
       </div>
       <div class="sec-head"><span class="sec-title">Failure mode movers (this window vs the one before it)</span></div>
@@ -6880,7 +7706,10 @@ function computeIncidents() {
 
       const firstTs = Math.min(...g.thisSigs.map(s => s.detected_at));
       const latestSig = g.thisSigs.reduce((a, b) => a.detected_at > b.detected_at ? a : b);
-      const evSummary = latestSig.evidence_summary || latestSig.what || '';
+      // Prose is absent from the bulk load (explain=false). evidenceSummary()
+      // derives the same line from `evidence`, which is still returned — the
+      // path it already took for signals stored before those fields existed.
+      const evSummary = evidenceSummary(latestSig) || '';
 
       const urgency = (trend === 'spike' ? 4 : trend === 'new' ? 3 : trend === 'rising' ? 2 : trend === 'stable' ? 1 : 0)
                     * 1000 + thisN;
@@ -6947,14 +7776,14 @@ function renderIncidents() {
 
     const policyActive = _policies.some(p => signalPolicyCovers(p, ft, inc.agent_id));
     const policyBtn  = policyActive
-      ? '<button class="inc-btn inc-btn-primary" onclick="nav(\'policies\',document.querySelector(\'[onclick*=policies]\'))">✓ Policy active</button>'
-      : '<button class="inc-btn" onclick="enablePolicyFromIncident(' + jsVal(ft) + ',' + jsVal(inc.agent_id) + ')">+ Create policy</button>';
+      ? '<button class="inc-btn inc-btn-primary" ' + actionAttrs('navTo', 'policies') + '>✓ Policy active</button>'
+      : '<button class="inc-btn" ' + actionAttrs('enablePolicyFromIncident', ft, inc.agent_id) + '>+ Create policy</button>';
 
     const topRunId = inc.runIds[0] || '';
-    const replayBtn  = topRunId ? '<button class="inc-btn" onclick="showDetail(' + jsVal(topRunId) + ',' + jsVal(inc.agent_id) + ')">Replay failing run ↗</button>' : '';
-    const viewBtn    = '<button class="inc-btn" onclick="openAgentDetail(' + jsVal(inc.agent_id) + ')">View agent →</button>';
-    const compareBtn = '<button class="inc-btn" onclick="nav(\'compare\',document.querySelector(\'[onclick*=compare]\'))">Compare to last deploy</button>';
-    const modelsBtn  = '<button class="inc-btn" onclick="openAgentDetail(' + jsVal(inc.agent_id) + ')">View details →</button>';
+    const replayBtn  = topRunId ? '<button class="inc-btn" ' + actionAttrs('showDetail', topRunId, inc.agent_id) + '>Replay failing run ↗</button>' : '';
+    const viewBtn    = '<button class="inc-btn" ' + actionAttrs('openAgentDetail', inc.agent_id) + '>View agent →</button>';
+    const compareBtn = '<button class="inc-btn" ' + actionAttrs('navTo', 'compare') + '>Compare to last deploy</button>';
+    const modelsBtn  = '<button class="inc-btn" ' + actionAttrs('openAgentDetail', inc.agent_id) + '>View details →</button>';
 
     const isLoopType  = ['TOOL_LOOP','TOOL_THRASHING'].includes(ft);
     const isModelType = ['EMPTY_LLM_RESPONSE','SLOW_STEP','LLM_TRUNCATION_LOOP'].includes(ft);
@@ -7032,7 +7861,7 @@ function renderIncidentPanels(incidents) {
       + '<div class="inc-panel-lbl">Next best action</div>'
       + '<div class="inc-panel-val" style="color:var(--amber)">' + esc(ftName) + '</div>'
       + '<div class="inc-panel-sub">' + esc(topNoPolicy.agent_id) + ' · ' + topNoPolicy.thisN + ' signal' + (topNoPolicy.thisN !== 1 ? 's' : '') + ' · no active policy</div>'
-      + '<button class="inc-panel-cta-btn" onclick="enablePolicyFromIncident(' + jsVal(topNoPolicy.failure_type) + ',' + jsVal(topNoPolicy.agent_id) + ')">+ Create policy</button>'
+      + '<button class="inc-panel-cta-btn" ' + actionAttrs('enablePolicyFromIncident', topNoPolicy.failure_type, topNoPolicy.agent_id) + '>+ Create policy</button>'
       + '</div>';
   }
 

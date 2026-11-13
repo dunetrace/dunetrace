@@ -1,5 +1,21 @@
 # Integrating a TypeScript Agent with Dunetrace
 
+<!--dunetrace:instrument
+framework: typescript
+language: typescript
+install: npm install dunetrace
+primary_symbol: dunetrace.Dunetrace
+mechanism: context-manager
+opens_own_run: true
+requires_run_context: false
+wrappers_require_run_context: true
+target_file: the module exporting your agent's entry function
+target_example: `src/agent.ts`, `app/api/chat/route.ts`, or `src/index.ts`
+target_hints: ["new OpenAI(", "new Anthropic(", "chat.completions.create", "messages.create"]
+emits: [run.started, run.completed, run.errored, llm.called, llm.responded, tool.called, tool.responded]
+verify_cmd: curl http://localhost:8002/v1/agents/my-agent/runs
+-->
+
 > **Using Python?** See [integrate-custom-python-agent.md](./integrate-custom-python-agent.md).
 > **Using LangChain, CrewAI, AutoGen, or the Vercel AI SDK?** Those have dedicated guides — see [integrate-langchain-agent.md](./integrate-langchain-agent.md), [integrate-crewai-agent.md](./integrate-crewai-agent.md), [integrate-autogen-agent.md](./integrate-autogen-agent.md), [integrate-vercel-ai.md](./integrate-vercel-ai.md).
 
@@ -9,25 +25,57 @@
 npm install dunetrace
 ```
 
+Save as `agent.ts` and run it. No API key and no LLM account needed:
+
 ```typescript
+// agent.ts
 import { Dunetrace } from "dunetrace";
+
+async function webSearch(query: string): Promise<string[]> {
+  return [`result for ${query}`];    // stand in for your real search
+}
 
 const dt = new Dunetrace();          // local dev, no API key needed
 const search = dt.tool(webSearch);   // wrap a tool function once
 
 await dt.run("my-agent", { model: "gpt-4o" }, async (run) => {
   const results = await search("capital of France");
+  console.log(results);
   run.finalAnswer();
 });
 
 await dt.shutdown();
 ```
 
+```bash
+npx tsx agent.ts
+```
+
 Start the backend once, locally, before running this: `docker compose up -d`. Requires Node 22+.
+
+## Where this goes
+
+`dt.run()` goes around the **one call that represents a whole agent
+turn**. The client wrappers (`dt.wrapOpenAI`, `dt.wrapAnthropic`) and
+`autoInstrument()` go once at startup, wherever the client is constructed.
+
+Find the entry point by locating the LLM call:
+
+```bash
+grep -rn "chat.completions.create\|messages.create" --include=*.ts --include=*.tsx src app
+```
+
+In a Next.js App Router project that is usually a route handler such as
+`app/api/chat/route.ts`, and the `dt.run()` wraps the handler body. In a plain
+Node service it is usually `src/agent.ts`.
+
+Wrapping the client without opening a run records nothing. If you would rather
+not restructure the entry point, `dt.trace(fn, "agent-id")` wraps a function so
+it opens and closes its own run.
 
 ## What this does
 
-Wrap your agent's entry point in `dt.run(...)`. Everything called inside that callback — LLM calls, tool calls — is auto-traced and shipped to the backend in the background. Dunetrace detects structural failures (tool loops, retry storms, cost spikes, and 26 more) within ~15 seconds — no other code changes.
+Wrap your agent's entry point in `dt.run(...)`. Everything called inside that callback — LLM calls, tool calls — is auto-traced and shipped to the backend in the background. Dunetrace detects structural failures (tool loops, retry storms, cost spikes, and 31 more) within ~15 seconds — no other code changes.
 
 ## Recommended usage pattern
 
@@ -50,7 +98,10 @@ await dt.run("my-agent", { model: "gpt-4o", tools: ["web_search"] }, async (run)
 await dt.shutdown();
 ```
 
-`dt.wrapAnthropic(new Anthropic())` works the same way for Anthropic. Both skip streamed calls (`stream: true`) — use `run.llmCalled()` / `run.llmResponded()` manually for those.
+`dt.wrapAnthropic(new Anthropic())` works the same way for Anthropic. Both
+handle streamed calls (`stream: true`) on the same code path `autoInstrument()`
+uses: `llm.called` fires at call time and `llm.responded` when the stream ends.
+See [Streaming](#streaming) below.
 
 ## Initialization (optional)
 
@@ -58,28 +109,67 @@ await dt.shutdown();
 const dt = new Dunetrace({ endpoint: "http://localhost:8001" });   // default — local dev, no key needed
 ```
 
-**Production** needs an API key:
+**Production** needs an API key.
 
-```typescript
-const dt = new Dunetrace({ endpoint: "https://your-ingest", apiKey: "dt_live_..." });
-```
-
-Generate the first key directly in Postgres (there's no UI for this yet):
-
-```sql
-INSERT INTO organizations (id, name) VALUES ('my-company', 'My Company') ON CONFLICT (id) DO NOTHING;
-INSERT INTO api_keys (key, org_id) VALUES ('dt_live_<random-string>', 'my-company');
-```
+A fresh self-hosted install has no keys, so the first one comes from the ingest
+service's bootstrap endpoint. It is gated on `ADMIN_API_KEY` from your `.env`,
+which is the operator's deployment secret rather than a tenant credential.
+Omitting `scopes` mints an **admin** key, the one scope a fresh install cannot
+obtain any other way:
 
 ```bash
-node -e "const c=require('crypto'); console.log('dt_live_'+c.randomBytes(16).toString('hex'))"
+curl -X POST http://localhost:8001/v1/keys \
+  -H 'Content-Type: application/json' \
+  -d '{"org_id": "my-company", "org_name": "My Company", "admin_key": "'"$ADMIN_API_KEY"'"}'
+```
+
+The response carries `key` once. It is stored only as a SHA-256 hash and is
+never logged, so save it now. Keep it for operators.
+
+Then mint a narrower key for the agent itself, from the Customer API, using the
+admin key you just created. An agent needs `ingest` and nothing else:
+
+```bash
+curl -X POST http://localhost:8002/v1/keys \
+  -H "Authorization: Bearer $DUNETRACE_ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"scopes": ["ingest"]}'
+```
+
+Give the agent that second key. An `ingest` key cannot mint keys, write
+policies, or decide approvals, and `POST /v1/keys` returns 403 for any scope the
+calling key does not itself hold, so an agent key cannot escalate to admin.
+
+> **Do not INSERT into `api_keys` by hand.** Keys are verified with
+> `WHERE key_hash = ... AND active = TRUE`. A row written with a plaintext
+> `key` column and no `key_hash` never authenticates, and the schema migration
+> marks any such row `active = FALSE`.
+
+**The TypeScript SDK reads no configuration from the environment.** Unlike the
+Python SDK, it does not look at `DUNETRACE_API_KEY` or `DUNETRACE_API_URL`
+(the only env vars it reads are `DUNETRACE_QUEUE_PATH` and
+`DUNETRACE_OMIT_LLM_OUTPUT_TEXT`). Read them yourself and pass them in:
+
+```typescript
+const dt = new Dunetrace({
+  endpoint: process.env.DUNETRACE_API_URL ?? "http://localhost:8001",
+  apiKey:   process.env.DUNETRACE_API_KEY,
+});
 ```
 
 Always call `await dt.shutdown()` before your process exits — this flushes any buffered events.
 
 ## Auto instrumentation
 
-`autoInstrument()` patches the OpenAI and Anthropic SDKs once, globally. Every client instance is then tracked inside a `dt.run()` — including clients you never touch, such as ones constructed inside a library:
+`autoInstrument()` patches the OpenAI, Anthropic and Mistral SDKs once,
+globally, plus the global `fetch`. Every client instance is then tracked
+**inside a `dt.run()`**, including clients you never touch, such as ones
+constructed inside a library.
+
+> **Outside a `dt.run()` these patches emit nothing**, silently. The call
+> succeeds and no event is recorded. Wrap your entry point in `dt.run()`, or use
+> `dt.trace()`, which opens the run for you.
+
 
 ```typescript
 import OpenAI from "openai";
@@ -155,7 +245,7 @@ autoInstrument({ openai: OpenAI, targets: ["openai"] });   // no HTTP instrument
 | | |
 |---|---|
 | Errors | A failed call propagates unchanged and emits no `llm.responded` — there's no usage or output to describe. HTTP failures *are* recorded, as `tool.responded` with `success: false`. |
-| LangChain.js | Needs a callback-handler integration rather than a patch — LangChain.js has no global handler registry equivalent to the Python `register_configure_hook` the Python SDK relies on. Use `dt.tool()` / `dt.trace()`, or the [Vercel AI SDK integration](#vercel-ai-sdk-integration). |
+| LangChain.js | Needs a callback-handler integration rather than a patch — LangChain.js has no global handler registry equivalent to the Python `register_configure_hook` the Python SDK relies on. Use `dt.tool()` / `dt.trace()`, or the [Vercel AI SDK integration](./integrate-vercel-ai.md). |
 | CrewAI | Python-only — there is no JavaScript port to instrument. |
 
 A bug in event emission can never fail your LLM call: emission is wrapped so it warns and continues rather than throwing into your call path.
@@ -199,6 +289,39 @@ await dt.shutdown();
 ```
 
 `TOOL_LOOP` should appear in the dashboard within ~15 seconds.
+
+
+### If nothing arrives
+
+Work down this list. The first two cover almost every case.
+
+1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm the registration call (`Dunetrace`) actually ran, and ran **before** the first agent invocation.
+
+2. **Did the process flush?** Events ship from a background thread. Call
+   `await dt.shutdown()` before the process exits, or the buffer dies with it.
+
+3. **Is the backend reachable?** Both should return `{"status":"ok",...}`:
+
+   ```bash
+   curl -s localhost:8001/ready   # ingest
+   curl -s localhost:8002/ready   # customer API
+   ```
+
+4. **Did anything land?** If your agent id is listed here, instrumentation is
+   working and the problem is downstream:
+
+   ```bash
+   curl -s localhost:8002/v1/agents
+   curl -s "localhost:8002/v1/agents/<your-agent-id>/runs?limit=5"
+   ```
+
+5. **Turn on debug logging.** `new Dunetrace({ debug: true })` logs every event as it is buffered and
+   every batch as it ships.
+
+**Runs appear but no signals?** That is usually correct, not a fault. The
+detector polls every 5 seconds, and a healthy run produces no signals. Several
+detectors also need cross-run baselines and stay dormant until the agent has
+run history. Check `docker compose logs detector` if you expected one.
 
 ---
 
@@ -282,7 +405,11 @@ const dt = new Dunetrace({ emitAsJson: true, endpoint: null });
 
 ### Tuning detectors
 
-Edit `detectors.yml` on the server, then `docker compose restart detector`:
+Edit `detectors.yml` on the server, then restart **both** the detector and the ingest service — ingest serves the same file to SDKs over `GET /v1/detector-config`, so restarting only the detector leaves every agent's in-path pass on the old thresholds for the life of the ingest process:
+
+```bash
+docker compose restart detector ingest
+```
 
 ```yaml
 default:

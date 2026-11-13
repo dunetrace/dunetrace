@@ -52,100 +52,19 @@ async def close_pool() -> None:
 
 # ── Schema additions ───────────────────────────────────────────────────────────
 
-# NOTE: The ingest service owns the core schema (events, failure_signals, api_keys).
-# The detector service adds only what it needs on top.
+# NOTE: every table this worker shares with another service — processed_runs,
+# runs, failure_signals, custom_detectors, custom_detector_results, packs,
+# org_enabled_packs, run_state_metrics, and issues (upserted here, resolved
+# and searched by the API) — is declared by dunetrace_schemas.migrations
+# (2, 5, 8 and 12), which ensure_detector_schema() applies first. What is
+# declared below is the detector's alone.
 
 _DETECTOR_SCHEMA = """
--- Tracks which runs the detector has already processed.
--- Prevents double-processing if the worker restarts.
-CREATE TABLE IF NOT EXISTS processed_runs (
-    run_id        TEXT PRIMARY KEY,
-    agent_id      TEXT        NOT NULL,
-    agent_version TEXT        NOT NULL,
-    processed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    signal_count  INTEGER     NOT NULL DEFAULT 0,
-    trigger       TEXT        NOT NULL   -- "completed" | "errored" | "stalled"
-);
--- audit Finding 15: remember how many events a run had when we processed it, so
--- late-arriving events (event count grew) trigger a re-detection instead of being
--- silently ignored. Defaults to 0 for pre-existing rows (they'll reprocess once
--- if any new event arrives, which is harmless — writes are deduped by run_id+type).
-ALTER TABLE processed_runs ADD COLUMN IF NOT EXISTS event_count INTEGER NOT NULL DEFAULT 0;
-
--- Add shadow column to failure_signals if it doesn't exist.
--- Shadow signals are stored but never sent to customers.
--- A detector graduates out of shadow mode manually once precision > 80%.
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'failure_signals' AND column_name = 'shadow'
-    ) THEN
-        ALTER TABLE failure_signals ADD COLUMN shadow BOOLEAN NOT NULL DEFAULT TRUE;
-    END IF;
-END $$;
-
--- co_signal_count: how many signals fired on the same run (>=2 means boosted).
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'failure_signals' AND column_name = 'co_signal_count'
-    ) THEN
-        ALTER TABLE failure_signals ADD COLUMN co_signal_count INTEGER NOT NULL DEFAULT 0;
-    END IF;
-END $$;
-
--- Persistent issue tracking: one row per (org_id, agent_id, failure_type) triple.
--- status: open | resolved | reopened
--- clean_runs_since: consecutive runs with no signal of this type (reset to 0 on each hit).
--- Resolved when clean_runs_since reaches CLEAN_RUNS_THRESHOLD (default 5).
-CREATE TABLE IF NOT EXISTS issues (
-    id               BIGSERIAL    PRIMARY KEY,
-    agent_id         TEXT         NOT NULL,
-    failure_type     TEXT         NOT NULL,
-    status           TEXT         NOT NULL DEFAULT 'open',
-    first_seen       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    last_seen        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    resolved_at      TIMESTAMPTZ,
-    affected_runs    INTEGER      NOT NULL DEFAULT 1,
-    clean_runs_since INTEGER      NOT NULL DEFAULT 0,
-    UNIQUE (agent_id, failure_type)
-);
-
--- Custom detector tables (also created by the API service; duplicated here so the
--- detector worker can start before the API without failing on missing tables).
-CREATE TABLE IF NOT EXISTS custom_detectors (
-    id                BIGSERIAL    PRIMARY KEY,
-    agent_id          TEXT         NOT NULL DEFAULT '*',
-    name              TEXT         NOT NULL,
-    description       TEXT         NOT NULL,
-    config_json       JSONB        NOT NULL,
-    status            TEXT         NOT NULL DEFAULT 'shadow',
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    total_runs        INTEGER      NOT NULL DEFAULT 0,
-    shadow_fire_count INTEGER      NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_custom_detectors_agent ON custom_detectors(agent_id, status);
-
-CREATE TABLE IF NOT EXISTS custom_detector_results (
-    id           BIGSERIAL    PRIMARY KEY,
-    detector_id  BIGINT       NOT NULL REFERENCES custom_detectors(id) ON DELETE CASCADE,
-    run_id       TEXT         NOT NULL,
-    agent_id     TEXT         NOT NULL,
-    fired        BOOLEAN      NOT NULL,
-    evaluated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
-
--- Conversation modeling (Phase 3.1). A "run" has no other dedicated table
--- anywhere in this codebase — it's just a run_id value shared across events/
--- failure_signals rows — so this is genuinely new infrastructure, not a
--- column bolted onto an existing table. conversation_id is nullable: every
--- processed run gets a runs row regardless of whether the SDK's
--- dt.run(conversation_id=...) was ever set, old runs and single-turn agents
--- simply never get a conversations row or FK.
+-- Conversation modeling (Phase 3.1). The `runs` registry itself is migration
+-- 2's (it is read by the API too); this is the conversations side of it.
+-- runs.conversation_id is nullable: every processed run gets a runs row
+-- regardless of whether the SDK's dt.run(conversation_id=...) was ever set —
+-- old runs and single-turn agents simply never get a conversations row.
 CREATE TABLE IF NOT EXISTS conversations (
     id            BIGSERIAL   PRIMARY KEY,
     org_id        TEXT        NOT NULL,
@@ -159,33 +78,16 @@ CREATE TABLE IF NOT EXISTS conversations (
     UNIQUE (org_id, agent_id, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_conversations_org_agent ON conversations(org_id, agent_id);
-
-CREATE TABLE IF NOT EXISTS runs (
-    run_id          TEXT        PRIMARY KEY,
-    org_id          TEXT        NOT NULL,
-    agent_id        TEXT        NOT NULL,
-    agent_version   TEXT        NOT NULL,
-    conversation_id BIGINT      REFERENCES conversations(id),
-    started_at      TIMESTAMPTZ NOT NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_runs_conversation ON runs(conversation_id) WHERE conversation_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_runs_org_agent    ON runs(org_id, agent_id, started_at DESC);
-
--- Performance indexes for baseline queries (processed_runs) and alert worker queries (failure_signals).
-CREATE INDEX IF NOT EXISTS idx_processed_runs_agent_version
-    ON processed_runs(agent_id, agent_version, processed_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_failure_signals_agent_shadow_alerted
-    ON failure_signals(agent_id, shadow, alerted, detected_at DESC);
 """
 
 # ── Multi-tenancy unification (v0.5.0) ──────────────────────────────────────────
 #
-# processed_runs/issues/custom_detectors/custom_detector_results all gain org_id.
-# Unlike ingest_svc, this service doesn't own api_keys — org_id is backfilled by
-# joining through events.org_id (agent_id -> most-recent org_id seen for that
-# agent), which ingest_svc's own migration guarantees is populated and NOT NULL.
+# The org_id columns themselves are migrations' (2 for processed_runs, 8 for
+# custom_detectors/custom_detector_results, 12 for issues); what stays here is
+# the data repair. Unlike ingest_svc, this service doesn't own api_keys — org_id
+# is backfilled by joining through events.org_id (agent_id -> most-recent org_id
+# seen for that agent), which ingest_svc's own migration guarantees is populated
+# and NOT NULL.
 #
 # Startup-order hazard: docker-compose starts detector only after ingest has
 # *started* (service_started, not "migration complete"), so it's possible for
@@ -193,63 +95,8 @@ CREATE INDEX IF NOT EXISTS idx_failure_signals_agent_shadow_alerted
 # yet, the backfill/NOT NULL step is skipped this run and retried on the next
 # restart — every ensure_*_schema() call is idempotent, so this converges
 # without operator action once ingest's migration has actually run.
-_MULTI_TENANCY_DDL = """
-ALTER TABLE processed_runs        ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE issues                ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE custom_detectors      ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE custom_detector_results ADD COLUMN IF NOT EXISTS org_id TEXT;
-"""
 
 _ORG_BACKFILL_TABLES_BY_AGENT = ("issues", "custom_detectors", "custom_detector_results")
-
-# ── Pack activation (Phase 1.0) ─────────────────────────────────────────────────
-#
-# packs is a small, Dunetrace-owned lookup table (which detector-pack classes
-# exist) — org_enabled_packs is the per-org activation side table, following
-# the same org_id-TEXT-no-FK convention every other org-scoped table in this
-# codebase uses (org_github_integrations, org_alert_integrations, etc.) rather
-# than a FK to organizations(id), which is itself TEXT (e.g. the literal
-# string 'default' in dev mode), not the uuid the original spec assumed.
-# pack_name DOES FK to packs(name) — that's Dunetrace's own small, rarely-
-# changing registry, not customer-controlled data, so the same "don't FK
-# across service/tenant boundaries" reasoning doesn't apply to it.
-_PACKS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS packs (
-    name           TEXT         PRIMARY KEY,
-    description    TEXT         NOT NULL,
-    detector_names TEXT[]       NOT NULL DEFAULT '{}',
-    added_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS org_enabled_packs (
-    org_id      TEXT         NOT NULL,
-    pack_name   TEXT         NOT NULL REFERENCES packs(name),
-    enabled_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    enabled_by  TEXT,
-    PRIMARY KEY (org_id, pack_name)
-);
-CREATE INDEX IF NOT EXISTS idx_org_enabled_packs_org ON org_enabled_packs(org_id);
-"""
-
-# Per-run state metrics (Capability 3, Phase 3.3). One row per (run, state);
-# api_svc reads these to build cross-run state analytics. run_started_at is when
-# the run happened (from run.started), so trends bucket by run time, not compute
-# time. org_id TEXT NOT NULL, no FK — same convention as every org-scoped table.
-_RUN_STATE_METRICS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS run_state_metrics (
-    run_id         TEXT         NOT NULL,
-    org_id         TEXT         NOT NULL,
-    agent_id       TEXT         NOT NULL,
-    state          TEXT         NOT NULL,
-    total_ms       BIGINT       NOT NULL,
-    segment_count  INT          NOT NULL,
-    run_started_at TIMESTAMPTZ,
-    computed_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (run_id, state)
-);
-CREATE INDEX IF NOT EXISTS idx_rsm_agent
-    ON run_state_metrics(org_id, agent_id, run_started_at);
-"""
 
 # Per-shard poll watermark. Without it the run-discovery queries have no lower
 # time bound, so every 5s poll rescans every terminal event in the whole
@@ -284,19 +131,48 @@ CREATE INDEX IF NOT EXISTS idx_rsm_agent
 # table bounds that: a run that fails MAX_PROCESSING_ATTEMPTS times is marked
 # processed with the error recorded, so a deterministically-bad run cannot spin
 # forever and is still visible as failed rather than clean.
+#
+# processed_runs.processing_error, which the exhausted-budget path writes, is
+# migration 8's.
 _RUN_FAILURE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_processing_failures (
-    run_id           TEXT        PRIMARY KEY,
+    org_id           TEXT        NOT NULL DEFAULT '',
+    run_id           TEXT        NOT NULL,
     attempts         INT         NOT NULL DEFAULT 1,
     last_error       TEXT,
-    last_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    last_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (org_id, run_id)
 );
-ALTER TABLE processed_runs ADD COLUMN IF NOT EXISTS processing_error TEXT;
+
+-- run_id is caller-supplied, so two tenants legitimately hold the same one and
+-- a run_id-only key made them share one retry budget: org A's three failures
+-- wrote off org B's run on its first blip, and A's success cleared B's
+-- counter. Same defect migration 2 fixed on runs/processed_runs. Guarded on the
+-- current key being single-column so it no-ops on a fresh install. Existing
+-- rows are transient bookkeeping, so adopting '' as their org is harmless —
+-- at worst a run in flight gets its full budget back.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        WHERE c.relname = 'run_processing_failures'
+          AND i.indisprimary
+          AND i.indnatts = 1
+    ) THEN
+        ALTER TABLE run_processing_failures
+            ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE run_processing_failures DROP CONSTRAINT run_processing_failures_pkey;
+        ALTER TABLE run_processing_failures
+            ADD CONSTRAINT run_processing_failures_pkey PRIMARY KEY (org_id, run_id);
+    END IF;
+END $$;
 """
 
 # Learned per-agent destination set for UNGROUNDED_DESTINATION's opt-in novelty
 # mode. Detector-owned (nothing else reads it), so it lives here rather than in
-# migrations — same rule run_state_metrics follows.
+# migrations — same rule run_baseline_metrics and detector_watermarks follow.
 #
 # It exists because every other baseline in this service is a scalar P75 that a
 # bounded query can compute on demand; a destination baseline is a SET, and
@@ -446,39 +322,11 @@ async def _backfill_org_id(conn) -> None:
         await conn.execute(f"UPDATE {table} SET org_id = 'default' WHERE org_id IS NULL")
         await conn.execute(f"ALTER TABLE {table} ALTER COLUMN org_id SET NOT NULL")
 
-    # issues' UNIQUE constraint must widen to include org_id, or two orgs with an
-    # identically-named agent_id + failure_type would collide.
-    await conn.execute(
-        """
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1 FROM pg_constraint WHERE conname = 'issues_agent_id_failure_type_key'
-            ) THEN
-                ALTER TABLE issues DROP CONSTRAINT issues_agent_id_failure_type_key;
-            END IF;
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint WHERE conname = 'issues_org_agent_failure_type_key'
-            ) THEN
-                ALTER TABLE issues
-                    ADD CONSTRAINT issues_org_agent_failure_type_key
-                    UNIQUE (org_id, agent_id, failure_type);
-            END IF;
-        END $$;
-        """
-    )
-
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_processed_runs_org_agent_version "
-        "ON processed_runs(org_id, agent_id, agent_version, processed_at DESC)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_issues_org_agent ON issues(org_id, agent_id)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_custom_detectors_org_agent "
-        "ON custom_detectors(org_id, agent_id, status)"
-    )
+    # issues' UNIQUE key is (org_id, agent_id, failure_type) — the widening of
+    # a pre-multi-tenancy (agent_id, failure_type) key, and the org-scoped
+    # index, are migration 12's, like the org-scoped indexes on processed_runs
+    # and custom_detectors are migration 8's. Only the NOT NULL promotion
+    # above is this service's, because only this service knows the real org.
 
 
 # Detectors that have graduated out of shadow mode.
@@ -524,22 +372,33 @@ async def ensure_detector_schema() -> None:
     Migrations own every definition more than one service touches, so this runs
     before the local DDL below — booting detector against an empty database used
     to crash on a table another service happened to create first.
-    """
-    from dunetrace_schemas.migrations import apply_migrations
 
-    if _pool:
-        async with _pool.acquire() as _c:
-            await apply_migrations(_c)
+    Apply, then require. require_schema_version is the guard for a replica
+    that could not apply (a lock timeout, a read-only standby): it raises
+    before any local DDL runs, so a too-old schema fails the start here rather
+    than the first query that reads a column it lacks.
+    """
+    from dunetrace_schemas.migrations import (
+        CURRENT_SCHEMA_VERSION,
+        apply_migrations,
+        require_schema_version,
+        schema_connection,
+    )
 
     if not _pool:
         return
-    async with _pool.acquire() as conn:
+    # Migrations, this service's own DDL and the backfills all run on a
+    # connection with no command_timeout — see schema_connection. _backfill_org_id
+    # alone runs four unbounded scans of the partitioned events table, which the
+    # pool's 15s timeout cancelled on any real database, crash-looping the worker.
+    async with schema_connection(settings.DATABASE_URL) as _c:
+        await apply_migrations(_c)
+        await require_schema_version(_c, CURRENT_SCHEMA_VERSION, "detector")
+
+    async with schema_connection(settings.DATABASE_URL) as conn:
         await conn.execute(_DETECTOR_SCHEMA)
-        await conn.execute(_MULTI_TENANCY_DDL)
         await _backfill_org_id(conn)
-        await conn.execute(_PACKS_SCHEMA)
-        await _seed_packs(conn)
-        await conn.execute(_RUN_STATE_METRICS_SCHEMA)
+        await _seed_packs(conn)  # packs table is migration 8's; the rows are ours
         await conn.execute(_DESTINATION_BASELINE_SCHEMA)
         await conn.execute(_WATERMARK_SCHEMA)
         await conn.execute(_RUN_FAILURE_SCHEMA)
@@ -1508,29 +1367,47 @@ async def fetch_completed_runs(
         rows = await conn.fetch(
             """
             WITH touched AS (
-                SELECT DISTINCT run_id
+                -- org_id travels with run_id: the join below pairs on both, so
+                -- one tenant's recent activity cannot pull another tenant's
+                -- same-named run into this poll.
+                SELECT DISTINCT run_id, org_id
                 FROM events
                 WHERE ($4::timestamptz IS NULL OR received_at > $4::timestamptz)
                   AND ($2::int = 1 OR abs(hashtext(agent_id)) % $2 = $3)
             )
-            SELECT DISTINCT ON (e.run_id)
+            -- Every correlation below carries org_id as well as run_id.
+            -- run_id is caller-supplied, so two tenants legitimately share one:
+            -- DISTINCT ON (e.run_id) collapsed their two runs into a single row
+            -- (one org never got detected at all), the processed_runs anti-join
+            -- let one tenant's processing mark the other's run done, and the
+            -- event-count comparison counted both tenants' events.
+            SELECT DISTINCT ON (e.org_id, e.run_id)
                 e.run_id,
                 e.agent_id,
                 e.agent_version,
                 e.org_id,
                 e.event_type AS trigger
             FROM events e
-            JOIN touched t ON t.run_id = e.run_id
+            JOIN touched t ON t.run_id = e.run_id AND t.org_id IS NOT DISTINCT FROM e.org_id
             WHERE e.event_type IN ('run.completed', 'run.errored')
               AND (
                   -- not yet processed …
-                  NOT EXISTS (SELECT 1 FROM processed_runs p WHERE p.run_id = e.run_id)
+                  NOT EXISTS (
+                      SELECT 1 FROM processed_runs p
+                      WHERE p.run_id = e.run_id AND p.org_id = e.org_id
+                  )
                   -- … OR processed, but new events arrived since (audit Finding 15:
                   -- late events must trigger a re-detection, not be dropped).
-                  OR (SELECT count(*) FROM events e2 WHERE e2.run_id = e.run_id)
-                     > (SELECT p.event_count FROM processed_runs p WHERE p.run_id = e.run_id)
+                  OR (
+                      SELECT count(*) FROM events e2
+                      WHERE e2.run_id = e.run_id
+                        AND e2.org_id IS NOT DISTINCT FROM e.org_id
+                  ) > (
+                      SELECT p.event_count FROM processed_runs p
+                      WHERE p.run_id = e.run_id AND p.org_id = e.org_id
+                  )
               )
-            ORDER BY e.run_id, e.received_at ASC
+            ORDER BY e.org_id, e.run_id, e.received_at ASC
             LIMIT $1
             """,
             limit,
@@ -1575,17 +1452,24 @@ async def fetch_stalled_runs(
             FROM events e
             WHERE e.event_type = 'run.started'
               AND ($5::timestamptz IS NULL OR e.received_at > $5::timestamptz)
+              -- org_id on every correlation: without it another tenant's
+              -- run.completed satisfied the "has a terminal" test for this
+              -- tenant's genuinely stalled run, their processed_runs row
+              -- suppressed it, and their recent events made it look alive.
               AND NOT EXISTS (
                   SELECT 1 FROM events t
                   WHERE t.run_id = e.run_id
+                    AND t.org_id IS NOT DISTINCT FROM e.org_id
                     AND t.event_type IN ('run.completed', 'run.errored')
               )
               AND NOT EXISTS (
-                  SELECT 1 FROM processed_runs p WHERE p.run_id = e.run_id
+                  SELECT 1 FROM processed_runs p
+                  WHERE p.run_id = e.run_id AND p.org_id = e.org_id
               )
               AND NOT EXISTS (
                   SELECT 1 FROM events recent
                   WHERE recent.run_id = e.run_id
+                    AND recent.org_id IS NOT DISTINCT FROM e.org_id
                     AND recent.received_at > NOW() - ($1 || ' seconds')::INTERVAL
               )
               AND ($3::int = 1 OR abs(hashtext(e.agent_id)) % $3 = $4)
@@ -1600,7 +1484,7 @@ async def fetch_stalled_runs(
     return [dict(r) for r in rows]
 
 
-async def fetch_run_lineage(run_id: str) -> Optional[dict]:
+async def fetch_run_lineage(run_id: str, org_id: str) -> Optional[dict]:
     """One lightweight lineage row for a run — its identity and immediate parent,
     read from `run.started` — without pulling the run's full event list.
 
@@ -1608,17 +1492,21 @@ async def fetch_run_lineage(run_id: str) -> Optional[dict]:
     (see run_graph.py / the DELEGATION_LOOP detector), where fetching every
     event of every ancestor would be wasteful — only agent_id + parent_run_id
     are needed per hop. Returns None if the run has no `run.started` on record.
+
+    org_id-scoped for the same reason fetch_run_events is: an unscoped hop
+    would walk into another tenant's delegation graph.
     """
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT run_id, agent_id, agent_version, parent_run_id
             FROM events
-            WHERE run_id = $1 AND event_type = 'run.started'
+            WHERE run_id = $1 AND org_id = $2 AND event_type = 'run.started'
             ORDER BY step_index ASC, timestamp ASC
             LIMIT 1
             """,
             run_id,
+            org_id,
         )
     return dict(row) if row else None
 
@@ -1766,8 +1654,17 @@ async def upsert_destination_baseline(
         )
 
 
-async def fetch_run_events(run_id: str) -> list[dict]:
-    """All events for a run, ordered by step_index then timestamp."""
+async def fetch_run_events(run_id: str, org_id: str) -> list[dict]:
+    """All events for a run, ordered by step_index then timestamp.
+
+    org_id is NOT redundant. run_id is caller-supplied — the SDK exposes
+    `run_id=` and the OTLP path derives it from a caller-supplied trace id — so
+    two tenants legitimately have the same one, which is why runs and
+    processed_runs are keyed (org_id, run_id). Without it this returned both
+    tenants' events and build_run_state folded them into ONE interleaved run:
+    the signal was written under one org carrying the other's tool args, model
+    output and system prompt in its evidence, readable through
+    GET /v1/signals/{id} and forwarded to an LLM provider on Explain."""
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -1775,10 +1672,11 @@ async def fetch_run_events(run_id: str) -> list[dict]:
                 event_type, run_id, agent_id, agent_version,
                 step_index, timestamp, payload, parent_run_id, conversation_id
             FROM events
-            WHERE run_id = $1
+            WHERE run_id = $1 AND org_id = $2
             ORDER BY step_index ASC, timestamp ASC
             """,
             run_id,
+            org_id,
         )
     return [
         {
@@ -1841,33 +1739,42 @@ async def write_signals(signals: list, shadow: bool, org_id: str) -> int:
 MAX_PROCESSING_ATTEMPTS = 3
 
 
-async def record_processing_failure(run_id: str, error: str) -> int:
-    """Count this failed attempt and return the running total."""
+async def record_processing_failure(run_id: str, org_id: str, error: str) -> int:
+    """Count this failed attempt and return the running total.
+
+    Keyed by (org_id, run_id): run_id alone let one tenant's failures consume
+    another tenant's retry budget for a run that merely shares the id."""
     if not _pool:
         return MAX_PROCESSING_ATTEMPTS
     async with _pool.acquire() as conn:
         return await conn.fetchval(
             """
-            INSERT INTO run_processing_failures (run_id, attempts, last_error)
-            VALUES ($1, 1, $2)
-            ON CONFLICT (run_id) DO UPDATE
+            INSERT INTO run_processing_failures (org_id, run_id, attempts, last_error)
+            VALUES ($1, $2, 1, $3)
+            ON CONFLICT (org_id, run_id) DO UPDATE
                 SET attempts        = run_processing_failures.attempts + 1,
                     last_error      = EXCLUDED.last_error,
                     last_attempt_at = NOW()
             RETURNING attempts
             """,
+            org_id,
             run_id,
             error[:2000],
         )
 
 
-async def clear_processing_failures(run_id: str) -> None:
+async def clear_processing_failures(run_id: str, org_id: str) -> None:
     """Called after a run finally processes, so a transient blip leaves nothing
-    behind and the next failure starts its budget fresh."""
+    behind and the next failure starts its budget fresh. Scoped by org_id for
+    the same reason record_processing_failure is."""
     if not _pool:
         return
     async with _pool.acquire() as conn:
-        await conn.execute("DELETE FROM run_processing_failures WHERE run_id = $1", run_id)
+        await conn.execute(
+            "DELETE FROM run_processing_failures WHERE run_id = $1 AND org_id = $2",
+            run_id,
+            org_id,
+        )
 
 
 async def mark_run_processed(
@@ -1913,25 +1820,43 @@ async def mark_run_processed(
         )
 
 
-async def fetch_run_state(run_id: str) -> Optional[dict]:
-    """Return {'event_count', 'signal_types'} for a run's prior processing, or
-    None if never processed. `signal_types` is the set of failure_type values
-    already stored for the run — used to make re-detection additive (Finding 15):
-    we only write failure types not already recorded, so a reprocess never
-    duplicates a signal or re-alerts an existing one."""
+async def fetch_run_state(run_id: str, org_id: str) -> dict:
+    """Prior processing state for a run: whether processed_runs has a row, the
+    event_count that row recorded, and the failure types ALREADY stored for the
+    run. Used to make re-detection additive (audit Finding 15): only failure
+    types not already recorded are written, so a reprocess never duplicates a
+    signal or re-alerts an existing one.
+
+    `signal_types` is read from failure_signals directly and is returned
+    WHETHER OR NOT processed_runs has a row. That distinction matters. The
+    signal-write loop can fail part-way — a pool timeout on the third of three
+    signals — which leaves the run unmarked so the next poll retries it. Keying
+    dedup off processed_runs alone made existing_types empty on that retry and
+    re-wrote the signals already stored, every poll, forever; nothing dedupes at
+    the DB layer because failure_signals has no uniqueness on
+    (run_id, failure_type).
+
+    Both reads carry org_id. processed_runs has been keyed (org_id, run_id)
+    since migration 2, so a bare lookup could return ANOTHER tenant's row — this
+    run then read as an already-processed reprocess and its signals were dropped
+    as "already recorded", silently and with nothing logged.
+    """
     if not _pool:
-        return None
+        return {"processed": False, "event_count": None, "signal_types": set()}
     async with _pool.acquire() as conn:
         prow = await conn.fetchrow(
-            "SELECT event_count FROM processed_runs WHERE run_id = $1", run_id
+            "SELECT event_count FROM processed_runs WHERE run_id = $1 AND org_id = $2",
+            run_id,
+            org_id,
         )
-        if prow is None:
-            return None
         types = await conn.fetch(
-            "SELECT DISTINCT failure_type FROM failure_signals WHERE run_id = $1", run_id
+            "SELECT DISTINCT failure_type FROM failure_signals WHERE run_id = $1 AND org_id = $2",
+            run_id,
+            org_id,
         )
     return {
-        "event_count": prow["event_count"],
+        "processed": prow is not None,
+        "event_count": prow["event_count"] if prow is not None else None,
         "signal_types": {t["failure_type"] for t in types},
     }
 
@@ -2199,7 +2124,7 @@ async def write_run_state_metrics(
                 INSERT INTO run_state_metrics
                     (run_id, org_id, agent_id, state, total_ms, segment_count, run_started_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (run_id, state) DO UPDATE
+                ON CONFLICT (org_id, run_id, state) DO UPDATE
                     SET total_ms = EXCLUDED.total_ms,
                         segment_count = EXCLUDED.segment_count,
                         run_started_at = EXCLUDED.run_started_at,

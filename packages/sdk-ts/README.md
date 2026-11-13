@@ -185,6 +185,47 @@ See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, N
 | `flushIntervalMs` | `200` | Background buffer drain interval (ms) |
 | `emitAsJson` | `false` | Loki NDJSON mode |
 | `emitter` | `HttpBatchEmitter` | Custom batch-shipping strategy — see [Durable retry](#durable-retry) |
+| `bufferSize` | `10000` | Outbound event buffer capacity — see [Buffer overflow](#buffer-overflow) |
+| `maxFieldChars` | `8192` | Per-field character cap on free text — see [Redaction and content caps](#redaction-and-content-caps). `0` disables |
+| `redact` | — | `(args) => args` hook applied to structured tool args before the built-in denylist |
+| `redactKeys` | — | Extra key names for the built-in denylist |
+
+## Redaction and content caps
+
+The SDK is the only place secrets are stripped — the server never redacts, and
+caps only the OTLP path. Every value under a secret-looking key in structured
+tool args is replaced with `[REDACTED]` before serialisation, and every free-text
+field (tool args and output, LLM output, retrieval query/content, memory values,
+`input_text`, `system_prompt`) is cut at `maxFieldChars`.
+
+Key matching is on **words**, so `accessToken`, `access_token`, `X-Api-Key` and
+`APIKey` all hit the same denylist entry; an entry matches a key that equals it
+or ends with `_<entry>`. The built-in list covers `authorization`, `api_key`,
+`apikey`, `token`, `secret`, `password`, `cookie` and `set_cookie`.
+
+A capped field carries `<field>_truncated: true` and
+`<field>_original_length: N` alongside it; an uncapped one carries neither, so
+ordinary payloads are unchanged.
+
+```ts
+const dt = new Dunetrace({
+  maxFieldChars: 4096,
+  redactKeys: ["patientId", "X-Session-Id"],
+  redact: (args) => ({ ...args, internalNotes: undefined }),
+});
+```
+
+## Buffer overflow
+
+The outbound buffer holds `bufferSize` events. When it is full it sheds the
+**oldest whole run** — not the event that happened to arrive next. Dropping
+single events produced partial runs the detector could not tell apart from
+complete ones (a tool loop with its early calls missing looks clean).
+
+`run.completed` / `run.errored` are **never** shed. A run that was cut reaches
+the server with `dropped_events: <n>` on its terminal, so its signals are held
+in shadow rather than reported as if drawn from the whole run. Shedding logs one
+warning a minute, not one per dropped event.
 
 ## Durable retry
 
@@ -234,7 +275,7 @@ Node.js only — there is no browser build of this SDK today (`engines.node >= 2
 
 ## What it detects
 
-31 structural detectors run on every completed run — no LLM, no configuration required. Detection runs server-side (the same detector worker processes every agent's events regardless of source SDK), so additions here apply to TypeScript agents automatically. A few of the main ones:
+34 structural detectors run on every completed run — no LLM, no configuration required. Detection runs server-side (the same detector worker processes every agent's events regardless of source SDK), so additions here apply to TypeScript agents automatically. A few of the main ones:
 
 | Category | Detectors |
 |---|---|
@@ -243,7 +284,7 @@ Node.js only — there is no browser build of this SDK today (`engines.node >= 2
 | Security | `PROMPT_INJECTION_SIGNAL` `MEMORY_POISONING` |
 | Silent degradation | `PREMATURE_TERMINATION` `RUNAWAY_ITERATION` |
 
-→ [docs/detectors.md](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md) for the full list of 31 detectors
+→ [docs/detectors.md](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md) for the full list of 34 detectors
 
 You can also define **custom detectors** in plain English from the dashboard or API. They run in shadow mode on every run and accumulate results before any alert fires. → [Custom detectors](https://github.com/dunetrace/dunetrace/blob/main/docs/detectors.md#custom-detectors)
 

@@ -62,7 +62,7 @@ with your API key and a poll interval. Or call the API directly:
 
 ```bash
 POST /v1/orgs/integrations/elevenlabs
-Authorization: Bearer dt_live_...
+Authorization: Bearer dt_...
 Content-Type: application/json
 
 {

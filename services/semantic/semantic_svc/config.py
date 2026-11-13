@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+from dunetrace_schemas.deploy_guard import assert_safe_deployment
+
 
 def _load_dotenv(path: str = ".env") -> None:
     try:
@@ -28,8 +30,27 @@ class Settings:
         "postgresql://dunetrace:dunetrace@localhost:5432/dunetrace",
     )
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    # Deployment identity — read only by the startup guard at the bottom of
+    # this file. This worker authenticates nothing, so neither value changes
+    # its behaviour; they exist so ENV=prod with AUTH_MODE=dev is refused on
+    # every container, not just the two HTTP services. Same defaults as
+    # ingest_svc/api_svc: ENV is dev unless told otherwise, AUTH_MODE fails
+    # closed to prod.
+    ENV: str = os.getenv("ENV", "dev")
+    AUTH_MODE: str = os.getenv("AUTH_MODE", "prod")
     POLL_INTERVAL: float = float(os.getenv("POLL_INTERVAL", "15"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "100"))
+
+    # Build identity for dunetrace_build_info{service="semantic",version=...}.
+    # Same resolution as ingest_svc/api_svc: APP_VERSION, else GIT_COMMIT, else
+    # the package version. Set one of them in deploy to identify the build.
+    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
+    # Port for the worker's own /metrics, /ready and /health (stdlib HTTP server
+    # from dunetrace_schemas.metrics, bound on every interface so the compose
+    # healthcheck and an in-network scraper can reach it; compose does not
+    # publish it). 0 disables the server. Only started when the worker is
+    # enabled — a disabled worker exits 0 and has nothing to scrape.
+    METRICS_PORT: int = int(os.getenv("METRICS_PORT", "9103"))
 
     # Disabled by default — an OSS install that never sets this never opens a DB
     # pool for this service, let alone calls an LLM. See run_worker().
@@ -76,3 +97,6 @@ class Settings:
 
 
 settings = Settings()
+
+# ENV=prod with AUTH_MODE=dev never comes up — see dunetrace_schemas.deploy_guard.
+assert_safe_deployment("semantic", settings.ENV, settings.AUTH_MODE)

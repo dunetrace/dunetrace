@@ -26,11 +26,21 @@ from setuptools.command.build_py import build_py
 # without adding it here fails the suite rather than shipping a broken build.
 BUNDLED_DOCS = [
     "detectors.md",
+    "integrate-autogen-agent.md",
+    "integrate-crewai-agent.md",
     "integrate-custom-python-agent.md",
+    "integrate-dify.md",
     "integrate-haystack-agent.md",
     "integrate-langchain-agent.md",
     "integrate-langdock.md",
+    "integrate-litellm.md",
+    "integrate-llamaindex.md",
+    "integrate-openai-agents.md",
+    "integrate-pydantic-ai.md",
+    "integrate-smolagents.md",
     "integrate-typescript-agent.md",
+    "integrate-vercel-ai.md",
+    "integrations/voice-frameworks.md",
     "mcp-server.md",
     "policies.md",
 ]
@@ -65,7 +75,12 @@ def _copy_docs() -> None:
         if not src.is_file():
             missing.append(name)
             continue
-        shutil.copy2(src, _DEST / name)
+        # A name may carry a subdirectory (integrations/...). Mirror it rather
+        # than flattening, so _read_doc can use one repo-relative path for both
+        # the wheel and the checkout.
+        dest = _DEST / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
 
     if missing:
         raise SystemExit(

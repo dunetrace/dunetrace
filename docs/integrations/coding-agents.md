@@ -20,7 +20,7 @@ and [auto-instrumentation.md](auto-instrumentation.md)).
 |---|---|
 | **Claude Code** | `pip install dunetrace-mcp` registers it automatically in `~/.claude.json`. Restart Claude Code. |
 | **Cursor** | Add `.cursor/mcp.json` to your project — see [docs/mcp-server.md#cursor](../mcp-server.md#cursor). |
-| **Codex / OpenAI Responses API** | Run `dunetrace-mcp --sse` and point the tool endpoint at it — see [docs/mcp-server.md#codex--sse-clients](../mcp-server.md#codex--sse-clients). |
+| **Codex / OpenAI Responses API** | Run `dunetrace-mcp --sse` (loopback only by default; the SSE server has no auth of its own) and point the tool endpoint at `http://127.0.0.1:8000/sse` — see [docs/mcp-server.md#codex--sse-clients](../mcp-server.md#codex--sse-clients). |
 
 ## What it's for
 

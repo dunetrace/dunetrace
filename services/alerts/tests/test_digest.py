@@ -164,6 +164,19 @@ class TestFormatDigestSlack(unittest.TestCase):
         self.assertIn("attachments", payload)
         self.assertIsInstance(json.dumps(payload), str)
 
+    def test_has_top_level_notification_text(self):
+        """Without a top-level `text`, Slack desktop/mobile notifications
+        show "no preview available"."""
+        payload = format_digest_slack(_sample_data(), "org-1")
+        self.assertTrue(payload.get("text"))
+        self.assertIn("Weekly agent health digest", payload["text"])
+        self.assertEqual(payload["attachments"][0]["fallback"], payload["text"])
+
+    def test_notification_text_has_no_mrkdwn_markers(self):
+        text = format_digest_slack(_sample_data(), "org-1")["text"]
+        for ch in "`*~":
+            self.assertNotIn(ch, text)
+
     def test_header_block_contains_digest_label(self):
         blocks = self._blocks()
         header = blocks[0]

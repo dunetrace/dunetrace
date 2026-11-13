@@ -33,9 +33,22 @@ the shape that turns a write tool into a confused deputy. `create_policy` and
 `toggle_policy` affect **live agent runs**: a `stop` policy terminates real runs
 as soon as the SDK next pulls policies.
 
+**Opting in also needs the right credential.** Seven of the nine write tools —
+the three policy tools and the four custom-detector tools — call Customer API
+endpoints that require an API key with the **`admin`** scope, so in prod mode
+`DUNETRACE_API_KEY` has to carry it or those calls return `403`. `resolve_issue`
+and `trigger_explain` work with any key for the org. Every read tool works with
+an agent's ingest-only key, and that is the right key for a read-only server:
+give the MCP server an admin key only when you have turned the write tools on.
+In `AUTH_MODE=dev` (the local quickstart) every request is already admin, so
+nothing changes there. How keys and scopes are minted is in
+[Operations › Deploying](operations.md#minting-the-first-api-key).
+
 > Earlier versions of this page advised issuing the MCP server "an API key
-> scoped to reads". No read-scoped key exists in Dunetrace, so that advice
-> mitigated nothing. Withholding the tools is the mechanism that actually works.
+> scoped to reads". No read-scoped key exists in Dunetrace: an ingest-only key
+> is now kept out of the seven admin-gated writes, but it can still resolve
+> issues, trigger explains and submit events. Withholding the tools is the
+> mechanism that actually works; the scope is the second lock, not the first.
 
 ---
 
@@ -104,14 +117,29 @@ Create `.cursor/mcp.json` in your project root (or global `~/.cursor/mcp.json`):
 
 ### Codex / SSE clients
 
-Run the server in SSE mode (listens on `:8000` by default):
+Run the server in SSE mode. It binds **loopback only** (`127.0.0.1:8000`) by
+default:
 
 ```bash
 dunetrace-mcp --sse
-dunetrace-mcp --sse --port 9000   # custom port
+dunetrace-mcp --sse --port 9000            # custom port
+dunetrace-mcp --sse --host 0.0.0.0         # expose it — read the warning below first
 ```
 
-Point your client's tool endpoint at `http://localhost:8000/sse`.
+Point your client's tool endpoint at `http://127.0.0.1:8000/sse`.
+
+> **The SSE server has no authentication.** There is no bearer check, no
+> allow-list, nothing. Anyone who can reach the port can call every registered
+> tool using *your* `DUNETRACE_API_KEY` — and under `AUTH_MODE=dev` that key is
+> an admin of every org. With `DUNETRACE_MCP_READONLY=false` that includes the
+> nine writing tools: `create_policy(action="stop")` terminates every
+> production run of an agent as soon as the SDK next pulls policies, and
+> `delete_policy` removes guardrails that are already in place.
+>
+> That is why the default bind is loopback and why `--host` exists: exposing it
+> has to be a deliberate act. The server prints a warning on any non-loopback
+> bind. If a remote client genuinely needs to reach it, put an authenticating
+> reverse proxy in front and keep the server itself on loopback.
 
 ### Manual test (stdio)
 
@@ -129,8 +157,11 @@ The server speaks MCP over stdin/stdout. You can pipe JSON-RPC messages manually
 |---|---|---|
 | `DUNETRACE_API_URL` | `http://localhost:8002` | Customer API base URL |
 | `DUNETRACE_API_KEY` | `dt_dev_test` | Bearer token (auth header) |
+| `DUNETRACE_MCP_READONLY` | `true` | Withhold the nine write tools. Set `false` to register them |
 
-For production, set `DUNETRACE_API_KEY` to your real API key.
+For production, set `DUNETRACE_API_KEY` to a real key: an ingest-only key covers
+every read tool; with `DUNETRACE_MCP_READONLY=false` the key must carry the
+`admin` scope for the policy and custom-detector tools (see above).
 
 ---
 
@@ -510,6 +541,8 @@ Full context for a single issue — metadata, affected runs, root cause, and a s
 
 May trigger an LLM call to generate the root cause/fix (the same native root-cause analysis `trigger_explain` uses) and can take 5–15 seconds. If no LLM key is configured on the backend, `root_cause`/`suggested_fix` are omitted but the rest of the report still returns.
 
+For the four `dunetrace_native` failure types — `TOOL_LOOP`, `RETRY_STORM`, `CASCADING_TOOL_FAILURE`, `STEP_COUNT_INFLATION` — the fix is a runtime policy rather than a diff, so the report adds a **SUGGESTED POLICY** block with the policy's name, agent, condition and action. The same body is returned machine-readably as `suggested_policy`, shaped exactly like `POST /v1/policies` expects, so it can be applied unchanged. (This path used to return a 500: the policy is a structured object and the field carrying it was typed as free text.)
+
 `code_references` (the source file/line an issue maps to) is always empty for now — Dunetrace has no source-mapping capability yet.
 
 **Arguments:**
@@ -631,9 +664,13 @@ Quick-start code snippet for instrumenting an agent with Dunetrace.
 
 | Argument | Type | Description |
 |---|---|---|
-| `framework` | string | `langchain`, `python`, `typescript`, `haystack`, `tools`, `voice`, or `otel` |
+| `framework` | string | `autogen`, `crewai`, `dify`, `haystack`, `langchain`, `litellm`, `llamaindex`, `openai-agents`, `otel`, `pydantic-ai`, `python`, `smolagents`, `tools`, `typescript`, `vercel-ai`, `voice` |
 
-Aliases: `langgraph`, `lc`, `ts`, `js`, `node`, `haystack-ai`, `voice-agent`, `stt`, `tts`, `speech`, `otlp`, `opentelemetry`, `langdock`, `dify`, `tool-calls`, `tracking`.
+Aliases: `ag2`, `agents-sdk`, `ai-sdk`, `autogen-agentchat`, `crew`, `crew-ai`, `custom python`, `custom-python`, `haystack-ai`, `haystack2`, `hs`, `javascript`, `js`, `langdock`, `langgraph`, `lc`, `lc-graph`, `lc_graph`, `litellm-proxy`, `llama-index`, `llama_index`, `next.js`, `nextjs`, `no-code`, `node`, `nodejs`, `open-telemetry`, `openai_agents`, `opentelemetry`, `otlp`, `py`, `pydantic_ai`, `pydanticai`, `rag`, `smol`, `smolagent`, `speech`, `stt`, `swarm`, `tool`, `tool-calls`, `tool_calls`, `tracking`, `ts`, `tts`, `vercel`, `voice-agent`, `voice-agents`, `voice_agent`, `zero-code`.
+
+Each returns a short inline guide where one exists, followed by the full
+Markdown guide. The guides are bundled into the wheel at build time, so a
+`pip install dunetrace-mcp` gets the same content as a source checkout.
 
 ---
 
@@ -1013,7 +1050,9 @@ Dunetrace itself: `create_policy` and `toggle_policy` change how **live agent
 runs** behave (a `stop` policy terminates real runs from the moment the SDK
 next pulls policies), and `trigger_explain` / `create_custom_detector` each
 spend an LLM call against your configured provider. Everything else is scoped
-to Dunetrace's own records.
+to Dunetrace's own records. The policy and custom-detector tools need an
+`admin`-scoped `DUNETRACE_API_KEY` in prod mode; `resolve_issue` and
+`trigger_explain` accept any key for the org.
 
 ---
 

@@ -1,7 +1,11 @@
 """
 Core data models. No external dependencies.
-Content fields carry raw text — tool args, tool output, LLM output, and errors
-are transmitted as-is to the backend over TLS.
+Content fields carry text, not hashes — tool args, tool output, LLM output and
+errors reach the backend readable, over TLS. Before they are shipped the SDK
+redacts credential-shaped keys and caps every content field (see
+``dunetrace.redaction``: ``DEFAULT_DENYLIST``, ``max_field_chars`` — default
+8192 characters, with ``<field>_truncated`` / ``<field>_original_length``
+markers on the wire when a cap applies).
 """
 
 from __future__ import annotations
@@ -10,7 +14,6 @@ import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Dict, List, Optional
 
 try:
@@ -22,95 +25,11 @@ except ImportError:  # Python 3.7
 # ── Event Types ────────────────────────────────────────────────────────────────
 
 
-class EventType(str, Enum):
-    RUN_STARTED = "run.started"
-    RUN_COMPLETED = "run.completed"
-    RUN_ERRORED = "run.errored"
-    LLM_CALLED = "llm.called"
-    LLM_RESPONDED = "llm.responded"
-    TOOL_CALLED = "tool.called"
-    TOOL_RESPONDED = "tool.responded"
-    RETRIEVAL_CALLED = "retrieval.called"
-    RETRIEVAL_RESPONDED = "retrieval.responded"
-    EXTERNAL_SIGNAL = "external.signal"
-    POLICY_TRIGGERED = "policy.triggered"
-    # Policy evaluation observability (rate-limited): one record per policy
-    # evaluation, shipped via the normal transport but routed by ingest into the
-    # policy_evaluations table rather than stored as a run event. Kept in sync
-    # with dunetrace_schemas.enums.EventType (test_sdk_parity.py).
-    POLICY_EVALUATED = "policy.evaluated"
-    # Voice-agent events (detector pack "voice"). Additive: emitted only by the
-    # optional voice-specific RunContext helpers; no built-in detector reads
-    # them until the voice pack is active. Kept value-for-value in sync with
-    # dunetrace_schemas.enums.EventType (enforced by test_sdk_parity.py).
-    TRANSCRIPTION_RECEIVED = "transcription.received"
-    TTS_GENERATED = "tts.generated"
-    VOICE_ACTIVITY_DETECTED = "voice_activity.detected"
-    TURN_TAKING = "turn_taking.changed"
-    RECORDING_AVAILABLE = "recording.available"
-    # Human-in-the-loop approval events (Capability 2). Emitted around a
-    # require_approval policy gate. Kept value-for-value in sync with
-    # dunetrace_schemas.enums.EventType (enforced by test_sdk_parity.py).
-    APPROVAL_REQUESTED = "approval.requested"
-    APPROVAL_GRANTED = "approval.granted"
-    APPROVAL_DENIED = "approval.denied"
-    APPROVAL_TIMEOUT = "approval.timeout"
-    # Agent memory channel (Capability 1). Content written to / read from / cleared
-    # in agent memory, so a run's persisted state is observable. Kept value-for-
-    # value in sync with dunetrace_schemas.enums.EventType (test_sdk_parity.py).
-    MEMORY_WRITTEN = "memory.written"
-    MEMORY_READ = "memory.read"
-    MEMORY_CLEARED = "memory.cleared"
-
-
-class Severity(str, Enum):
-    CRITICAL = "CRITICAL"
-    HIGH = "HIGH"
-    MEDIUM = "MEDIUM"
-    LOW = "LOW"
-
-
-class FailureType(str, Enum):
-    TOOL_LOOP = "TOOL_LOOP"
-    TOOL_THRASHING = "TOOL_THRASHING"
-    TOOL_AVOIDANCE = "TOOL_AVOIDANCE"
-    GOAL_ABANDONMENT = "GOAL_ABANDONMENT"
-    PROMPT_INJECTION_SIGNAL = "PROMPT_INJECTION_SIGNAL"
-    RAG_EMPTY_RETRIEVAL = "RAG_EMPTY_RETRIEVAL"
-    EXCESSIVE_RETRIEVAL = "EXCESSIVE_RETRIEVAL"
-    LLM_TRUNCATION_LOOP = "LLM_TRUNCATION_LOOP"
-    SILENT_TRUNCATION = "SILENT_TRUNCATION"
-    CONTEXT_BLOAT = "CONTEXT_BLOAT"
-    SLOW_STEP = "SLOW_STEP"
-    RETRY_STORM = "RETRY_STORM"
-    EMPTY_LLM_RESPONSE = "EMPTY_LLM_RESPONSE"
-    STEP_COUNT_INFLATION = "STEP_COUNT_INFLATION"
-    CASCADING_TOOL_FAILURE = "CASCADING_TOOL_FAILURE"
-    FIRST_STEP_FAILURE = "FIRST_STEP_FAILURE"
-    USER_DISSATISFACTION = "USER_DISSATISFACTION"
-    INTENT_MISALIGNMENT = "INTENT_MISALIGNMENT"
-    REASONING_STALL = "REASONING_STALL"
-    CONFIDENT_HALLUCINATION = "CONFIDENT_HALLUCINATION_PROXY"
-    POLICY_VIOLATION = "POLICY_VIOLATION"
-    COST_SPIKE = "COST_SPIKE"
-    SESSION_LATENCY = "SESSION_LATENCY"
-    PREMATURE_TERMINATION = "PREMATURE_TERMINATION"
-    UNREAD_TOOL_ERROR = "UNREAD_TOOL_ERROR"
-    TOOL_ARGUMENT_FABRICATION = "TOOL_ARGUMENT_FABRICATION"
-    RETRIEVED_CONTENT_INJECTION = "RETRIEVED_CONTENT_INJECTION"
-    HANDOFF_CONTEXT_LOSS = "HANDOFF_CONTEXT_LOSS"
-    AGENT_HANDOFF_FAILURE = "AGENT_HANDOFF_FAILURE"
-    RUNAWAY_ITERATION = "RUNAWAY_ITERATION"
-    MODEL_FALLBACK_DRIFT = "MODEL_FALLBACK_DRIFT"
-    MEMORY_POISONING = "MEMORY_POISONING"
-    DELEGATION_LOOP = "DELEGATION_LOOP"
-    OVERSIZED_TOOL_ARGUMENTS = "OVERSIZED_TOOL_ARGUMENTS"
-    UNGROUNDED_DESTINATION = "UNGROUNDED_DESTINATION"
-    # Not an agent failure: the SDK could not measure the run. Kept in the same
-    # enum so it travels the existing signal pipeline, but it describes the
-    # telemetry, not the agent.
-    INSTRUMENTATION_DEGRADED = "INSTRUMENTATION_DEGRADED"
-    CUSTOM = "CUSTOM"  # sentinel for user-defined custom detectors
+# EventType, Severity and FailureType are generated — see
+# packages/schemas-py/dunetrace_schemas/enum_source.py (the single source of
+# truth, shared with dunetrace_schemas.enums) and scripts/gen_enums.py. They are
+# re-exported here so `from dunetrace.models import EventType` keeps working.
+from dunetrace._enums import EventType, FailureType, Severity
 
 
 # ── Agent Event ────────────────────────────────────────────────────────────────
@@ -170,8 +89,9 @@ class ToolCall:
     # True length of `args` before any transport-side truncation. The OTLP
     # ingest path caps stored args at OTLP_MAX_ATTR_CHARS (8192), which is below
     # OVERSIZED_TOOL_ARGUMENTS' threshold — so `len(args)` alone could never fire
-    # that detector on an OTel-ingested run. None on the SDK path, where args are
-    # never truncated and `len(args)` is already the true length.
+    # that detector on an OTel-ingested run. The SDK path sets it too whenever
+    # its own cap (max_field_chars, default 8192) truncated `args`; None means
+    # `len(args)` is already the true length.
     args_length: Optional[int] = None
 
 
@@ -288,6 +208,11 @@ class RunState:
     exit_reason: Optional[str] = None
     input_text: Optional[str] = None
     system_prompt: Optional[str] = None
+    # Events the SDK's outbound buffer shed for this run under overload, read
+    # from the run.completed / run.errored payload. > 0 means the run is
+    # incomplete: the detector holds its signals in shadow with capped
+    # confidence and severity rather than trusting a verdict on partial data.
+    dropped_events: int = 0
     # Cross-run baselines populated by the server before detectors run.
     # None = insufficient history. Local self-hosted mode may leave these None.
     baseline_p75_steps: Optional[float] = None

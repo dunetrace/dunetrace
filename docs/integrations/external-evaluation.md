@@ -46,7 +46,7 @@ state, not a failure.
 
 ```bash
 POST /v1/orgs/integrations/langfuse
-Authorization: Bearer dt_live_...
+Authorization: Bearer dt_...
 Content-Type: application/json
 
 {
@@ -118,8 +118,8 @@ framework with no pull-friendly API, or a one-off backfill — push results
 directly:
 
 ```bash
-POST /v1/semantic-signals/external
-Authorization: Bearer dt_live_...
+POST /v1/semantic-signals
+Authorization: Bearer dt_...
 Content-Type: application/json
 
 {

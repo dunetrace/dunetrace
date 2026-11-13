@@ -144,6 +144,15 @@ export interface LlmRespondedOptions {
    *  (o-series, extended-thinking models). Kept separate from completionTokens so
    *  cost accounting and the OTel exporter can attribute them distinctly. */
   reasoningTokens?:  number;
+  /** Which llmCalled() this response belongs to — the number llmCalled()
+   *  returned. Defaults to the most recent call, which is correct whenever
+   *  called/responded are adjacent (every manual caller, every non-streaming
+   *  patcher). A STREAMED call breaks that adjacency: the response is not known
+   *  until the caller drains, which may be after other calls have started, so
+   *  the streaming instrumentation captures the id at call time and passes it
+   *  here. Without it two overlapping streams emit called(A), called(B),
+   *  responded(A), responded(B) and positional pairing swaps their responses. */
+  callId?:           number;
 }
 
 /** A synchronous per-event sink. Each AgentEvent is handed to it as it is
@@ -171,4 +180,28 @@ export interface ClientOptions {
    *  alongside Dunetrace's own ingest. Additive and opt-in; a failure in the sink
    *  never touches ingest. */
   exporter?: EventSink;
+  /** Per-field character cap on every free-text field the SDK ships (tool args
+   *  and output, LLM output, retrieval query/content, memory values, input_text,
+   *  system_prompt). Defaults to 8192 — the same cap the OTLP ingest path
+   *  enforces — so a run reads the same whichever transport it arrived on. A
+   *  capped field carries `<field>_truncated` / `<field>_original_length`
+   *  siblings. 0 disables the cap. See redaction.ts. */
+  maxFieldChars?: number;
+  /** Hook applied to structured tool args before the built-in denylist, for
+   *  domain-specific fields the denylist cannot know about. Gets a shallow copy
+   *  and must return an object; if it throws or returns anything else its
+   *  output is discarded and the built-in denylist still applies. Runs on every
+   *  tool call, so keep it cheap. */
+  redact?: (args: Record<string, unknown>) => Record<string, unknown>;
+  /** Extra key names for the built-in denylist. Matching is on normalised
+   *  words, so `"X-Session-Id"` and `"xSessionId"` are the same entry, and an
+   *  entry matches a key that equals it or ends with `_<entry>`. */
+  redactKeys?: string[];
+  /** Flush the buffer when the process exits naturally, so a script that never
+   *  calls `dt.shutdown()` still ships its events (the periodic drain timer is
+   *  unref'd and a short-lived process exits before it ever fires). Defaults to
+   *  true; set false to opt out. Uses Node's `beforeExit`, which never delays an
+   *  exit that was going to happen anyway — see the "Exit flush" note in
+   *  client.ts. `process.exit()` and fatal signals still bypass it. */
+  flushOnExit?: boolean;
 }

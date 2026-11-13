@@ -426,7 +426,7 @@ class TestMaybeRunConversationEvaluator(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
-        async def fake_fetch_run_events(run_id):
+        async def fake_fetch_run_events(org_id, run_id):
             return events_by_run[run_id]
 
         with (

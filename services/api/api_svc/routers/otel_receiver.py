@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.db.queries import (
     fetch_otel_receiver_stats,
     get_org_otel_ingestion_enabled,
@@ -58,7 +58,7 @@ async def get_otel_ingestion_enabled(org_id: str = Depends(require_org)) -> dict
 )
 async def set_otel_ingestion_enabled(
     body: OtelIngestionToggle,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> dict:
     await set_org_otel_ingestion_enabled(org_id, body.enabled)
     return {"enabled": body.enabled}

@@ -53,9 +53,24 @@ class DeployResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    """GET /health — liveness. No dependency state here by design; see
+    ReadyResponse for that."""
+
     status: str = "ok"
     version: str = "0.5.0"
-    db: str = "unknown"
+
+
+class ReadyResponse(BaseModel):
+    """GET /ready — the readiness verdict and the inputs it was made from
+    (dunetrace_schemas.metrics.db_ready's info dict, plus the build version).
+    Served with 200 when status is "ok", 503 when it is "not_ready"."""
+
+    status: str  # "ok" | "not_ready"
+    version: str
+    db: str  # "ok" | "no_pool" | the exception class name the check hit
+    schema_version: Optional[int] = None  # applied migration version; None when unreachable
+    required: int  # CURRENT_SCHEMA_VERSION this build needs
+    pool: Optional[Dict[str, Any]] = None  # size/min/max/idle when the pool exposes them
 
 
 class KeyCreateRequest(BaseModel):
@@ -63,12 +78,22 @@ class KeyCreateRequest(BaseModel):
     admin_key: str = Field(min_length=1)
     org_name: Optional[str] = None
     rate_limit_rpm: int = Field(default=600, ge=1, le=100_000)
+    # Scopes to grant (see dunetrace_schemas.scopes). None — the field omitted —
+    # mints an ``admin`` key: this is the operator's bootstrap endpoint, and an
+    # admin key is the one thing a fresh install cannot get any other way. Pass
+    # a list (e.g. ``["ingest"]``) to mint something narrower; unknown names
+    # are dropped and an all-unknown or empty list falls back to ``ingest``.
+    # See routers/ingest.py::create_key for why this default differs from the
+    # Customer API's.
+    scopes: Optional[List[str]] = None
 
 
 class KeyCreateResponse(BaseModel):
-    key: str
+    key: str  # full key — returned once, never stored or logged
+    key_prefix: str  # non-secret leading characters, as listed by GET /v1/keys
     org_id: str
     org_name: str
+    scopes: List[str]  # what was actually written, after normalisation
     created_at: float = Field(default_factory=time.time)
 
 

@@ -20,6 +20,7 @@ except ImportError:
     asyncpg = None  # type: ignore
 
 from api_svc.config import settings
+from api_svc.explain_common import _get_step_range
 from dunetrace.models import FailureSignal, FailureType, Severity
 from explainer_svc.explainer import coerce_failure_type, explain
 
@@ -29,76 +30,13 @@ _pool = None
 
 # ── Pool lifecycle ─────────────────────────────────────────────────────────────
 
-_MIGRATIONS_DDL = """
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS co_signal_count INTEGER NOT NULL DEFAULT 0;
-"""
+# Every table this service shares with another — failure_signals, organizations,
+# api_keys, fixes, policies, policy_evaluations, custom_detectors,
+# custom_detector_results, packs, org_enabled_packs, run_state_metrics — is
+# declared by dunetrace_schemas.migrations, which init_pool() applies before
+# any of the DDL below. What is declared here is this service's alone.
 
-_FIXES_DDL = """
-CREATE TABLE IF NOT EXISTS fixes (
-    id                    BIGSERIAL PRIMARY KEY,
-    run_id                TEXT        NOT NULL,
-    signal_id             BIGINT      NOT NULL,
-    fix_content           TEXT        NOT NULL,
-    fix_type              TEXT        NOT NULL DEFAULT 'prompt_addition',
-    applied_via           TEXT        NOT NULL,
-    langfuse_prompt_name  TEXT,
-    langfuse_version      INTEGER,
-    applied_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- org_id is nullable here: this table is also created by ingest_svc, which owns the
--- org_id backfill + NOT NULL migration (services/ingest/ingest_svc/db/postgres.py).
--- Whichever service starts first creates the base table; the other's ALTER ... ADD
--- COLUMN IF NOT EXISTS / backfill is a no-op or idempotent catch-up.
-ALTER TABLE fixes ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_fixes_signal_id ON fixes(signal_id);
-CREATE INDEX IF NOT EXISTS idx_fixes_run_id    ON fixes(run_id, applied_at DESC);
-"""
-
-_POLICIES_DDL = """
-CREATE TABLE IF NOT EXISTS policies (
-    id          BIGSERIAL PRIMARY KEY,
-    agent_id    TEXT        NOT NULL DEFAULT '*',
-    name        TEXT        NOT NULL,
-    condition   JSONB       NOT NULL,
-    action      JSONB       NOT NULL,
-    enabled     BOOLEAN     NOT NULL DEFAULT TRUE,
-    priority    INT         NOT NULL DEFAULT 100,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- See fixes.org_id comment above — same cross-service "whichever wins" ownership.
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent_id, enabled);
-"""
-
-_POLICY_SECURITY_DDL = """
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT '';
--- Which version of the HMAC canonical form a policy was signed under. Existing
--- rows default to 1 (the original form); policies using a condition.match
--- expression block are signed as 2. Verification is driven by this per-row value.
-ALTER TABLE policies ADD COLUMN IF NOT EXISTS sig_version INT NOT NULL DEFAULT 1;
-
--- Policy evaluation observability (Phase 5). Owned/written by ingest_svc; created
--- defensively here (IF NOT EXISTS) so the API's read query never fails if the API
--- happens to start first. Kept in sync with ingest_svc's DDL.
-CREATE TABLE IF NOT EXISTS policy_evaluations (
-    id              BIGSERIAL PRIMARY KEY,
-    org_id          TEXT,
-    policy_id       BIGINT,
-    policy_name     TEXT        NOT NULL DEFAULT '',
-    agent_id        TEXT        NOT NULL DEFAULT '',
-    run_id          TEXT,
-    trigger_name    TEXT,
-    trigger_matched BOOLEAN,
-    fired           BOOLEAN,
-    sampled         BOOLEAN     NOT NULL DEFAULT FALSE,
-    reason          TEXT,
-    conditions      JSONB,
-    evaluated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_policy_evals_policy
-    ON policy_evaluations(org_id, policy_id, evaluated_at DESC);
-
+_POLICY_AUDIT_DDL = """
 CREATE TABLE IF NOT EXISTS policy_audit_log (
     id          BIGSERIAL    PRIMARY KEY,
     policy_id   BIGINT,
@@ -125,8 +63,6 @@ CREATE INDEX IF NOT EXISTS idx_policy_audit_changed_at ON policy_audit_log(chang
 """
 
 _FEEDBACK_DDL = """
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
-
 CREATE TABLE IF NOT EXISTS agent_detector_overrides (
     agent_id         TEXT        NOT NULL,
     failure_type     TEXT        NOT NULL,
@@ -163,102 +99,12 @@ END $$;
 ALTER TABLE agent_detector_overrides ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
 """
 
-_KEYS_DDL = """
--- organizations/org_id replace companies/customer_id (see
--- services/ingest/ingest_svc/db/postgres.py for the rename migration that owns
--- this transition). This DDL only needs to land the NEW shape idempotently —
--- whichever of ingest_svc/api_svc starts first creates it.
-CREATE TABLE IF NOT EXISTS organizations (
-    id          TEXT PRIMARY KEY,
-    name        TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-INSERT INTO organizations (id, name) VALUES ('default', 'Default Organization')
-    ON CONFLICT (id) DO NOTHING;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS id BIGSERIAL;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS org_id TEXT;
-ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_rpm INTEGER NOT NULL DEFAULT 600;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_id ON api_keys(id);
-"""
-
-_CUSTOM_DETECTORS_DDL = """
-CREATE TABLE IF NOT EXISTS custom_detectors (
-    id                BIGSERIAL    PRIMARY KEY,
-    agent_id          TEXT         NOT NULL DEFAULT '*',
-    name              TEXT         NOT NULL,
-    description       TEXT         NOT NULL,
-    config_json       JSONB        NOT NULL,
-    status            TEXT         NOT NULL DEFAULT 'shadow',
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    total_runs        INTEGER      NOT NULL DEFAULT 0,
-    shadow_fire_count INTEGER      NOT NULL DEFAULT 0
-);
--- org_id ownership: see detector_svc/db.py, which also creates this table and
--- owns the org_id backfill + NOT NULL migration for it.
-ALTER TABLE custom_detectors ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_custom_detectors_agent ON custom_detectors(agent_id, status);
-
-CREATE TABLE IF NOT EXISTS custom_detector_results (
-    id           BIGSERIAL    PRIMARY KEY,
-    detector_id  BIGINT       NOT NULL REFERENCES custom_detectors(id) ON DELETE CASCADE,
-    run_id       TEXT         NOT NULL,
-    agent_id     TEXT         NOT NULL,
-    fired        BOOLEAN      NOT NULL,
-    evaluated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-ALTER TABLE custom_detector_results ADD COLUMN IF NOT EXISTS org_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_cdr_detector ON custom_detector_results(detector_id, evaluated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_cdr_run      ON custom_detector_results(run_id);
-"""
-
-# Phase 1.4.3 — semantic signal feedback capture. This service creates
-# signal_groups/signal_group_members defensively (IF NOT EXISTS) even though
-# semantic_svc is their primary owner — same dual-creation convention already
-# used for custom_detectors/custom_detector_results (detector_svc + api_svc):
-# whichever service starts first wins, and semantic_svc may never even be
-# enabled (SEMANTIC_WORKER_ENABLED defaults to false) on a given install.
+# Phase 1.4.3 — semantic signal feedback capture. signal_groups /
+# signal_group_members / signal_group_overrides (which this service reads and,
+# for fp_count, writes) are migration 10's; the per-org opt-in flags this loop
+# is gated on (organizations.semantic_feedback_enabled / _auto_suppress) are
+# migration 6's. What is declared here is this service's alone.
 _SEMANTIC_FEEDBACK_DDL = """
--- Opt-in per org (default off) — the whole feedback loop (capture +
--- auto-suppress) is inert until an org turns it on. auto_suppress controls
--- what happens once a group crosses the false-positive threshold: FALSE
--- (default) just lowers future confidence by 0.3; TRUE stops writing new
--- signals for that group entirely. See semantic_svc/worker.py.
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_enabled BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_feedback_auto_suppress BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS signal_groups (
-    id                BIGSERIAL    PRIMARY KEY,
-    org_id            TEXT         NOT NULL,
-    agent_id          TEXT         NOT NULL,
-    evaluator         TEXT         NOT NULL,
-    root_cause_hash   TEXT         NOT NULL,
-    root_cause_sample TEXT         NOT NULL,
-    first_seen        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    last_seen         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    signal_count      INTEGER      NOT NULL DEFAULT 0,
-    UNIQUE (org_id, agent_id, evaluator, root_cause_hash)
-);
-CREATE INDEX IF NOT EXISTS idx_signal_groups_org_agent ON signal_groups(org_id, agent_id);
-
-CREATE TABLE IF NOT EXISTS signal_group_members (
-    id         BIGSERIAL   PRIMARY KEY,
-    group_id   BIGINT      NOT NULL REFERENCES signal_groups(id) ON DELETE CASCADE,
-    signal_id  BIGINT      NOT NULL,
-    run_id     TEXT        NOT NULL,
-    added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_signal_group_members_group ON signal_group_members(group_id, added_at DESC);
-CREATE INDEX IF NOT EXISTS idx_signal_group_members_signal ON signal_group_members(signal_id);
-
--- One row per group that has accumulated false-positive feedback. No row at
--- all means fp_count=0 — a group is only ever created here once its first
--- false_positive verdict arrives (see record_signal_feedback).
-CREATE TABLE IF NOT EXISTS signal_group_overrides (
-    group_id   BIGINT      PRIMARY KEY REFERENCES signal_groups(id) ON DELETE CASCADE,
-    fp_count   INTEGER     NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 -- One row per feedback submission (not per group) — (signal_id, org_id,
 -- verdict, notes), exactly the shape in the Phase 1.4 brief. Aggregation
 -- into signal_group_overrides.fp_count happens at write time in
@@ -274,205 +120,20 @@ CREATE TABLE IF NOT EXISTS signal_feedback (
 CREATE INDEX IF NOT EXISTS idx_signal_feedback_signal ON signal_feedback(signal_id);
 """
 
-# Phase 1.5 — semantic evaluation billing/quotas. Defensively duplicated from
-# semantic_svc's own migration (services/semantic/semantic_svc/db.py), same
-# whichever-starts-first convention as _SEMANTIC_FEEDBACK_DDL above — this
-# service's new usage endpoint reads both tables without depending on
-# semantic_svc (which may be disabled entirely, SEMANTIC_WORKER_ENABLED
-# defaults to false) having ever run.
-_SEMANTIC_QUOTA_DDL = """
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS semantic_evaluation_quota INTEGER NOT NULL DEFAULT 1000;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS allow_semantic_overage BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS org_semantic_evaluation_usage (
-    org_id     TEXT    NOT NULL,
-    month      TEXT    NOT NULL,
-    eval_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (org_id, month)
-);
-
-CREATE TABLE IF NOT EXISTS semantic_evaluation_log (
-    id                BIGSERIAL   PRIMARY KEY,
-    org_id            TEXT        NOT NULL,
-    agent_id          TEXT        NOT NULL,
-    evaluator         TEXT        NOT NULL,
-    fired             BOOLEAN     NOT NULL,
-    prompt_tokens     INTEGER     NOT NULL,
-    completion_tokens INTEGER     NOT NULL,
-    cost_usd          REAL        NOT NULL,
-    evaluated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_semantic_evaluation_log_org_time ON semantic_evaluation_log(org_id, evaluated_at);
-"""
-
-# Phase 2.1 — external evaluation integrations (Langfuse first; LangSmith/
-# Braintrust reuse this same generic shape in 2.2/2.3, differing only by
-# `provider` and whatever keys their own credentials JSON needs).
-# Primarily owned by integrations_worker's own migration (not yet built as of
-# this PR being the config-CRUD half); duplicated here defensively, same
-# whichever-starts-first convention as every other cross-service table in
-# this schema.
-_INTEGRATIONS_DDL = """
-CREATE TABLE IF NOT EXISTS external_evaluation_integrations (
-    id                    BIGSERIAL    PRIMARY KEY,
-    org_id                TEXT         NOT NULL,
-    provider              TEXT         NOT NULL,
-    endpoint_url          TEXT         NOT NULL,
-    encrypted_credentials TEXT         NOT NULL,
-    poll_interval_secs    INTEGER      NOT NULL DEFAULT 60,
-    enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
-    last_polled_at        TIMESTAMPTZ,
-    last_success_at       TIMESTAMPTZ,
-    consecutive_failures  INTEGER      NOT NULL DEFAULT 0,
-    first_failure_at      TIMESTAMPTZ,
-    last_alerted_at       TIMESTAMPTZ,
-    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, provider)
-);
-CREATE INDEX IF NOT EXISTS idx_ext_integrations_enabled
-    ON external_evaluation_integrations(enabled) WHERE enabled = TRUE;
-
--- Dedup: a poll's overlap window (to tolerate the provider's own indexing
--- lag) will re-fetch evaluations already seen — this is what prevents
--- writing a duplicate failure_signals row for the same external evaluation.
-CREATE TABLE IF NOT EXISTS external_evaluation_processed (
-    org_id       TEXT        NOT NULL,
-    provider     TEXT        NOT NULL,
-    external_id  TEXT        NOT NULL,
-    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (org_id, provider, external_id)
-);
-"""
-
-# Phase 4.1 — ElevenLabs pull integration credentials (bring-your-own API key
-# per org, encrypted at rest). Deliberately a DEDICATED table, not a row in
-# external_evaluation_integrations: ElevenLabs is not an evaluation provider
-# (it yields TTS generations we correlate to tts.generated events by
-# timestamp/character-count/voice, not scores we join by trace_id), so it
-# stores different state (a generation high-water mark, no endpoint_url — the
-# base URL is fixed). It still reuses the same Fernet encrypt-at-rest infra and
-# the same failure-tracking columns as external_evaluation_integrations so the
-# Phase 4.3 poller gets identical failure-isolation/backoff behavior for free.
-# Primarily owned by elevenlabs_worker's own migration (Phase 4.3); duplicated
-# here defensively, same whichever-starts-first convention as every other
-# cross-service table in this schema.
-_ELEVENLABS_DDL = """
-CREATE TABLE IF NOT EXISTS elevenlabs_integrations (
-    id                      BIGSERIAL        PRIMARY KEY,
-    org_id                  TEXT             NOT NULL UNIQUE,
-    encrypted_credentials   TEXT             NOT NULL,
-    poll_interval_secs      INTEGER          NOT NULL DEFAULT 300,
-    enabled                 BOOLEAN          NOT NULL DEFAULT TRUE,
-    last_polled_at          TIMESTAMPTZ,
-    last_success_at         TIMESTAMPTZ,
-    last_seen_generation_at DOUBLE PRECISION,
-    consecutive_failures    INTEGER          NOT NULL DEFAULT 0,
-    first_failure_at        TIMESTAMPTZ,
-    last_alerted_at         TIMESTAMPTZ,
-    created_at              TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
-    updated_at              TIMESTAMPTZ       NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_elevenlabs_integrations_enabled
-    ON elevenlabs_integrations(enabled) WHERE enabled = TRUE;
-
--- elevenlabs_generations is owned by elevenlabs_worker (Phase 4.3/4.4);
--- duplicated here defensively so api_svc's Phase 5 read paths (run/call detail,
--- filter listing) never hit a missing table when an org has ElevenLabs
--- configured but this service started first. Column-for-column identical to
--- integrations_svc/db.py's copy.
-CREATE TABLE IF NOT EXISTS elevenlabs_generations (
-    id                     BIGSERIAL        PRIMARY KEY,
-    org_id                 TEXT             NOT NULL,
-    generation_id          TEXT             NOT NULL,
-    voice_id               TEXT,
-    voice_name             TEXT,
-    model                  TEXT,
-    character_count        INTEGER          NOT NULL DEFAULT 0,
-    cost_credits           INTEGER,
-    text                   TEXT,
-    source                 TEXT,
-    generated_at           DOUBLE PRECISION NOT NULL,
-    correlated_to_event_id BIGINT,
-    correlation_method     TEXT,
-    correlation_confidence REAL,
-    correlated_at          TIMESTAMPTZ,
-    unmatched_reason       TEXT,
-    run_id                 TEXT,
-    agent_id               TEXT,
-    fetched_at             TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, generation_id)
-);
-ALTER TABLE elevenlabs_generations ADD COLUMN IF NOT EXISTS run_id TEXT;
-ALTER TABLE elevenlabs_generations ADD COLUMN IF NOT EXISTS agent_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_elevenlabs_gen_run
-    ON elevenlabs_generations(org_id, run_id);
-"""
-
-_ALERT_INTEGRATIONS_DDL = """
--- Phase 4.1 — per-org Slack/Linear alert destinations, both bring-your-own
--- (a customer's own Slack incoming webhook / Linear API key + webhook
--- secret), same encrypt-at-rest pattern as Phase 2.1's
--- external_evaluation_integrations. api_svc only ever encrypts (on config
--- submission) and never decrypts, EXCEPT for Linear's webhook_secret — see
--- api_svc/crypto.py::decrypt_credentials_for_webhook_verification's
--- docstring for why that one case is a deliberate, narrow exception.
--- alerts_svc is the only thing that decrypts webhook_url/api_key, to
--- actually call Slack/Linear's API.
-CREATE TABLE IF NOT EXISTS org_alert_integrations (
-    id                    BIGSERIAL    PRIMARY KEY,
-    org_id                TEXT         NOT NULL,
-    provider              TEXT         NOT NULL,   -- 'slack' | 'linear'
-    encrypted_credentials TEXT         NOT NULL,   -- slack: {webhook_url}; linear: {api_key, webhook_secret}
-    config_json           JSONB        NOT NULL DEFAULT '{}',  -- slack: {channel}; linear: {team_id, project_id}
-    enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, provider)
-);
-
--- Bi-directional sync (Linear issue closed -> Dunetrace signal resolved).
--- Written by alerts_svc (when it creates a Linear issue for a signal), read
--- by api_svc's webhook receiver (routers/linear_webhook.py) to find which
--- signal a given Linear issue corresponds to.
-CREATE TABLE IF NOT EXISTS linear_issue_signals (
-    id              BIGSERIAL    PRIMARY KEY,
-    org_id          TEXT         NOT NULL,
-    signal_id       BIGINT       NOT NULL,
-    linear_issue_id TEXT         NOT NULL,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (linear_issue_id)
-);
-"""
-
-# Phase 4.2 — MCP resolve_issue tool. `issues` is owned by detector_svc
-# (services/detector/detector_svc/db.py); api_svc has only ever read it
-# (list_issues) until now. This service becomes the first WRITER of these
-# two specific columns (via resolve_issue below), so it defensively ensures
-# they exist here — same "whichever service needs a column adds it
-# defensively" convention detector_svc itself already uses for
-# failure_signals.shadow/co_signal_count (owned by ingest_svc).
-# Deliberately orthogonal to the existing auto-resolve/reopen-on-recurrence
-# machinery (clean_runs_since) — a manually-resolved issue still reopens if
-# the failure recurs later, same as an auto-resolved one; these two columns
-# only record how a resolution happened, not a permanent lock.
-#
-# Guarded by an existence check, not a bare ALTER — api_svc doesn't create
-# `issues` itself (detector_svc does), so on a fresh install where
-# detector_svc hasn't started yet, a bare ALTER TABLE would fail with
-# "relation issues does not exist" and crash this service's entire
-# startup, taking down every other endpoint with it. This degrades to a
-# no-op instead, retried (and eventually succeeding) on next restart —
-# same tolerance list_issues already implicitly relies on.
-_ISSUES_RESOLUTION_DDL = """
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'issues') THEN
-        ALTER TABLE issues ADD COLUMN IF NOT EXISTS resolution_notes TEXT;
-        ALTER TABLE issues ADD COLUMN IF NOT EXISTS manually_resolved BOOLEAN NOT NULL DEFAULT FALSE;
-    END IF;
-END $$;
-"""
+# Every other table this service shares with a worker is declared by
+# dunetrace_schemas.migrations, applied first in init_pool():
+# - org_semantic_evaluation_usage / semantic_evaluation_log (the usage
+#   endpoint; written by semantic_svc)                          -> migration 10
+# - external_evaluation_integrations / external_evaluation_processed
+#   (config CRUD; polled by integrations_svc)                    -> migration 11
+# - elevenlabs_integrations / elevenlabs_generations (config CRUD and the
+#   run/call read paths; polled by integrations_svc)             -> migration 11
+# - org_alert_integrations / linear_issue_signals (config CRUD and the
+#   Linear webhook receiver; delivered by alerts_svc)            -> migration 9
+# - issues, including resolution_notes / manually_resolved, which
+#   resolve_issue() below writes (upserted by detector_svc)      -> migration 12
+# Each used to be a "defensive copy" of the worker's DDL here, guarded on
+# whichever service started first; the copies are gone.
 
 # Phase 4.3 — GitHub App per-org config. installation_id isn't a secret (an
 # App is one operator-level registration; per-org installs are just
@@ -520,43 +181,6 @@ CREATE TABLE IF NOT EXISTS agent_source_config (
 );
 """
 
-# failure_signals.source is owned by semantic_svc's migration (added there
-# for Phase 1's semantic evaluators, reused by integrations_svc for
-# Phase 2's external providers) — but Phase 4.4's agent_performance_trends()
-# reads it directly from api_svc, and semantic_svc is disabled by default
-# (SEMANTIC_WORKER_ENABLED). Found via a real 500 (UndefinedColumnError)
-# against a deployment that had never started semantic_svc: api_svc must not
-# assume a column owned by an optional service exists. Defensive
-# ADD COLUMN IF NOT EXISTS, same "whichever starts first wins" convention
-# already used for custom_detectors/custom_detector_results above.
-_PERFORMANCE_TRENDS_DDL = """
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'structural';
-"""
-
-# Pack activation (Phase 1.0). detector_svc owns packs (it seeds rows from
-# PACK_REGISTRY at startup and is the sole reader of org_enabled_packs for
-# detector selection) — created here too defensively, same "whichever starts
-# first wins" convention as every other cross-service table, since api_svc
-# is the write path for activation (POST/DELETE /v1/orgs/packs/{name}) and
-# must not assume detector_svc has started first.
-_PACKS_DDL = """
-CREATE TABLE IF NOT EXISTS packs (
-    name           TEXT         PRIMARY KEY,
-    description    TEXT         NOT NULL,
-    detector_names TEXT[]       NOT NULL DEFAULT '{}',
-    added_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS org_enabled_packs (
-    org_id      TEXT         NOT NULL,
-    pack_name   TEXT         NOT NULL REFERENCES packs(name),
-    enabled_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    enabled_by  TEXT,
-    PRIMARY KEY (org_id, pack_name)
-);
-CREATE INDEX IF NOT EXISTS idx_org_enabled_packs_org ON org_enabled_packs(org_id);
-"""
-
 # Human-in-the-loop approvals (Capability 2). org_id TEXT NOT NULL, no FK to
 # organizations(id) — same convention as every other org-scoped table here.
 # status is stored as TEXT (validated against api_svc.approvals.ApprovalStatus
@@ -575,35 +199,23 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_at       TIMESTAMPTZ,
     decided_by       TEXT,
     decision_channel TEXT,
-    delivered_at     TIMESTAMPTZ
+    delivered_at     TIMESTAMPTZ,
+    note             TEXT
 );
 -- delivered_at: set once alerts_svc has notified a human (Phase 2.3). Added
 -- via ALTER too, so an approvals table created by an earlier build in this
 -- sprint (before delivery existed) gains the column without a manual migration.
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+-- note: the deciding human's free-text message, written ONLY as part of the
+-- terminal decision write below. It inherits the decision's immutability from
+-- the `status = 'pending'` guard in set_approval_decision — there is no
+-- note-update path, by design, so an audit trail entry can never be edited
+-- after the fact. Added via ALTER for the same reason delivered_at was.
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS note TEXT;
 CREATE INDEX IF NOT EXISTS idx_approvals_org_status ON approvals(org_id, status);
 CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_undelivered
     ON approvals(requested_at) WHERE delivered_at IS NULL AND status = 'pending';
-"""
-
-# Per-run state metrics (Capability 3, Phase 3.3). Written by detector_svc,
-# read here for cross-run analytics. Defensive copy (CREATE IF NOT EXISTS) —
-# whichever service starts first wins, same pattern as the packs tables.
-_RUN_STATE_METRICS_DDL = """
-CREATE TABLE IF NOT EXISTS run_state_metrics (
-    run_id         TEXT         NOT NULL,
-    org_id         TEXT         NOT NULL,
-    agent_id       TEXT         NOT NULL,
-    state          TEXT         NOT NULL,
-    total_ms       BIGINT       NOT NULL,
-    segment_count  INT          NOT NULL,
-    run_started_at TIMESTAMPTZ,
-    computed_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (run_id, state)
-);
-CREATE INDEX IF NOT EXISTS idx_rsm_agent
-    ON run_state_metrics(org_id, agent_id, run_started_at);
 """
 
 
@@ -630,33 +242,34 @@ async def init_pool() -> None:
         statement_cache_size=0,
     )
     # Shared schema first: migrations own every definition more than one
-    # service touches, and the DDL below ALTERs tables another service creates.
-    # Booting this service against an empty database used to crash on
+    # service touches (the tables this service reads but never declares, and
+    # the ones it writes alongside ingest or the detector). Booting this
+    # service against an empty database used to crash on
     # `relation "failure_signals" does not exist`.
-    from dunetrace_schemas.migrations import apply_migrations
+    #
+    # Apply, then require. require_schema_version is the guard for a replica
+    # that could not apply (a lock timeout, a read-only standby): it raises
+    # before any local DDL runs, so a too-old schema fails the start here
+    # rather than the first query that reads a column it lacks.
+    from dunetrace_schemas.migrations import (
+        CURRENT_SCHEMA_VERSION,
+        apply_migrations,
+        require_schema_version,
+        schema_connection,
+    )
 
-    async with _pool.acquire() as conn:
+    # Untimed connection: a migration that builds an index on a populated
+    # table takes longer than the pool's command_timeout. See schema_connection.
+    async with schema_connection(settings.DATABASE_URL) as conn:
         await apply_migrations(conn)
+        await require_schema_version(conn, CURRENT_SCHEMA_VERSION, "api")
 
     async with _pool.acquire() as conn:
-        await conn.execute(_MIGRATIONS_DDL)
-        await conn.execute(_FIXES_DDL)
-        await conn.execute(_POLICIES_DDL)
-        await conn.execute(_POLICY_SECURITY_DDL)
+        await conn.execute(_POLICY_AUDIT_DDL)
         await conn.execute(_FEEDBACK_DDL)
-        await conn.execute(_KEYS_DDL)
-        await conn.execute(_CUSTOM_DETECTORS_DDL)
         await conn.execute(_SEMANTIC_FEEDBACK_DDL)
-        await conn.execute(_SEMANTIC_QUOTA_DDL)
-        await conn.execute(_INTEGRATIONS_DDL)
-        await conn.execute(_ELEVENLABS_DDL)
-        await conn.execute(_ALERT_INTEGRATIONS_DDL)
-        await conn.execute(_ISSUES_RESOLUTION_DDL)
         await conn.execute(_GITHUB_APP_DDL)
-        await conn.execute(_PERFORMANCE_TRENDS_DDL)
-        await conn.execute(_PACKS_DDL)
         await conn.execute(_APPROVALS_DDL)
-        await conn.execute(_RUN_STATE_METRICS_DDL)
     logger.info("DB pool ready")
 
 
@@ -665,6 +278,15 @@ async def close_pool() -> None:
     if _pool:
         await _pool.close()
         _pool = None
+
+
+def get_pool():
+    """The live asyncpg pool (None before init_pool / after close_pool).
+
+    Exposed for the readiness probe in main.py, which hands it to
+    dunetrace_schemas.metrics.db_ready — nothing else should reach for it.
+    """
+    return _pool
 
 
 async def check_db() -> str:
@@ -786,20 +408,27 @@ async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
         return [], 0
 
     async with _pool.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(DISTINCT agent_id) FROM events WHERE org_id = $1",
-            org_id,
-        )
-
         rows = await conn.fetch(
             """
-            WITH event_agg AS (
-                SELECT
-                    agent_id,
-                    MAX(received_at)          AS last_seen,
-                    COUNT(DISTINCT run_id)    AS run_count
+            WITH run_agg AS (
+                -- Collapse to one row per (agent, run) FIRST, then count those.
+                -- `COUNT(DISTINCT run_id) GROUP BY agent_id` reads the same rows
+                -- but makes the planner sort all of them by (agent_id, run_id):
+                -- 149,907 rows, an external merge spilling 10MB to disk, 743ms.
+                -- Two hash aggregates over the same scan give the identical
+                -- numbers in 172ms with no spill (verified row-for-row across
+                -- all 136 agents).
+                SELECT agent_id, run_id, MAX(received_at) AS last_seen
                 FROM events
                 WHERE org_id = $1
+                GROUP BY agent_id, run_id
+            ),
+            event_agg AS (
+                SELECT
+                    agent_id,
+                    MAX(last_seen) AS last_seen,
+                    COUNT(*)       AS run_count
+                FROM run_agg
                 GROUP BY agent_id
             ),
             signal_agg AS (
@@ -818,7 +447,11 @@ async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
                 e.run_count,
                 COALESCE(s.signal_count, 0)   AS signal_count,
                 COALESCE(s.critical_count, 0) AS critical_count,
-                COALESCE(s.high_count, 0)     AS high_count
+                COALESCE(s.high_count, 0)     AS high_count,
+                -- The total is one row per agent in event_agg, so a window
+                -- function reads it off this scan. It used to be a second
+                -- COUNT(DISTINCT agent_id) query over the whole events table.
+                COUNT(*) OVER () AS _total
             FROM event_agg e
             LEFT JOIN signal_agg s ON s.agent_id = e.agent_id
             ORDER BY e.last_seen DESC
@@ -829,7 +462,22 @@ async def list_agents(org_id: str, offset: int, limit: int) -> tuple[list, int]:
             offset,
         )
 
-    return [dict(r) for r in rows], total or 0
+        # COUNT(*) OVER () is computed before LIMIT, so it is the full agent
+        # count even on a partial page. An empty page (offset past the end)
+        # carries no row to read it from — fall back to a direct count rather
+        # than reporting 0. Inside the `async with`: conn is back in the pool
+        # once it exits.
+        if rows:
+            total = int(rows[0]["_total"])
+        else:
+            total = (
+                await conn.fetchval(
+                    "SELECT COUNT(DISTINCT agent_id) FROM events WHERE org_id = $1", org_id
+                )
+                or 0
+            )
+
+    return [{k: v for k, v in dict(r).items() if k != "_total"} for r in rows], total
 
 
 # ── Failure type breakdown ────────────────────────────────────────────────────
@@ -910,42 +558,88 @@ async def agent_signal_sparklines(org_id: str) -> dict:
 
 async def list_runs(
     org_id: str,
-    agent_id: str,
+    agent_id: Optional[str],
     offset: int,
     limit: int,
     has_signals: Optional[bool] = None,
+    per_agent_limit: Optional[int] = None,
 ) -> tuple[list, int]:
-    """List runs for an agent within org_id. Optionally filter to only runs with signals."""
+    """List runs within org_id. Optionally filter to only runs with signals.
+
+    ``agent_id=None`` lists across the whole org, which is what the dashboard's
+    initial load actually wants — it was issuing one request per agent and then
+    flattening the results itself.
+
+    ``per_agent_limit=N`` bounds the result to each agent's newest N rather than
+    the newest N overall, which is the only form that can replace that fan-out:
+    on this dataset the newest 8,000 runs come from 37 of 135 agents, so a global
+    window would leave 98 agents with none. With N=200 this returns the same 7,794
+    rows the 136 per-agent requests did.
+    """
     if not _pool:
         return [], 0
 
     signal_filter = ""
+    # s.org_id = pr.org_id, not just s.run_id = pr.run_id: run_id is
+    # caller-supplied, so an unscoped correlation lets another tenant's signals
+    # decide whether this org's run is filtered in or out.
     if has_signals is True:
-        signal_filter = "AND EXISTS (SELECT 1 FROM failure_signals s WHERE s.run_id = pr.run_id AND s.shadow = FALSE)"
+        signal_filter = (
+            "AND EXISTS (SELECT 1 FROM failure_signals s "
+            "WHERE s.run_id = pr.run_id AND s.org_id = pr.org_id AND s.shadow = FALSE)"
+        )
     elif has_signals is False:
-        signal_filter = "AND NOT EXISTS (SELECT 1 FROM failure_signals s WHERE s.run_id = pr.run_id AND s.shadow = FALSE)"
+        signal_filter = (
+            "AND NOT EXISTS (SELECT 1 FROM failure_signals s "
+            "WHERE s.run_id = pr.run_id AND s.org_id = pr.org_id AND s.shadow = FALSE)"
+        )
+
+    # Built together so the placeholder numbering holds with or without the
+    # agent filter — see the same note in list_signals.
+    params: list = [org_id]
+    agent_filter = ""
+    if agent_id is not None:
+        params.append(agent_id)
+        agent_filter = f"AND pr.agent_id = ${len(params)}"
+    rank_filter = ""
+    if per_agent_limit is not None:
+        params.append(per_agent_limit)
+        rank_filter = f"WHERE _rn <= ${len(params)}"
+    limit_ph, offset_ph = f"${len(params) + 1}", f"${len(params) + 2}"
 
     async with _pool.acquire() as conn:
         total = await conn.fetchval(
             f"""
-            SELECT COUNT(*) FROM processed_runs pr
-            WHERE pr.org_id = $1 AND pr.agent_id = $2
-            {signal_filter}
+            SELECT COUNT(*) FROM (
+                SELECT ROW_NUMBER() OVER (
+                           PARTITION BY pr.agent_id ORDER BY pr.processed_at DESC
+                       ) AS _rn
+                FROM processed_runs pr
+                WHERE pr.org_id = $1 {agent_filter}
+                {signal_filter}
+            ) r {rank_filter}
             """,
-            org_id,
-            agent_id,
+            *params,
         )
 
         rows = await conn.fetch(
             f"""
-            WITH page AS (
+            WITH ranked AS (
                 SELECT pr.run_id, pr.agent_id, pr.agent_version,
-                       pr.trigger AS exit_reason, pr.processed_at
+                       pr.trigger AS exit_reason, pr.processed_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY pr.agent_id ORDER BY pr.processed_at DESC
+                       ) AS _rn
                 FROM processed_runs pr
-                WHERE pr.org_id = $1 AND pr.agent_id = $2
+                WHERE pr.org_id = $1 {agent_filter}
                 {signal_filter}
-                ORDER BY pr.processed_at DESC
-                LIMIT $3 OFFSET $4
+            ),
+            page AS (
+                SELECT run_id, agent_id, agent_version, exit_reason, processed_at
+                FROM ranked
+                {rank_filter}
+                ORDER BY processed_at DESC
+                LIMIT {limit_ph} OFFSET {offset_ph}
             ),
             run_events AS (
                 -- Single pass over events for just this page's runs, instead of
@@ -957,20 +651,31 @@ async def list_runs(
                         WHERE e.event_type IN ('run.completed', 'run.errored')
                     )                                                            AS completed_at,
                     MAX(e.step_index)                                           AS step_count,
-                    SUM(
-                        -- llm.called carries a chars//4 ESTIMATE and llm.responded
-                        -- the exact count for the same call, so summing both
-                        -- double-counts. The canonical run builder overrides
-                        -- rather than adds (dunetrace/run_builder.py); this now
-                        -- matches. GREATEST per call_id would be exact, but the
-                        -- estimate is always <= the exact count in practice and
-                        -- this keeps the aggregate a single scan.
-                        CASE WHEN e.event_type = 'llm.responded'
-                                  AND (e.payload->>'prompt_tokens') IS NOT NULL
-                             THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
-                             WHEN e.event_type = 'llm.called'
-                             THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
-                             ELSE 0 END
+                    -- llm.called carries a chars//4 ESTIMATE and llm.responded the
+                    -- exact count for the SAME call, so the two must be overridden,
+                    -- not added (dunetrace/run_builder.py, and CLAUDE.md's note on
+                    -- the paired events).
+                    --
+                    -- The previous CASE did not do that: it picks a value per ROW
+                    -- and SUM then adds across rows, so a run with both events got
+                    -- estimate + exact anyway. Measured on run 00042bc0… that was
+                    -- 13 tokens for a call that used 12, and 152% over across
+                    -- agent "agent"'s 30-day history. Two nested aggregates give
+                    -- the real override in the same single scan: take the exact
+                    -- total when there is one, else fall back to the estimate
+                    -- (direct-SDK traces report tokens only on llm.called,
+                    -- LangChain-shaped ones only on llm.responded).
+                    COALESCE(
+                        NULLIF(SUM(
+                            CASE WHEN e.event_type = 'llm.responded'
+                                 THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
+                                 ELSE 0 END
+                        ), 0),
+                        SUM(
+                            CASE WHEN e.event_type = 'llm.called'
+                                 THEN COALESCE((e.payload->>'prompt_tokens')::integer, 0)
+                                 ELSE 0 END
+                        )
                     )                                                            AS prompt_tokens,
                     SUM(
                         CASE WHEN e.event_type = 'llm.responded'
@@ -982,13 +687,21 @@ async def list_runs(
                         FILTER (WHERE e.event_type = 'llm.called'
                                        AND e.payload->>'model' IS NOT NULL))[1]  AS model
                 FROM events e
-                WHERE e.run_id IN (SELECT run_id FROM page)
+                -- org_id is not redundant with the page CTE. `page` is
+                -- org-scoped, but joining events on run_id ALONE re-widens to
+                -- every tenant: run_id is caller-supplied, so two orgs can hold
+                -- the same one and this would fold their token counts and step
+                -- counts into ours. It also lets the planner prune partitions
+                -- instead of scanning all of them.
+                WHERE e.org_id = $1 AND e.run_id IN (SELECT run_id FROM page)
                 GROUP BY e.run_id
             ),
             run_signals AS (
                 SELECT s.run_id, COUNT(*) AS signal_count
                 FROM failure_signals s
-                WHERE s.run_id IN (SELECT run_id FROM page) AND s.shadow = FALSE
+                WHERE s.org_id = $1
+                  AND s.run_id IN (SELECT run_id FROM page)
+                  AND s.shadow = FALSE
                 GROUP BY s.run_id
             )
             SELECT
@@ -1003,8 +716,7 @@ async def list_runs(
             LEFT JOIN run_signals rs ON rs.run_id = p.run_id
             ORDER BY p.processed_at DESC
             """,
-            org_id,
-            agent_id,
+            *params,
             limit,
             offset,
         )
@@ -1021,6 +733,22 @@ async def list_runs(
         rd["cost_usd"] = round(raw, 6) if raw else None
         results.append(rd)
     return results, total or 0
+
+
+def _focus_range(evidence: dict, failure_type: str, step_index: int) -> dict:
+    """The step span a signal points at, as {first_step, last_step}.
+
+    Thin wrapper over the explainer's _get_step_range so there is exactly one
+    per-detector mapping in the codebase. Most detectors have no range and
+    collapse to the signal's own step; the ten that span a window
+    (TOOL_LOOP, CONTEXT_BLOAT, ...) name their own evidence keys.
+    """
+    fallback = step_index if isinstance(step_index, int) else 0
+    try:
+        first, last = _get_step_range(evidence or {}, failure_type, fallback)
+    except Exception:  # a malformed evidence dict must not break run detail
+        first = last = fallback
+    return {"first_step": first, "last_step": last}
 
 
 async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False) -> Optional[dict]:
@@ -1077,6 +805,19 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         # NULL for runs that predate this migration or never had a
         # conversation_id at all, same "instrumentation-dependent, may be
         # absent" tolerance as trace_id/system_prompt elsewhere.
+        dry_run_rows = await conn.fetch(
+            """
+            SELECT policy_id, policy_name, step_index, would_action_type,
+                   would_action_params, matched_branch, reason, evaluated_at
+              FROM policy_evaluations
+             WHERE org_id = $1 AND run_id = $2
+               AND mode = 'dry_run' AND fired = TRUE
+             ORDER BY step_index NULLS LAST, evaluated_at
+            """,
+            org_id,
+            run_id,
+        )
+
         run_row = await conn.fetchrow(
             "SELECT conversation_id FROM runs WHERE run_id = $1 AND org_id = $2",
             run_id,
@@ -1107,6 +848,24 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         )
 
     # Build signal list with explanations
+    dry_run_verdicts = [
+        {
+            "policy_id": r["policy_id"],
+            "policy_name": r["policy_name"],
+            "step_index": r["step_index"],
+            "would_action_type": r["would_action_type"],
+            "would_action_params": (
+                json.loads(r["would_action_params"])
+                if isinstance(r["would_action_params"], str)
+                else r["would_action_params"]
+            ),
+            "matched_branch": r["matched_branch"],
+            "reason": r["reason"],
+            "at": r["evaluated_at"].timestamp() if r["evaluated_at"] else None,
+        }
+        for r in dry_run_rows
+    ]
+
     signal_list = []
     for s in signals:
         evidence = s["evidence"]
@@ -1146,6 +905,18 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
                 "confidence": s["confidence"],
                 "detected_at": detected_at,
                 "evidence": dict(evidence) if evidence else {},
+                # Which steps to put in focus when this signal is the entry
+                # point. Computed here, not in the page: the evidence key
+                # holding the step range differs per detector
+                # (_STEP_RANGE_FIELDS), and a second copy of that mapping in
+                # the dashboard would drift the moment a detector changes its
+                # evidence shape — and would drift silently, focusing the
+                # wrong step rather than failing.
+                "focus": _focus_range(
+                    dict(evidence) if evidence else {},
+                    s["failure_type"],
+                    s["step_index"],
+                ),
                 "shadow": s["shadow"],
                 "title": exp.title if exp else s["failure_type"],
                 "what": exp.what if exp else "",
@@ -1198,6 +969,11 @@ async def get_run_detail(org_id: str, run_id: str, include_shadow: bool = False)
         "cost_usd": cost_usd,
         "events": event_list,
         "signals": signal_list,
+        # What a dry-run policy would have done on THIS run, beside the step
+        # that triggered it. A verdict read on its own is a claim; a verdict
+        # read next to the tool arguments that caused it is evidence, and that
+        # is what gets someone to turn enforcement on.
+        "dry_run_verdicts": dry_run_verdicts,
         "conversation_id": conversation_id,
     }
 
@@ -1556,13 +1332,22 @@ def _cost_bucket(cost_usd: float) -> str:
 
 
 async def _fetch_call_events_and_signals(conn, org_id: str, run_ids: list) -> tuple[list, list]:
+    # org_id is not redundant with the caller's conversation/runs authorisation:
+    # run_id is caller-supplied, so two tenants legitimately hold the same one
+    # (that is why `runs` is keyed (org_id, run_id)). Fanning out on the bare id
+    # pulled the *other* tenant's transcription.received (caller speech),
+    # tts.generated (spoken text), llm.called/llm.responded payloads and
+    # recording.available URLs into this tenant's call timeline, recordings list
+    # and cost breakdown. The failure_signals read below was always scoped; this
+    # one has to be too.
     event_rows = await conn.fetch(
         """
         SELECT run_id, event_type, payload, received_at, step_index
         FROM events
-        WHERE run_id = ANY($1::text[]) AND event_type = ANY($2::text[])
+        WHERE org_id = $1 AND run_id = ANY($2::text[]) AND event_type = ANY($3::text[])
         ORDER BY received_at ASC
         """,
+        org_id,
         run_ids,
         list(_CALL_EVENT_TYPES),
     )
@@ -1604,9 +1389,16 @@ async def list_calls(
             WHERE c.org_id = $1
               AND ($2::text IS NULL OR c.agent_id = $2)
               AND ($3::timestamptz IS NULL OR c.last_run_at >= $3)
+              -- Both halves of the join carry org_id for the same reason
+              -- _fetch_call_events_and_signals does: run_id is caller-supplied
+              -- and collides across tenants, so `e.run_id = r.run_id` alone lets
+              -- another org's voice events decide that this org's conversation
+              -- is a call at all.
               AND EXISTS (
-                  SELECT 1 FROM runs r JOIN events e ON e.run_id = r.run_id
-                  WHERE r.conversation_id = c.id AND e.event_type = ANY($4::text[])
+                  SELECT 1 FROM runs r
+                  JOIN events e ON e.run_id = r.run_id AND e.org_id = r.org_id
+                  WHERE r.conversation_id = c.id AND r.org_id = c.org_id
+                    AND e.event_type = ANY($4::text[])
               )
             ORDER BY c.last_run_at DESC
             LIMIT $5
@@ -1621,9 +1413,14 @@ async def list_calls(
             return [], 0
         conv_ids = [r["id"] for r in conv_rows]
 
+        # conv_ids came from an org-scoped read, but the run ids harvested here
+        # are handed straight to the events fan-out below — re-asserting org_id
+        # keeps the whole chain scoped instead of relying on one upstream filter.
         run_rows = await conn.fetch(
-            "SELECT run_id, conversation_id FROM runs WHERE conversation_id = ANY($1::bigint[])",
+            "SELECT run_id, conversation_id FROM runs "
+            "WHERE conversation_id = ANY($1::bigint[]) AND org_id = $2",
             conv_ids,
+            org_id,
         )
         run_to_conv = {r["run_id"]: r["conversation_id"] for r in run_rows}
         run_ids = list(run_to_conv.keys())
@@ -1697,9 +1494,13 @@ async def get_call_detail(org_id: str, conversation_id: int) -> Optional[dict]:
         if not conv:
             return None
 
+        # Same reason as list_calls: these run ids feed the events fan-out, so
+        # the org filter travels with them rather than stopping at `conversations`.
         run_rows = await conn.fetch(
-            "SELECT run_id, agent_version, started_at FROM runs WHERE conversation_id = $1 ORDER BY started_at ASC",
+            "SELECT run_id, agent_version, started_at FROM runs "
+            "WHERE conversation_id = $1 AND org_id = $2 ORDER BY started_at ASC",
             conversation_id,
+            org_id,
         )
         run_ids = [r["run_id"] for r in run_rows]
         if not run_ids:
@@ -1864,23 +1665,55 @@ async def get_signal_by_id(org_id: str, signal_id: int) -> Optional[dict]:
 
 async def list_signals(
     org_id: str,
-    agent_id: str,
+    agent_id: Optional[str],
     offset: int,
     limit: int,
     severity: Optional[str] = None,
     failure_type: Optional[str] = None,
     include_shadow: bool = False,
+    explain_rows: bool = True,
+    per_agent_limit: Optional[int] = None,
 ) -> tuple[list, int]:
-    """List signals for an agent with optional filters. By default only live (non-shadow) signals are returned; pass include_shadow=True to include shadow signals too."""
+    """List signals with optional filters. By default only live (non-shadow)
+    signals are returned; pass include_shadow=True to include shadow ones too.
+
+    ``agent_id=None`` lists across the whole org. The dashboard's initial load
+    needs every agent's signals at once, and fetching them per agent was 136
+    requests the browser could only run 6 at a time.
+
+    ``explain_rows=False`` drops the LONG-FORM prose — ``what``,
+    ``why_it_matters`` and ``suggested_fixes``, together 74% of this endpoint's
+    payload (``suggested_fixes`` alone is 49%), and only read when a human opens
+    one signal. ``title`` and ``evidence_summary`` are returned either way:
+    ``evidence_summary`` is the single line the aggregate views actually render,
+    and omitting it sent the dashboard's Incidents cards down a client-side
+    fallback that produced "confidence 90%" for 90% of signals (5,665 of 6,291)
+    instead of a description. The omitted keys stay present and empty, so the
+    response shape is unchanged for every caller, and the default stays True so
+    the MCP server and the per-agent views are unaffected.
+
+    ``per_agent_limit=N`` returns each agent's newest N rather than the newest N
+    overall. That distinction is the point: the dashboard needs a bounded slice
+    PER AGENT, and a global newest-N window does not give it one — measured on a
+    real dataset the newest 8,000 runs came from 37 of 135 agents, so 98 agents
+    would have loaded with nothing. Windowing here reproduces exactly what one
+    request per agent returned, in a single query.
+    """
     if not _pool:
         return [], 0
 
     import json
 
-    where = ["org_id = $1", "agent_id = $2"]
+    # where/params are built together so the placeholder numbering stays correct
+    # whether or not agent_id is bound — an org-wide call must not leave a $2 in
+    # the SQL with nothing to fill it.
+    where = ["org_id = $1"]
+    params: list = [org_id]
+    if agent_id is not None:
+        params.append(agent_id)
+        where.append(f"agent_id = ${len(params)}")
     if not include_shadow:
         where.append("shadow = FALSE")
-    params: list = [org_id, agent_id]
 
     if severity:
         params.append(severity.upper())
@@ -1891,20 +1724,37 @@ async def list_signals(
 
     where_clause = " AND ".join(where)
 
+    _cols = """id, failure_type, severity, run_id, agent_id, agent_version,
+               step_index, confidence, detected_at, evidence, alerted, shadow,
+               COALESCE(co_signal_count, 0) AS co_signal_count"""
+
+    if per_agent_limit is not None:
+        # Rank within each agent, then page over the union of those slices, so a
+        # busy agent cannot crowd a quiet one out of the result set.
+        params.append(per_agent_limit)
+        source = f"""(
+                SELECT {_cols},
+                       ROW_NUMBER() OVER (
+                           PARTITION BY agent_id ORDER BY detected_at DESC
+                       ) AS _rn
+                FROM failure_signals WHERE {where_clause}
+            ) w WHERE w._rn <= ${len(params)}"""
+        # co_signal_count is already unwrapped by the inner SELECT.
+        out_cols = """id, failure_type, severity, run_id, agent_id, agent_version,
+                      step_index, confidence, detected_at, evidence, alerted, shadow,
+                      co_signal_count"""
+    else:
+        source = f"failure_signals WHERE {where_clause}"
+        out_cols = _cols
+
     async with _pool.acquire() as conn:
-        total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM failure_signals WHERE {where_clause}",
-            *params,
-        )
+        total = await conn.fetchval(f"SELECT COUNT(*) FROM {source}", *params)
 
         params_paged = params + [limit, offset]
         rows = await conn.fetch(
             f"""
-            SELECT id, failure_type, severity, run_id, agent_id, agent_version,
-                   step_index, confidence, detected_at, evidence, alerted, shadow,
-                   COALESCE(co_signal_count, 0) AS co_signal_count
-            FROM failure_signals
-            WHERE {where_clause}
+            SELECT {out_cols}
+            FROM {source}
             ORDER BY detected_at DESC
             LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
             """,
@@ -1957,16 +1807,18 @@ async def list_signals(
                 "shadow": s["shadow"],
                 "co_signal_count": s["co_signal_count"],
                 "title": exp.title if exp else s["failure_type"],
-                "what": exp.what if exp else "",
-                "why_it_matters": exp.why_it_matters if exp else "",
+                # Always returned: the aggregate views render this line, and it
+                # is 7% of the payload against suggested_fixes' 49%.
                 "evidence_summary": exp.evidence_summary if exp else "",
+                "what": exp.what if (exp and explain_rows) else "",
+                "why_it_matters": exp.why_it_matters if (exp and explain_rows) else "",
                 "suggested_fixes": [
                     {
                         "description": f.description,
                         "language": f.language,
                         "code": f.code,
                     }
-                    for f in (exp.suggested_fixes if exp else [])
+                    for f in (exp.suggested_fixes if (exp and explain_rows) else [])
                 ],
             }
         )
@@ -3778,7 +3630,7 @@ async def create_approval(
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, org_id, run_id, agent_id, tool_name, tool_args,
                       status, requested_at, expires_at, decided_at, decided_by,
-                      decision_channel
+                      decision_channel, note
             """,
             org_id,
             run_id,
@@ -3799,7 +3651,8 @@ async def list_approvals(org_id: str, status: Optional[str] = None, limit: int =
         rows = await conn.fetch(
             """
             SELECT id, org_id, run_id, agent_id, tool_name, tool_args, status,
-                   requested_at, expires_at, decided_at, decided_by, decision_channel
+                   requested_at, expires_at, decided_at, decided_by, decision_channel,
+                   note
             FROM approvals
             WHERE org_id = $1 AND ($2::text IS NULL OR status = $2)
             ORDER BY requested_at DESC
@@ -3820,7 +3673,8 @@ async def get_approval(org_id: str, approval_id: int) -> Optional[dict]:
         row = await conn.fetchrow(
             """
             SELECT id, org_id, run_id, agent_id, tool_name, tool_args, status,
-                   requested_at, expires_at, decided_at, decided_by, decision_channel
+                   requested_at, expires_at, decided_at, decided_by, decision_channel,
+                   note
             FROM approvals
             WHERE org_id = $1 AND id = $2
             """,
@@ -3836,6 +3690,7 @@ async def set_approval_decision(
     new_status: str,
     decided_by: Optional[str],
     decision_channel: Optional[str],
+    note: Optional[str] = None,
 ) -> Optional[dict]:
     """Move a *pending* approval to a terminal status. The `status = 'pending'`
     guard in the WHERE clause makes this a no-op on an already-decided approval
@@ -3843,7 +3698,15 @@ async def set_approval_decision(
     the recorded outcome. Caller should treat None as 'already decided or not
     found' and re-read to see the actual state. Transition legality is enforced
     here structurally (only pending → terminal is reachable); the full rule set
-    lives in api_svc.approvals.is_valid_transition()."""
+    lives in api_svc.approvals.is_valid_transition().
+
+    `note` is the deciding human's message. It rides this write and only this
+    write, which is what makes it immutable: a decision that loses the terminal
+    race writes nothing, so its note is discarded along with it. There is
+    deliberately no note-update path — an audit trail you can edit afterwards is
+    not an audit trail. Keyword with a default so the Slack caller
+    (routers/slack.py) needs no change.
+    """
     if not _pool:
         return None
     async with _pool.acquire() as conn:
@@ -3853,16 +3716,19 @@ async def set_approval_decision(
             SET status = $3,
                 decided_at = NOW(),
                 decided_by = $4,
-                decision_channel = $5
+                decision_channel = $5,
+                note = $6
             WHERE org_id = $1 AND id = $2 AND status = 'pending'
             RETURNING id, org_id, run_id, agent_id, tool_name, tool_args, status,
-                      requested_at, expires_at, decided_at, decided_by, decision_channel
+                      requested_at, expires_at, decided_at, decided_by,
+                      decision_channel, note
             """,
             org_id,
             approval_id,
             new_status,
             decided_by,
             decision_channel,
+            note,
         )
     return dict(row) if row else None
 
@@ -4179,6 +4045,41 @@ async def get_signal_fix_status(
 # ── Policies ─────────────────────────────────────────────────────────────────
 
 
+#: Actions the SDK will refuse to honour from an unverifiable remote policy.
+#: Mirrors ENFORCING_ACTIONS in the SDK's policies module; imported rather than
+#: duplicated so the two cannot drift.
+from dunetrace.policies import ENFORCING_ACTIONS as _ENFORCING_ACTIONS
+
+
+def _enforcement_state(action: dict, signature: str, enabled: bool) -> dict:
+    """Will this policy enforce, and if not, what fixes it.
+
+    Three states, deliberately distinct:
+      enforcing  — it will do what it says
+      log_only   — it records and does nothing, because that is what was asked
+      degraded   — it records and does nothing, and that is NOT what was asked
+
+    The third is the one worth surfacing. Everything else looks identical in a
+    policy list.
+    """
+    action_type = (action or {}).get("type", "log")
+    if not enabled:
+        return {"enforcement": "disabled", "enforcement_reason": ""}
+    if action_type not in _ENFORCING_ACTIONS:
+        return {"enforcement": "log_only", "enforcement_reason": ""}
+    if not signature:
+        return {
+            "enforcement": "degraded",
+            "enforcement_reason": (
+                f"This policy asks for {action_type!r} but is unsigned, so every SDK "
+                f"downgrades it to log-only and it enforces nothing. Set "
+                f"POLICY_SIGNING_SECRET on the server and DUNETRACE_POLICY_SECRET on "
+                f"the agent, then re-save the policy to sign it."
+            ),
+        }
+    return {"enforcement": "enforcing", "enforcement_reason": ""}
+
+
 def _policy_row(r: Any) -> dict:
     import json as _json
 
@@ -4200,49 +4101,30 @@ def _policy_row(r: Any) -> dict:
         "priority": r["priority"],
         "signature": r.get("signature", "") or "",
         "sig_version": r.get("sig_version", 1) or 1,
+        # "enforcing" | "dry_run". Read from the row rather than defaulted, or
+        # a dry-run policy reads back as enforcing and the dashboard renders no
+        # dry-run card for it at all.
+        "mode": r.get("mode") or "enforcing",
+        # Whether this policy will actually enforce once an SDK loads it, and
+        # why not when it will not. The SDK downgrades an enforcing remote
+        # policy to log-only when it cannot verify the origin, and rewrites the
+        # action in place — so from the dashboard a downgraded policy looked
+        # exactly like one deliberately set to log. That is server-knowable:
+        # an unsigned policy (POLICY_SIGNING_SECRET unset here) is downgraded
+        # by every SDK that loads it.
+        **_enforcement_state(act, r.get("signature", "") or "", r["enabled"]),
         "created_at": ca.timestamp() if hasattr(ca, "timestamp") else ca,
         "updated_at": ua.timestamp() if hasattr(ua, "timestamp") else ua,
     }
 
 
-def _policy_canonical(
-    version: int,
-    policy_id: int,
-    agent_id: str,
-    name: str,
-    condition: dict,
-    action: dict,
-    enabled: bool,
-    priority: int,
-) -> str:
-    """Versioned canonical string for the policy HMAC. MUST stay in exact sync
-    with the SDK's ``_policy_canonical`` (dunetrace/policies/__init__.py):
-      v1 — original 7 fields, null-byte separated (byte-identical to pre-feature).
-      v2 — same fields with an authenticated "v2" domain-separation prefix; used
-           for policies carrying a condition.match expression block.
-    condition is JSON-dumped with sort_keys, so the nested `match` block is
-    already covered by the signature under either version."""
-    fields = [
-        str(policy_id),
-        agent_id,
-        name,
-        _json_mod.dumps(condition, sort_keys=True),
-        _json_mod.dumps(action, sort_keys=True),
-        str(enabled),
-        str(priority),
-    ]
-    if version >= 2:
-        fields.insert(0, "v%d" % version)
-    return "\x00".join(fields)
-
-
-def _sig_version_for(condition: dict) -> int:
-    """The minimum canonical-form version representing this condition: v2 when it
-    uses a `match` expression block, else v1 (keeps legacy policies byte-identical
-    and older SDKs able to verify them)."""
-    if isinstance(condition, dict) and condition.get("match") is not None:
-        return 2
-    return 1
+# The canonical string and version selector are IMPORTED from the SDK rather
+# than duplicated here. They were two copies with a "MUST stay in exact sync"
+# comment on each, which is a standing invitation to drift: the two disagreeing
+# does not fail loudly, it makes every signature mismatch and every remote
+# policy silently stop enforcing. One definition cannot disagree with itself.
+from dunetrace.policies import _policy_canonical  # noqa: E402
+from dunetrace.policies import sig_version_for_condition as _sig_version_for  # noqa: E402
 
 
 def _sign_policy(
@@ -4254,6 +4136,7 @@ def _sign_policy(
     enabled: bool,
     priority: int,
     secret: str,
+    mode: str = "enforcing",
 ) -> tuple:
     """HMAC-SHA256 over the versioned canonical policy fields. Returns
     ``(signature, sig_version)``; signature is '' when secret is empty (dev mode),
@@ -4261,11 +4144,11 @@ def _sign_policy(
 
     Must stay in sync with _verify_policy_signature in the SDK's policies.py.
     """
-    version = _sig_version_for(condition)
+    version = _sig_version_for(condition, mode)
     if not secret:
         return "", version
     canonical = _policy_canonical(
-        version, policy_id, agent_id, name, condition, action, enabled, priority
+        version, policy_id, agent_id, name, condition, action, enabled, priority, mode
     )
     return hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest(), version
 
@@ -4367,6 +4250,135 @@ async def fetch_policy_evaluations(org_id: str, policy_id: int, limit: int = 100
     return [_policy_eval_row(r) for r in rows]
 
 
+async def fetch_dry_run_summary(org_id: str, policy_id: int, days: int = 14) -> dict:
+    """Everything the dry-run card needs, computed here rather than in the page.
+
+    The dashboard has a standing rule against deriving metrics client-side: the
+    bugs it produced were all a numerator and a denominator drawn from
+    different populations. This is exactly that shape of number, so the ratio
+    is computed in one query against one window.
+
+    `would_fire_runs` counts DISTINCT run_id, not rows. A dry-run `log` policy
+    records on every match, so a row count would report a policy firing forty
+    times on four runs and read as far noisier than it is. The question the
+    card answers is "how many runs would this have acted on".
+    """
+    empty = {
+        "policy_id": policy_id,
+        "window_days": days,
+        "would_fire_runs": 0,
+        "total_runs": 0,
+        "fire_rate": None,
+        "would_action_type": None,
+        "would_action_params": None,
+        "branches": [],
+        "samples": [],
+        "first_seen": None,
+        "last_seen": None,
+    }
+    if not _pool:
+        return empty
+
+    async with _pool.acquire() as conn:
+        head = await conn.fetchrow(
+            """
+            WITH win AS (
+                SELECT run_id, agent_id, would_action_type, would_action_params,
+                       matched_branch, evaluated_at
+                  FROM policy_evaluations
+                 WHERE org_id = $1 AND policy_id = $2
+                   AND mode = 'dry_run' AND fired = TRUE
+                   AND evaluated_at > NOW() - ($3 || ' days')::interval
+            )
+            SELECT COUNT(DISTINCT run_id)                        AS would_fire_runs,
+                   MIN(evaluated_at)                             AS first_seen,
+                   MAX(evaluated_at)                             AS last_seen,
+                   (ARRAY_AGG(would_action_type  ORDER BY evaluated_at DESC))[1] AS action_type,
+                   (ARRAY_AGG(would_action_params ORDER BY evaluated_at DESC))[1] AS action_params,
+                   (ARRAY_AGG(agent_id           ORDER BY evaluated_at DESC))[1] AS agent_id
+              FROM win
+            """,
+            org_id,
+            policy_id,
+            str(days),
+        )
+        if head is None or not head["would_fire_runs"]:
+            return empty
+
+        # Denominator from the same agent and the same window as the numerator.
+        total_runs = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM runs
+             WHERE org_id = $1 AND agent_id = $2
+               AND started_at > NOW() - ($3 || ' days')::interval
+            """,
+            org_id,
+            head["agent_id"] or "",
+            str(days),
+        )
+        branches = await conn.fetch(
+            """
+            SELECT matched_branch AS branch, COUNT(DISTINCT run_id) AS runs
+              FROM policy_evaluations
+             WHERE org_id = $1 AND policy_id = $2
+               AND mode = 'dry_run' AND fired = TRUE
+               AND matched_branch IS NOT NULL
+               AND evaluated_at > NOW() - ($3 || ' days')::interval
+             GROUP BY matched_branch
+             ORDER BY runs DESC
+             LIMIT 5
+            """,
+            org_id,
+            policy_id,
+            str(days),
+        )
+        samples = await conn.fetch(
+            """
+            SELECT DISTINCT ON (run_id) run_id, agent_id, step_index, evaluated_at
+              FROM policy_evaluations
+             WHERE org_id = $1 AND policy_id = $2
+               AND mode = 'dry_run' AND fired = TRUE
+               AND evaluated_at > NOW() - ($3 || ' days')::interval
+             ORDER BY run_id, evaluated_at DESC
+             LIMIT 5
+            """,
+            org_id,
+            policy_id,
+            str(days),
+        )
+
+    fired = int(head["would_fire_runs"] or 0)
+    total = int(total_runs or 0)
+    params = head["action_params"]
+    if isinstance(params, str):
+        params = _json_mod.loads(params)
+    return {
+        "policy_id": policy_id,
+        "window_days": days,
+        "would_fire_runs": fired,
+        "total_runs": total,
+        # None rather than 0 when the denominator is unknown: a rate of "0%"
+        # and "no runs to compare against" are different answers.
+        "fire_rate": round(fired / total, 4) if total else None,
+        "would_action_type": head["action_type"],
+        "would_action_params": params,
+        "branches": [{"branch": b["branch"], "runs": int(b["runs"])} for b in branches],
+        "samples": [
+            {
+                "run_id": s["run_id"],
+                # The run-detail view is addressed by (run_id, agent_id), so a
+                # sample that cannot be opened is not much of a sample.
+                "agent_id": s["agent_id"],
+                "step_index": s["step_index"],
+                "at": s["evaluated_at"].timestamp() if s["evaluated_at"] else None,
+            }
+            for s in samples
+        ],
+        "first_seen": head["first_seen"].timestamp() if head["first_seen"] else None,
+        "last_seen": head["last_seen"].timestamp() if head["last_seen"] else None,
+    }
+
+
 async def create_policy(
     org_id: str,
     name: str,
@@ -4375,6 +4387,7 @@ async def create_policy(
     action: dict,
     priority: int = 100,
     enabled: bool = True,
+    mode: str = "enforcing",
 ) -> dict:
     if not _pool:
         raise RuntimeError("DB pool not available")
@@ -4383,8 +4396,9 @@ async def create_policy(
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
-                INSERT INTO policies (name, agent_id, condition, action, priority, enabled, org_id)
-                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
+                INSERT INTO policies
+                    (name, agent_id, condition, action, priority, enabled, org_id, mode)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7, $8)
                 RETURNING *
                 """,
                 name,
@@ -4394,6 +4408,7 @@ async def create_policy(
                 priority,
                 enabled,
                 org_id,
+                mode,
             )
             # Signature is over policy identity/behavior fields only — org_id is a
             # tenancy filter, not part of the policy's cryptographic identity, and
@@ -4408,6 +4423,7 @@ async def create_policy(
                 enabled,
                 priority,
                 settings.POLICY_SIGNING_SECRET,
+                mode,
             )
             row = await conn.fetchrow(
                 "UPDATE policies SET signature = $1, sig_version = $2 WHERE id = $3 RETURNING *",
@@ -4744,13 +4760,24 @@ async def agent_cost_stats(org_id: str, agent_id: str) -> dict:
     from explainer_svc.cost import estimate_cost
 
     async with _pool.acquire() as conn:
-        # Prompt tokens + model per run. prompt_tokens may be in llm.called (direct SDK)
-        # or llm.responded (LangChain) — sum both; model always comes from llm.called.
+        # Prompt tokens + model per run. prompt_tokens may be in llm.called (direct
+        # SDK) or llm.responded (LangChain) — take the exact llm.responded total
+        # when present and fall back to the llm.called estimate, never both. Summing
+        # them (which this did) counts one call twice whenever an integration emits
+        # both, and disagreed with the run-detail page for the same runs.
+        # model always comes from llm.called.
         prompt_rows = await conn.fetch(
             """
             SELECT run_id,
                    MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
-                   SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens
+                   COALESCE(
+                       NULLIF(SUM(CASE WHEN event_type = 'llm.responded'
+                                       THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                                       ELSE 0 END), 0),
+                       SUM(CASE WHEN event_type = 'llm.called'
+                                THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                                ELSE 0 END)
+                   ) AS prompt_tokens
             FROM events
             WHERE org_id = $1 AND agent_id = $2
               AND event_type IN ('llm.called', 'llm.responded')
@@ -4870,7 +4897,10 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
 
     async with _pool.acquire() as conn:
         # Per-run token totals + run timestamp.
-        # prompt_tokens: direct SDK → llm.called, LangChain → llm.responded.
+        # prompt_tokens: direct SDK → llm.called, LangChain → llm.responded. An
+        # integration that emits BOTH reports the same call twice (estimate, then
+        # exact), so override rather than sum — this page and the run-detail page
+        # must not disagree about the same run's tokens.
         # completion_tokens: always in llm.responded.
         token_rows = await conn.fetch(
             """
@@ -4878,7 +4908,14 @@ async def agent_token_stats(org_id: str, agent_id: str) -> dict:
                 run_id,
                 MAX(agent_version) AS agent_version,
                 MAX(CASE WHEN event_type = 'llm.called' THEN payload->>'model' END) AS model,
-                SUM(COALESCE((payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
+                COALESCE(
+                    NULLIF(SUM(CASE WHEN event_type = 'llm.responded'
+                                    THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                                    ELSE 0 END), 0),
+                    SUM(CASE WHEN event_type = 'llm.called'
+                             THEN COALESCE((payload->>'prompt_tokens')::int, 0)
+                             ELSE 0 END)
+                ) AS prompt_tokens,
                 SUM(CASE WHEN event_type = 'llm.responded'
                     THEN COALESCE((payload->>'completion_tokens')::int, 0) ELSE 0 END) AS completion_tokens,
                 SUM(CASE WHEN event_type = 'llm.responded'
@@ -5420,6 +5457,7 @@ async def agent_performance_trends(org_id: str, agent_id: str, window_days: int)
     from api_svc.performance_trends import (
         build_day_buckets,
         compute_baseline_comparisons,
+        compute_cost_by_day,
         compute_daily_points,
         compute_failure_mode_deltas,
     )
@@ -5472,7 +5510,18 @@ async def agent_performance_trends(org_id: str, agent_id: str, window_days: int)
             SELECT e.run_id,
                    DATE_TRUNC('day', pr.processed_at AT TIME ZONE 'UTC')::date AS day,
                    MAX(CASE WHEN e.event_type = 'llm.called' THEN e.payload->>'model' END) AS model,
-                   SUM(COALESCE((e.payload->>'prompt_tokens')::int, 0)) AS prompt_tokens,
+                   -- prompt_tokens is carried on BOTH event types for the same
+                   -- call — llm.called has a chars//4 estimate, llm.responded the
+                   -- exact count once the provider reports it. They are kept
+                   -- apart here and overridden (not added) below; summing them in
+                   -- one pass overstated this agent's tokens by 152% against the
+                   -- same runs' totals on the run-detail page.
+                   SUM(CASE WHEN e.event_type = 'llm.responded'
+                            THEN COALESCE((e.payload->>'prompt_tokens')::int, 0) ELSE 0 END)
+                       AS prompt_tokens_responded,
+                   SUM(CASE WHEN e.event_type = 'llm.called'
+                            THEN COALESCE((e.payload->>'prompt_tokens')::int, 0) ELSE 0 END)
+                       AS prompt_tokens_called,
                    SUM(CASE WHEN e.event_type = 'llm.responded'
                             THEN COALESCE((e.payload->>'completion_tokens')::int, 0) ELSE 0 END)
                        AS completion_tokens
@@ -5488,15 +5537,9 @@ async def agent_performance_trends(org_id: str, agent_id: str, window_days: int)
             agent_id,
             window_str,
         )
-        cost_by_day: dict = {}
-        for r in token_rows:
-            day = str(r["day"])
-            cost = estimate_cost(
-                r["model"] or "unknown",
-                int(r["prompt_tokens"] or 0),
-                int(r["completion_tokens"] or 0),
-            )
-            cost_by_day[day] = cost_by_day.get(day, 0.0) + cost
+        # Override-not-sum lives in the pure layer with the rest of the
+        # arithmetic, so it is unit-tested without a database.
+        cost_by_day = compute_cost_by_day(token_rows, estimate_cost)
 
         latency_rows = await conn.fetch(
             """

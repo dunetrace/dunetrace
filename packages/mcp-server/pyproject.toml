@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dunetrace-mcp"
-version = "0.4.5"
+version = "0.4.7"
 description = "Dunetrace MCP server - expose agent signals to Claude Code, Cursor, and Codex"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
-authors = [{ name = "Dunetrace", email = "dunetrace@gmail.com" }]
+authors = [{ name = "Dunetrace UG (haftungsbeschränkt)", email = "vikas@dunetrace.com" }]
 keywords = ["ai", "agents", "mcp", "observability", "llm", "monitoring"]
 dependencies = [
     # server.py imports `mcp.server.fastmcp`, which bounds this at BOTH ends:
@@ -20,7 +20,16 @@ dependencies = [
     # every test collection died on ModuleNotFoundError, while local checkouts
     # pinned at 1.23.x kept passing. Moving to 2.x is an API migration, not a
     # version bump — do it deliberately, then raise this ceiling.
-    "mcp>=1.2,<2",
+    #
+    # The floor is 1.9.4, not 1.2, because of the --sse bind address:
+    # FastMCP's Settings.host defaulted to "0.0.0.0" through 1.9.0 and only
+    # became "127.0.0.1" in 1.9.4. This server has no authentication in any
+    # version, so a `>=1.2` range meant the *same command* exposed every tool
+    # (and the operator's admin bearer token) on every interface or on
+    # loopback depending on which `mcp` the resolver happened to pick.
+    # main() also sets mcp.settings.host explicitly; this floor is what makes
+    # the default safe for anything that bypasses main().
+    "mcp>=1.9.4,<2",
     "httpx>=0.24",
 ]
 
@@ -36,7 +45,10 @@ include = ["dunetrace_mcp*"]
 # at build time; this is what puts it in the wheel. Without it the resources
 # resolve into site-packages and return "(doc not found)" on a real install.
 [tool.setuptools.package-data]
-dunetrace_mcp = ["_docs/*.md"]
+# Second glob: some served docs live in a docs/ subdirectory (integrations/…),
+# and setup.py mirrors that structure rather than flattening it, so one
+# repo-relative path works for both the wheel and a source checkout.
+dunetrace_mcp = ["_docs/*.md", "_docs/*/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

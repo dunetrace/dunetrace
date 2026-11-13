@@ -54,10 +54,20 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/dunetrace-${{ matrix.service }}
+          # Exactly one source for the `latest` tag: the guarded raw entry
+          # below. metadata-action's default flavor (latest=auto) would add it
+          # as well, and two rules deciding one tag is how the guard gets lost.
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            # `latest` must track the newest STABLE release only. Unguarded,
+            # pushing v0.6.0-rc1 repointed it — and docker-compose.ghcr.yml
+            # pins :latest for all six images, so the next quickstart user
+            # pulled the release candidate. A semver prerelease is the only
+            # tag shape with a hyphen in it, which is what this keys on.
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -67,6 +77,15 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Stamps the release version into the image (Dockerfile ARG/ENV
+          # APP_VERSION). Without it every service falls back to the hardcoded
+          # default in its config.py, so /health and the
+          # dunetrace_build_info{service,version} gauge on a published image
+          # reported a version that had nothing to do with the tag it was built
+          # from. metadata-action's `version` output is the semver tag with the
+          # leading `v` stripped (v0.5.4 -> 0.5.4).
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}

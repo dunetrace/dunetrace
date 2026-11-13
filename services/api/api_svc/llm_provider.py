@@ -23,7 +23,25 @@ this module needs are identical, and the API image already installs ``openai``.
 
 from __future__ import annotations
 
+import time
+
 from api_svc.config import settings
+from dunetrace_schemas import metrics as dt_metrics
+
+# One call site for four features, so this is also the one place their latency
+# and error rate are measured. Labelled by provider only: the model is a
+# per-provider constant and the feature is not known here.
+_LLM_CALLS = dt_metrics.counter(
+    "dunetrace_api_llm_calls_total",
+    "LLM completions made by the Customer API's own features, by outcome.",
+    ("provider", "status"),
+)
+_LLM_SECONDS = dt_metrics.histogram(
+    "dunetrace_api_llm_call_seconds",
+    "Wall-clock latency of one LLM completion made by the Customer API.",
+    ("provider",),
+    buckets=dt_metrics.DEFAULT_LATENCY_BUCKETS,
+)
 
 # Provider -> (api-key setting name, default model, base_url or None).
 # Order is the auto-detect precedence when API_LLM_PROVIDER is unset: anthropic
@@ -99,6 +117,21 @@ async def complete(system: str, user: str, *, max_tokens: int) -> str:
     provider = resolve_provider()
     if provider is None:
         raise ValueError(missing_key_message())
+    # An unconfigured provider is not a call and is not counted; every attempt
+    # past this point is, including the ones that raise.
+    started = time.perf_counter()
+    try:
+        text = await _dispatch(provider, system, user, max_tokens=max_tokens)
+    except BaseException:
+        _LLM_SECONDS.labels(provider=provider).observe(time.perf_counter() - started)
+        _LLM_CALLS.labels(provider=provider, status="error").inc()
+        raise
+    _LLM_SECONDS.labels(provider=provider).observe(time.perf_counter() - started)
+    _LLM_CALLS.labels(provider=provider, status="ok").inc()
+    return text
+
+
+async def _dispatch(provider: str, system: str, user: str, *, max_tokens: int) -> str:
     api_key, model, base_url = provider_config(provider)
 
     if provider == "anthropic":

@@ -59,6 +59,102 @@ _VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 # froze at 17 entries and 422'd types that exist in the data. See that module.
 
 
+async def _signals_response(
+    org_id: str,
+    agent_id: Optional[str],
+    offset: int,
+    limit: int,
+    severity: Optional[str],
+    failure_type: Optional[str],
+    include_shadow: bool,
+    explain: bool,
+    per_agent_limit: Optional[int] = None,
+) -> SignalListResponse:
+    """Shared body for the per-agent and org-wide list endpoints."""
+    if severity and severity.upper() not in _VALID_SEVERITIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}",
+        )
+    if failure_type and not is_valid_failure_type(failure_type):
+        raise HTTPException(status_code=422, detail=invalid_failure_type_detail(failure_type))
+    rows, total = await list_signals(
+        org_id,
+        agent_id,
+        offset,
+        limit,
+        severity,
+        failure_type,
+        include_shadow,
+        explain_rows=explain,
+        per_agent_limit=per_agent_limit,
+    )
+
+    def _ts(v):
+        if v is None:
+            return None
+        return v.timestamp() if hasattr(v, "timestamp") else float(v)
+
+    signals = [SignalDetail(**{**r, "detected_at": _ts(r["detected_at"])}) for r in rows]
+    return SignalListResponse(
+        signals=signals,
+        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
+    )
+
+
+_EXPLAIN_Q = Query(
+    True,
+    description=(
+        "Include the long-form explainer prose (what / why_it_matters / "
+        "suggested_fixes) — 74% of the payload, and only read when a human opens "
+        "one signal. Pass false for aggregate views. `title` and "
+        "`evidence_summary` are returned either way; the omitted keys are still "
+        "present, empty."
+    ),
+)
+
+
+@router.get(
+    "/v1/signals",
+    response_model=SignalListResponse,
+    summary="List failure signals across every agent in the org",
+)
+async def get_all_signals(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(settings.PAGE_SIZE_DEFAULT, ge=1, le=settings.PAGE_SIZE_MAX),
+    agent_id: Optional[str] = Query(None, description="Optional: restrict to one agent"),
+    severity: Optional[str] = Query(
+        None, description="Filter by severity: LOW | MEDIUM | HIGH | CRITICAL"
+    ),
+    failure_type: Optional[str] = Query(None, description="Filter by failure type e.g. TOOL_LOOP"),
+    include_shadow: bool = Query(
+        False, description="Include shadow signals (stored but not alerted) in results"
+    ),
+    explain: bool = _EXPLAIN_Q,
+    per_agent_limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description=(
+            "Return each agent's newest N signals instead of the newest N overall. "
+            "This is what lets one request replace one-per-agent: a plain global "
+            "window starves quiet agents, so they would come back empty."
+        ),
+    ),
+    org_id: str = Depends(require_org),
+) -> SignalListResponse:
+    return await _signals_response(
+        org_id,
+        agent_id,
+        offset,
+        limit,
+        severity,
+        failure_type,
+        include_shadow,
+        explain,
+        per_agent_limit,
+    )
+
+
 @router.get(
     "/v1/agents/{agent_id}/signals",
     response_model=SignalListResponse,
@@ -75,31 +171,11 @@ async def get_signals(
     include_shadow: bool = Query(
         False, description="Include shadow signals (stored but not alerted) in results"
     ),
+    explain: bool = _EXPLAIN_Q,
     org_id: str = Depends(require_org),
 ) -> SignalListResponse:
-    if severity and severity.upper() not in _VALID_SEVERITIES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid severity {severity!r}. Valid: {sorted(_VALID_SEVERITIES)}",
-        )
-    if failure_type and not is_valid_failure_type(failure_type):
-        raise HTTPException(
-            status_code=422,
-            detail=invalid_failure_type_detail(failure_type),
-        )
-    rows, total = await list_signals(
-        org_id, agent_id, offset, limit, severity, failure_type, include_shadow
-    )
-
-    def _ts(v):
-        if v is None:
-            return None
-        return v.timestamp() if hasattr(v, "timestamp") else float(v)
-
-    signals = [SignalDetail(**{**r, "detected_at": _ts(r["detected_at"])}) for r in rows]
-    return SignalListResponse(
-        signals=signals,
-        page=Page(total=total, offset=offset, limit=limit, has_more=(offset + limit) < total),
+    return await _signals_response(
+        org_id, agent_id, offset, limit, severity, failure_type, include_shadow, explain
     )
 
 
@@ -523,6 +599,36 @@ async def open_pr(
                 "Auto-apply is blocked for PROMPT_INJECTION_SIGNAL. "
                 "The trace contains untrusted input — review the fix manually "
                 "before opening a PR."
+            ),
+        )
+
+    # This endpoint serves customer_code / code_change fixes ONLY, which is what
+    # the explain response, fix_classification's module docstring and the docs
+    # all say. Nothing enforced it: the dashboard gated the button client-side
+    # and the server accepted anything. So a caller could open a PR for a
+    # dunetrace_native signal (whose fix is a runtime policy applied through
+    # POST /v1/policies, not a diff) or for a prompt_addition one (which
+    # explain returns with apply_blocked: true precisely because no automated
+    # apply path exists) — and _attempt_real_diff below would then resolve a
+    # real source file and commit LLM-generated content into the customer's
+    # repository on the strength of a caller-supplied root_cause/fix_content.
+    if classify_fix(signal) == "dunetrace_native":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This signal's fix is a runtime policy, not a code change. Apply "
+                "it with POST /v1/policies using the suggested_policy body from "
+                "POST /v1/signals/{id}/explain — there is no PR to open."
+            ),
+        )
+    if signal["failure_type"] not in _CODE_CHANGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Opening a PR is only supported for code_change fixes. This "
+                f"signal's fix type is prompt_addition ({signal['failure_type']}): "
+                "Dunetrace can read the system prompt but has no write access to "
+                "wherever it lives, so the fix has to be copied in manually."
             ),
         )
 

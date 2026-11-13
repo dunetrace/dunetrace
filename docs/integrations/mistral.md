@@ -21,7 +21,7 @@ pip install 'dunetrace[mistral]'   # pulls mistralai>=2.0
 ```python
 from dunetrace import Dunetrace
 
-dt = Dunetrace(api_key="dt_live_...")
+dt = Dunetrace(api_key="dt_...")
 dt.init(agent_id="my-agent")       # patches mistral along with everything else installed
 
 with dt.run("my-agent", user_input=question):

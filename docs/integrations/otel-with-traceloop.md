@@ -14,7 +14,7 @@ from traceloop.sdk import Traceloop
 
 Traceloop.init(
     api_endpoint="https://<your-dunetrace-ingest>/v1/otlp",
-    headers={"Authorization": "Bearer dt_live_..."},
+    headers={"Authorization": "Bearer dt_..."},
 )
 ```
 

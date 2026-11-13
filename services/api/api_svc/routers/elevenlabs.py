@@ -17,7 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.crypto import encrypt_credentials
 from api_svc.db.queries import (
     analytics_cost_by_outcome,
@@ -94,7 +94,7 @@ def _status_response(status: dict | None) -> ElevenLabsIntegrationStatus:
 )
 async def set_elevenlabs_integration(
     body: ElevenLabsIntegrationRequest,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> ElevenLabsIntegrationStatus:
     # Encrypt first: it is local and fails fast if the master key is missing, so
     # a misconfigured server never makes an outbound call to ElevenLabs.
@@ -137,7 +137,7 @@ async def get_elevenlabs_integration(
     summary="Remove this org's ElevenLabs integration",
     status_code=204,
 )
-async def remove_elevenlabs_integration(org_id: str = Depends(require_org)):
+async def remove_elevenlabs_integration(org_id: str = Depends(require_scope("admin"))):
     deleted = await delete_elevenlabs_integration(org_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="No ElevenLabs integration configured.")

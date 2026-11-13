@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import os
 
+from dunetrace_schemas.deploy_guard import assert_safe_deployment
+
 
 def _load_dotenv(path: str = ".env") -> None:
     try:
@@ -41,6 +43,9 @@ class Settings:
     # an open one. Both compose files set `dev` explicitly for the local
     # quickstart; anything else (k8s, systemd, bare uvicorn) inherits `prod`.
     AUTH_MODE: str = os.getenv("AUTH_MODE", "prod")
+    # Deployment identity, read only by the startup guard at the bottom of
+    # this file (AUTH_MODE alone drives is_dev). Same default as ingest_svc.
+    ENV: str = os.getenv("ENV", "dev")
 
     # Trusted-upstream bypass — mirrors ingest_svc's INTERNAL_TOKEN. When set, requests
     # carrying a matching x-internal-token header skip this service's own api_keys
@@ -120,3 +125,6 @@ class Settings:
 
 
 settings = Settings()
+
+# ENV=prod with AUTH_MODE=dev never comes up — see dunetrace_schemas.deploy_guard.
+assert_safe_deployment("api", settings.ENV, settings.AUTH_MODE)

@@ -45,7 +45,13 @@ def mock_db(monkeypatch):
     monkeypatch.setattr("ingest_svc.db.postgres.close_pool", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.check_db", AsyncMock(return_value="ok"))
-    monkeypatch.setattr("ingest_svc.db.postgres.insert_events", AsyncMock(return_value=1))
+    # Returns the batch size: /v1/ingest now treats fewer rows than events as
+    # a persistence failure (503), so a fixed return_value=1 would reject every
+    # multi-event payload below.
+    monkeypatch.setattr(
+        "ingest_svc.db.postgres.insert_events",
+        AsyncMock(side_effect=lambda events, batch_id, org_id: len(events)),
+    )
     # Patched where routers/ingest.py actually looks it up — see the identical
     # comment in tests/test_ingest.py's mock_db fixture. Return value matches
     # the agent_id _record_a_full_run() below uses for every event.

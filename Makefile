@@ -1,4 +1,4 @@
-.PHONY: up down logs build test test-sdk-py test-sdk-ts test-schema-parity
+.PHONY: up down logs build test test-sdk-py test-sdk-ts test-schema-parity check-schema-owners verify-boot-order verify-boot-order-existing
 
 up:
 	docker compose up -d
@@ -52,6 +52,26 @@ test-sdk-ts:
 # No PYTHONPATH — it parses the sources rather than importing them.
 test-schema-parity:
 	python -m pytest tests/ -v
+
+# Boot-order verification against a REAL Postgres. Not part of `make test`:
+# it needs a database, and every other target is deliberately DB-free. This is
+# what closes the gap CLAUDE.md records as pending — the failure mode the whole
+# migration refactor exists to kill is a service booting first and finding a
+# table another service was supposed to have declared.
+#   make verify-boot-order                 # starts a throwaway container itself
+#   DATABASE_URL=... make verify-boot-order-existing
+verify-boot-order:
+	python scripts/verify_schema_boot_order.py --start-container
+
+verify-boot-order-existing:
+	python scripts/verify_schema_boot_order.py
+
+# Schema ownership: every table declared in exactly one place (a shared table in
+# migrations.py, a single-owner table in its service). Stdlib only. --check is a
+# ratchet against scripts/schema_owners_baseline.json; the target is zero.
+check-schema-owners:
+	python scripts/check_schema_owners.py --check
+	python -m unittest scripts.test_check_schema_owners
 
 test:
 	$(MAKE) test-sdk-py test-schemas test-ingest test-detector test-explainer test-alerts test-api test-mcp test-semantic test-integrations test-schema-parity test-sdk-ts

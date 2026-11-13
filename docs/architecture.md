@@ -23,7 +23,7 @@ Dunetrace is a pipeline of independent services communicating through a shared P
 │   Framework integrations: LangChain · CrewAI · AutoGen · OTel             │
 └──────┬──────────────────────────────┬──────────────────────────┬──────────┘
        │  HTTP POST /v1/ingest        │  stdout NDJSON           │  OTel spans
-       │  (async, 202)                │  (emit_as_json=True)     │  (otel_exporter=…)
+       │  (202 = committed)           │  (emit_as_json=True)     │  (otel_exporter=…)
        │  (Python + TypeScript)       │  (Python + TypeScript)   │  (Python only)
        ▼                              ▼                          ▼
 ┌─────────────────────┐  ┌────────────────────────┐  ┌──────────────────────┐
@@ -35,9 +35,9 @@ Dunetrace is a pipeline of independent services communicating through a shared P
 │  (OTLP/HTTP)        │  └────────────────────────┘  │  OpenLLMetry · any  │
 │                     │                               │  OTLP exporter      │
 │  validates ·        │                               └──────────────────────┘
-│  202 immediately    │
-│  BackgroundTask     │
 │  writes to Postgres │
+│  then 202 (or 503   │
+│   + Retry-After)    │
 └──────────┬──────────┘
            │  writes: events table
            ▼
@@ -56,19 +56,29 @@ Dunetrace is a pipeline of independent services communicating through a shared P
 │           │  │ Fetches       │  │  by default)        │  │  by default)        │
 │ Reconstr. │  │ unalerted     │  │                      │  │                     │
 │ RunState  │  │ shadow=FALSE  │  │  Adaptive sampling   │  │  Pulls Langfuse /   │
-│ Runs 29   │  │ signals       │  │  → DeepEval          │  │  LangSmith /        │
+│ Runs 34   │  │ signals       │  │  → DeepEval          │  │  LangSmith /        │
 │ detectors │  │ → explain()   │  │  evaluators →        │  │  Braintrust results │
 │ Writes    │  │ → Slack /     │  │  failure_signals     │  │  → failure_signals  │
 │ signals   │  │ webhook       │  │  (source=semantic)   │  │  (source=provider)  │
 └───────────┘  └───────────────┘  └────────────────────┘  └─────────────────────┘
 
+   A fifth worker, ElevenLabs, runs from the SAME image as Integrations with a
+   different `command`: it pulls voice-call data and correlates it with runs.
+   Optional and off by default, like the two above it. That is why compose
+   carries eight app services from seven service directories — `explainer` is a
+   library nothing runs, and `integrations` builds two containers.
+
 ┌──────────────────────────────────────────────────────────────┐
 │                  Customer API  :8002                         │
 │                                                             │
-│   GET /v1/agents                  GET /v1/runs/{id}         │
-│   GET /v1/agents/{id}/runs        GET /v1/runs/{id}/events  │
-│   GET /v1/agents/{id}/signals     GET /v1/agents/{id}/insights│
-│   Read-only · bearer token auth · explains signals inline   │
+│   100 routes across 25 routers — 58 reads, 42 writes         │
+│                                                              │
+│   GET  /v1/agents            GET  /v1/runs/{id}              │
+│   GET  /v1/agents/{id}/runs  GET  /v1/agents/{id}/insights   │
+│   POST /v1/signals/{id}/explain   POST /v1/policies          │
+│                                                              │
+│   Bearer token auth · writes are scope-gated                 │
+│   (admin for org config, approve for decisions)              │
 └──────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
@@ -85,73 +95,113 @@ Dunetrace is a pipeline of independent services communicating through a shared P
 
 ## Detection: Two Independent Paths
 
-Dunetrace runs Tier 1 detectors in two different places, and they are not the same
-detection run seen twice — they are two independent evaluations that can disagree.
-Understanding which path produced a given signal matters: only one of them is the
-source of truth for alerts and the dashboard.
+Tier 1 (structural) detectors run in two places, and they are not the same
+evaluation seen twice. They serve different purposes, run at different times,
+and — since 2.2 — read the **same server-authoritative thresholds**.
 
 ```
-              ┌────────────────────────────────────────┐
-              │            Your Agent Process           │
-              │                                         │
-              │   SDK builds RunState in memory          │
-              │   as events occur                        │
-              └───────────────────┬─────────────────────┘
-                                  │  at run end, before span export
-                                  ▼
-              ┌────────────────────────────────────────┐
-PATH 1        │  Client-side (OTel) pass                 │
-client-side,  │  Tier 1 detectors run                     │
-in-process    │  TIER1_DETECTORS thresholds                │
-              │  (hardcoded in detectors.py)                │
-              │  → root span attributes (dunetrace.signal.N.*)
-              └────────────────────────────────────────┘
-                (only exists if an OTel exporter is configured;
-                 works with no backend at all)
-
-
-              ┌────────────────────────────────────────┐
-              │                Ingest API                │
-              │  writes raw events to Postgres            │
-              └───────────────────┬─────────────────────┘
-                                  │  detector worker polls every 5s
-                                  ▼
-              ┌────────────────────────────────────────┐
-PATH 2        │  Server-side pass                        │
-server-side,  │  Tier 1 + custom detectors                │
-after         │  detectors.yml thresholds (configurable,   │
-ingestion     │  hot-reloadable without redeploying the SDK)│
-              │  → failure_signals table                    │
-              │    → alerts worker → Slack/webhook           │
-              │    → dashboard                                │
-              └────────────────────────────────────────┘
-                (requires the full backend stack running)
+              ┌──────────────────────────────────────────────────────┐
+              │                  Your Agent Process                   │
+              │                                                        │
+              │  SDK builds RunState in memory as events occur         │
+              │                                                        │
+PATH 1        │  In-path (policy) pass                                 │
+client-side,  │    only when a trigger="signal" policy is active       │
+per step      │    run_detectors(state, detectors=<per-agent list>,    │
+              │                  context="policy")  after each         │
+              │                  tool.called / llm.responded /         │
+              │                  tool.responded                        │
+              │    → policy action: stop / switch_model / inject /     │
+              │      require_approval / log                            │
+              │                                                        │
+              │  Background thread at run start (one per agent, TTL):  │
+              │    GET /v1/policies        → PolicyEngine               │
+              │    GET /v1/detector-config → DetectorConfigStore        │
+              └───────────────────────────┬────────────────────────────┘
+                                          │ events (SDK → ingest)
+                                          ▼
+              ┌──────────────────────────────────────────────────────┐
+              │   Ingest API — writes raw events; serves detectors.yml │
+              │   overrides + packs + P75 baselines at                 │
+              │   GET /v1/detector-config                              │
+              └───────────────────────────┬────────────────────────────┘
+                                          │ detector worker polls every 5s
+                                          ▼
+              ┌──────────────────────────────────────────────────────┐
+PATH 2        │  Server-side pass                                      │
+server-side,  │  all 34 built-ins + packs + custom detectors           │
+after         │  detectors.yml thresholds + P75 baselines              │
+ingestion     │  → failure_signals → alerts, dashboard, issues,        │
+              │    OTel signal spans (emit_signal_span)                │
+              └──────────────────────────────────────────────────────┘
 ```
 
-| | Path 1 — client-side (OTel) | Path 2 — server-side |
+| | Path 1 — in-path (policy) | Path 2 — server-side |
 |---|---|---|
-| Where it runs | In the SDK process, at run end | Detector worker, after ingestion |
-| When | Before span export, synchronously | On the next 5s poll cycle |
-| Thresholds | `TIER1_DETECTORS` hardcoded in `detectors.py` | `detectors.yml`, loaded at worker startup |
-| Output | Root span attributes (`dunetrace.signal.N.*`) | `failure_signals` table |
+| Where it runs | Inside the agent process, `run_context.py` | Detector worker, after ingestion |
+| When | After each step, **only while a `trigger="signal"` policy is active** for the agent; otherwise never | On the next 5s poll after the run completes or stalls |
+| Detectors | The per-agent list from `GET /v1/detector-config` (`dunetrace/detector_config.py::build_detectors`), narrowed to the failure types the active signal policies name; `TIER1_DETECTORS` (31) before the first fetch. Never `PROMPT_INJECTION_SIGNAL`, `HANDOFF_CONTEXT_LOSS`, `DELEGATION_LOOP` | All 34 (`_DETECTOR_CLASSES`, an alias of the SDK's `DETECTOR_KEYS`) + registered plugins + enabled packs + JSON custom detectors |
+| Thresholds | `detectors.yml` `default` + agent-category overrides, as served by ingest; in-path scan caps can only be lowered | `detectors.yml`, loaded at worker startup |
+| Baselines | `baselines` from the same response, copied onto `RunState.baseline_*` before the pass | Computed from `run_baseline_metrics` per run |
+| Output | A policy decision — nothing is written to `failure_signals` | `failure_signals` rows |
 | Feeds alerts / dashboard? | No | Yes — this is the only path that does |
-| Works without the backend running? | Yes | No |
-| Custom detectors | Not evaluated | Evaluated (Tier 1 always runs first) |
+| Source of truth | No | Yes |
 
-**Why two paths instead of one:** the OTel path exists for SDK-only deployments — teams
-piping spans straight into Tempo/Honeycomb/Datadog without running `ingest`/`detector`/
-`alerts` at all, or wanting agent failures correlated with infra spans in one place. The
-server-side path exists because it's the only one with access to `detectors.yml`
-overrides, custom detectors, cross-run baselines (P75 step count, token growth, etc.),
-and the issue-tracking/alerting/digest machinery — none of which a stateless SDK process
-can compute for itself.
+**What the OTel exporter does — and does not — do.** `DunetraceOTelExporter`
+turns events into spans. It does **not** run detectors: the
+`dunetrace.signal.*` spans a backend shows under a run are emitted by the
+server-side path (`emit_signal_span`, parented onto the run's deterministic
+root span context) after the detector worker has written the signal. An
+SDK-only deployment with no backend gets spans, and no signals.
 
-**They can disagree.** If you tune a threshold in `detectors.yml`, the OTel span
-annotations (Path 1) keep using the SDK's hardcoded defaults — they will not pick up the
-override. A signal that fires in your Tempo trace may not fire in the dashboard, or vice
-versa. **The server-side path (Path 2) is the source of truth** for anything user-facing
-— alerts, the dashboard, issue tracking. Treat Path 1 purely as a convenience for
-SDK-only / infra-correlation use cases, not as a second copy of the same detection result.
+**Thresholds are server-authoritative.** Every 60s per agent (the same TTL as
+the policy bundle), the SDK's background thread pulls
+`GET /v1/detector-config?agent_id=…&agent_version=…` from the ingest service:
+the `default` + agent-category overrides from `detectors.yml` already mapped
+to constructor kwargs, the packs the org has enabled, and the agent's P75
+baselines. The parser is shared (`dunetrace_schemas.detector_config`), so
+what ingest serves is what the worker instantiates. The SDK builds a fresh
+per-agent instance of each in-path detector from its class with those kwargs
+overlaid on the in-path instance's own settings, and appends the listed packs'
+detectors with class defaults. Two rules keep the client side honest:
+
+- **In-path budget caps may only be lowered by the server, never raised.**
+  `UngroundedDestinationDetector` and `UnresolvedAmbiguityDetector` are
+  constructed in `TIER1_DETECTORS` with `MAX_SCAN_NS` / `MAX_SURFACE_CHARS` /
+  `MAX_ARGS_CHARS` / `MAX_OUTPUT_CHARS` far below their class defaults, and
+  every detector has a `MAX_COST_NS`. The in-path pass runs once per step
+  *inside the customer's request path* — their latency pays for every byte
+  scanned — whereas `detectors.yml` tunes the worker's own instance, which
+  has nothing waiting on it. A value that is right server-side can be 50x too
+  expensive in-path, so `build_detectors` applies a `BUDGET_CAPS` key only
+  when it is lower than what the in-path instance already has.
+- **Unknown is skipped, not fatal.** A kwarg this SDK build does not know is
+  dropped with one WARNING per (detector, key); an unknown detector or pack
+  is ignored at DEBUG; a detector whose constructor rejects the merged kwargs
+  falls back to its in-path instance.
+
+**When the fetch fails**, the store keeps whatever it last loaded, or — before
+any load — the in-path pass runs the `TIER1_DETECTORS` class defaults exactly
+as it always did. The failure is retried on the shared backoff (2s, 4s, 8s,
+capped at 15s — `dunetrace/remote_fetch.py::RemoteFetchState`, the same
+bookkeeping `PolicyEngine` uses), the first failure in a streak logs WARNING
+and recovery logs INFO, and every `policy.evaluated` event carries
+`detector_config_stale` / `detector_config_age_s` next to the 1.4
+`policy_bundle_stale` / `policy_bundle_age_s` fields, so the dashboard can see
+that a policy decision was taken on default thresholds.
+
+**Why both paths exist.** Path 1 is *prevention*: a runtime policy has to see
+a tool loop while the run is still going, inside the process that can stop
+it, and nothing outside that process can be on that critical path. Path 2 is
+*the record*: it is the only place with custom detectors, cross-run
+delegation graphs, issue tracking, alerting and digests, and the only writer
+of `failure_signals`. Path 1 exists to act; Path 2 exists to be believed.
+They still can differ in the small — Path 1 evaluates a run in progress
+(`RunState` mid-run, not the final one), narrows the list to the failure
+types the active policies name, and keeps its scan caps — but no longer in
+the large: a threshold tuned in `detectors.yml` reaches both.
+`services/detector/tests/test_client_server_threshold_parity.py` pins that
+with golden runs through both lists.
 
 ---
 
@@ -195,7 +245,7 @@ If you already run Langfuse, LangSmith, or Braintrust, `integrations_worker`
 pulls their evaluation results in and correlates them to Dunetrace runs via
 `trace_id`, writing them into the same `failure_signals` table tagged with
 the provider's name as `source`. A synchronous generic push endpoint
-(`POST /v1/semantic-signals/external`) covers evaluation tools without a
+(`POST /v1/semantic-signals`) covers evaluation tools without a
 dedicated poller. Full detail, including per-provider auth and failure
 handling, in [docs/integrations/external-evaluation.md](integrations/external-evaluation.md).
 
@@ -306,9 +356,7 @@ Trace (trace_id = run_id as 128-bit int)
     └── Span: "retrieval"     [dunetrace.index_name, dunetrace.result_count]
 ```
 
-At run end, Tier 1 detectors run on the completed `RunState`. Each signal is written as indexed attributes on the root span (`dunetrace.signal.0.failure_type`, `.severity`, `.confidence`, `.evidence.*`). HIGH/CRITICAL signals set `span.status = ERROR`.
-
-This is Path 1 of the two independent detection paths — see [Detection: Two Independent Paths](#detection-two-independent-paths) above for the full comparison against the server-side path, and why the two can disagree.
+The exporter does **not** run detectors. Signals appear in the trace as `dunetrace.signal.{failure_type}` child spans emitted by the detector worker (`emit_signal_span`) once the server-side pass has written them, parented onto the run's deterministic root span context; a HIGH/CRITICAL signal marks its span as an error. See [Detection: Two Independent Paths](#detection-two-independent-paths) above.
 
 Orphaned child spans (a `tool_called` with no matching `tool_responded`, e.g. when an exception fires mid-tool) are force-closed with `status = ERROR` so backends visually flag the broken step.
 
@@ -387,12 +435,12 @@ The entry point for all SDK traffic. Its only job is to accept events as fast as
 
 - Validates the event schema (Pydantic)
 - Authenticates via `api_keys` table and resolves the caller's `org_id`; every event is tagged with it before being written — see [Database Schema](#database-schema)
-- Returns `202 Accepted` before touching the database
-- Writes events to Postgres in a `BackgroundTask` (after the 202)
+- Writes the batch to Postgres, then returns `202 Accepted` — the 202 is a promise that the events are committed
+- A store failure or a row shortfall returns `503` with a `Retry-After` header (5s) and a generic detail; the SDK keeps the batch and re-sends it whole. Nothing is acknowledged that was not written
 - Never does any detection logic
 - `POST /v1/deploy` — accepts deploy markers from `dt.mark_deploy()` and writes to the `deploy_events` table synchronously (no background task; deploy markers are rare and low-volume)
 
-**Why the 202 before writing?** Your agent is waiting. The round-trip to the agent should be as short as possible. Validation is synchronous; persistence is async.
+**Why write before the 202?** It used to be the other way round — 202 first, persistence in a `BackgroundTask`, every failure swallowed into a log line — so a DB outage looked like success to the SDK, which then discarded its only copy of the events. The extra DB round-trip sits in the SDK's background drain thread, never in the agent's own path, so agent latency is unchanged. A re-sent batch is safe: `insert_events` drops events whose `event_id` is already stored, and the route treats a short row count that is fully explained by already-stored `event_id`s as accepted rather than lost (so a batch whose 202 was lost in transit does not become a permanent 503). `POST /v1/otlp/traces` is different by design: OTel exporters expect a fast 200 and retry on their own, so it keeps its buffer-and-retry contract (`PersistRetry`).
 
 **EventStore abstraction** (`services/ingest/ingest_svc/db/event_store.py`) — the write path (`insert_events`) and retention (`prune_old_events`) sit behind an `EventStore` interface, swapped via `get_event_store()`/`set_event_store()`. `PostgresEventStore` (the default) delegates to the same partition-aware functions in `db/postgres.py` described below; `InMemoryEventStore` is a fully in-process fake for tests that want to assert on what actually got "written" rather than mocking a free function. This covers only ingest_svc's own write path — the four read-side services (detector, alerts, api, explainer) each query Postgres directly and are intentionally left alone; introducing a shared cross-service storage interface would cross a boundary this codebase keeps deliberately separate (see System Overview: "communicate only through a shared Postgres database", no shared business logic beyond the SDK/schemas packages).
 
@@ -417,7 +465,7 @@ A background polling loop that runs every 5 seconds. It is the only process that
 1. Fetches runs completed since last poll (terminal events `run.completed` or `run.errored`) plus any runs that have stalled (no new events for `STALL_TIMEOUT_SECS`, default 90s)
 2. Checks `processed_runs` to skip already-processed runs
 3. Reconstructs `RunState` by fetching and replaying all events for each run
-4. Runs all 32 structural detectors against the `RunState` (`_DETECTOR_CLASSES` in `detector_svc/detectors.py`), then any active custom detectors and any detectors belonging to a pack this org has enabled. Three of the 32 don't evaluate off `RunState` alone: `PROMPT_INJECTION_SIGNAL` is detected by the SDK on raw input at run-start and embedded in the `run.started` payload, so the worker extracts it from there; `HANDOFF_CONTEXT_LOSS` and `DELEGATION_LOOP` need a second run's data and are evaluated against the cross-run delegation graph (`_handoff_signal_from_parent` / `_delegation_signal_from_chain` in `worker.py`)
+4. Runs all 34 structural detectors against the `RunState` (`_DETECTOR_CLASSES` in `detector_svc/detectors.py`), then any active custom detectors and any detectors belonging to a pack this org has enabled. Three of the 34 don't evaluate off `RunState` alone: `PROMPT_INJECTION_SIGNAL` is detected by the SDK on raw input at run-start and embedded in the `run.started` payload, so the worker extracts it from there; `HANDOFF_CONTEXT_LOSS` and `DELEGATION_LOOP` need a second run's data and are evaluated against the cross-run delegation graph (`_handoff_signal_from_parent` / `_delegation_signal_from_chain` in `worker.py`)
 5. Writes any `FailureSignal` rows to Postgres
 6. Updates the `issues` table: UPSERTs an issue row for each live signal fired (`upsert_fired_issues`) and increments the clean-run counter for any open issues that did not fire this run (`advance_clean_runs`). An issue auto-resolves after 5 consecutive clean runs. Issue tracking failures are caught and logged — they do not affect run processing.
 7. Marks the run as processed
@@ -488,7 +536,7 @@ Langfuse/LangSmith/Braintrust integrations and correlates them to Dunetrace
 runs via `trace_id`. See [External Integration Mode](#external-integration-mode)
 above and [docs/integrations/external-evaluation.md](integrations/external-evaluation.md)
 for full detail, including the generic push endpoint
-(`POST /v1/semantic-signals/external`), which is served by the Customer API
+(`POST /v1/semantic-signals`), which is served by the Customer API
 directly rather than this worker, since it's a synchronous customer-facing
 call, not a background poll.
 
@@ -531,10 +579,33 @@ A background polling loop that runs every 10 seconds. It is the only process tha
 
 ### Customer API (port 8002)
 
-A read-only FastAPI service. Powers the dashboard and any customer integrations.
+A FastAPI service — 100 routes across 25 routers. Powers the dashboard and any
+customer integrations. It is **not read-only**: 42 of those routes are
+`POST`/`PUT`/`PATCH`/`DELETE`, and some of them change what a live agent does.
+`POST /v1/policies` is the sharpest — a `stop` policy terminates real runs as
+soon as the SDK next pulls policies — alongside `POST /v1/keys` (mints
+credentials) and `POST /v1/approvals/{id}/decision` (releases a blocked agent).
 
-- All endpoints require `Authorization: Bearer <api_key>`
-- In `AUTH_MODE=dev`, auth is skipped entirely i.e. no token required. **`AUTH_MODE` defaults to `prod`** in both the ingest and customer API — dev mode disables authentication outright, so it has to be an explicit opt-in and a deployment that forgets to set the variable gets a locked-down API rather than an open one. Both compose files set `dev` for the local quickstart (`docker-compose.ghcr.yml` reads it as `${AUTH_MODE:-dev}`, so `AUTH_MODE=prod` in the environment is enough to lock it down without editing the file). Each service logs a `WARNING` at startup whenever dev mode is active
+- Nearly every endpoint requires `Authorization: Bearer <api_key>`. Four routers
+  are mounted without the router-level dependency, each for a stated reason:
+  `packs` (`GET /v1/packs` is a static catalog with no org context; its other
+  three endpoints declare `Depends(require_org)` individually), `slack` and
+  `linear_webhook` (inbound webhooks, authenticated by the provider's own request
+  signature rather than a Dunetrace key), and `github_integration` (`/callback`
+  is GitHub's own browser redirect and carries no key; its other four endpoints
+  declare `Depends(require_org)` individually). The three probes — `/health`,
+  `/ready`, `/metrics` — are unauthenticated by design and are for the internal
+  network only
+- **Writes are scope-gated** on top of authentication (`api_svc/auth.py`'s
+  `require_scope`). `admin` gates every org-wide config write — API keys, policy
+  writes and toggles, custom detectors, packs, org settings and every integration
+  config route; `approve` gates `POST /v1/approvals/{id}/decision`, because the
+  agent being gated holds an ingest key and would otherwise be able to open its
+  own gate. A key can mint at most the scopes it already holds, and an absent
+  scope list fails closed to ingest-only. Reads stay ingest-accessible.
+  `services/api/tests/test_scope_enforcement.py` walks the live route table and
+  fails the build if a write under a managed prefix lacks its scope
+- In `AUTH_MODE=dev`, auth is skipped entirely i.e. no token required. **`AUTH_MODE` defaults to `prod`** in both the ingest and customer API — dev mode disables authentication outright, so it has to be opted into explicitly. The quickstart compose file sets `AUTH_MODE: ${AUTH_MODE:-dev}` with every port bound to loopback; `docker-compose.prod.yml` pins `ENV=prod` and `AUTH_MODE=prod` on every service, and each service refuses to start with `ENV=prod` and `AUTH_MODE=dev` (`dunetrace_schemas.deploy_guard`). Both services key dev mode on `AUTH_MODE` alone — see docs/operations.md, "Deploying".
 - All signal responses include the full explanation (title, what, why, fixes)
 - Pagination via `offset` / `limit` query params
 
@@ -548,13 +619,15 @@ A read-only FastAPI service. Powers the dashboard and any customer integrations.
 | `GET /v1/agents/{id}/insights` | Aggregated analytics: input hash patterns, signal trends by day, version stats, time-to-first-tool percentiles, hourly signal distribution. Also returns `failure_rates` (daily affected/total per failure type), `systemic_patterns` (7-day rate + `is_systemic` flag), and `deploy_events` (last 90 days of deploy markers) — the data powering the Health Record and Deploy Timeline panels |
 | `GET /v1/agents/{id}/issues` | Open/resolved issue list for an agent. Accepts optional `status` filter (`open`, `resolved`, `reopened`). Returns id, failure_type, status, first_seen, last_seen, resolved_at, affected_runs, clean_runs_since |
 | `GET /v1/runs/{id}` | Full run detail — metadata, all events, all signals with explanations |
-| `POST /v1/signals/{id}/explain` | Root-cause analysis, fully native — built from Dunetrace's own events, no external tracing system involved. Returns `fix_category` (`dunetrace_native`, with a deterministic `suggested_policy`; or `customer_code`, with LLM-generated `fix_content`/`fix_patch`), plus `root_cause` and `apply_blocked`. Requires `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in env |
+| `POST /v1/signals/{id}/explain` | Root-cause analysis, fully native — built from Dunetrace's own events, no external tracing system involved. Returns `fix_category` (`dunetrace_native`, with a deterministic `suggested_policy`; or `customer_code`, with LLM-generated `fix_content`/`fix_patch`), plus `root_cause` and `apply_blocked`. Requires one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `MISTRAL_API_KEY` in env; `API_LLM_PROVIDER` pins which, and a pinned provider whose key is missing is an error rather than a fall-through to another vendor |
 | `POST /v1/signals/{id}/open-pr` | For `customer_code` / `code_change` fixes only: opens a draft GitHub PR. Auth resolves per-org GitHub App installation first, else the legacy global `GITHUB_TOKEN`/`GITHUB_REPO` — see [docs/integrations/github-app.md](integrations/github-app.md). When two-tier source mapping resolves a real file, the PR edits it directly (diff computed via `difflib` from real before/after content, not LLM-authored); otherwise falls back to a `dunetrace-fixes/signal-{id}.md` summary file. Records the fix in the `fixes` table. Blocked for `PROMPT_INJECTION_SIGNAL` (returns 403) and when GitHub isn't configured (503). `dunetrace_native` fixes (a `suggested_policy`) are applied via the existing `POST /v1/policies` instead, after user confirmation — no separate endpoint. `prompt_addition` fixes have no automated apply path — always a manual copy |
 | `GET /v1/orgs/integrations/github/install-url`, `.../callback`, `POST`/`GET`/`DELETE /v1/orgs/integrations/github` | Per-org GitHub App install flow and repos/reviewers config — see [docs/integrations/github-app.md](integrations/github-app.md) |
 | `POST`/`GET`/`DELETE /v1/agents/{agent_id}/source-config` | Tier-1 explicit source mapping (`repo`, optional `file_path`) for an agent — see [docs/integrations/github-app.md](integrations/github-app.md#source-mapping-which-repofile-does-a-signal-correspond-to) |
 | `POST /v1/signals/{id}/record-copy` | Record a clipboard-path fix in the `fixes` table |
 | `GET /v1/signals/{id}/fix-status` | Return fix history and recurrence verdict (`verified / likely_fixed / still_occurring / insufficient_data`) |
-| `GET /health` | Service health check — returns `{"status":"ok","db":"ok"}` |
+| `GET /health` | Liveness only — `{"status":"ok","version":…}` with **no** database round-trip, so it never fails while the process serves HTTP. Unauthenticated, hidden from `/docs` |
+| `GET /ready` | Readiness — 200 when the database answers `SELECT 1` and the applied `schema_version` is at least this build's `CURRENT_SCHEMA_VERSION`; 503 with the same body (`db`, `schema_version`, `required`, `pool`) otherwise. This is what the compose healthcheck targets. Unauthenticated, hidden from `/docs` |
+| `GET /metrics` | Prometheus exposition — request counts and latency by templated route, LLM call counts and latency by provider, build and schema version. Unauthenticated, internal network only. Catalogue in [docs/operations.md](operations.md#observability-probes-and-metrics) |
 
 **Signal endpoints** accept an optional `include_shadow` query parameter:
 
@@ -767,6 +840,67 @@ CREATE TABLE alert_dedup (
 );
 ```
 
+### Schema ownership
+
+**Every table touched by more than one service is declared in
+`packages/schemas-py/dunetrace_schemas/migrations.py`, and nowhere else.** A
+single-owner table stays inline in that service's own schema-init as
+`CREATE TABLE IF NOT EXISTS`. Two declarations of one table — two services, or
+migrations plus a service that never deleted its copy — is the
+"whichever service starts first wins" contract the migration runner exists to
+replace, and an `ALTER TABLE … ADD COLUMN` in a service on a table that service
+does not declare (a *stray column*) is the same problem one column at a time:
+that column belongs in a new migration. An index lives with its table's
+declaration for the same reason: `idx_events_tts_correlation` serves the
+ElevenLabs worker's query but is ingest's DDL, because `events` is ingest's —
+created from the worker, guarded on the table existing, a worker-first boot
+ran without it until that worker's next restart.
+
+Where each table lives (migrations 1–12):
+
+- **Migrations (shared)** — `organizations`, `api_keys`, `runs`,
+  `processed_runs`, `failure_signals`, `fixes`, `policies`,
+  `policy_evaluations`, `custom_detectors`, `custom_detector_results`, `packs`,
+  `org_enabled_packs`, `run_state_metrics`, `org_alert_integrations`,
+  `linear_issue_signals`, `signal_groups`, `signal_group_members`,
+  `signal_group_overrides`, `org_semantic_evaluation_usage`,
+  `semantic_evaluation_log`, `external_evaluation_integrations`,
+  `external_evaluation_processed`, `elevenlabs_integrations`,
+  `elevenlabs_generations`, `issues`, and `schema_version` itself.
+- **Ingest** (`services/ingest/ingest_svc/db/postgres.py`) — `events` (and its
+  monthly partitions), `deploy_events`, `rate_limit_workers`,
+  `agent_rate_quotas`, `otel_receiver_stats`.
+- **Detector** (`services/detector/detector_svc/db.py`) — `conversations`,
+  `run_processing_failures`, `run_baseline_metrics`,
+  `agent_destination_baseline`, `detector_watermarks`.
+- **Customer API** (`services/api/api_svc/db/queries.py`) — `policy_audit_log`,
+  `agent_detector_overrides`, `signal_feedback`, `github_install_states`,
+  `org_github_integrations`, `agent_source_config`, `approvals`.
+- **Alerts** (`services/alerts/alerts_svc/db.py`) — `digest_log`, `alert_dedup`.
+- **Semantic** (`services/semantic/semantic_svc/db.py`) —
+  `semantic_processed_runs`, `agent_semantic_config`,
+  `semantic_evaluation_usage`, `org_conversation_evaluation_usage`.
+- **Integrations** (`services/integrations/integrations_svc/db.py`) — nothing;
+  both containers' tables are migration 11's.
+
+Every schema-init applies the migrations and then calls
+`require_schema_version(conn, CURRENT_SCHEMA_VERSION, "<service>")` before
+any DDL of its own, so a service that could not bring the database current
+refuses to start instead of running against a schema that cannot answer its
+queries (see `docs/operations.md`, "Schema migrations").
+
+`scripts/check_schema_owners.py` enforces the one-declaration rule. It scans
+the six service schema files plus `migrations.py` as text, lists every
+`CREATE TABLE` and `ADD COLUMN` per service and every owner per table, and
+exits 1 on any multi-owner table or stray column; it runs in CI with a
+baseline of zero (`--check` against `scripts/schema_owners_baseline.json`).
+Its sibling `tests/test_schema_parity.py` asserts column-for-column agreement
+for any duplicate that reappears. `make check-schema-owners` runs both.
+`scripts/verify_schema_boot_order.py` is the runtime counterpart: against a
+real Postgres it boots every service first on a fresh database, runs
+concurrent appliers, checks idempotence, and upgrades a database built by
+HEAD's DDL — see `docs/operations.md`.
+
 ---
 
 ## Partitioning & Retention
@@ -813,10 +947,26 @@ the delete carries a `NOT EXISTS` against `events` rather than trusting a retent
 constant, which makes the invariant hold whatever `EVENT_RETENTION_DAYS` is actually
 set to, including a value this service never sees.
 
+There is **no age knob** on this prune, and deliberately so. There used to be a
+`PROCESSED_RUNS_RETENTION_DAYS` bound over `processed_at`, but `processed_at`
+records when a run was last *analysed*, not when it happened, and it is refreshed
+every time late events trigger a re-detection — so the bound never expired rows
+for runs that were re-processed recently but whose events had aged out long ago.
+It was removed rather than left as a no-op knob. Candidates are now selected by
+the absence-of-events test directly, which also guarantees every pass makes
+progress; an age-bounded pass could return a full batch of rows that all still
+have events and delete nothing.
+
+What governs the window is therefore ingest's `EVENT_RETENTION_DAYS` (90 by
+default): a `processed_runs` row becomes eligible when the partition holding its
+events is dropped. Only one knob remains here:
+
 | Env var | Default | Description |
 |---|---|---|
-| `PROCESSED_RUNS_RETENTION_DAYS` | `120` | Age bound on the prune scan. Sits beyond the 90-day event default so the anti-join only considers rows that can plausibly qualify. Not the safety mechanism — the `NOT EXISTS` is |
 | `PRUNE_BATCH_SIZE` | `10000` | Rows per delete batch. A pass keeps going while batches come back full, so a neglected table catches up over one pass rather than one batch per day |
+
+Only shard 0 prunes — the table is not shard-partitioned, so every replica running
+this would contend on the same rows for no extra throughput.
 
 ---
 
@@ -912,7 +1062,7 @@ A denied request gets `429` with a `Retry-After` header (seconds until the oldes
 
 **Cross-process coordination:** the limiter is a per-process in-memory singleton, so a single instance enforces `rate_limit_rpm` exactly. Running multiple ingest workers or replicas would otherwise let each one enforce the *full* limit independently — N processes silently allowing N× the configured rate. `RateLimiter._heartbeat()` closes this gap approximately rather than exactly: every 10s, each process upserts a liveness row into `rate_limit_workers`, reaps rows older than 30s, and sets `self._active_workers` to the resulting count; `is_allowed()` then checks each request against `rate_limit_rpm // active_workers` instead of the raw configured value. With the default single-instance deployment, `active_workers` is always `1` and enforcement is exact, identical to before this mechanism existed.
 
-This is a deliberate approximation, not a shortcut: an exact answer would mean a synchronous Postgres round-trip on every ingest request, which conflicts with the API's "return `202` before writing to DB" design and its throughput target. The tradeoff is a lag of up to one heartbeat interval (~10s) when a worker joins or leaves — during that window the aggregate limit across all workers can be briefly over- or under-enforced. A transient heartbeat failure (DB blip) leaves `active_workers` at its last known value rather than resetting to `1`, since resetting would itself cause every worker to briefly re-enforce the full limit — exactly the overshoot this mechanism exists to prevent.
+This is a deliberate approximation, not a shortcut: an exact answer would mean a second synchronous Postgres round-trip on every ingest request, on top of the write itself, which conflicts with the API's throughput target. The tradeoff is a lag of up to one heartbeat interval (~10s) when a worker joins or leaves — during that window the aggregate limit across all workers can be briefly over- or under-enforced. A transient heartbeat failure (DB blip) leaves `active_workers` at its last known value rather than resetting to `1`, since resetting would itself cause every worker to briefly re-enforce the full limit — exactly the overshoot this mechanism exists to prevent.
 
 ---
 
@@ -922,8 +1072,8 @@ This is a deliberate approximation, not a shortcut: an exact answer would mean a
 |---|---|---|
 | SDK `_emit()` | <1μs (deque append, default config) | Millions/sec |
 | SDK drain thread | 200ms idle poll; continuous under load | 100 events/batch |
-| Ingest API (202) | ~5ms | ~1,000 req/sec (single instance) |
-| Ingest DB write | ~20ms | Background, non-blocking |
+| Ingest API (202) | ~5ms + the DB write | ~1,000 req/sec (single instance) |
+| Ingest DB write | ~20ms | In the request path — the 202 is sent after the commit |
 | Detector poll cycle | 5s | ~100 runs/cycle |
 | Explain layer | <1ms | Synchronous |
 | Alerts poll cycle | 10s | 50 signals/cycle |
@@ -934,7 +1084,9 @@ This is a deliberate approximation, not a shortcut: an exact answer would mean a
 - **Per-run, not per-event:** overhead scales with event count. A run emitting ~20 events stays under ~500μs total; a run with hundreds of events accumulates proportionally (still tens of µs each). The "sub-500μs" figure is a per-event/small-run guideline, not a per-run guarantee for arbitrarily large runs.
 - **Signal-trigger policies run detectors in-path.** If you configure a policy with `trigger: "signal"`, the SDK evaluates the detector suite on every step — measured ~130μs/event (~2.9ms for a 20-event run), roughly 10× the baseline. Latency-sensitive agents should prefer non-signal triggers (`tool_call_count`, `llm_latency_ms`, etc.) or accept the added in-path cost.
 
-With `emit_as_json=True` or an OTel exporter, `_emit()` also serialises to JSON or creates spans synchronously — overhead increases accordingly. The drain thread is entirely background. Even under backpressure (ingest API down), the ring buffer drops the oldest events rather than blocking the agent.
+With `emit_as_json=True` or an OTel exporter, `_emit()` also serialises to JSON or creates spans synchronously — overhead increases accordingly. The drain thread is entirely background.
+
+**Buffer overload sheds whole runs, visibly.** Under backpressure (ingest API down, or an agent emitting faster than the drain thread ships) the ring buffer (`dunetrace/buffer.py`) never blocks the agent — but it no longer drops single events either. Dropping one event at a time produced partial runs the detector could not tell from complete ones: a tool loop with its early calls missing looked clean, and a run missing `run.started` had no tools list. When the buffer is full it now sheds the **oldest whole run**: every buffered event of the run at the head of the queue is tombstoned (skipped on drain; compacted in one sweep only when the deque exceeds twice its capacity, so `push` stays O(1) amortised and sub-millisecond under sustained overload) and every later non-terminal event of that run is counted and discarded on arrival. `run.completed` / `run.errored` are never shed: the client reserves the terminal's slot first, reads the run's drop count, and stamps it on the payload as `dropped_events: <n>` — omitted when 0, so a healthy run's wire format is unchanged; a terminal that was already buffered when its run was shed is stamped on drain instead. Each shed run gets one WARNING naming the run and count, rate-limited to one line a minute with a tally of the others. The detector reads the count into `RunState.dropped_events` and treats the run as *incomplete* — every signal shadow, capped, marked, and excluded from issue tracking and baselines (see the shadow-mode section of `docs/detectors.md`). The per-run drop map is capped (4,096 runs, oldest evicted first) so a shed run whose terminal never arrives cannot pin memory.
 
 ---
 

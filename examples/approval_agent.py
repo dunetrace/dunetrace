@@ -58,7 +58,12 @@ def main() -> None:
             print(f"approved: {result}")
         except ApprovalDenied as exc:
             # Denied outright, or nobody approved before the 60s timeout.
-            print(f"blocked: {exc.reason} (tool did not run)")
+            print(f"blocked: {exc.status} (tool did not run)")
+            if exc.note:
+                # The human's correction, delivered into the run with
+                # provenance. Feed it into the next planning step and retry
+                # inside THIS run — see docs/approvals.md.
+                print(f"  human note from {exc.decided_by or 'operator'}: {exc.note}")
         except (urllib.error.URLError, RuntimeError) as exc:
             print(f"(could not reach the approval API — is the stack running? {exc})")
 

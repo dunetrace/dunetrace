@@ -1,10 +1,16 @@
 """
-Database layer for the integrations worker. Owns external_evaluation_integrations
-and external_evaluation_processed outright (mirrors api_svc's own defensive
-duplicate of the same DDL — whichever service starts first wins). Reads
-events (owned by ingest_svc) for trace_id correlation and writes to the
-shared failure_signals table, same conventions semantic_svc already
-established for a service that isn't the schema's primary owner.
+Database layer for the integrations worker (both the evaluation pollers and
+the ElevenLabs poller run off this module).
+
+Every table this worker touches is shared with another service and is
+declared by dunetrace_schemas.migrations, not here: external_evaluation_*
+and elevenlabs_* (migration 11; the API owns their config CRUD and read
+paths), failure_signals (5), and `events` for trace_id / tts correlation
+(ingest's own). This file used to carry its own copy of the migration-11
+tables and a "defensive" ALTER on failure_signals.source under the
+whichever-starts-first convention, and never applied the shared migrations
+at all — so a worker-first boot on an empty database had no failure_signals
+to write into. Both ensure_* entry points apply migrations first now.
 """
 
 from __future__ import annotations
@@ -56,140 +62,56 @@ async def close_pool() -> None:
         _pool = None
 
 
-# ── Schema additions ───────────────────────────────────────────────────────────
+# ── Schema ─────────────────────────────────────────────────────────────────────
 
-_INTEGRATIONS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS external_evaluation_integrations (
-    id                    BIGSERIAL    PRIMARY KEY,
-    org_id                TEXT         NOT NULL,
-    provider              TEXT         NOT NULL,
-    endpoint_url          TEXT         NOT NULL,
-    encrypted_credentials TEXT         NOT NULL,
-    poll_interval_secs    INTEGER      NOT NULL DEFAULT 60,
-    enabled               BOOLEAN      NOT NULL DEFAULT TRUE,
-    last_polled_at        TIMESTAMPTZ,
-    last_success_at       TIMESTAMPTZ,
-    consecutive_failures  INTEGER      NOT NULL DEFAULT 0,
-    first_failure_at      TIMESTAMPTZ,
-    last_alerted_at       TIMESTAMPTZ,
-    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, provider)
-);
-CREATE INDEX IF NOT EXISTS idx_ext_integrations_enabled
-    ON external_evaluation_integrations(enabled) WHERE enabled = TRUE;
 
-CREATE TABLE IF NOT EXISTS external_evaluation_processed (
-    org_id       TEXT        NOT NULL,
-    provider     TEXT        NOT NULL,
-    external_id  TEXT        NOT NULL,
-    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (org_id, provider, external_id)
-);
+async def _apply_shared_migrations() -> None:
+    """Shared schema first, the way every other service boots. The tables
+    this worker polls into (migration 11) and writes signals to (5) are
+    migrations', so without this call a worker-first boot found none of
+    them.
 
--- Defensive: failure_signals.source is owned by semantic_svc's migration,
--- which may not have run (SEMANTIC_WORKER_ENABLED defaults to false).
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'structural';
-"""
+    Apply, then require. require_schema_version is the guard for a replica
+    that could not apply (a lock timeout, a read-only standby): it raises
+    before any local DDL runs, so a too-old schema fails the start here
+    rather than the first poll that writes a column it lacks."""
+    from dunetrace_schemas.migrations import (
+        CURRENT_SCHEMA_VERSION,
+        apply_migrations,
+        require_schema_version,
+        schema_connection,
+    )
+
+    # Untimed connection — see schema_connection.
+    async with schema_connection(settings.DATABASE_URL) as conn:
+        await apply_migrations(conn)
+        await require_schema_version(conn, CURRENT_SCHEMA_VERSION, "integrations")
 
 
 async def ensure_integrations_schema() -> None:
+    """external_evaluation_integrations / external_evaluation_processed are
+    migration 11's. Nothing is declared locally for the evaluation pollers."""
     if not _pool:
         return
-    async with _pool.acquire() as conn:
-        await conn.execute(_INTEGRATIONS_SCHEMA)
+    await _apply_shared_migrations()
     logger.info("Integrations schema ready")
 
 
 # ── ElevenLabs schema (Phase 4.3) ──────────────────────────────────────────────
 #
-# elevenlabs_integrations is duplicated defensively (api_svc owns the config
-# side; whichever starts first wins). elevenlabs_generations is owned here: the
-# poller writes it, Phase 4.4 correlation updates correlated_to_event_id in
-# place, and the customer API reads it. correlated_* columns stay NULL in this
-# phase — correlation is Phase 4.4.
-_ELEVENLABS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS elevenlabs_integrations (
-    id                      BIGSERIAL        PRIMARY KEY,
-    org_id                  TEXT             NOT NULL UNIQUE,
-    encrypted_credentials   TEXT             NOT NULL,
-    poll_interval_secs      INTEGER          NOT NULL DEFAULT 300,
-    enabled                 BOOLEAN          NOT NULL DEFAULT TRUE,
-    last_polled_at          TIMESTAMPTZ,
-    last_success_at         TIMESTAMPTZ,
-    last_seen_generation_at DOUBLE PRECISION,
-    consecutive_failures    INTEGER          NOT NULL DEFAULT 0,
-    first_failure_at        TIMESTAMPTZ,
-    last_alerted_at         TIMESTAMPTZ,
-    created_at              TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
-    updated_at              TIMESTAMPTZ       NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_elevenlabs_integrations_enabled
-    ON elevenlabs_integrations(enabled) WHERE enabled = TRUE;
-
-CREATE TABLE IF NOT EXISTS elevenlabs_generations (
-    id                     BIGSERIAL        PRIMARY KEY,
-    org_id                 TEXT             NOT NULL,
-    generation_id          TEXT             NOT NULL,
-    voice_id               TEXT,
-    voice_name             TEXT,
-    model                  TEXT,
-    character_count        INTEGER          NOT NULL DEFAULT 0,
-    -- ElevenLabs bills characters as credits on standard TTS plans, so credits
-    -- == character_count. Stored as its own column so a future plan whose
-    -- credit model differs can be represented without a migration.
-    cost_credits           INTEGER,
-    text                   TEXT,
-    source                 TEXT,
-    generated_at           DOUBLE PRECISION NOT NULL,
-    -- Correlation (Phase 4.4). correlated_* set on a match; unmatched_reason set
-    -- when the generation is old enough that a match should have arrived and
-    -- none did (recorded as drift, no longer retried). A row with all four NULL
-    -- is still pending and will be retried next cycle.
-    correlated_to_event_id BIGINT,
-    correlation_method     TEXT,
-    correlation_confidence REAL,
-    correlated_at          TIMESTAMPTZ,
-    unmatched_reason       TEXT,
-    -- Denormalized from the matched event at correlation time (Phase 5.1) so the
-    -- run/call/filter read queries never need an events.id join (events is a big
-    -- partitioned table with no standalone id index). NULL until correlated.
-    run_id                 TEXT,
-    agent_id               TEXT,
-    fetched_at             TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
-    UNIQUE (org_id, generation_id)
-);
--- Defensive for installs where an earlier build created the table without these.
-ALTER TABLE elevenlabs_generations ADD COLUMN IF NOT EXISTS unmatched_reason TEXT;
-ALTER TABLE elevenlabs_generations ADD COLUMN IF NOT EXISTS run_id TEXT;
-ALTER TABLE elevenlabs_generations ADD COLUMN IF NOT EXISTS agent_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_elevenlabs_gen_org_time
-    ON elevenlabs_generations(org_id, generated_at DESC);
--- Phase 4.4 correlation pass scans only generations still awaiting a decision.
-CREATE INDEX IF NOT EXISTS idx_elevenlabs_gen_uncorrelated
-    ON elevenlabs_generations(org_id) WHERE correlated_to_event_id IS NULL;
--- Phase 5.1 read paths: generations for a run, and the filter/high-cost listing.
-CREATE INDEX IF NOT EXISTS idx_elevenlabs_gen_run
-    ON elevenlabs_generations(org_id, run_id);
-
--- Correlation candidate lookup: tts.generated events for an org in a time
--- window. Partial index keeps it scoped to just the voice events, small even on
--- a large events table.
-CREATE INDEX IF NOT EXISTS idx_events_tts_correlation
-    ON events(org_id, timestamp) WHERE event_type = 'tts.generated';
-
--- Defensive, same reason as _INTEGRATIONS_SCHEMA: write_integration_down_signal
--- writes failure_signals.source, owned by semantic_svc's migration which may
--- not have run. This worker can run standalone, so ensure the column here too.
-ALTER TABLE failure_signals ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'structural';
-"""
+# elevenlabs_integrations and elevenlabs_generations (with the correlation and
+# denormalised run/agent columns, and their three read-path indexes) are
+# migration 11's. The correlation-candidate index on `events`
+# (idx_events_tts_correlation) is declared by ingest, whose table it is: this
+# worker used to create it guarded on the table existing, so a worker-first
+# boot against an empty database ran without it until the worker's next
+# restart. Nothing is declared here.
 
 
 async def ensure_elevenlabs_schema() -> None:
     if not _pool:
         return
-    async with _pool.acquire() as conn:
-        await conn.execute(_ELEVENLABS_SCHEMA)
+    await _apply_shared_migrations()
     logger.info("ElevenLabs schema ready")
 
 
@@ -230,20 +152,29 @@ async def has_processed(org_id: str, provider: str, external_id: str) -> bool:
         )
 
 
-async def fetch_run_by_trace_id(trace_id: str) -> dict | None:
+async def fetch_run_by_trace_id(org_id: str, trace_id: str) -> dict | None:
     """Correlates an external evaluation back to the Dunetrace run it's
-    about. Returns None if no event carries this trace_id — either the run
-    predates trace_id support, wasn't instrumented with it, or genuinely
-    isn't a Dunetrace run."""
+    about, within the polling org. Returns None if no event of *this org*
+    carries this trace_id — either the run predates trace_id support, wasn't
+    instrumented with it, or genuinely isn't a Dunetrace run.
+
+    org_id is the polling integration's, and it is load-bearing: trace_id is
+    caller-supplied (the SDK and the OTLP path both derive it from one), so
+    two tenants legitimately share one. Unscoped, LIMIT 1 could pick the
+    other tenant's row, and _poll_one then wrote the signal with the polling
+    org's org_id but that row's agent_id/agent_version/run_id — surfacing one
+    org's agent naming and run identifiers in another's dashboard. Same
+    reasoning as api_svc's fetch_run_by_trace_id_for_org."""
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT run_id, agent_id, agent_version, org_id
             FROM events
-            WHERE trace_id = $1
+            WHERE trace_id = $1 AND org_id = $2
             LIMIT 1
             """,
             trace_id,
+            org_id,
         )
     return dict(row) if row else None
 

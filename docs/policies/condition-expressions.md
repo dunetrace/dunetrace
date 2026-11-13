@@ -41,8 +41,8 @@ A field path is a dotted string. The part before the first dot is the
 | `args.*` | The tool call's arguments (only at the `before_tool_call` gate — see [below](#where-args-come-from)) | `args.amount`, `args.customer_id`, `args.customer.email` |
 | `run.*` | Run metadata | `run.agent_id`, `run.duration_ms`, `run.event_count`, `run.step_count`, `run.tool_call_count`, `run.error_count`, `run.cost_usd` |
 | `event.*` | The current event's fields | `event.type`, `event.tool_name`, `event.hour` (UTC 0–23), `event.timestamp` (unix) |
-| `agent.*` | Agent metadata | `agent.tier`, `agent.model` — *not yet populated, see note* |
-| `org.*` | Org metadata | `org.plan`, `org.tier` — *not yet populated, see note* |
+| `agent.*` | Agent metadata | **Rejected at registration — see note** |
+| `org.*` | Org metadata | **Rejected at registration — see note** |
 
 **Nested paths** use dot notation: `args.customer.email` resolves
 `args["customer"]["email"]`. Any missing segment makes the whole path **absent**.
@@ -51,11 +51,27 @@ A field path is a dotted string. The part before the first dot is the
 operator except `exists`/`not_exists` evaluate to `false` (and logs a debug
 line). Use `exists` / `not_exists` to reason about presence explicitly.
 
-> **`agent.*` and `org.*` have no source yet.** They are valid to write — a
-> policy referencing them loads and validates cleanly — but always evaluate as
-> *absent* until a metadata channel lands (tracked in `BACKLOG.md`). Use
-> `not_exists` if you want a condition that holds until then, or avoid them for
-> now. `args.*`, `run.*`, and `event.*` are fully wired.
+> **`agent.*` and `org.*` are rejected at registration.** Nothing populates
+> them at runtime, so every comparison against one evaluates as absent and a
+> policy using one can never fire. It used to load cleanly and sit inert, which
+> is the worst thing this engine can do: the dashboard showed it enabled, it
+> reported zero firings, and zero firings is also what a working policy looks
+> like on a healthy day. Creating one now fails with an error that names the
+> prefix:
+>
+> ```
+> Policy 'trial-cap': condition references agent.*, which is not available at
+> runtime. Nothing populates it, so every comparison evaluates as absent and
+> this policy can never fire. Available prefixes: args.* (with the
+> 'before_tool_call' trigger), run.*, event.*. Rewrite the condition against
+> one of those, or drop the clause.
+> ```
+>
+> The same error comes back from `dt.add_policy()` and from the dashboard,
+> because both run the same validator. Tier and plan gating needs a
+> server-side metadata channel that does not exist yet; the deferral and its
+> trigger condition are recorded in `BACKLOG.md`. `args.*`, `run.*` and
+> `event.*` are fully wired.
 
 No wildcards. `args.*` as a literal path is not supported — name the field.
 
@@ -194,9 +210,29 @@ design: blocking on an argument value only makes sense before the call executes.
 
 In the after-event metric path (the checks that run after `tool_called` /
 `llm_responded` / `tool_responded`), `args.*` is **absent** — the tool already
-ran, so `run.*` and `event.*` are the useful namespaces there. A policy that
-needs `args.*` should use `trigger: before_tool_call` with a `require_approval`
-action.
+ran, so `run.*` and `event.*` are the useful namespaces there.
+
+**`args.*` on any other trigger is rejected at registration**, for the same
+reason `agent.*` is: it could never match, and an inert policy that reads as
+enabled is worse than no policy. A policy that needs `args.*` must use
+`trigger: before_tool_call` with a `require_approval` action.
+
+**Those two are each other's only partner.** `before_tool_call` is evaluated
+only by the approval gate, which considers `require_approval` and nothing else,
+and it is not a step-level metric either. So each half alone is inert, and both
+halves alone are rejected:
+
+```
+Policy 'stop-wires': trigger 'before_tool_call' only reaches the approval gate,
+which handles action 'require_approval' and nothing else — action 'stop' is
+never consulted there, and 'before_tool_call' is not a step-level metric, so
+this policy can never fire. Use action 'require_approval', or trigger on a
+step-level metric (tool_call_count, step_count, cost_usd, error_count,
+signal, ...).
+```
+
+`stop`-on-a-tool-name reads like the most natural policy in the world, which is
+exactly why it is worth failing loudly rather than accepting.
 
 ```yaml
 # args.amount is live here — evaluated before refund_customer runs
@@ -358,7 +394,29 @@ core's are routine.
 
 Expression conditions are covered by the same HMAC-SHA256 policy signature as
 everything else — the `match` block lives inside `condition`, which is fully
-hashed, so **a tampered expression fails verification**. Policies using a `match`
-block are signed under canonical-form **version 2** (`sig_version: 2`); legacy
-policies stay version 1, byte-identical, so existing signed policies keep
-verifying unchanged. See [Trust boundary](../policies.md#trust-boundary).
+hashed, so **a tampered expression fails verification**.
+
+The canonical form is versioned, and a policy signs at the lowest version that
+can carry it. That is what lets new fields be authenticated without
+invalidating signatures already issued:
+
+| Version | Covers | Used by |
+|---|---|---|
+| 1 | The original seven fields, byte-identical to pre-feature policies | Everything else |
+| 2 | v1 plus an authenticated `v2` prefix | A policy with a `match` block |
+| 3 | v2 plus the policy's `mode` | A policy in [dry run](dry-run.md) |
+
+`mode` is signed because it decides whether the policy enforces at all. Left
+unsigned, anyone who could reach the policy feed could flip a signed enforcing
+policy to `dry_run` and silently disarm it. A non-default `mode` carried on a
+v1 or v2 signature is therefore **rejected**, not honoured:
+
+```
+Policy 'cap-tools' (id=12) declares mode 'dry_run' on a v1 signature, which
+does not cover mode — rejected. Re-save the policy so the server signs it at v3.
+```
+
+Existing signed policies are unaffected: an enforcing policy with no `match`
+block still signs and verifies at v1, byte for byte.
+
+See [Trust boundary](../policies.md#trust-boundary).

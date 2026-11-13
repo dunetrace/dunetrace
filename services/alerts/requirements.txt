@@ -1,6 +1,10 @@
 asyncpg==0.29.0
 httpx==0.28.1
 python-dotenv>=1.2.2
+# PIN STYLE (shared across services): a package used by more than one image
+# floats on a floor, so every image resolves the SAME version at build time.
+# `==` is reserved for the few places where the version itself is load-bearing
+# (deepeval's pydantic/python-dotenv ranges, mistralai>=2).
 PyYAML>=6.0
 # audit Finding 4 (BLOCKER): alerts_svc/crypto.py imports cryptography to decrypt
 # per-org Slack/Linear creds, but it was missing here — clean builds crash-looped
@@ -10,3 +14,7 @@ cryptography>=42
 # This service does not use pydantic directly, but importing the shared migration
 # runner pulls the package __init__, so the image cannot boot without it.
 pydantic==2.10.4
+# dunetrace_schemas.metrics — /metrics, /ready and /health on METRICS_PORT.
+# Optional there (the worker boots without it, every metric a no-op); pinned
+# here so the published image actually exposes them.
+prometheus-client>=0.20

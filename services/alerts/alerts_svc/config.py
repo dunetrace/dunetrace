@@ -5,6 +5,8 @@ services/alerts/alerts_svc/config.py
 from __future__ import annotations
 import os
 
+from dunetrace_schemas.deploy_guard import assert_safe_deployment
+
 
 def _load_dotenv(path: str = ".env") -> None:
     try:
@@ -29,6 +31,14 @@ class Settings:
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL", "postgresql://dunetrace:dunetrace@localhost:5432/dunetrace"
     )
+    # Deployment identity — read only by the startup guard at the bottom of
+    # this file. This worker authenticates nothing, so neither value changes
+    # its behaviour; they exist so ENV=prod with AUTH_MODE=dev is refused on
+    # every container, not just the two HTTP services. Same defaults as
+    # ingest_svc/api_svc: ENV is dev unless told otherwise, AUTH_MODE fails
+    # closed to prod.
+    ENV: str = os.getenv("ENV", "dev")
+    AUTH_MODE: str = os.getenv("AUTH_MODE", "prod")
 
     # Slack
     # Set SLACK_WEBHOOK_URL to enable Slack alerts.
@@ -91,6 +101,15 @@ class Settings:
 
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # Build identity, reported on dunetrace_build_info{service="alerts"}. Same
+    # resolution order as ingest_svc/api_svc so one deploy sets it once.
+    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
+
+    # Prometheus /metrics + /ready + /health on a daemon thread (see
+    # dunetrace_schemas.metrics.start_metrics_server). Not published by
+    # compose; the in-network healthcheck and scraper reach it. 0 disables.
+    METRICS_PORT: int = int(os.getenv("METRICS_PORT", "9102"))
+
     # Weekly digest
     DIGEST_ENABLED: bool = os.getenv("DIGEST_ENABLED", "true").lower() == "true"
     DIGEST_DAY: int = int(os.getenv("DIGEST_DAY", "0"))  # 0=Monday … 6=Sunday
@@ -123,6 +142,8 @@ if not (0 <= settings.SHARD_INDEX < settings.SHARD_COUNT):
     )
 if settings.CLAIM_TIMEOUT_SECS <= 0:
     raise ValueError(f"CLAIM_TIMEOUT_SECS must be > 0, got {settings.CLAIM_TIMEOUT_SECS}")
+# ENV=prod with AUTH_MODE=dev never comes up — see dunetrace_schemas.deploy_guard.
+assert_safe_deployment("alerts", settings.ENV, settings.AUTH_MODE)
 
 # Severity order for threshold comparisons
 SEVERITY_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}

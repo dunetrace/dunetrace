@@ -15,7 +15,7 @@ import openlit
 
 openlit.init(
     otlp_endpoint="https://<your-dunetrace-ingest>/v1/otlp",
-    otlp_headers="Authorization=Bearer dt_live_...",
+    otlp_headers="Authorization=Bearer dt_...",
 )
 ```
 

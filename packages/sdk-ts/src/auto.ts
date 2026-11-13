@@ -38,6 +38,7 @@
  */
 
 import { getCurrentRun, httpInstrumentationSuppressed, httpSuppression } from "./context.js";
+import { safeEmit as _safeEmit } from "./util.js";
 
 /** Marks a function as already instrumented, so re-patching is a no-op. */
 const INSTRUMENTED = Symbol.for("dunetrace.instrumented");
@@ -86,14 +87,11 @@ function warn(message: string, err?: unknown): void {
  * Auto-instrumentation sits in the middle of a call the host application depends
  * on. A bug in our event emission must never turn a working LLM call into a
  * failed one, so every emit goes through here — the same guarantee the Python
- * SDK's `_safe_emit` provides.
+ * SDK's `_safe_emit` provides. The implementation is shared with the manual
+ * `dt.tool()` path (see util.ts), which needs the identical promise.
  */
 function safeEmit(emit: () => void): void {
-  try {
-    emit();
-  } catch (err) {
-    warn("auto-instrumentation failed to emit an event (call itself is unaffected)", err);
-  }
+  _safeEmit(emit, "auto-instrumentation");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -368,12 +366,100 @@ type Emitter = (model: string, resp: unknown, startedAt: number) => void;
 type CollectorFactory = () => StreamCollector;
 
 /**
+ * Attach a resolution callback to `value` WITHOUT replacing it.
+ *
+ * The point is that the caller keeps the object the vendor SDK returned. Both
+ * `openai` and `@anthropic-ai/sdk` return an `APIPromise` from `create()` — a
+ * Promise subclass carrying `.withResponse()`, `.asResponse()` and
+ * `_thenUnwrap()`, which is the documented way to read rate-limit headers and
+ * the request id. Anything that `await`s such a value and returns a new promise
+ * (an `async function` wrapper, for one) hands back a bare Promise and those
+ * members are gone.
+ *
+ * Calling `.then()` directly rather than going through `Promise.resolve()`
+ * keeps this callback FIRST in line: it is registered on the original promise
+ * synchronously, before the caller gets a chance to await, so the event is
+ * buffered before their continuation runs. (Both SDKs' `APIPromise.then()`
+ * delegates to a cached `parse()`, so observing here does not re-read the body
+ * or start a second request.)
+ *
+ * Rejections are swallowed HERE and only here: the error still reaches the
+ * caller on the untouched original. Attaching the no-op rejection handler is
+ * what stops our derived promise from surfacing as an unhandled rejection.
+ */
+function observeResolution(value: unknown, onResolved: (v: unknown) => void): void {
+  const then = isRecord(value) ? (value as { then?: unknown })["then"] : undefined;
+  if (typeof then !== "function") {
+    // Not a thenable — a fake or a sync-returning method. Report it as-is.
+    onResolved(value);
+    return;
+  }
+  try {
+    (then as (ok: (v: unknown) => void, err: (e: unknown) => void) => unknown).call(
+      value,
+      onResolved,
+      () => { /* the caller sees this on the original; emit nothing */ },
+    );
+  } catch {
+    /* a hostile thenable — never break the call it is attached to */
+  }
+}
+
+/**
+ * Hand back `replacement`'s promise behaviour on `original`'s object surface.
+ *
+ * Only the streaming path needs this: there the caller must receive the
+ * OBSERVED stream rather than the vendor's own, so the resolved value genuinely
+ * changes and `observeResolution` above is not enough. Proxying keeps
+ * `.withResponse()` / `.asResponse()` reachable on an `APIPromise` instead of
+ * replacing it with a bare Promise.
+ *
+ * `then`/`catch`/`finally` come from the replacement, bound to it. Everything
+ * else is read off the TARGET and bound to the target — the same rule
+ * `observeStream` follows below, and for the same reason: routing through the
+ * proxy breaks the class private fields (`#x`) both SDKs use internally.
+ *
+ * A plain native promise has nothing to preserve, so it skips the proxy
+ * entirely and pays no per-call cost.
+ *
+ * Known limit: `.withResponse()` on a STREAMING call still resolves to the
+ * vendor's raw stream, because it goes to the SDK's own `parse()` rather than
+ * through `then`. Draining that copy reports no llm.responded — the same
+ * outcome as a stream nobody consumes. The non-streaming path, which is where
+ * `.withResponse()` is actually used, is unaffected.
+ */
+function withPromiseSurface(original: unknown, replacement: Promise<unknown>): Promise<unknown> {
+  if (!isRecord(original)) return replacement;
+  if (Object.getPrototypeOf(original) === Promise.prototype) return replacement;
+
+  return new Proxy(original as object, {
+    get(target, prop): unknown {
+      if (prop === "then" || prop === "catch" || prop === "finally") {
+        const fn = (replacement as unknown as Record<string, AnyFn>)[prop];
+        return fn.bind(replacement);
+      }
+      const value = Reflect.get(target, prop) as unknown;
+      return typeof value === "function" ? (value as AnyFn).bind(target) : value;
+    },
+  }) as unknown as Promise<unknown>;
+}
+
+/**
  * Wrap a `create`-shaped method so successful non-streaming calls emit events.
  *
  * Errors propagate untouched and emit nothing: a call that threw produced no
  * usage, no finish reason, and no output, so there is no llm.responded to
  * describe. The failure is already visible to the caller and to whatever
  * error handling the host has.
+ *
+ * NOT an `async function`, deliberately. An async wrapper awaits the vendor's
+ * return value and resolves a fresh native Promise with it, which silently
+ * downgrades `openai`/`@anthropic-ai/sdk`'s `APIPromise` — so
+ * `create(opts).withResponse()` threw `TypeError: ... is not a function` the
+ * moment instrumentation was switched on. And because `autoInstrument()` patches
+ * the shared prototype, that broke every client in the process, including ones
+ * built inside third-party libraries. The non-streaming path therefore returns
+ * the vendor's own object untouched and observes it from the side.
  */
 function instrumentCreate(
   orig: AsyncFn,
@@ -383,38 +469,61 @@ function instrumentCreate(
 ): AsyncFn {
   if ((orig as unknown as Record<symbol, unknown>)[INSTRUMENTED]) return orig;
 
-  const wrapped = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
+  const wrapped = function (this: unknown, ...args: unknown[]): Promise<unknown> {
     const opts = isRecord(args[0]) ? args[0] : undefined;
     const model = str(opts?.["model"]) ?? "unknown";
     const startedAt = Date.now();
 
     // The SDK issues its request through fetch; suppress HTTP instrumentation for
     // the duration so one LLM call doesn't also register as a tool call.
-    const resp = await httpSuppression.run(true, () => orig.apply(this, args));
+    let ret: unknown;
+    try {
+      ret = httpSuppression.run(true, () => orig.apply(this, args));
+    } catch (err) {
+      // A method that throws synchronously rather than returning a rejected
+      // promise. The async wrapper this replaced turned that into a rejection;
+      // keep doing so, so the call site's shape does not depend on the vendor.
+      return Promise.reject(err);
+    }
 
     // openai/anthropic express streaming as an option on one method; Mistral
     // has a separate `stream` method that always streams.
     if (!alwaysStream && !opts?.["stream"]) {
-      emit(model, resp, startedAt);
-      return resp;
+      observeResolution(ret, (resp) => emit(model, resp, startedAt));
+      return ret as Promise<unknown>;
     }
 
     // Streaming: usage and finish reason only exist once the caller drains the
-    // stream, so emit llm.called now and llm.responded when it finishes.
-    const run = getCurrentRun();
-    if (!run) return resp;
-    safeEmit(() => { run.llmCalled(model, 0); });
+    // stream, so emit llm.called now and llm.responded when it finishes. This is
+    // the one path that must change the resolved value — the caller has to
+    // receive the observing proxy — so it rebuilds the promise and puts the
+    // vendor's object surface back over it.
+    const observed = (async (): Promise<unknown> => {
+      const resp = await (ret as Promise<unknown>);
+      const run = getCurrentRun();
+      if (!run) return resp;
+      // Capture the correlation id at CALL time. The response lands whenever the
+      // caller drains, which may be after other calls have started — two
+      // overlapping streams emit called(A), called(B), responded(A), responded(B),
+      // and without the id the server-side builder pairs them positionally and
+      // swaps their models, tokens, latency and cost.
+      let callId: number | undefined;
+      safeEmit(() => { callId = run.llmCalled(model, 0); });
 
-    return observeStream(resp, collectorFor(), (result) => {
-      safeEmit(() => {
-        run.llmResponded({
-          completionTokens: result.completionTokens,
-          latencyMs: Date.now() - startedAt,
-          finishReason: result.finishReason ?? "stop",
-          outputText: result.outputText,
+      return observeStream(resp, collectorFor(), (result) => {
+        safeEmit(() => {
+          run.llmResponded({
+            completionTokens: result.completionTokens,
+            latencyMs: Date.now() - startedAt,
+            finishReason: result.finishReason ?? "stop",
+            outputText: result.outputText,
+            callId,
+          });
         });
       });
-    });
+    })();
+
+    return withPromiseSurface(ret, observed);
   };
 
   Object.defineProperty(wrapped, INSTRUMENTED, { value: true, enumerable: false });

@@ -1,8 +1,8 @@
 {
   "name": "dunetrace",
-  "version": "0.6.4",
-  "description": "Real-time monitoring for AI agents",
-  "author": "Dunetrace <dunetrace@gmail.com>",
+  "version": "0.6.6",
+  "description": "The runtime reliability layer for AI agents.",
+  "author": "Dunetrace UG (haftungsbeschränkt) <vikas@dunetrace.com>",
   "license": "Apache-2.0",
   "keywords": [
     "ai",
@@ -24,16 +24,19 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "default": "./dist/index.js"
     },
     "./integrations/otel": {
+      "types": "./dist/integrations/otel.d.ts",
       "require": "./dist/integrations/otel.js",
-      "types": "./dist/integrations/otel.d.ts"
+      "default": "./dist/integrations/otel.js"
     },
     "./integrations/otel-receiver": {
+      "types": "./dist/integrations/otel-receiver.d.ts",
       "require": "./dist/integrations/otel-receiver.js",
-      "types": "./dist/integrations/otel-receiver.d.ts"
+      "default": "./dist/integrations/otel-receiver.js"
     }
   },
   "files": [

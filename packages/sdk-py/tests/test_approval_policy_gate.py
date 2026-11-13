@@ -57,12 +57,31 @@ class TestFindApprovalPolicy(unittest.TestCase):
         self.assertIsNone(e.find_approval_policy("other-agent", "wire_money"))
         self.assertIsNotNone(e.find_approval_policy("billing-agent", "wire_money"))
 
-    def test_ignores_non_approval_before_tool_call_is_impossible(self):
-        # A before_tool_call trigger with a non-require_approval action still
-        # isn't returned (find_approval_policy filters on action type too).
-        p = _approve_policy()
-        p["action"] = {"type": "log"}
-        e = self._engine(p)
+    def test_non_approval_before_tool_call_is_rejected_at_registration(self):
+        """The combination can no longer be built.
+
+        before_tool_call only reaches find_approval_policy, which filters on
+        action type, and it is not in build_metrics() either — so paired with
+        any action but require_approval it could never fire. It used to
+        construct happily and sit inert, which is the failure this engine must
+        not produce. validate_policy_semantics now refuses it.
+        """
+        from dunetrace.policies import PolicyConfigError
+
+        spec = _approve_policy()
+        spec["action"] = {"type": "stop"}
+        with self.assertRaises(PolicyConfigError) as ctx:
+            Policy(**spec)
+        self.assertIn("before_tool_call", str(ctx.exception))
+        self.assertIn("require_approval", str(ctx.exception))
+
+    def test_gate_still_filters_on_action_type(self):
+        """Defence in depth: registration is the gate, but the runtime filter
+        stays. Mutated past validation, such a policy is still not returned."""
+        policy = Policy(**_approve_policy())
+        policy.action = {"type": "log"}  # bypass __post_init__
+        e = PolicyEngine()
+        e.add(policy)
         self.assertIsNone(e.find_approval_policy("agent", "wire_money"))
 
     def test_empty_engine_returns_none(self):

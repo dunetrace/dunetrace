@@ -5,7 +5,13 @@ cross-cutting BaseDetector attribute rather than a detector-specific tunable.
 
 Run:
     cd services/detector
-    PYTHONPATH=../../packages/sdk-py:. python -m pytest tests/test_config_loader.py -v
+    PYTHONPATH=../../packages/sdk-py:../../packages/schemas-py:. python -m pytest tests/test_config_loader.py -v
+
+The parser itself lives in dunetrace_schemas.detector_config (shared with the
+ingest service's GET /v1/detector-config); this module is the detector's
+adapter over it. The parser's own tests are packages/schemas-py/tests/
+test_detector_config.py — what is asserted here is the adapter contract the
+worker relies on.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ import unittest
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 for _p in [
     os.path.join(_ROOT, "packages/sdk-py"),
+    os.path.join(_ROOT, "packages/schemas-py"),
     os.path.join(_ROOT, "services/detector"),
 ]:
     if _p not in sys.path:
@@ -51,6 +58,29 @@ default:
         try:
             result = load_detector_kwargs(path)
             self.assertEqual(result["default"]["tool_loop"], {"THRESHOLD": 5, "WINDOW": 8})
+        finally:
+            os.unlink(path)
+
+    def test_scattershot_thresholds_parsed(self):
+        path = _write_yaml("""
+default:
+  scattershot_tool_use:
+    min_distinct_tools: 7
+    min_total_calls: 10
+    min_repeat_ratio: 2.0
+    scan_limit: 100
+""")
+        try:
+            result = load_detector_kwargs(path)
+            self.assertEqual(
+                result["default"]["scattershot_tool_use"],
+                {
+                    "MIN_DISTINCT_TOOLS": 7,
+                    "MIN_TOTAL_CALLS": 10,
+                    "MIN_REPEAT_RATIO": 2.0,
+                    "SCAN_LIMIT": 100,
+                },
+            )
         finally:
             os.unlink(path)
 
@@ -298,6 +328,68 @@ custom_detectors:
             self.assertEqual(result["regex_timeout_ms"], 5.0)
         finally:
             os.unlink(path)
+
+
+class TestAdapterOverSharedParser(unittest.TestCase):
+    """detector_svc.config_loader is a thin adapter over
+    dunetrace_schemas.detector_config. The worker passes SEVERITY straight into
+    a detector constructor, so it must arrive as the SDK's enum, and the key
+    set the shared module uses to flag typo'd sections must be the worker's."""
+
+    def test_severity_is_the_sdk_enum_not_the_schemas_one(self):
+        path = _write_yaml("""
+default:
+  tool_loop:
+    severity: HIGH
+""")
+        try:
+            sev = load_detector_kwargs(path)["default"]["tool_loop"]["SEVERITY"]
+            self.assertIs(type(sev), Severity)
+            self.assertIs(sev, Severity.HIGH)
+        finally:
+            os.unlink(path)
+
+    def test_builtin_detector_keys_match_worker_class_list(self):
+        from dunetrace_schemas.detector_config import BUILTIN_DETECTOR_KEYS
+        from detector_svc.detectors import _DETECTOR_CLASSES
+
+        self.assertEqual(set(_DETECTOR_CLASSES), set(BUILTIN_DETECTOR_KEYS))
+
+    def test_typo_section_is_warned_through_adapter(self):
+        path = _write_yaml("""
+default:
+  tool_lop:
+    threshold: 5
+""")
+        try:
+            with self.assertLogs("dunetrace.detector_config", level="WARNING") as logs:
+                result = load_detector_kwargs(path, known_detectors={"tool_loop"})
+            self.assertEqual(result, {"default": {}})
+            self.assertTrue(any("tool_lop is not a known detector" in m for m in logs.output))
+        finally:
+            os.unlink(path)
+
+    def test_worker_baseline_sql_matches_shared_builder(self):
+        """detector_svc.db.fetch_metric_baseline still carries its own copy of
+        the per-column P75 statement. Until it is switched to the shared
+        builder, this pins the two to the same text (modulo whitespace) so
+        GET /v1/detector-config cannot report a different "normal" than the
+        detector applies."""
+        import inspect
+        import re
+
+        from dunetrace_schemas.baselines import metric_baseline_sql
+        from detector_svc import db
+
+        src = inspect.getsource(db.fetch_metric_baseline)
+        m = re.search(r'f"""(.*?)"""', src, re.S)
+        self.assertIsNotNone(m, "fetch_metric_baseline no longer inlines its SQL")
+        worker_sql = m.group(1).replace("{column}", "step_count")
+
+        def norm(sql: str) -> str:
+            return re.sub(r"\s+", " ", sql).strip()
+
+        self.assertEqual(norm(worker_sql), norm(metric_baseline_sql("step_count")))
 
 
 if __name__ == "__main__":

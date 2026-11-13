@@ -6,7 +6,13 @@ asyncpg==0.29.0
 # Lower bound raised to 1.2.2 for GHSA (set_key symlink-following arbitrary file
 # overwrite); upper bound kept for deepeval compatibility.
 python-dotenv>=1.2.2,<2.0.0
-PyYAML==6.0.2
+# PIN STYLE (shared across services): a package used by more than one image
+# floats on a floor, so every image resolves the SAME version at build time.
+# `==` is reserved for the few places where the version itself is load-bearing
+# (deepeval's pydantic/python-dotenv ranges, mistralai>=2). PyYAML was `==6.0.2`
+# in detector/ingest/semantic and floating in alerts/api, which is the opposite
+# of what an exact pin is for: it guaranteed divergence the moment 6.0.3 shipped.
+PyYAML>=6.0
 deepeval==4.0.9
 anthropic>=0.40
 # Only imported when SEMANTIC_LLM_PROVIDER=mistral. Pinned to v2+: v2.0 moved
@@ -25,3 +31,7 @@ mistralai>=2.0
 # dependency is also DIRECT (via dunetrace_schemas), so removing deepeval would
 # not silently break the migration import.
 pydantic>=2.11.7,<3.0.0
+# /metrics for Prometheus (dunetrace_schemas.metrics). Optional at import time —
+# the module degrades to no-op metrics with a WARNING when it is missing — but
+# shipped in the image so the worker actually exposes something to scrape.
+prometheus-client>=0.20

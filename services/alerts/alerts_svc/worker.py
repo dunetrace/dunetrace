@@ -31,8 +31,11 @@ import logging
 import os
 import socket
 import time
+from typing import Any
 
 from dunetrace.models import FailureSignal, FailureType, Severity
+from dunetrace_schemas import metrics as _metrics
+from dunetrace_schemas.migrations import CURRENT_SCHEMA_VERSION
 
 from explainer_svc.explainer import coerce_failure_type, explain
 from explainer_svc.models import Explanation
@@ -42,6 +45,7 @@ from alerts_svc.formatters.linear import format_linear_issue
 from alerts_svc.formatters.approval import format_slack_approval, format_webhook_approval
 from alerts_svc.sender import send_slack, send_webhook, send_linear, SendResult
 from alerts_svc.crypto import decrypt_credentials
+from alerts_svc import db as _db
 from alerts_svc.db import (
     init_pool,
     close_pool,
@@ -87,6 +91,115 @@ logger = logging.getLogger("dunetrace.alerts")
 # correctness comes from the claim being set atomically, not from the value —
 # but it's what tells you *which* replica is sitting on a stuck claim.
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:shard{settings.SHARD_INDEX}"
+
+
+# ── Metrics + readiness ───────────────────────────────────────────────────────
+#
+# Served on METRICS_PORT (/metrics, /ready, /health) by a daemon thread the
+# shared helper starts — see dunetrace_schemas.metrics. Every metric here is a
+# no-op object when prometheus_client is absent, so nothing below branches on
+# availability. Delivery latency/result metrics live in sender.py, next to
+# the outbound calls they time.
+
+BACKLOG_SIGNALS = _metrics.gauge(
+    "dunetrace_alerts_backlog_signals",
+    "Unalerted live signals claimed by the most recent poll.",
+)
+# result: delivered (at least one destination accepted it), suppressed (policy
+# pending, silenced/snoozed/under a confidence floor, or in a dedup window),
+# skipped (a lower-confidence duplicate folded into its group's best signal,
+# or nothing to send it to), failed (reconstruction, explanation or every
+# destination failed — the claim is released and it is retried next poll).
+# The four sum to the poll's backlog.
+PROCESSED_TOTAL = _metrics.counter(
+    "dunetrace_alerts_processed_total",
+    "Claimed signals by outcome of the poll that processed them.",
+    ("result",),
+)
+POLL_SECONDS = _metrics.histogram(
+    "dunetrace_alerts_poll_seconds",
+    "Wall-clock duration of one poll_once() cycle, delivery included.",
+    buckets=_metrics.DEFAULT_LATENCY_BUCKETS + (60.0, 120.0, 300.0),
+)
+EXCEPTIONS_TOTAL = _metrics.counter(
+    "dunetrace_alerts_exceptions_total",
+    "Exceptions caught by the worker, by the stage that caught them.",
+    ("where",),
+)
+APPROVALS_DELIVERED_TOTAL = _metrics.counter(
+    "dunetrace_alerts_approvals_delivered_total",
+    "Pending approvals notified over Slack and/or the webhook.",
+)
+DIGESTS_SENT_TOTAL = _metrics.counter(
+    "dunetrace_alerts_digests_sent_total",
+    "Weekly digests sent (one per org).",
+)
+
+# Freshness of the poll loop, for /ready. Monotonic stamps: when the current
+# or last poll started and when the last one finished (success or not — the
+# question readiness answers is "is the loop turning", DB health is db_ready's).
+_poll_started_at: float | None = None
+_poll_finished_at: float | None = None
+
+
+def poll_freshness(now: float | None = None) -> tuple[bool, dict]:
+    """Is the poll loop alive? Fresh when the last poll finished within
+    3×POLL_INTERVAL. A poll still in flight is allowed CLAIM_TIMEOUT_SECS —
+    the bound the claim design already puts on one batch's worst-case
+    delivery (three destinations × full retry backoff exceeds 3×10s) — so a
+    slow batch is not reported as a dead worker while a wedged one still is.
+    Before the first poll completes the worker is not ready."""
+    now = time.monotonic() if now is None else now
+    max_age = 3.0 * float(settings.POLL_INTERVAL)
+    info: dict[str, Any] = {"max_age_seconds": max_age, "in_flight": False}
+    started, finished = _poll_started_at, _poll_finished_at
+    if started is None and finished is None:
+        info.update(last_poll_age_seconds=None, fresh=False, reason="no poll completed yet")
+        return False, info
+    in_flight = started is not None and (finished is None or started > finished)
+    if in_flight:
+        age = now - float(started)  # type: ignore[arg-type]
+        fresh = age <= max(max_age, float(settings.CLAIM_TIMEOUT_SECS))
+        info.update(in_flight=True, last_poll_age_seconds=round(age, 3), fresh=fresh)
+        return fresh, info
+    age = now - float(finished)  # type: ignore[arg-type]
+    fresh = age <= max_age
+    info.update(last_poll_age_seconds=round(age, 3), fresh=fresh)
+    if not fresh:
+        info["reason"] = "poll loop stale"
+    return fresh, info
+
+
+async def readiness() -> tuple[bool, dict]:
+    """The /ready check: DB reachable at the required schema version AND the
+    poll loop is fresh. Runs on the worker's event loop (scheduled there by
+    the metrics thread), so it shares the pool rather than opening its own."""
+    ok, info = await _metrics.db_ready(_db._pool, CURRENT_SCHEMA_VERSION)
+    fresh, poll_info = poll_freshness()
+    info["poll"] = poll_info
+    return bool(ok and fresh), info
+
+
+async def start_observability(
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> _metrics.MetricsServer | None:
+    """Register the standard metrics, report the schema version this worker
+    found, and start the /metrics + /ready server on METRICS_PORT (0
+    disables). Called after schema setup so /ready can never say ok before
+    the migrations gate has passed. Never raises — observability is not a
+    dependency of alert delivery."""
+    try:
+        _metrics.register_standard("alerts", settings.APP_VERSION)
+        _, info = await _metrics.db_ready(_db._pool, CURRENT_SCHEMA_VERSION)
+        if info.get("schema_version") is not None:
+            _metrics.set_schema_version(int(info["schema_version"]))
+        return _metrics.start_metrics_server(settings.METRICS_PORT, readiness, loop)
+    except Exception:
+        EXCEPTIONS_TOTAL.labels(where="metrics_server").inc()
+        logger.warning(
+            "Metrics/readiness server not started — continuing without it", exc_info=True
+        )
+        return None
 
 
 # Signal reconstruction
@@ -308,13 +421,27 @@ async def deliver_pending_approvals() -> int:
                 logger.error("Approval %s webhook delivery failed: %s", approval["id"], exc)
 
         await mark_approval_delivered(approval["id"])
+        APPROVALS_DELIVERED_TOTAL.inc()
         handled += 1
 
     return handled
 
 
 async def poll_once() -> tuple[int, int]:
-    """One poll cycle. Returns (signals_found, signals_delivered)."""
+    """One poll cycle. Returns (signals_found, signals_delivered).
+
+    Times the cycle into dunetrace_alerts_poll_seconds and stamps the
+    freshness markers /ready reads, whether the cycle returned or raised."""
+    global _poll_started_at, _poll_finished_at
+    _poll_started_at = time.monotonic()
+    try:
+        return await _poll_once()
+    finally:
+        _poll_finished_at = time.monotonic()
+        POLL_SECONDS.observe(max(_poll_finished_at - _poll_started_at, 0.0))
+
+
+async def _poll_once() -> tuple[int, int]:
     rows = await claim_unalerted_signals(
         limit=settings.BATCH_SIZE,
         shard_count=settings.SHARD_COUNT,
@@ -322,6 +449,7 @@ async def poll_once() -> tuple[int, int]:
         worker_id=WORKER_ID,
         claim_timeout_secs=settings.CLAIM_TIMEOUT_SECS,
     )
+    BACKLOG_SIGNALS.set(len(rows or ()))
     if not rows:
         return 0, 0
 
@@ -476,6 +604,11 @@ async def poll_once() -> tuple[int, int]:
         to_deliver.append((best, suppressed_since))
         duplicate_ids.extend(rest_ids)
 
+    if silent_ids:
+        PROCESSED_TOTAL.labels(result="suppressed").inc(len(silent_ids))
+    if duplicate_ids:
+        PROCESSED_TOTAL.labels(result="skipped").inc(len(duplicate_ids))
+
     # Persist dedup counts before any network calls so they survive a crash
     for org_id, agent_id, failure_type, count in suppressed_groups:
         await increment_suppressed_count(org_id, agent_id, failure_type, count)
@@ -503,6 +636,8 @@ async def poll_once() -> tuple[int, int]:
         try:
             signals_by_row.append((row, _row_to_signal(row)))
         except Exception as exc:
+            EXCEPTIONS_TOTAL.labels(where="reconstruct").inc()
+            PROCESSED_TOTAL.labels(result="failed").inc()
             logger.error("Failed to reconstruct signal for signal_id=%d: %s", row["id"], exc)
 
     # TODO: batch this into a single query — currently one DB round-trip per signal
@@ -513,7 +648,9 @@ async def poll_once() -> tuple[int, int]:
         ]
     )
 
-    run_token_map = await fetch_run_tokens([row["run_id"] for row, _ in signals_by_row])
+    run_token_map = await fetch_run_tokens(
+        [(row["org_id"], row["run_id"]) for row, _ in signals_by_row]
+    )
     org_by_signal_id = {row["id"]: row["org_id"] for row in rows}
 
     # work: (signal_id, explanation, suppressed_count)
@@ -523,7 +660,7 @@ async def poll_once() -> tuple[int, int]:
     for (row, signal), rate_ctx in zip(signals_by_row, rate_contexts):
         try:
             explanation = explain(signal, rate_context=rate_ctx)
-            tk = run_token_map.get(row["run_id"], {})
+            tk = run_token_map.get((row["org_id"], row["run_id"]), {})
             if tk:
                 pt = int(tk.get("prompt_tokens") or 0)
                 ct = int(tk.get("completion_tokens") or 0)
@@ -531,6 +668,8 @@ async def poll_once() -> tuple[int, int]:
                 explanation.cost_usd = estimate_cost(tk.get("model") or "", pt, ct) or None
             work.append((row["id"], explanation, deliver_idx.get(row["id"], 0)))
         except Exception as exc:
+            EXCEPTIONS_TOTAL.labels(where="explain").inc()
+            PROCESSED_TOTAL.labels(result="failed").inc()
             logger.error("Failed to build explanation for signal_id=%d: %s", row["id"], exc)
 
     if not work:
@@ -576,6 +715,8 @@ async def poll_once() -> tuple[int, int]:
                 linear_config,
             )
         except Exception as exc:
+            EXCEPTIONS_TOTAL.labels(where="deliver").inc()
+            PROCESSED_TOTAL.labels(result="failed").inc()
             logger.error("Delivery error for signal_id=%d: %s", signal_id, exc)
             return None
 
@@ -587,6 +728,13 @@ async def poll_once() -> tuple[int, int]:
 
         any_success = any(r.success for r in results.values()) if results else False
         no_destinations = not results
+
+        if no_destinations:
+            PROCESSED_TOTAL.labels(result="skipped").inc()
+        elif any_success:
+            PROCESSED_TOTAL.labels(result="delivered").inc()
+        else:
+            PROCESSED_TOTAL.labels(result="failed").inc()
 
         if any_success or no_destinations:
             for dest, result in results.items():
@@ -708,34 +856,54 @@ async def run_worker() -> None:
         settings.CLAIM_TIMEOUT_SECS,
     )
 
+    # After schema setup, before the first poll: /ready reports not-ready
+    # until that first poll completes, and never ok on a too-old schema.
+    metrics_server = await start_observability(asyncio.get_running_loop())
+
     try:
         while True:
-            try:
-                found, delivered = await poll_once()
-                if found:
-                    logger.info("Cycle: found=%d delivered=%d", found, delivered)
-            except Exception:
-                logger.exception("Poll cycle error")
-
-            try:
-                approvals_delivered = await deliver_pending_approvals()
-                if approvals_delivered:
-                    logger.info("Approvals delivered: %d", approvals_delivered)
-            except Exception:
-                logger.exception("Approval delivery cycle error")
-
-            try:
-                sent = await send_weekly_digest()
-                if sent:
-                    logger.info("Weekly digests sent: %d org(s)", sent)
-            except Exception:
-                logger.exception("Digest cycle error")
-
+            await _cycle()
             await asyncio.sleep(settings.POLL_INTERVAL)
     except asyncio.CancelledError:
         logger.info("Worker cancelled — shutting down gracefully")
     finally:
+        if metrics_server is not None:
+            try:
+                metrics_server.shutdown()
+                metrics_server.server_close()
+            except Exception:  # observability must not block the pool close
+                logger.debug("metrics server shutdown failed", exc_info=True)
         await close_pool()
+
+
+async def _cycle() -> None:
+    """One iteration of the main loop: signals, approvals, digest. Each stage
+    is isolated so one failing never starves the others, and each failure is
+    counted in dunetrace_alerts_exceptions_total{where}."""
+    try:
+        found, delivered = await poll_once()
+        if found:
+            logger.info("Cycle: found=%d delivered=%d", found, delivered)
+    except Exception:
+        EXCEPTIONS_TOTAL.labels(where="poll").inc()
+        logger.exception("Poll cycle error")
+
+    try:
+        approvals_delivered = await deliver_pending_approvals()
+        if approvals_delivered:
+            logger.info("Approvals delivered: %d", approvals_delivered)
+    except Exception:
+        EXCEPTIONS_TOTAL.labels(where="approvals").inc()
+        logger.exception("Approval delivery cycle error")
+
+    try:
+        sent = await send_weekly_digest()
+        if sent:
+            DIGESTS_SENT_TOTAL.inc(sent)
+            logger.info("Weekly digests sent: %d org(s)", sent)
+    except Exception:
+        EXCEPTIONS_TOTAL.labels(where="digest").inc()
+        logger.exception("Digest cycle error")
 
 
 if __name__ == "__main__":

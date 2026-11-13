@@ -2,3 +2,14 @@ asyncpg==0.29.0
 python-dotenv>=1.2.2
 httpx>=0.27
 cryptography>=42
+# dunetrace_schemas' package __init__ imports its pydantic wire-format models,
+# so every `from dunetrace_schemas...` import in this service (migrations in
+# db.py, metrics in the workers) needs pydantic installed even though nothing
+# here uses the models. Without it an ENABLED worker crashed at its first
+# ensure_*_schema() call; config.py's deploy-guard fallback only covered its
+# own import.
+pydantic>=2.10.4,<3.0.0
+# /metrics for Prometheus (dunetrace_schemas.metrics). Optional at import time —
+# the module degrades to no-op metrics with a WARNING when it is missing — but
+# shipped in the image so the workers actually expose something to scrape.
+prometheus-client>=0.20

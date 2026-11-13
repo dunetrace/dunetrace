@@ -74,11 +74,11 @@ def _ddl_sources() -> str:
     """All DDL this service's tables can be declared by.
 
     The WHOLE module source, not just its UPPERCASE schema constants: some
-    constraints are (re)declared by ALTERs issued from inside functions — the
-    org_id widening of issues' UNIQUE lives in _backfill_org_id, and the
-    detector_watermarks pkey repair in _WATERMARK_SCHEMA. Reading only the
-    constants made this check report the former as a violation when the live
-    database was in fact correct.
+    constraints are (re)declared by ALTERs issued from inside functions or
+    DO blocks — the detector_watermarks pkey repair in _WATERMARK_SCHEMA, and
+    (in migrations, which are read too) the org_id widening of issues' UNIQUE
+    in migration 12. Reading only the constants made this check report a
+    violation when the live database was in fact correct.
     """
     return "\n".join([inspect.getsource(db)] + [sql for _n, _name, sql in migrations.MIGRATIONS])
 

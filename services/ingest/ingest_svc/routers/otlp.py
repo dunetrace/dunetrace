@@ -45,6 +45,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ingest_svc.auth import is_trusted
+from ingest_svc.body_limits import BodyTooLarge, read_bounded_body
 from ingest_svc.config import settings
 from ingest_svc.db import (
     fetch_otel_ingestion_enabled,
@@ -77,36 +78,9 @@ _ENABLE_CACHE_TTL = 300.0
 _enable_cache: dict[str, tuple[bool, float]] = {}
 
 
-class _OtlpTooLarge(Exception):
-    """Body (compressed or decompressed) exceeds a configured limit. Mapped to a
-    413 by the route."""
-
-
-async def _read_bounded_body(request: Request, limit: int) -> bytes:
-    """Read the request body, refusing to buffer more than `limit` bytes. Honors
-    Content-Length when present, and also caps during streaming so a missing or
-    lying Content-Length can't slip an oversized body past."""
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            declared = int(content_length)
-        except ValueError:
-            declared = -1
-        if declared > limit:
-            raise _OtlpTooLarge()
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > limit:
-            raise _OtlpTooLarge()
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
 def _gunzip_bounded(raw: bytes, limit: int) -> bytes:
     """Decompress a gzip body, refusing to expand past `limit` bytes. Guards
-    against gzip bombs (a few KB expanding to gigabytes). Raises _OtlpTooLarge
+    against gzip bombs (a few KB expanding to gigabytes). Raises BodyTooLarge
     when the limit is hit, ValueError when the body isn't valid gzip."""
     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
     out = bytearray()
@@ -114,18 +88,36 @@ def _gunzip_bounded(raw: bytes, limit: int) -> bytes:
         out += decompressor.decompress(raw, limit + 1)
         while decompressor.unconsumed_tail and len(out) <= limit:
             out += decompressor.decompress(decompressor.unconsumed_tail, limit + 1 - len(out))
+    except Exception as exc:
+        raise ValueError(f"invalid gzip body: {exc}") from exc
+
+    # Refuse BEFORE flush(). flush() takes no length argument: it decompresses
+    # everything still in unconsumed_tail in one go, so calling it here defeated
+    # the whole bound — a 48 KB body of compressed zeros allocated 50 MB, and
+    # the size check below only ran once that memory was already committed. A
+    # body under OTLP_MAX_BODY_BYTES expands to roughly 10 GB that way, and this
+    # runs before the API key is verified, so it was reachable anonymously.
+    #
+    # A non-empty unconsumed_tail means the max_length bound stopped us with
+    # input still pending, which is exactly the over-limit case.
+    if len(out) > limit or decompressor.unconsumed_tail:
+        raise BodyTooLarge(limit=limit, received=len(out))
+
+    # Safe now: every byte of input has been consumed, so flush() only returns
+    # what is left in the internal output buffer, which is already bounded.
+    try:
         out += decompressor.flush()
     except Exception as exc:
         raise ValueError(f"invalid gzip body: {exc}") from exc
     if len(out) > limit:
-        raise _OtlpTooLarge()
+        raise BodyTooLarge(limit=limit, received=len(out))
     return bytes(out)
 
 
 def _decode_body(raw: bytes, content_type: str, content_encoding: str) -> list[dict]:
     """Decompress if needed, then parse as protobuf or JSON depending on
     Content-Type. Raises ValueError on a malformed body (caller: 400) or
-    _OtlpTooLarge on a gzip bomb (caller: 413)."""
+    BodyTooLarge on a gzip bomb (caller: 413)."""
     if content_encoding.lower() == "gzip":
         raw = _gunzip_bounded(raw, settings.OTLP_MAX_DECOMPRESSED_BYTES)
 
@@ -236,16 +228,25 @@ async def receive_otlp_traces(
         )
 
     try:
-        raw_body = await _read_bounded_body(request, settings.OTLP_MAX_BODY_BYTES)
-    except _OtlpTooLarge:
+        raw_body = await read_bounded_body(request, settings.OTLP_MAX_BODY_BYTES)
+    except BodyTooLarge:
         stats.record_rejected(org_id, "oversized")
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"Request body exceeds {settings.OTLP_MAX_BODY_BYTES} bytes.",
         )
+    # ── Auth, part 1: the header key, BEFORE the body is decompressed ─────────
+    # Split in two on purpose. The resource-attribute fallback below genuinely
+    # needs the parsed spans, but the Authorization header is what the SDK and
+    # every real collector send, so checking it first means an anonymous caller
+    # never buys a decompression pass off us and a legitimate one is identified
+    # before we spend the work. Defence in depth behind _gunzip_bounded's cap.
+    if not trusted:
+        org_id = await verify_api_key(_header_api_key(request))
+
     try:
         resource_spans = _decode_body(raw_body, content_type, content_encoding)
-    except _OtlpTooLarge:
+    except BodyTooLarge:
         stats.record_rejected(org_id, "gzip_bomb")
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -255,12 +256,10 @@ async def receive_otlp_traces(
         stats.record_rejected(org_id, "malformed")
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # ── Auth (untrusted): header key, then resource-attribute key ─────────────
-    if not trusted:
-        org_id = await verify_api_key(_header_api_key(request))
-        if org_id is None:
-            resource_key = _resource_api_key(resource_spans)
-            org_id = await verify_api_key(resource_key) if resource_key else None
+    # ── Auth, part 2: the dunetrace.api_key resource attribute ───────────────
+    if not trusted and org_id is None:
+        resource_key = _resource_api_key(resource_spans)
+        org_id = await verify_api_key(resource_key) if resource_key else None
         if org_id is None:
             stats.record_auth_failure()
             _record_auth_failure(request)

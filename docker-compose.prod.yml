@@ -1,25 +1,119 @@
-# Production Docker Compose — extend docker-compose.yml with prod overrides.
-# Usage: docker compose -f infra/docker-compose.yml -f infra/docker-compose.prod.yml up -d
+# Production overrides — layered on top of docker-compose.yml (or
+# docker-compose.ghcr.yml: same service names, so either base file works).
+#
+# Usage:
+#   DASHBOARD_BIND= POSTGRES_PASSWORD=<strong secret> ADMIN_API_KEY=<strong secret> \
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Put both in .env instead of the shell if you prefer — compose reads it for
+# interpolation. Never commit that file.
+#
+# Versus the quickstart this file:
+#
+#   * sets ENV=prod and AUTH_MODE=prod on every app service. Every ingest and
+#     customer-API endpoint then requires an API key. The startup guard
+#     (dunetrace_schemas.deploy_guard) refuses ENV=prod with AUTH_MODE=dev in
+#     every service, so a quickstart AUTH_MODE=dev left in .env cannot reopen
+#     the stack — the values here are literals, not ${...:-dev} defaults.
+#
+#   * requires POSTGRES_PASSWORD (no default) and threads it into every
+#     DATABASE_URL. `docker compose config` fails with "set POSTGRES_PASSWORD"
+#     while it is unset, instead of starting Postgres with the default password.
+#
+#   * publishes ONLY the dashboard, on 0.0.0.0:3000 once DASHBOARD_BIND= (empty)
+#     is set — the base file's default prefix is 127.0.0.1:, see the dashboard
+#     service below. Postgres (5432), the
+#     ingest API (8001) and the customer API (8002) keep the base file's
+#     127.0.0.1 binding. Reaching the two APIs from anywhere but the host is
+#     the job of a reverse proxy you run in front of them — infra/nginx.conf
+#     is a starting point (it proxies /v1/ingest → ingest:8001 and /api/ →
+#     api:8002 and serves the dashboard from /; give its /api/ location a
+#     trailing slash on proxy_pass so the prefix is stripped, and TLS is on
+#     you). Serve the dashboard and the API from the SAME origin, path-based
+#     as that config does: in prod mode the customer API only allows CORS
+#     from https://app.dunetrace.io, so a dashboard on one hostname calling
+#     an API on another fails in the browser.
+#
+#   * needs the dashboard pointed at the proxied API: `const API` at the top
+#     of the <script> in dashboard/mission-control.html is
+#     http://localhost:8002 and must become the API origin your proxy exposes
+#     (e.g. https://dunetrace.example.com/api); `const KEY` next to it must be
+#     a real key, not dt_dev_test.
+#
+#   * restart: always for the core services. The three opt-in workers keep
+#     `on-failure` from the base file on purpose: with their flag off they exit
+#     0, and `always` would restart-loop them forever.
+#
+# First API key (nothing can authenticate until one exists): the ingest
+# service's admin endpoint, gated on ADMIN_API_KEY, from the host —
+#   curl -s -X POST http://127.0.0.1:8001/v1/keys \
+#     -H 'Content-Type: application/json' \
+#     -d '{"org_id":"my-org","admin_key":"<ADMIN_API_KEY>"}'
+# The plaintext key is returned once and never stored. See docs/operations.md,
+# section "Deploying".
+
+x-prod-env: &prod-env
+  ENV: prod
+  AUTH_MODE: prod
+  DATABASE_URL: postgresql://dunetrace:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/dunetrace
+  PYTHONUNBUFFERED: "1"
 
 services:
+  postgres:
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+
   ingest:
     restart: always
     environment:
-      - PYTHONUNBUFFERED=1
+      <<: *prod-env
+      # Bootstraps the first API key through POST /v1/keys (see above). Leave
+      # unset after bootstrapping to close that endpoint, or keep it to mint
+      # more org keys later.
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      # For a gateway/auth service in front of ingest that vouches for the
+      # caller with an x-internal-token header. Unset means no such gateway.
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
 
   detector:
     restart: always
+    environment:
+      <<: *prod-env
 
   alerts:
     restart: always
+    environment:
+      <<: *prod-env
+
+  # Opt-in workers: ENV/AUTH_MODE/DATABASE_URL like everything else, but no
+  # `restart: always` — see the note at the top.
+  semantic:
+    environment:
+      <<: *prod-env
+
+  integrations:
+    environment:
+      <<: *prod-env
+
+  elevenlabs:
+    environment:
+      <<: *prod-env
 
   api:
     restart: always
+    environment:
+      <<: *prod-env
+      # Same gateway bypass as ingest's — a matching x-internal-token header
+      # skips the api_keys lookup. Unset means no such gateway.
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
 
-  db:
+  dashboard:
     restart: always
-    volumes:
-      - pgdata_prod:/var/lib/postgresql/data
-
-volumes:
-  pgdata_prod:
+    # The one public port. The base file binds it to loopback through the
+    # DASHBOARD_BIND prefix; setting DASHBOARD_BIND="" in the environment (or
+    # .env) publishes it on all interfaces:
+    #   DASHBOARD_BIND= POSTGRES_PASSWORD=... docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+    # (An override file cannot replace a base `ports` list without a YAML tag
+    # the repo's pre-commit check-yaml hook rejects, so the base file carries
+    # the knob instead.)

@@ -19,8 +19,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.requests import ClientDisconnect
 
+from dunetrace_schemas import metrics as _metrics
+from dunetrace_schemas.migrations import CURRENT_SCHEMA_VERSION
 from ingest_svc.auth import is_trusted
+from ingest_svc.body_limits import BodyTooLarge, read_bounded_body
 from ingest_svc.config import settings
 from ingest_svc.db import (
     close_pool,
@@ -36,6 +40,31 @@ from ingest_svc.rate_limiter import _HEARTBEAT_INTERVAL, get_limiter
 from ingest_svc.routers import ingest, health, otlp
 
 _PRUNE_INTERVAL = 86400.0  # once a day
+
+# JSON endpoints whose body the middlewares below buffer in full (to find the
+# rate-limit bucket and the org context). INGEST_MAX_BODY_BYTES is enforced on
+# these before any of that buffering happens. /v1/otlp/traces is not here: the
+# middleware never reads its body, and the route caps it itself with
+# OTLP_MAX_BODY_BYTES (routers/otlp.py) using the same bounded reader.
+_BODY_LIMITED_PATHS = frozenset({"/v1/ingest", "/v1/deploy"})
+
+# Request-level metrics. Counted by the outermost middleware (count_requests in
+# create_app) so a 429/413 short-circuit from rate_limit_and_log — which never
+# reaches a route — is still a request. The persist-path metrics are in
+# routers/ingest.py, next to the code they time.
+_requests = _metrics.counter(
+    "dunetrace_ingest_requests_total",
+    "HTTP requests by route template, method and response status.",
+    ("path", "method", "status"),
+)
+_rate_limited = _metrics.counter(
+    "dunetrace_ingest_rate_limited_total",
+    "Requests rejected with 429 by the per-key/per-agent rate limiter.",
+)
+_body_too_large = _metrics.counter(
+    "dunetrace_ingest_body_too_large_total",
+    "Requests rejected with 413 for a body over INGEST_MAX_BODY_BYTES.",
+)
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -81,6 +110,19 @@ async def _otlp_maintenance_loop() -> None:
             get_span_limiter().evict_stale()
         except Exception as exc:
             logger.debug("OTLP maintenance tick failed: %s", exc)
+
+
+async def _run_partition_topup_once() -> int:
+    """Create the next few monthly event partitions. Best-effort like the other
+    two passes: a failure here is retried on the next tick, and must not stop
+    retention from running."""
+    try:
+        from ingest_svc.db.postgres import ensure_event_partitions
+
+        return await ensure_event_partitions()
+    except Exception as exc:
+        logger.warning("event partition top-up failed: %s", exc)
+        return 0
 
 
 async def _run_prune_once() -> int:
@@ -146,6 +188,12 @@ async def _prune_loop() -> None:
     horizon to state and audit, rather than two that can drift apart.
     """
     while True:
+        # Top up FIRST. Partitions were only ever created at startup, so a
+        # long-uptime process silently began writing into events_default —
+        # rows the pruner deliberately never drops, and which then block the
+        # next restart from creating the month they belong to. See
+        # ensure_event_partitions.
+        await _run_partition_topup_once()
         await _run_prune_once()
         await _run_scrub_once()
         await asyncio.sleep(_PRUNE_INTERVAL)
@@ -163,6 +211,12 @@ async def lifespan(app: FastAPI):
         )
     await init_pool()
     await ensure_schema()
+    # ensure_schema has already required CURRENT_SCHEMA_VERSION; this reads the
+    # version it found so dunetrace_schema_version reports the real number.
+    # db_ready never raises — a failed read leaves the gauge at 0.
+    _, ready_info = await _metrics.db_ready(get_pool(), CURRENT_SCHEMA_VERSION)
+    if ready_info.get("schema_version") is not None:
+        _metrics.set_schema_version(ready_info["schema_version"])
 
     try:
         if await retention_looks_stale(settings.EVENT_RETENTION_DAYS):
@@ -193,6 +247,62 @@ async def lifespan(app: FastAPI):
 # App
 
 
+def _reject_body_too_large(request: Request, exc: BodyTooLarge) -> JSONResponse:
+    """413 for a body over INGEST_MAX_BODY_BYTES. Logged at WARNING with the
+    declared and received sizes and the client address — which is also the
+    rate-limit bucket an unparseable body would land in, since the api_key
+    inside it is never read — and never any of the body itself."""
+    _body_too_large.inc()
+    client = request.client.host if request.client else "unknown"
+    logger.warning(
+        "Request body too large; rejected with 413. path=%s declared=%s received=%d "
+        "limit=%d client=%s",
+        request.url.path,
+        "absent" if exc.declared is None else exc.declared,
+        exc.received,
+        exc.limit,
+        client,
+    )
+    return JSONResponse(
+        status_code=413,
+        content={"detail": f"Request body exceeds {exc.limit} bytes."},
+    )
+
+
+# Methods we serve. request.method is caller-controlled: both services run plain
+# uvicorn (no [standard], so h11 parses the request line) and h11 accepts any
+# RFC-7230 token as a method. _route_path already folds unknown PATHS into
+# "other" precisely so a scanner cannot mint time series; method got no such
+# treatment, so `ZZZ-SCAN-1 /nope` repeated with distinct tokens grew the
+# registry without bound — one counter child plus a full histogram (12 buckets,
+# sum and count) each, held for the life of the process and visible on the
+# unauthenticated /metrics endpoint.
+_KNOWN_METHODS = frozenset(
+    {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"}
+)
+
+
+def _method_label(method: str) -> str:
+    """The HTTP method if it is one we serve, else "other"."""
+    return method if method in _KNOWN_METHODS else "other"
+
+
+def _path_label(request: Request, known_paths: frozenset[str]) -> str:
+    """The ``path`` label for dunetrace_ingest_requests_total.
+
+    The matched route's template when the router ran (so
+    ``/admin/keys/{key_id}/agents/{agent_id}/quota``, never the literal ids);
+    the literal path when a middleware short-circuited before routing (a 429
+    or 413 on a known endpoint); else ``"other"`` — an unknown path is
+    caller-controlled and must not mint a new time series per request.
+    """
+    template = getattr(request.scope.get("route"), "path", None)
+    if isinstance(template, str) and template:
+        return template
+    raw = request.url.path
+    return raw if raw in known_paths else "other"
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Dunetrace Ingest API",
@@ -200,6 +310,7 @@ def create_app() -> FastAPI:
         description="Receives agent instrumentation events from the Dunetrace SDK.",
         lifespan=lifespan,
     )
+    _metrics.register_standard("ingest", settings.APP_VERSION)
 
     app.add_middleware(
         CORSMiddleware,
@@ -215,9 +326,19 @@ def create_app() -> FastAPI:
     )
 
     # Registered first = inner = runs AFTER rate_limit_and_log.
-    # Trusted path (auth service): reads org_id/agent_id from headers, sets Postgres
-    # session config for RLS (defined in dunetrace-cloud, not here), skips DB lookup.
-    # Dev/direct path: resolves api_key from body → org_id via DB lookup.
+    #
+    # Resolves the caller's org/agent onto request.state so routes and logging
+    # can use them. It used to ALSO issue
+    #   SELECT set_config('app.current_org_id', $1, true)
+    # for row-level security defined in dunetrace-cloud. That could never work
+    # and has been removed: the third argument makes the setting
+    # TRANSACTION-local, the transaction commits as the `async with` exits, the
+    # connection is released immediately, and the route's insert acquires a
+    # DIFFERENT connection from the pool. So the value was gone before anything
+    # could read it, at a cost of one extra pool acquisition and two round-trips
+    # on the hottest path in the system. A gateway that wants RLS has to set the
+    # GUC on the same connection as the statement it guards, which means doing
+    # it in the query layer, not in middleware.
     #
     # x-org-id is the current header name; x-customer-id is accepted as a fallback
     # for callers running an older cloud gateway build (pre-v0.5.0 naming).
@@ -228,23 +349,6 @@ def create_app() -> FastAPI:
             org_id = request.headers.get("x-org-id") or request.headers.get("x-customer-id") or None
             request.state.agent_id = agent_id
             request.state.org_id = org_id
-            if agent_id or org_id:
-                pool = get_pool()
-                if pool:
-                    try:
-                        async with pool.acquire() as conn:
-                            async with conn.transaction():
-                                if org_id:
-                                    await conn.execute(
-                                        "SELECT set_config('app.current_org_id', $1, true)", org_id
-                                    )
-                                if agent_id:
-                                    await conn.execute(
-                                        "SELECT set_config('app.current_agent_id', $1, true)",
-                                        agent_id,
-                                    )
-                    except Exception as exc:
-                        logger.warning("Failed to set org context: %s", exc)
             return await call_next(request)
 
         import json as _json
@@ -264,23 +368,6 @@ def create_app() -> FastAPI:
 
         request.state.agent_id = agent_id
         request.state.org_id = org_id
-
-        if org_id:
-            pool = get_pool()
-            if pool:
-                try:
-                    async with pool.acquire() as conn:
-                        async with conn.transaction():
-                            await conn.execute(
-                                "SELECT set_config('app.current_org_id', $1, true)", org_id
-                            )
-                            if agent_id:
-                                await conn.execute(
-                                    "SELECT set_config('app.current_agent_id', $1, true)",
-                                    agent_id,
-                                )
-                except Exception as exc:
-                    logger.warning("Failed to set org context: %s", exc)
         return await call_next(request)
 
     # Registered second = outer = runs FIRST.
@@ -288,6 +375,30 @@ def create_app() -> FastAPI:
     # Dev/direct path: parse body, rate-limit by key (or IP fallback).
     @app.middleware("http")
     async def rate_limit_and_log(request: Request, call_next):
+        # Body-size cap, first thing, on the trusted and direct paths alike:
+        # this is the outermost middleware, and nothing below it may buffer
+        # the body before the cap has been applied. Content-Length is checked
+        # before a byte is read; a body that grows past the cap mid-stream
+        # (no Content-Length, or a lying one) is cut off there. On success the
+        # bounded read caches the body on the request, so request.body() below,
+        # set_org_context and the route all still see it. The trusted gateway
+        # is not exempt — memory safety belongs to the process doing the
+        # buffering, whatever the upstream promised.
+        if request.method == "POST" and request.url.path in _BODY_LIMITED_PATHS:
+            try:
+                await read_bounded_body(request, settings.INGEST_MAX_BODY_BYTES)
+            except BodyTooLarge as exc:
+                return _reject_body_too_large(request, exc)
+            except ClientDisconnect:
+                # Was swallowed by the `except Exception: pass` around the old
+                # request.body() call and surfaced later as FastAPI's own 400
+                # when the route tried to read the body; keep it a 400, just
+                # earlier. Nobody is left to receive it, so no log noise.
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "Client disconnected before the body was received."},
+                )
+
         if is_trusted(request):
             t = time.monotonic()
             response = await call_next(request)
@@ -305,8 +416,10 @@ def create_app() -> FastAPI:
 
         api_key = ""
         agent_id: str | None = None
-        if request.method == "POST" and request.url.path in ("/v1/ingest", "/v1/deploy"):
+        if request.method == "POST" and request.url.path in _BODY_LIMITED_PATHS:
             try:
+                # Already read and cached by the bounded read above; this
+                # returns the cached bytes without touching the stream.
                 body_bytes = await request.body()
                 data = _json.loads(body_bytes) if body_bytes else {}
                 api_key = data.get("api_key", "") or ""
@@ -326,7 +439,18 @@ def create_app() -> FastAPI:
             api_key = auth[7:].strip() if auth.startswith("Bearer ") else ""
             agent_id = request.headers.get("X-Dunetrace-Agent-Id") or None
 
-        if request.url.path in ("/v1/ingest", "/v1/deploy", "/v1/otlp/traces"):
+        # OPTIONS is excluded: a CORS preflight carries no payload and does no
+        # work, but the check was not method-gated, so every preflight spent a
+        # token from the caller's bucket. Once exhausted the browser got a 429
+        # for the preflight itself — and because CORSMiddleware sits INSIDE this
+        # one, that response carries no Access-Control-Allow-Origin, so the
+        # browser reports an opaque CORS failure rather than the rate limit that
+        # actually happened. HEAD likewise transfers nothing.
+        if request.method not in ("OPTIONS", "HEAD") and request.url.path in (
+            "/v1/ingest",
+            "/v1/deploy",
+            "/v1/otlp/traces",
+        ):
             bucket = (
                 api_key
                 if api_key and not api_key.startswith("dt_dev_")
@@ -335,6 +459,7 @@ def create_app() -> FastAPI:
             limiter = get_limiter()
             result = await limiter.is_allowed(bucket, agent_id)
             if not result.allowed:
+                _rate_limited.inc()
                 logger.warning("Rate limit exceeded. retry_after=%ds", result.retry_after)
                 headers = {
                     "Retry-After": str(result.retry_after),
@@ -357,6 +482,38 @@ def create_app() -> FastAPI:
     app.include_router(ingest.router)
     app.include_router(otlp.router)
     app.include_router(health.router)
+
+    # Literal paths the path label may carry when no route matched (a
+    # middleware short-circuit). Templated routes are excluded on purpose: a
+    # literal /admin/keys/7/... would leak the id into the label; they are
+    # only ever reported via scope["route"] once routing has run.
+    known_paths = frozenset(
+        r.path
+        for r in app.routes
+        if isinstance(getattr(r, "path", None), str) and "{" not in r.path
+    )
+
+    # Registered last = outermost = runs FIRST and sees every response,
+    # including the 429/413 that rate_limit_and_log returns without calling
+    # the next layer. An exception escaping the stack is the 500 Starlette's
+    # ServerErrorMiddleware (above us) will turn it into.
+    @app.middleware("http")
+    async def count_requests(request: Request, call_next):
+        try:
+            response = await call_next(request)
+        except Exception:
+            _requests.labels(
+                path=_path_label(request, known_paths),
+                method=_method_label(request.method),
+                status="500",
+            ).inc()
+            raise
+        _requests.labels(
+            path=_path_label(request, known_paths),
+            method=_method_label(request.method),
+            status=str(response.status_code),
+        ).inc()
+        return response
 
     return app
 

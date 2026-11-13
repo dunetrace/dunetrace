@@ -31,7 +31,11 @@ from dunetrace.models import FailureSignal, FailureType, Severity
 from explainer_svc.models import Explanation, CodeFix
 from explainer_svc.explainer import explain
 
-from alerts_svc.formatters.slack import format_slack, format_slack_simple
+from alerts_svc.formatters.slack import (
+    format_slack,
+    format_slack_simple,
+    notification_text,
+)
 from alerts_svc.formatters.webhook import (
     format_webhook,
     sign_payload,
@@ -205,6 +209,70 @@ class TestSlackFormatter(unittest.TestCase):
         payload = format_slack_simple(self.exp)
         self.assertIn("text", payload["attachments"][0])
         self.assertIn(self.exp.title, payload["attachments"][0]["text"])
+
+
+class TestSlackNotificationFallback(unittest.TestCase):
+    """Slack reads the top-level `text` for desktop/mobile push previews.
+    Without it a blocks/attachments-only payload shows "no preview available"."""
+
+    def setUp(self):
+        self.exp = make_explanation()
+
+    def test_top_level_text_present(self):
+        payload = format_slack(self.exp)
+        self.assertTrue(payload.get("text"))
+
+    def test_top_level_text_is_meaningful(self):
+        text = format_slack(self.exp)["text"]
+        self.assertIn("HIGH", text)
+        self.assertIn("Tool loop detected", text)
+        self.assertIn("agent-test", text)
+        self.assertIn("run-abc123", text)
+
+    def test_top_level_text_has_no_mrkdwn_markers(self):
+        """A notification renders `text` verbatim — backticks and asterisks
+        from the title would show up literally."""
+        text = format_slack(self.exp)["text"]
+        for ch in "`*~":
+            self.assertNotIn(ch, text)
+
+    def test_attachment_carries_fallback(self):
+        attachment = format_slack(self.exp)["attachments"][0]
+        self.assertEqual(attachment["fallback"], format_slack(self.exp)["text"])
+
+    def test_simple_format_has_top_level_text(self):
+        payload = format_slack_simple(self.exp)
+        self.assertTrue(payload.get("text"))
+        self.assertIn("Tool loop detected", payload["text"])
+
+    def test_cost_included_when_known(self):
+        exp = make_explanation()
+        exp.total_tokens = 120_000
+        exp.cost_usd = 1.25
+        self.assertIn("$1.25", notification_text(exp))
+
+    def test_cost_omitted_when_unknown(self):
+        self.assertNotIn("$", notification_text(self.exp))
+
+    def test_suppressed_count_included(self):
+        self.assertIn("+3 suppressed", notification_text(self.exp, suppressed_count=3))
+
+    def test_systemic_rate_context_included(self):
+        exp = make_explanation()
+        exp.rate_context = {
+            "total_runs": 40,
+            "affected_runs": 12,
+            "rate": 0.3,
+            "is_systemic": True,
+        }
+        self.assertIn("systemic: 12/40 runs in 7d", notification_text(exp))
+
+    def test_long_title_is_truncated(self):
+        exp = make_explanation()
+        exp.title = "Tool loop detected: " + "x" * 500
+        text = notification_text(exp)
+        self.assertLessEqual(len(text), 220)
+        self.assertTrue(text.endswith("…"))
 
 
 # Webhook formatter
@@ -828,7 +896,13 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
     async def test_token_counts_set_when_llm_events_present(self):
         captured = []
         await self._run(
-            {"run-tok": {"prompt_tokens": 300, "completion_tokens": 80, "model": "gpt-4o"}},
+            {
+                ("org-1", "run-tok"): {
+                    "prompt_tokens": 300,
+                    "completion_tokens": 80,
+                    "model": "gpt-4o",
+                }
+            },
             captured,
         )
         self.assertIsNotNone(captured[0].total_tokens)
@@ -837,7 +911,13 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
     async def test_cost_set_when_model_known(self):
         captured = []
         await self._run(
-            {"run-tok": {"prompt_tokens": 1_000_000, "completion_tokens": 0, "model": "gpt-4o"}},
+            {
+                ("org-1", "run-tok"): {
+                    "prompt_tokens": 1_000_000,
+                    "completion_tokens": 0,
+                    "model": "gpt-4o",
+                }
+            },
             captured,
         )
         self.assertAlmostEqual(captured[0].cost_usd, 2.50)
@@ -852,7 +932,8 @@ class TestWorkerTokenEnrichment(unittest.IsolatedAsyncioTestCase):
         """Both tokens = 0 should yield total_tokens=None, not 0."""
         captured = []
         await self._run(
-            {"run-tok": {"prompt_tokens": 0, "completion_tokens": 0, "model": "gpt-4o"}}, captured
+            {("org-1", "run-tok"): {"prompt_tokens": 0, "completion_tokens": 0, "model": "gpt-4o"}},
+            captured,
         )
         self.assertIsNone(captured[0].total_tokens)
         self.assertIsNone(captured[0].cost_usd)

@@ -33,7 +33,13 @@ def mock_db(monkeypatch):
     monkeypatch.setattr("ingest_svc.db.postgres.close_pool", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.check_db", AsyncMock(return_value="ok"))
-    monkeypatch.setattr("ingest_svc.db.postgres.insert_events", AsyncMock(return_value=1))
+    # Returns the batch size: /v1/ingest treats fewer rows than events as a
+    # persistence failure (503 — see test_ingest_durability.py), so the old
+    # fixed return_value=1 would reject every multi-event batch below.
+    monkeypatch.setattr(
+        "ingest_svc.db.postgres.insert_events",
+        AsyncMock(side_effect=lambda events, batch_id, org_id: len(events)),
+    )
     # Patched where routers/ingest.py actually looks it up (`from ingest_svc.db
     # import verify_api_key` binds a local name there) — patching
     # ingest_svc.db.postgres.verify_api_key instead is a no-op, since that
@@ -43,6 +49,12 @@ def mock_db(monkeypatch):
     monkeypatch.setattr(
         "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value="org-test")
     )
+    # BOTH call sites, because in production they are the same function called
+    # with the same key. set_org_context (main.py) verifies first and caches the
+    # result on request.state; _resolve_org_id reuses it rather than repeating
+    # an uncached api_keys SELECT on the hot path. Patching only the route's
+    # binding left the two disagreeing, which no real deployment can do.
+    monkeypatch.setattr("ingest_svc.main.verify_api_key", AsyncMock(return_value="org-test"))
 
 
 @pytest.fixture
@@ -675,22 +687,23 @@ class TestVerifyApiKeyDevMode:
     async def test_dev_mode_dt_dev_key_resolves_to_default_org(self, monkeypatch):
         from ingest_svc.db.postgres import verify_api_key
 
-        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "dev")
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "dev")
         assert await verify_api_key("dt_dev_anything") == "default"
 
     async def test_dev_mode_empty_key_resolves_to_default_org(self, monkeypatch):
         from ingest_svc.db.postgres import verify_api_key
 
-        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "dev")
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "dev")
         assert await verify_api_key("") == "default"
 
     async def test_non_dev_mode_dt_dev_key_is_not_special_cased(self, monkeypatch):
-        # dt_dev_* is only a wildcard in dev mode (is_dev checks settings.ENV,
-        # not AUTH_MODE). In prod, it's just a string that won't match any row
+        # dt_dev_* is only a wildcard in dev mode (is_dev checks AUTH_MODE, the
+        # same knob api_svc uses — not ENV). In prod, it's just a string that
+        # won't match any row
         # and correctly resolves to no org.
         from ingest_svc.db.postgres import verify_api_key
 
-        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "production")
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "prod")
         monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
         assert await verify_api_key("dt_dev_anything") is None
 
@@ -725,7 +738,7 @@ class TestVerifyApiKeyDevMode:
             def acquire(self):
                 return _FakeConn()
 
-        monkeypatch.setattr("ingest_svc.db.postgres.settings.ENV", "production")
+        monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "prod")
         monkeypatch.setattr("ingest_svc.db.postgres._pool", _FakePool())
 
         with caplog.at_level(logging.ERROR, logger="dunetrace.ingest.db"):
@@ -828,12 +841,18 @@ class TestHealth:
         body = (await client.get("/health")).json()
         assert body["status"] == "ok"
         assert "version" in body
-        assert "db" in body
+        # Liveness carries no dependency state any more — that is /ready's
+        # verdict (test_metrics_ready.py). A liveness probe that waited on a
+        # pool connection reported a saturated process as dead.
+        assert "db" not in body
 
-    async def test_db_status_reported(self, client, monkeypatch):
-        monkeypatch.setattr("ingest_svc.routers.health.check_db", AsyncMock(return_value="no_pool"))
-        body = (await client.get("/health")).json()
-        assert body["db"] == "no_pool"
+    async def test_does_not_touch_the_db(self, client, monkeypatch):
+        pool = MagicMock()
+        pool.acquire.side_effect = AssertionError("liveness must not acquire a connection")
+        monkeypatch.setattr("ingest_svc.db.postgres._pool", pool)
+        r = await client.get("/health")
+        assert r.status_code == 200
+        pool.acquire.assert_not_called()
 
 
 # ── Partition management tests ─────────────────────────────────────────────────

@@ -1,6 +1,12 @@
 asyncpg==0.29.0
 python-dotenv>=1.2.2
-PyYAML==6.0.2
+# PIN STYLE (shared across services): a package used by more than one image
+# floats on a floor, so every image resolves the SAME version at build time.
+# `==` is reserved for the few places where the version itself is load-bearing
+# (deepeval's pydantic/python-dotenv ranges, mistralai>=2). PyYAML was `==6.0.2`
+# in detector/ingest/semantic and floating in alerts/api, which is the opposite
+# of what an exact pin is for: it guaranteed divergence the moment 6.0.3 shipped.
+PyYAML>=6.0
 regex==2026.6.28
 # OTel export of signal/policy spans (Phase 4). Matches the SDK's [otel] extra.
 # Import-guarded in dunetrace.otel, so detection still runs if these are absent.
@@ -12,3 +18,6 @@ opentelemetry-exporter-otlp-proto-http>=1.28.0
 # This service does not use pydantic directly, but importing the shared migration
 # runner pulls the package __init__, so the image cannot boot without it.
 pydantic==2.10.4
+# /metrics + /ready for the worker (dunetrace_schemas.metrics). Import-guarded
+# there: without it the worker still boots and every metric is a no-op.
+prometheus-client>=0.20

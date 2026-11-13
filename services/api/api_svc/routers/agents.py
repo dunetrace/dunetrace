@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Optional
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.config import settings
 from pydantic import BaseModel
 
@@ -170,7 +170,7 @@ class SourceConfigResponse(BaseModel):
 async def set_source_config(
     agent_id: str,
     body: SourceConfigRequest,
-    org_id: str = Depends(require_org),
+    org_id: str = Depends(require_scope("admin")),
 ) -> SourceConfigResponse:
     """file_path is optional — a repo-only mapping still helps: Phase 4.3's
     source resolution combines it with the SDK's own auto-detected file
@@ -198,7 +198,7 @@ async def get_source_config(
     summary="Remove this agent's explicit source mapping",
     status_code=204,
 )
-async def remove_source_config(agent_id: str, org_id: str = Depends(require_org)):
+async def remove_source_config(agent_id: str, org_id: str = Depends(require_scope("admin"))):
     deleted = await delete_agent_source_config(org_id, agent_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="No source config for this agent.")

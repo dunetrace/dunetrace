@@ -1,5 +1,20 @@
 # Integrating a LlamaIndex RAG Agent with Dunetrace
 
+<!--dunetrace:instrument
+framework: llamaindex
+language: python
+install: pip install dunetrace llama-index
+primary_symbol: dunetrace.Dunetrace.trace
+mechanism: decorator
+opens_own_run: true
+requires_run_context: false
+target_file: the function that calls query_engine.query()
+target_example: `app/rag.py`, `src/query.py`
+target_hints: ["query_engine.query(", "as_query_engine(", ".aquery("]
+emits: [run.started, run.completed, run.errored, retrieval.called, retrieval.responded]
+verify_cmd: python -c "import app.rag"  # then run one query
+-->
+
 ## Quick Start
 
 ```bash
@@ -7,10 +22,19 @@ pip install dunetrace llama-index
 ```
 
 ```python
+# rag.py
 import time
+
+from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
+
 from dunetrace import Dunetrace, get_current_run
 
 dt = Dunetrace()   # local dev, no API key needed
+
+# Any query engine works. This one indexes ./data so the file runs as written.
+query_engine = VectorStoreIndex.from_documents(
+    SimpleDirectoryReader("data").load_data()
+).as_query_engine()
 
 @dt.trace("llamaindex-agent", model="gpt-4o-mini", tools=["query-engine"])
 def answer_question(question: str) -> str:
@@ -29,11 +53,33 @@ def answer_question(question: str) -> str:
     )
     return str(response)
 
-answer_question("What does the documentation say about setup?")
-dt.shutdown()
+if __name__ == "__main__":
+    print(answer_question("What does the documentation say about setup?"))
+    dt.shutdown()
+```
+
+```bash
+mkdir -p data && echo "Setup: run docker compose up -d." > data/notes.txt
+OPENAI_API_KEY=sk-... python rag.py
 ```
 
 Start the backend once, locally, before running this: `docker compose up -d`.
+
+## Where this goes
+
+`@dt.trace` goes on the function that owns a whole question-and-answer
+round trip, the one that calls `query_engine.query()`.
+
+```bash
+grep -rn "query_engine.query(\|as_query_engine(" --include=*.py .
+```
+
+Typically `app/rag.py` or `src/query.py`. Decorate the wrapping function, not
+the query engine construction.
+
+LlamaIndex has no callback integration in this SDK, so the retrieval events are
+emitted by hand inside the traced function. That is the one place this guide
+asks you to add calls rather than a decorator.
 
 ## What this does
 
@@ -42,6 +88,39 @@ Start the backend once, locally, before running this: `docker compose up -d`.
 ## Verification
 
 Run your agent once, then check the dashboard at `http://localhost:3000` — the run should appear within ~15 seconds. Ask a question with no matching indexed content and confirm `response.source_nodes == []` triggers `RAG_EMPTY_RETRIEVAL`.
+
+
+### If nothing arrives
+
+Work down this list. The first two cover almost every case.
+
+1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm the registration call (`trace`) actually ran, and ran **before** the first agent invocation.
+
+2. **Did the process flush?** Events ship from a background thread. Call
+   `dt.shutdown()` before the process exits, or the buffer dies with it.
+
+3. **Is the backend reachable?** Both should return `{"status":"ok",...}`:
+
+   ```bash
+   curl -s localhost:8001/ready   # ingest
+   curl -s localhost:8002/ready   # customer API
+   ```
+
+4. **Did anything land?** If your agent id is listed here, instrumentation is
+   working and the problem is downstream:
+
+   ```bash
+   curl -s localhost:8002/v1/agents
+   curl -s "localhost:8002/v1/agents/<your-agent-id>/runs?limit=5"
+   ```
+
+5. **Turn on debug logging.** `Dunetrace(debug=True)` logs every event as it is buffered and
+   every batch as it ships.
+
+**Runs appear but no signals?** That is usually correct, not a fault. The
+detector polls every 5 seconds, and a healthy run produces no signals. Several
+detectors also need cross-run baselines and stay dormant until the agent has
+run history. Check `docker compose logs detector` if you expected one.
 
 ---
 

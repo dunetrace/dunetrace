@@ -21,15 +21,18 @@ import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from threading import Event, Lock, Thread
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from dunetrace.buffer import RingBuffer
 from dunetrace.context import _current_run
+from dunetrace.detector_config import DetectorConfigStore
 from dunetrace.detectors import PROMPT_INJECTION_DETECTOR
 from dunetrace.emitters import (
     USER_AGENT,
     BatchingEmitter,
     HttpBatchingEmitter,
+    ShipOutcome,
+    as_ship_outcome,
 )
 from dunetrace.models import (
     AgentEvent,
@@ -46,6 +49,7 @@ from dunetrace.policies import (
     PolicyEngine,
     PolicyViolation,
 )
+from dunetrace.redaction import DEFAULT_MAX_FIELD_CHARS, cap_text, compile_denylist
 from dunetrace.run_context import RunContext
 
 logger = logging.getLogger("dunetrace")
@@ -138,6 +142,46 @@ def _make_atexit_flush(client: "Dunetrace"):
     return _flush_on_exit
 
 
+def _resolve_max_field_chars(value: Optional[int]) -> int:
+    """The per-field content cap: the constructor argument when given, else
+    ``DUNETRACE_MAX_FIELD_CHARS``, else ``DEFAULT_MAX_FIELD_CHARS`` (8192).
+
+    ``0`` disables the cap — an explicit, documented opt-out for callers who
+    need full fidelity and accept the payload size. A negative or unparsable
+    value is not silently honoured: it logs and falls back to the default,
+    because "the cap is off" must never be an accident.
+    """
+    if value is None:
+        raw = os.environ.get("DUNETRACE_MAX_FIELD_CHARS", "").strip()
+        if not raw:
+            return DEFAULT_MAX_FIELD_CHARS
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                "Dunetrace: bad DUNETRACE_MAX_FIELD_CHARS=%r, using default %d",
+                raw,
+                DEFAULT_MAX_FIELD_CHARS,
+            )
+            return DEFAULT_MAX_FIELD_CHARS
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Dunetrace: bad max_field_chars=%r, using default %d", value, DEFAULT_MAX_FIELD_CHARS
+        )
+        return DEFAULT_MAX_FIELD_CHARS
+    if value < 0:
+        logger.warning(
+            "Dunetrace: max_field_chars must be >= 0 (0 disables the cap), got %d; "
+            "using default %d",
+            value,
+            DEFAULT_MAX_FIELD_CHARS,
+        )
+        return DEFAULT_MAX_FIELD_CHARS
+    return value
+
+
 def _coerce_text(value: Any) -> str:
     """Best-effort string form of a caller-supplied text field.
 
@@ -201,7 +245,44 @@ class Dunetrace:
         debug: bool = False,
         api_url: Optional[str] = None,
         policy_evaluation_reporting: Optional[bool] = None,
+        policy_cache_path: Optional[str] = None,
+        max_field_chars: Optional[int] = None,
+        redact: Optional[Callable[[dict], dict]] = None,
+        redact_keys: Optional[Iterable[str]] = None,
     ) -> None:
+        """
+        Content caps and redaction (see ``dunetrace.redaction``):
+
+        :param max_field_chars: Per-field character cap on every free-text
+            value the SDK ships — tool args and output, LLM output, retrieval
+            query/content, memory values, ``input_text`` and ``system_prompt``.
+            Default 8192 (env ``DUNETRACE_MAX_FIELD_CHARS``), the same limit the
+            OTLP ingest path enforces. A capped field carries
+            ``<field>_truncated: true`` and ``<field>_original_length: N`` next
+            to it; length fields such as ``output_length`` always report the
+            real size. ``0`` disables the cap. In-path detectors read the
+            capped text too (``ToolCall.args_length`` keeps the real length for
+            OVERSIZED_TOOL_ARGUMENTS).
+        :param redact: Optional ``dict -> dict`` hook applied to structured tool
+            args before they are serialised, ahead of the built-in denylist —
+            strip or mask whatever the denylist cannot know about (account
+            numbers, free-text PII). It receives a shallow copy and must return
+            a new dict; do not mutate nested values in place, the agent's tool
+            is about to run on them. If it raises or returns a non-dict the SDK
+            logs a WARNING once per process, drops its output, and continues
+            with the built-in denylist alone — the agent is never blocked by
+            its own redaction code. Runs on every tool call, so keep it cheap.
+        :param redact_keys: Extra key names for the built-in denylist. Matching
+            is case-insensitive after normalising ``-`` to ``_``, and a key
+            matches when it equals an entry or ends with ``_<entry>`` — the
+            defaults (``authorization``, ``api_key``, ``apikey``, ``token``,
+            ``secret``, ``password``, ``cookie``, ``set-cookie``) therefore
+            also catch ``Authorization``, ``X-Api-Key``, ``access_token``,
+            ``client_secret``, ``db_password``. Matched values become
+            ``"[REDACTED]"``; keys are kept. Only tool args (``tool_called``
+            and approval requests) are structured enough to redact by key;
+            plain-text fields are capped, not redacted.
+        """
         # is not None, not `endpoint or ...` — an explicit endpoint="" is taken
         # literally rather than silently falling back. To disable HTTP shipping,
         # pass emitter=NoopBatchingEmitter() (see dunetrace.emitters); that's the
@@ -236,6 +317,15 @@ class Dunetrace:
         self._emit_json = emit_as_json
         self._stdout_lock = Lock()  # one JSON line per write, no interleaving
 
+        # Live RunContexts by run_id, so _emit() can flush a run's abandoned
+        # streams on the terminal event itself — see _flush_run_streams. Weak
+        # values: a caller that drops a run without ever finishing it must not
+        # be kept alive by this index.
+        self._run_contexts: "weakref.WeakValueDictionary[str, RunContext]" = (
+            weakref.WeakValueDictionary()
+        )
+        self._run_contexts_lock = Lock()
+
         # OTel export (opt-in via DUNETRACE_OTEL_* env). When enabled and the
         # caller didn't wire an exporter explicitly, build one on the shared
         # tracer. dunetrace.otel.init() never raises and returns False when
@@ -260,6 +350,10 @@ class Dunetrace:
         self._exporters: List[Exporter] = list(exporters or [])
         self._default_agent_id = ""  # set by init()
         self._policy_engine = PolicyEngine()
+        # Server-authoritative detector thresholds for the in-path pass
+        # (dunetrace/detector_config.py), refreshed by the same background
+        # thread as the policy bundle with the same TTL/backoff bookkeeping.
+        self._detector_config_store = DetectorConfigStore()
 
         # Policy evaluation observability (Phase 5). Opt-in dashboard reporting
         # ships one rate-limited policy.evaluated event per evaluation; default
@@ -273,6 +367,29 @@ class Dunetrace:
             ).lower() in ("1", "true", "yes")
         self._policy_evaluation_reporting = bool(policy_evaluation_reporting)
         self._policy_eval_rate_limiter = EvaluationRateLimiter()
+
+        # Opt-in on-disk cache of the last remote policy bundle, one file per
+        # agent under this directory (env DUNETRACE_POLICY_CACHE_PATH). A
+        # process that starts while the policy server is unreachable primes
+        # the engine from it — through PolicyEngine.load(), so signature
+        # verification and the unsigned-enforcing-action downgrade apply to
+        # the cached copy exactly as to a live one. Default off: nothing is
+        # written anywhere unless the caller asks.
+        self._policy_cache_path = (
+            policy_cache_path
+            if policy_cache_path is not None
+            else os.environ.get("DUNETRACE_POLICY_CACHE_PATH", "")
+        )
+        self._policy_cache_tried: set = set()  # agent_ids primed (or attempted) from cache
+        self._policy_cache_write_warned = False
+
+        # Content caps and redaction — read by RunContext on every hook via
+        # self._client, so they are plain attributes, not properties.
+        self._max_field_chars: int = _resolve_max_field_chars(max_field_chars)
+        if redact is not None and not callable(redact):
+            raise TypeError(f"redact must be callable (dict -> dict), got {type(redact).__name__}")
+        self._redact_hook = redact
+        self._redact_denylist = compile_denylist(redact_keys)
 
         if debug:
             logging.basicConfig(level=logging.DEBUG)
@@ -384,13 +501,26 @@ class Dunetrace:
             if _active_run is not None:
                 parent_run_id = _active_run.run_id
 
+        # Content caps (dunetrace.redaction). Applied after the version hash,
+        # so grouping is stable however long the prompt is, and before RunState
+        # is built, so in-path detectors and the server read the same text.
+        # The injection scan below still sees the raw user_input: it runs
+        # in-process, is already windowed, and the tail of an oversized prompt
+        # is exactly where an injection would hide.
+        # getattr, not self._max_field_chars: a client built without __init__
+        # (framework tests construct one via __new__) still starts runs, on the
+        # documented default cap.
+        _max_chars = getattr(self, "_max_field_chars", DEFAULT_MAX_FIELD_CHARS)
+        input_text, input_truncated, input_len = cap_text(user_input, _max_chars)
+        sys_prompt, sys_prompt_truncated, sys_prompt_len = cap_text(system_prompt, _max_chars)
+
         ctx = RunContext(
             client=self,
             agent_id=agent_id,
             agent_version=version,
             available_tools=tools,
-            input_text=user_input,
-            system_prompt=system_prompt,
+            input_text=input_text,
+            system_prompt=sys_prompt,
             parent_run_id=parent_run_id,
             trace_id=trace_id,
             conversation_id=conversation_id,
@@ -421,11 +551,19 @@ class Dunetrace:
                 logger.debug("Dunetrace: injection scan failed", exc_info=True)
 
         payload: dict = {
-            "input_text": user_input,
-            "system_prompt": system_prompt,
+            "input_text": input_text,
+            "system_prompt": sys_prompt,
             "model": model,
             "tools": tools,
         }
+        # Markers only when a cut happened, so an ordinary run.started is
+        # byte-identical to before.
+        if input_truncated:
+            payload["input_text_truncated"] = True
+            payload["input_text_original_length"] = input_len
+        if sys_prompt_truncated:
+            payload["system_prompt_truncated"] = True
+            payload["system_prompt_original_length"] = sys_prompt_len
         if _injection_evidence:
             payload["injection_signal"] = _injection_evidence
         # Which SDK build, and which provider libraries it patched. Additive and
@@ -465,14 +603,25 @@ class Dunetrace:
         except Exception:
             logger.debug("Dunetrace: failed to record run start", exc_info=True)
 
-        # Fetch remote policies in a background thread so run start isn't delayed.
+        # Fetch remote policies and detector config in one background thread so
+        # run start isn't delayed. Each has its own TTL/backoff; the thread is
+        # started when either is due and each fetch re-checks for itself.
         try:
-            if self._ingest_url and self._api_key and self._policy_engine.needs_fetch(agent_id):
-                Thread(target=self._fetch_policies, args=(agent_id,), daemon=True).start()
+            if (
+                self._ingest_url
+                and self._api_key
+                and (
+                    self._policy_engine.needs_fetch(agent_id)
+                    or self._detector_config_store.needs_fetch(agent_id)
+                )
+            ):
+                Thread(
+                    target=self._fetch_remote_config, args=(agent_id, version), daemon=True
+                ).start()
         except Exception:
             # Thread() can raise RuntimeError under thread exhaustion; policies
             # are best-effort, the run proceeds with whatever is already loaded.
-            logger.debug("Dunetrace: policy prefetch could not start", exc_info=True)
+            logger.debug("Dunetrace: remote config prefetch could not start", exc_info=True)
 
         _token = _current_run.set(ctx)
         try:
@@ -499,13 +648,16 @@ class Dunetrace:
                         step_index=ctx.step,
                         trace_id=trace_id,
                         conversation_id=conversation_id,
-                        payload={
-                            "error_type": "PolicyViolation",
-                            "error": str(exc),
-                            "exit_reason": "policy_violation",
-                            "policy_name": exc.policy_name,
-                            "step_index": ctx.step,
-                        },
+                        payload=self._terminal_payload(
+                            ctx.run_id,
+                            {
+                                "error_type": "PolicyViolation",
+                                "error": str(exc),
+                                "exit_reason": "policy_violation",
+                                "policy_name": exc.policy_name,
+                                "step_index": ctx.step,
+                            },
+                        ),
                     )
                 )
             except Exception:
@@ -524,11 +676,14 @@ class Dunetrace:
                         step_index=ctx.step,
                         trace_id=trace_id,
                         conversation_id=conversation_id,
-                        payload={
-                            "error_type": type(exc).__name__,
-                            "error": str(exc),
-                            "step_index": ctx.step,
-                        },
+                        payload=self._terminal_payload(
+                            ctx.run_id,
+                            {
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                                "step_index": ctx.step,
+                            },
+                        ),
                     )
                 )
             except Exception:
@@ -552,11 +707,14 @@ class Dunetrace:
                         step_index=ctx.step,
                         trace_id=trace_id,
                         conversation_id=conversation_id,
-                        payload={
-                            "total_steps": ctx.step,
-                            "exit_reason": ctx.exit_reason or "completed",
-                            "tool_call_count": len(ctx.state.tool_calls),
-                        },
+                        payload=self._terminal_payload(
+                            ctx.run_id,
+                            {
+                                "total_steps": ctx.step,
+                                "exit_reason": ctx.exit_reason or "completed",
+                                "tool_call_count": len(ctx.state.tool_calls),
+                            },
+                        ),
                     )
                 )
             except Exception:
@@ -707,37 +865,267 @@ class Dunetrace:
         server still accepts ?api_key= from older SDK builds, but this one never
         sends it.
 
-        Silently ignores all errors — policies are best-effort.
+        Never raises — policies are best-effort and this runs on a daemon
+        thread — but a failure is not silent either:
+
+        * ``mark_fetched`` is only called on success. A failed fetch goes
+          through ``mark_fetch_failed`` and is retried on the engine's
+          backoff (2s, 4s, 8s, capped at 15s), not after the 60s success TTL.
+        * The first failure in a streak logs at WARNING (agent, host,
+          exception class and message); later failures in the same streak
+          at DEBUG; the success that ends a streak at INFO.
+        * Fail-open: whatever bundle was last loaded stays in memory and
+          keeps being enforced while fetches fail.
+        * ``begin_fetch``/``end_fetch`` are the stampede guard, so two runs
+          starting together still make one request.
         """
         if not self._ingest_url or not self._api_key:
             return
-        if not self._policy_engine.needs_fetch(agent_id):
+        engine = self._policy_engine
+        if not engine.needs_fetch(agent_id):
             return
-
-        self._policy_engine.mark_fetched(agent_id)  # prevent stampede
+        if not engine.begin_fetch(agent_id):
+            return  # another thread already has this agent's fetch on the wire
 
         try:
-            base = self._ingest_url.replace("/v1/ingest", "")
-            url = f"{base}/v1/policies?agent_id={urllib.parse.quote(agent_id, safe='')}"
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": USER_AGENT,
-                    **self._auth_headers(),
-                },
-            )
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                import json as _json
+            self._prime_policies_from_cache(agent_id)
 
-                data = _json.loads(resp.read())
-                self._policy_engine.load(
+            host = self._ingest_host()
+            try:
+                data = self._get_json(
+                    f"/v1/policies?agent_id={urllib.parse.quote(agent_id, safe='')}"
+                )
+                if not isinstance(data, dict):
+                    raise ValueError(f"policy response is {type(data).__name__}, expected object")
+                engine.load(
                     data.get("policies", []),
                     secret=self._policy_secret,
                     agent_id=agent_id,
                 )
+            except Exception as exc:
+                streak = engine.mark_fetch_failed(agent_id)
+                retained = engine.has_remote_bundle(agent_id)
+                logger.log(
+                    logging.WARNING if streak == 1 else logging.DEBUG,
+                    "Dunetrace: remote policy fetch failed for agent %r from %s "
+                    "(%s: %s); retrying in %.0fs, failure %d in a row; %s",
+                    agent_id,
+                    host,
+                    type(exc).__name__,
+                    exc,
+                    engine.fetch_backoff(streak),
+                    streak,
+                    "still enforcing the last loaded bundle"
+                    if retained
+                    else "no remote policies are loaded for this agent",
+                )
+                return
+
+            streak = engine.fetch_failure_streak(agent_id)
+            engine.mark_fetched(agent_id)
+            if streak:
+                logger.info(
+                    "Dunetrace: remote policy fetch for agent %r from %s recovered "
+                    "after %d failure(s)",
+                    agent_id,
+                    host,
+                    streak,
+                )
+            self._write_policy_cache(agent_id, data)
+        except Exception:
+            # Bookkeeping above must not be able to take the thread down; the
+            # engine's failure record (if any) already drives the retry.
+            logger.debug("Dunetrace: policy fetch bookkeeping failed", exc_info=True)
+        finally:
+            engine.end_fetch(agent_id)
+
+    def _fetch_remote_config(self, agent_id: str, agent_version: str = "") -> None:
+        """Background refresh of everything this agent pulls from the server:
+        the policy bundle and the detector configuration, in this one thread,
+        each on its own bookkeeping. Never raises."""
+        try:
+            if self._policy_engine.needs_fetch(agent_id):
+                self._fetch_policies(agent_id)
+        except Exception:
+            logger.debug("Dunetrace: policy fetch raised", exc_info=True)
+        try:
+            if self._detector_config_store.needs_fetch(agent_id):
+                self._fetch_detector_config(agent_id, agent_version)
+        except Exception:
+            logger.debug("Dunetrace: detector config fetch raised", exc_info=True)
+
+    def _ingest_base(self) -> str:
+        return self._ingest_url.replace("/v1/ingest", "")
+
+    def _ingest_host(self) -> str:
+        base = self._ingest_base()
+        return urllib.parse.urlsplit(base).netloc or base
+
+    def _get_json(self, path_and_query: str, timeout: float = 3.0) -> Any:
+        """GET ``{ingest base}{path_and_query}`` and return the parsed JSON
+        body. Authenticates with ``Authorization: Bearer <key>`` — never a
+        query parameter, which would land the key in every access log.
+        Raises on any transport, HTTP or parse failure; callers decide how to
+        record it."""
+        req = urllib.request.Request(
+            f"{self._ingest_base()}{path_and_query}",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+                **self._auth_headers(),
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+
+    def _fetch_detector_config(self, agent_id: str, agent_version: str = "") -> None:
+        """
+        Background fetch of the server's effective detector configuration for
+        ``agent_id`` — ``GET /v1/detector-config`` — into the
+        DetectorConfigStore, so the in-path pass runs the thresholds, packs and
+        baselines the detector worker would (see dunetrace/detector_config.py).
+
+        Same contract as ``_fetch_policies``: never raises; a failure goes
+        through ``mark_fetch_failed`` and is retried on the 2s/4s/8s/15s
+        backoff, the first failure in a streak logs WARNING and later ones
+        DEBUG, recovery logs INFO; ``begin_fetch``/``end_fetch`` are the
+        stampede guard. Fail-open: the last configuration loaded stays in use
+        while fetches fail, and before any has loaded the pass runs the
+        detector class defaults (``TIER1_DETECTORS``). Either way the
+        policy.evaluated payload says so via ``detector_config_stale``.
+        """
+        if not self._ingest_url or not self._api_key:
+            return
+        store = self._detector_config_store
+        if not store.needs_fetch(agent_id):
+            return
+        if not store.begin_fetch(agent_id):
+            return  # another thread already has this agent's fetch on the wire
+
+        try:
+            host = self._ingest_host()
+            query = f"agent_id={urllib.parse.quote(agent_id, safe='')}"
+            if agent_version:
+                query += f"&agent_version={urllib.parse.quote(agent_version, safe='')}"
+            try:
+                data = self._get_json(f"/v1/detector-config?{query}")
+                if not isinstance(data, dict):
+                    raise ValueError(
+                        f"detector config response is {type(data).__name__}, expected object"
+                    )
+                store.load(agent_id, data)
+            except Exception as exc:
+                streak = store.mark_fetch_failed(agent_id)
+                logger.log(
+                    logging.WARNING if streak == 1 else logging.DEBUG,
+                    "Dunetrace: detector config fetch failed for agent %r from %s "
+                    "(%s: %s); retrying in %.0fs, failure %d in a row; %s",
+                    agent_id,
+                    host,
+                    type(exc).__name__,
+                    exc,
+                    store.fetch_backoff(streak),
+                    streak,
+                    "still using the last configuration received"
+                    if store.has_config(agent_id)
+                    else "in-path detectors are running on class defaults",
+                )
+                return
+
+            streak = store.fetch_failure_streak(agent_id)
+            store.mark_fetched(agent_id)
+            if streak:
+                logger.info(
+                    "Dunetrace: detector config fetch for agent %r from %s recovered "
+                    "after %d failure(s)",
+                    agent_id,
+                    host,
+                    streak,
+                )
+        except Exception:
+            logger.debug("Dunetrace: detector config fetch bookkeeping failed", exc_info=True)
+        finally:
+            store.end_fetch(agent_id)
+
+    # ── Optional on-disk policy cache ─────────────────────────────────────────
+
+    def _policy_cache_file(self, agent_id: str) -> str:
+        return os.path.join(
+            self._policy_cache_path, urllib.parse.quote(agent_id, safe="") + ".json"
+        )
+
+    def _prime_policies_from_cache(self, agent_id: str) -> None:
+        """Load the cached raw bundle for ``agent_id`` into the engine, once,
+        and only while no remote bundle is in memory for it. Goes through
+        PolicyEngine.load() so a tampered file gets exactly the treatment a
+        tampered server response gets: signature checked when a secret is
+        set, enforcing actions downgraded to log-only when it is not. The
+        engine is NOT marked fetched, so the bundle reads as stale and the
+        network fetch still happens."""
+        if not self._policy_cache_path or agent_id in self._policy_cache_tried:
+            return
+        self._policy_cache_tried.add(agent_id)
+        if self._policy_engine.has_remote_bundle(agent_id):
+            return
+        path = self._policy_cache_file(agent_id)
+        try:
+            if not os.path.exists(path):
+                return
+            with open(path, "r", encoding="utf-8") as fh:
+                cached = json.load(fh)
+            if not isinstance(cached, dict) or cached.get("agent_id") != agent_id:
+                logger.warning(
+                    "Dunetrace: ignoring policy cache %s: not a bundle for %r", path, agent_id
+                )
+                return
+            policies = cached.get("policies")
+            if not isinstance(policies, list):
+                logger.warning("Dunetrace: ignoring policy cache %s: malformed", path)
+                return
+            self._policy_engine.load(policies, secret=self._policy_secret, agent_id=agent_id)
+            logger.info(
+                "Dunetrace: primed %d cached remote policy(ies) for agent %r from %s; "
+                "bundle is stale until a fetch succeeds",
+                len(policies),
+                agent_id,
+                path,
+            )
         except Exception as exc:
-            logger.debug("Policy fetch skipped: %s", exc)
+            logger.warning(
+                "Dunetrace: could not load policy cache %s: %s: %s", path, type(exc).__name__, exc
+            )
+
+    def _write_policy_cache(self, agent_id: str, data: Dict[str, Any]) -> None:
+        """Atomically persist the raw server response for ``agent_id``."""
+        if not self._policy_cache_path:
+            return
+        path = self._policy_cache_file(agent_id)
+        tmp = f"{path}.tmp-{os.getpid()}"
+        try:
+            os.makedirs(self._policy_cache_path, exist_ok=True)
+            payload = {
+                "agent_id": agent_id,
+                "fetched_at": time.time(),
+                "policies": data.get("policies", []),
+            }
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp, path)
+        except Exception as exc:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            # A cache that cannot be written is a degraded restart story, not
+            # a failure now: say so once, then stay quiet.
+            logger.log(
+                logging.DEBUG if self._policy_cache_write_warned else logging.WARNING,
+                "Dunetrace: could not write policy cache %s: %s: %s",
+                path,
+                type(exc).__name__,
+                exc,
+            )
+            self._policy_cache_write_warned = True
 
     def agent(
         self,
@@ -881,7 +1269,10 @@ class Dunetrace:
         function. No-op when called outside a ``dt.run()`` context (the function
         still runs, it just isn't tracked).
 
-        Tool arguments are serialized and transmitted as-is.
+        Tool arguments are bound to the function's parameter names, passed
+        through the ``redact`` hook and built-in denylist, JSON-serialised and
+        capped at ``max_field_chars`` (see ``Dunetrace.__init__``); the return
+        value is ``str()``-ed and capped the same way.
 
         Usage::
 
@@ -1221,23 +1612,98 @@ class Dunetrace:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _emit(self, event: AgentEvent) -> None:
+    _TERMINAL_EVENT_TYPES = frozenset({EventType.RUN_COMPLETED, EventType.RUN_ERRORED})
+
+    def _terminal_payload(self, run_id: str, payload: dict) -> dict:
+        """Stamp ``dropped_events`` onto a run.completed / run.errored payload.
+
+        The buffer sheds whole runs under overload (see ``dunetrace.buffer``).
+        Reserving the terminal's slot *first* means any shed needed to fit it
+        is already reflected in the count; the key is omitted when nothing was
+        dropped so a healthy run's wire format is unchanged. The detector reads
+        it into ``RunState.dropped_events`` and holds the run's signals in
+        shadow. Never raises — a failure here costs the marker, not the event.
+        """
         try:
-            if self._emit_json:
+            dropped = self._buffer.reserve_terminal(run_id)
+        except Exception:
+            logger.debug("Dunetrace: dropped_events lookup failed", exc_info=True)
+            dropped = 0
+        if dropped > 0:
+            payload["dropped_events"] = dropped
+        return payload
+
+    def _register_run(self, ctx: "RunContext") -> None:
+        """Index a live RunContext by run_id. Called from RunContext.__init__.
+
+        Every path that creates a run goes through RunContext — dt.run() and
+        each framework integration alike — so this is where _emit() can find a
+        run's open streams when its terminal event arrives.
+        """
+        try:
+            with self._run_contexts_lock:
+                self._run_contexts[ctx.run_id] = ctx
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Dunetrace: could not index run context", exc_info=True)
+
+    def _flush_run_streams(self, run_id: str) -> None:
+        """Finalize a run's abandoned streams, just before its terminal event.
+
+        ``dt.run()`` calls ``RunContext._flush_open_streams()`` in its own
+        ``finally`` (and it is idempotent, so this is a no-op there), but a
+        framework integration builds a ``RunContext`` directly and emits its
+        own ``run.completed`` / ``run.errored`` — LangChain's ``on_chain_end``
+        / ``on_chain_error``, OpenAI-Agents' ``_finish_run``. Neither ever
+        called the flush, so a stream the caller broke out of reported itself
+        from ``_StreamProxy.__del__`` at garbage-collection time, emitting
+        ``llm.responded`` into a run that had already closed.
+
+        Hanging it off the terminal event is the one place no integration can
+        forget: the flush's own ``llm.responded`` events are emitted (and
+        buffered) before the terminal, which is the ordering the run builders
+        need. Never raises — a failure here must not cost the terminal event.
+        """
+        try:
+            with self._run_contexts_lock:
+                ctx = self._run_contexts.pop(run_id, None)
+            if ctx is not None:
+                ctx._flush_open_streams()
+        except Exception:
+            logger.debug("Dunetrace: failed to flush open streams", exc_info=True)
+
+    def _emit(self, event: AgentEvent) -> None:
+        if event.event_type in self._TERMINAL_EVENT_TYPES:
+            # Before the terminal is recorded anywhere: these emit their own
+            # events, which must land ahead of it.
+            self._flush_run_streams(event.run_id)
+        # Each side channel is guarded on its own. They used to share one try
+        # with the buffer push that follows them, so an NDJSON line or an OTel
+        # exporter that choked on one payload cost the event its place in the
+        # buffer too — the ingest API never saw it at all.
+        if self._emit_json:
+            try:
                 self._write_json_line(event)
-            if self._otel_exporter is not None:
+            except Exception as exc:
+                logger.warning("Dunetrace: NDJSON write failed for %s: %s", event.event_type, exc)
+        if self._otel_exporter is not None:
+            try:
                 self._otel_exporter.handle(event)
-            for exporter in self._exporters:
-                try:
-                    exporter.handle(event)
-                except Exception as exc:
-                    logger.warning(
-                        "Dunetrace: exporter %s failed on %s: %s",
-                        exporter,
-                        event.event_type,
-                        exc,
-                    )
-            self._buffer.push(event)
+            except Exception as exc:
+                logger.warning("Dunetrace: OTel export failed for %s: %s", event.event_type, exc)
+        for exporter in self._exporters:
+            try:
+                exporter.handle(event)
+            except Exception as exc:
+                logger.warning(
+                    "Dunetrace: exporter %s failed on %s: %s",
+                    exporter,
+                    event.event_type,
+                    exc,
+                )
+        try:
+            # Terminal events are forced through: they carry the run's
+            # dropped_events count, so shedding one would hide the loss.
+            self._buffer.push(event, force=event.event_type in self._TERMINAL_EVENT_TYPES)
         except Exception as exc:
             logger.warning("Dunetrace: failed to emit %s: %s", event.event_type, exc)
 
@@ -1248,7 +1714,9 @@ class Dunetrace:
         Fields: ts (RFC3339), level ("info"), logger ("dunetrace"), event_type and agent_id
         as Loki stream labels, run_id/step_index/payload as structured fields.
         """
-        ts = datetime.datetime.utcfromtimestamp(event.timestamp).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        ts = datetime.datetime.fromtimestamp(event.timestamp, datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
         line = {
             "ts": ts,
             "level": "info",
@@ -1263,7 +1731,10 @@ class Dunetrace:
         if event.parent_run_id:
             line["parent_run_id"] = event.parent_run_id
 
-        serialised = json.dumps(line, separators=(",", ":"))
+        # default=str: emit_as_json runs synchronously inside _emit(), and a
+        # payload value json.dumps cannot represent would otherwise raise past
+        # the buffer push below it and lose the event outright.
+        serialised = json.dumps(line, default=str, separators=(",", ":"))
         with self._stdout_lock:
             sys.stdout.write(serialised + "\n")
             sys.stdout.flush()
@@ -1295,12 +1766,39 @@ class Dunetrace:
             client = ref()
             if client is None:
                 return  # caller dropped the client — nothing left to ship for
-            batch = client._buffer.drain(100)
+            try:
+                batch = client._buffer.drain(100)
+            except Exception:
+                # The one unguarded call left in the loop. If the buffer ever
+                # raises, park for an interval rather than end the thread: a
+                # dead drain thread is silent, permanent loss of every later
+                # event, and there is no supervisor to restart it.
+                logger.warning("Dunetrace: buffer drain failed", exc_info=True)
+                del client
+                flush_gate.wait(timeout=flush_interval)
+                flush_gate.clear()
+                continue
             if batch:
-                client._ship(batch)
+                try:
+                    client._ship(batch)
+                except Exception:
+                    # _ship already catches; this is the backstop that keeps
+                    # the loop alive no matter what it is wired to.
+                    logger.warning("Dunetrace: drain iteration failed", exc_info=True)
                 del client
             else:
+                # Nothing new to ship: give the emitter its turn at any batch
+                # it is holding for retry, so a backoff that came due while
+                # the agent is quiet is not stuck until the next event. The
+                # emitter does not reference the client back, so it is safe
+                # to hold across the call after the strong ref is released.
+                emitter = client._emitter
                 del client
+                try:
+                    emitter.retry_pending()
+                except Exception:
+                    logger.debug("retry_pending() raised; ignoring.", exc_info=True)
+                del emitter
                 # Wait until either flush() signals us, shutdown() fires, or the
                 # interval expires. This lets flush() wake the thread immediately.
                 flush_gate.wait(timeout=flush_interval)
@@ -1309,17 +1807,49 @@ class Dunetrace:
         client = ref()
         if client is None:
             return
-        remaining = client._buffer.drain_all()
+        try:
+            remaining = client._buffer.drain_all()
+        except Exception:
+            logger.warning("Dunetrace: final buffer drain failed", exc_info=True)
+            remaining = []
         if remaining:
-            client._ship(remaining)
+            try:
+                client._ship(remaining)
+            except Exception:
+                logger.warning("Dunetrace: final drain failed", exc_info=True)
+        # Last chance for anything already due; retries not yet due are lost
+        # with the process (in-memory), which DurableRetryEmitter exists for.
+        try:
+            client._emitter.retry_pending()
+        except Exception:
+            logger.debug("retry_pending() raised at shutdown; ignoring.", exc_info=True)
 
-    def _ship(self, batch: List[AgentEvent]) -> bool:
+    def _ship(self, batch: List[AgentEvent]) -> ShipOutcome:
         """Delegates to the configured BatchingEmitter (see dunetrace.emitters).
         Defaults to HttpBatchingEmitter — same POST-to-ingest-API behavior as
         before this was made pluggable. Never raises; returns the emitter's
-        success/failure so a future durable-retry layer can react to it.
+        ShipOutcome (normalised, since a third-party emitter may still return a
+        plain bool) so a durable-retry layer can tell a transient failure from a
+        batch the destination will never accept.
+
+        ``ship()`` is documented as non-raising and every built-in emitter
+        honours it, but ``emitter=`` is a public extension point and this call
+        runs on the drain thread: an exception escaping here used to kill that
+        thread outright, after which every event buffered forever and the
+        customer lost all observability with no log line of our own. One
+        warning and a failed batch is the right price.
         """
-        return self._emitter.ship(batch)
+        try:
+            return as_ship_outcome(self._emitter.ship(batch))
+        except Exception as exc:
+            logger.warning(
+                "Dunetrace: emitter %s raised from ship(); %d event(s) dropped: %s",
+                type(self._emitter).__name__,
+                len(batch),
+                exc,
+                exc_info=True,
+            )
+            return ShipOutcome.RETRYABLE
 
 
 # Backwards-compatible alias

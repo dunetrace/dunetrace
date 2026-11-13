@@ -35,7 +35,7 @@ spans into Dunetrace calls locally, no separate endpoint.
 from dunetrace import Dunetrace
 from dunetrace.integrations.otel_receiver import DunetraceOTelReceiver
 
-dt = Dunetrace(api_key="dt_live_...")
+dt = Dunetrace(api_key="dt_...")
 DunetraceOTelReceiver.attach(provider, dt, agent_id="my-agent")
 ```
 
@@ -48,7 +48,7 @@ exporters:
   otlphttp/dunetrace:
     endpoint: https://<your-dunetrace-ingest>
     headers:
-      Authorization: "Bearer dt_live_..."
+      Authorization: "Bearer dt_..."
 
 service:
   pipelines:

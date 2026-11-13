@@ -18,10 +18,12 @@ Environment:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import pathlib
 import re
+import sys
 import textwrap
 from datetime import datetime, timezone
 from importlib import resources
@@ -128,6 +130,69 @@ def _score_icon(score: int | None) -> str:
     return "🔴"
 
 
+# ── id handling ───────────────────────────────────────────────────────────────
+#
+# Every id below is interpolated into a request path that carries the
+# operator's bearer token, and the model choosing those ids has been reading
+# untrusted agent output (signal evidence, tool arguments, LLM text). Two
+# layers, both required:
+#
+#   client.seg()  makes any id inert in a URL — "/" and "?" can no longer leave
+#                 the segment, so `get_run_detail(run_id="../../v1/keys")` asks
+#                 for a run literally named that and gets a 404, instead of
+#                 GET /v1/keys.
+#   the checks    here refuse an id whose *shape* is already known to be wrong,
+#                 so `delete_policy(policy_id="../custom-detectors/5")` is
+#                 rejected by name rather than quietly escaped into a 404 —
+#                 the operator sees the attempt.
+#
+# These return the escaped segment, so a call site can only get one without the
+# other by not using them at all (and client._url() catches that).
+
+_MAX_ID_LEN = 256
+_FAILURE_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+
+def _seg_opaque(value, label: str) -> str:
+    """A free-form, caller-supplied id (run_id, agent_id).
+
+    These are whatever the customer passed to dt.run() — there is no shape to
+    enforce, so this rejects only what can never be a real id and leaves the
+    escaping to client.seg(). A legitimate id containing "/", ":" or a space
+    still works; it round-trips percent-encoded.
+    """
+    s = str(value).strip()
+    if not s:
+        raise ValueError(f"{label} must not be empty.")
+    if len(s) > _MAX_ID_LEN:
+        raise ValueError(f"{label} is too long ({len(s)} chars, max {_MAX_ID_LEN}).")
+    if any(c in s for c in ("\x00", "\n", "\r")):
+        raise ValueError(f"{label} contains a control character.")
+    return client.seg(s)
+
+
+def _seg_numeric(value, label: str) -> str:
+    """A surrogate-key id: policies.id, custom_detectors.id, failure_signals.id
+    and issues.id are all BIGSERIAL, and the API routes declare them `int`.
+    Anything else is a typo or an injection attempt — say so."""
+    s = str(value).strip()
+    # ASCII digits only — str.isdigit() is True for e.g. "\u0665" and superscripts.
+    if not re.fullmatch(r"[0-9]+", s) or int(s) <= 0:
+        raise ValueError(f"{label} must be a positive integer id (got {value!r}).")
+    return client.seg(s)
+
+
+def _seg_failure_type(value) -> str:
+    """A detector name — UPPER_SNAKE_CASE, from a closed-ish list."""
+    s = str(value).strip().upper()
+    if not _FAILURE_TYPE_RE.fullmatch(s):
+        raise ValueError(
+            f"failure_type must be an UPPER_SNAKE_CASE detector name, "
+            f"e.g. TOOL_LOOP (got {value!r})."
+        )
+    return client.seg(s)
+
+
 # ── tools ────────────────────────────────────────────────────────────────────
 
 
@@ -173,7 +238,7 @@ def get_agent_signals(
         severity:  Filter to one severity: CRITICAL, HIGH, MEDIUM, or LOW.
     """
     params: dict = {"limit": min(limit, 100), "include_shadow": "false"}
-    data = client.get(f"/v1/agents/{agent_id}/signals", **params)
+    data = client.get(f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/signals", **params)
     signals = data.get("signals", [])
 
     if severity:
@@ -217,7 +282,7 @@ def get_agent_health(agent_id: str) -> str:
     Args:
         agent_id: The agent ID to query.
     """
-    h = client.get(f"/v1/agents/{agent_id}/health-score")
+    h = client.get(f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/health-score")
 
     score = h.get("score")
     icon = _score_icon(score)
@@ -248,7 +313,7 @@ def get_run_detail(run_id: str, agent_id: str = "") -> str:
         run_id:   The run UUID to inspect.
         agent_id: Agent ID (optional; speeds up the signal lookup).
     """
-    run = client.get(f"/v1/runs/{run_id}")
+    run = client.get(f"/v1/runs/{_seg_opaque(run_id, 'run_id')}")
 
     r = run.get("run", run)  # handle both flat and nested shapes
     signals = run.get("signals", [])
@@ -377,7 +442,12 @@ def search_signals(
         aid = a["agent_id"]
         offset = 0
         while offset < MAX_PER_AGENT:
-            page = client.get(f"/v1/agents/{aid}/signals", limit=PAGE, offset=offset, **params)
+            page = client.get(
+                f"/v1/agents/{_seg_opaque(aid, 'agent_id')}/signals",
+                limit=PAGE,
+                offset=offset,
+                **params,
+            )
             sigs = page.get("signals", [])
             if not sigs:
                 break
@@ -457,9 +527,9 @@ def get_signal_detail(signal_id: int, agent_id: str = "") -> str:
     signal = None
     for a in agents:
         aid = a["agent_id"]
-        sigs = client.get(f"/v1/agents/{aid}/signals", limit=500, include_shadow="false").get(
-            "signals", []
-        )
+        sigs = client.get(
+            f"/v1/agents/{_seg_opaque(aid, 'agent_id')}/signals", limit=500, include_shadow="false"
+        ).get("signals", [])
         signal = next((s for s in sigs if s["id"] == signal_id), None)
         if signal:
             break
@@ -532,7 +602,7 @@ def get_agent_patterns(agent_id: str) -> str:
     Args:
         agent_id: The agent ID to analyze.
     """
-    insights = client.get(f"/v1/agents/{agent_id}/insights")
+    insights = client.get(f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/insights")
 
     lines = [f"Failure patterns for: {agent_id}\n"]
 
@@ -634,11 +704,13 @@ def summarize_agent(agent_id: str) -> str:
     if not agent_meta:
         return f"Agent '{agent_id}' not found. Use list_agents to see available agents."
 
-    signals_data = client.get(f"/v1/agents/{agent_id}/signals", limit=50, include_shadow="false")
+    signals_data = client.get(
+        f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/signals", limit=50, include_shadow="false"
+    )
     signals = signals_data.get("signals", [])
 
     try:
-        health = client.get(f"/v1/agents/{agent_id}/health-score")
+        health = client.get(f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/health-score")
     except Exception:
         health = None
 
@@ -707,7 +779,7 @@ def get_agent_runs(agent_id: str, limit: int = 20) -> str:
         agent_id: The agent ID to query.
         limit:    Max runs to return (default 20, max 100).
     """
-    data = client.get(f"/v1/agents/{agent_id}/runs", limit=min(limit, 100))
+    data = client.get(f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/runs", limit=min(limit, 100))
     runs = data.get("runs", [])
 
     if not runs:
@@ -827,7 +899,7 @@ def get_call_detail(conversation_id: int) -> str:
         conversation_id: The integer call id (from list_voice_calls).
     """
     try:
-        c = client.get(f"/v1/calls/{conversation_id}")
+        c = client.get(f"/v1/calls/{_seg_numeric(conversation_id, 'conversation_id')}")
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -886,7 +958,7 @@ def get_fix_status(signal_id: int, agent_id: str = "") -> str:
         agent_id:  Agent ID (optional; not required for lookup).
     """
     try:
-        data = client.get(f"/v1/signals/{signal_id}/fix-status")
+        data = client.get(f"/v1/signals/{_seg_numeric(signal_id, 'signal_id')}/fix-status")
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -943,7 +1015,7 @@ def list_agent_fixes(agent_id: str) -> str:
         agent_id: The agent ID to query.
     """
     try:
-        data = client.get(f"/v1/agents/{agent_id}/fixes")
+        data = client.get(f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/fixes")
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -989,7 +1061,7 @@ def trigger_explain(signal_id: int, agent_id: str = "") -> str:
         agent_id:  Agent ID (optional; informational only).
     """
     try:
-        result = client.post(f"/v1/signals/{signal_id}/explain", {})
+        result = client.post(f"/v1/signals/{_seg_numeric(signal_id, 'signal_id')}/explain", {})
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1080,9 +1152,14 @@ def list_policies(agent_id: str = "") -> str:
             except Exception:
                 action = {}
 
-        metric = cond.get("metric", "—")[:12]
-        op = cond.get("operator", "—")[:4]
-        threshold = str(cond.get("threshold", "—"))[:10]
+        # The stored condition is {trigger, operator, value} (plus an optional
+        # `match` block). This read "metric"/"threshold", which no policy has
+        # ever carried, so every row rendered as "—".
+        metric = str(cond.get("trigger", "—"))[:12]
+        op = str(cond.get("operator", "—"))[:4]
+        threshold = str(cond.get("value", "—"))[:10]
+        if cond.get("match") and cond.get("trigger") == "expression":
+            threshold = "<expr>"
         act_type = action.get("type", "—")[:18]
         enabled = "enabled" if p.get("enabled", True) else "disabled"
         name = (p.get("name") or "—")[:25]
@@ -1098,22 +1175,28 @@ def list_policies(agent_id: str = "") -> str:
 @writing_tool()
 def create_policy(name: str, agent_id: str, condition: str, action: str) -> str:
     """
-    Create a runtime policy that triggers an action when a metric threshold is
-    crossed during a live agent run.
+    Create a runtime policy that fires mid-run when its condition is met.
 
     Args:
         name:      Policy name (human-readable label).
         agent_id:  Agent to apply the policy to (use '*' for all agents).
-        condition: JSON string with keys: metric, operator, threshold.
-                   Example: '{"metric": "cost_usd", "operator": "gt", "threshold": 5.0}'
-                   Metrics: cost_usd, tool_calls, llm_calls, retries, step_count,
-                            duration_s, prompt_tokens, completion_tokens
-                   Operators: gt, gte, lt, lte, eq
-        action:    JSON string with key 'type' and optional params.
+        condition: JSON string with keys: trigger, operator, value.
+                   Example: '{"trigger": "cost_usd", "operator": "gt", "value": 5.0}'
+                   Triggers: tool_call_count, step_count, cost_usd, error_count,
+                             finish_reason, llm_latency_ms, signal
+                   Operators: gt, gte, lt, lte, eq, neq, contains
+                              (spelled out — '>', '>=' and '==' are rejected)
+
+                   `signal` is a LIST of the failure types detected so far, so it
+                   takes `contains` and nothing else:
+                     '{"trigger": "signal", "operator": "contains", "value": "TOOL_LOOP"}'
+                   `eq` there can never match and `neq` matches on every run; both
+                   are rejected with a 422 naming the fix.
+        action:    JSON string with key 'type' and optional 'params'.
                    Examples:
                      '{"type": "stop"}'
-                     '{"type": "switch_model", "model": "gpt-4o-mini"}'
-                     '{"type": "inject_prompt", "text": "Stop looping."}'
+                     '{"type": "switch_model", "params": {"model": "gpt-4o-mini"}}'
+                     '{"type": "inject_prompt", "params": {"prompt": "Stop looping."}}'
                      '{"type": "log"}'
     """
     try:
@@ -1162,7 +1245,9 @@ def toggle_policy(policy_id: str, enabled: bool) -> str:
         enabled:   True to enable, False to disable.
     """
     try:
-        result = client.patch(f"/v1/policies/{policy_id}/toggle", {"enabled": enabled})
+        result = client.patch(
+            f"/v1/policies/{_seg_numeric(policy_id, 'policy_id')}/toggle", {"enabled": enabled}
+        )
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1180,7 +1265,7 @@ def delete_policy(policy_id: str) -> str:
         policy_id: The policy ID to delete.
     """
     try:
-        client.delete(f"/v1/policies/{policy_id}")
+        client.delete(f"/v1/policies/{_seg_numeric(policy_id, 'policy_id')}")
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1329,7 +1414,9 @@ def activate_custom_detector(detector_id: str) -> str:
         detector_id: The custom detector ID to activate.
     """
     try:
-        result = client.patch(f"/v1/custom-detectors/{detector_id}", {"status": "active"})
+        result = client.patch(
+            f"/v1/custom-detectors/{_seg_numeric(detector_id, 'detector_id')}", {"status": "active"}
+        )
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1352,7 +1439,9 @@ def pause_custom_detector(detector_id: str) -> str:
         detector_id: The custom detector ID to pause.
     """
     try:
-        result = client.patch(f"/v1/custom-detectors/{detector_id}", {"status": "paused"})
+        result = client.patch(
+            f"/v1/custom-detectors/{_seg_numeric(detector_id, 'detector_id')}", {"status": "paused"}
+        )
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1372,7 +1461,7 @@ def delete_custom_detector(detector_id: str) -> str:
         detector_id: The custom detector ID to delete.
     """
     try:
-        client.delete(f"/v1/custom-detectors/{detector_id}")
+        client.delete(f"/v1/custom-detectors/{_seg_numeric(detector_id, 'detector_id')}")
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1396,7 +1485,7 @@ def list_agent_issues(agent_id: str, status: str = "open") -> str:
         status:   'open', 'resolved', or 'all' (default: 'open').
     """
     try:
-        data = client.get(f"/v1/agents/{agent_id}/issues", status=status)
+        data = client.get(f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/issues", status=status)
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1436,6 +1525,11 @@ def get_issue(issue_id: int) -> str:
     5-15 seconds. If no LLM key is configured on the backend, root_cause/
     suggested_fix are omitted but the rest of the report still returns.
 
+    For the four failure types Dunetrace can fix itself (TOOL_LOOP,
+    RETRY_STORM, CASCADING_TOOL_FAILURE, STEP_COUNT_INFLATION) the report
+    also carries a SUGGESTED POLICY block — a runtime guardrail, not a code
+    change. Apply it with create_policy, or in the dashboard.
+
     code_references (source file/line the issue maps to) is always empty
     for now — Dunetrace has no source-mapping capability yet (planned,
     not yet built).
@@ -1444,7 +1538,7 @@ def get_issue(issue_id: int) -> str:
         issue_id: The integer issue ID (from search_issues or list_agent_issues).
     """
     try:
-        data = client.get(f"/v1/issues/{issue_id}")
+        data = client.get(f"/v1/issues/{_seg_numeric(issue_id, 'issue_id')}")
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1479,6 +1573,28 @@ def get_issue(issue_id: int) -> str:
     if data.get("suggested_fix"):
         lines.append("SUGGESTED FIX:")
         lines.append(f"  {data['suggested_fix']}")
+        lines.append("")
+
+    # A `dunetrace_native` fix is a runtime guardrail, not a diff: the API
+    # returns a ready-to-submit PolicyCreate body alongside the prose.
+    policy = data.get("suggested_policy")
+    if isinstance(policy, dict):
+        raw_cond = policy.get("condition")
+        raw_action = policy.get("action")
+        cond: dict = raw_cond if isinstance(raw_cond, dict) else {}
+        action: dict = raw_action if isinstance(raw_action, dict) else {}
+        lines.append("SUGGESTED POLICY (Dunetrace enforces this itself — no code change):")
+        lines.append(f"  Name:      {policy.get('name', '—')}")
+        lines.append(f"  Agent:     {policy.get('agent_id', '*')}")
+        lines.append(
+            f"  Condition: {cond.get('trigger', '?')} "
+            f"{cond.get('operator', '?')} {cond.get('value', '?')}"
+        )
+        lines.append(f"  Action:    {action.get('type', '?')}")
+        lines.append(
+            "  Apply it with create_policy(...) (needs DUNETRACE_MCP_READONLY=false), "
+            "or in the dashboard."
+        )
         lines.append("")
 
     if not data.get("root_cause") and not data.get("suggested_fix"):
@@ -1580,7 +1696,10 @@ def resolve_issue(issue_id: int, resolution_notes: str) -> str:
                            of 3 in the agent's retry loop."
     """
     try:
-        client.post(f"/v1/issues/{issue_id}/resolve", {"resolution_notes": resolution_notes})
+        client.post(
+            f"/v1/issues/{_seg_numeric(issue_id, 'issue_id')}/resolve",
+            {"resolution_notes": resolution_notes},
+        )
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1603,7 +1722,9 @@ def get_failure_pattern_detail(agent_id: str, failure_type: str) -> str:
         failure_type: The detector type, e.g. TOOL_LOOP, COST_SPIKE, CONTEXT_BLOAT.
     """
     try:
-        data = client.get(f"/v1/agents/{agent_id}/failure-patterns/{failure_type.upper()}")
+        data = client.get(
+            f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/failure-patterns/{_seg_failure_type(failure_type)}"
+        )
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -1690,8 +1811,8 @@ def compare_runs(run_id_1: str, run_id_2: str, agent_id: str = "") -> str:
         agent_id:  Agent ID (optional; informational only).
     """
     try:
-        raw1 = client.get(f"/v1/runs/{run_id_1}")
-        raw2 = client.get(f"/v1/runs/{run_id_2}")
+        raw1 = client.get(f"/v1/runs/{_seg_opaque(run_id_1, 'run_id_1')}")
+        raw2 = client.get(f"/v1/runs/{_seg_opaque(run_id_2, 'run_id_2')}")
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -2367,8 +2488,58 @@ _GUIDES: dict[str, str] = {
     """).strip(),
 }
 
+# Guide key -> the full Markdown doc appended to the short inline guide.
+# Every value must also appear in setup.py's BUNDLED_DOCS, or a pip-installed
+# build falls back to the inline text only; test_docs_packaging.py enforces it.
+_GUIDE_DOCS: dict[str, str] = {
+    "langchain": "integrate-langchain-agent.md",
+    "python": "integrate-custom-python-agent.md",
+    "typescript": "integrate-typescript-agent.md",
+    "tools": "integrate-custom-python-agent.md",
+    "haystack": "integrate-haystack-agent.md",
+    "voice": "integrations/voice-frameworks.md",
+    "otel": "integrate-langdock.md",
+    "crewai": "integrate-crewai-agent.md",
+    "autogen": "integrate-autogen-agent.md",
+    "llamaindex": "integrate-llamaindex.md",
+    "openai-agents": "integrate-openai-agents.md",
+    "vercel-ai": "integrate-vercel-ai.md",
+    "pydantic-ai": "integrate-pydantic-ai.md",
+    "smolagents": "integrate-smolagents.md",
+    "litellm": "integrate-litellm.md",
+    "dify": "integrate-dify.md",
+}
+
 # Aliases map natural-language variants to canonical guide keys
 _ALIASES: dict[str, str] = {
+    "crewai": "crewai",
+    "crew": "crewai",
+    "crew-ai": "crewai",
+    "autogen": "autogen",
+    "autogen-agentchat": "autogen",
+    "ag2": "autogen",
+    "llamaindex": "llamaindex",
+    "llama-index": "llamaindex",
+    "llama_index": "llamaindex",
+    "rag": "llamaindex",
+    "openai-agents": "openai-agents",
+    "openai_agents": "openai-agents",
+    "agents-sdk": "openai-agents",
+    "swarm": "openai-agents",
+    "vercel": "vercel-ai",
+    "vercel-ai": "vercel-ai",
+    "ai-sdk": "vercel-ai",
+    "nextjs": "vercel-ai",
+    "next.js": "vercel-ai",
+    "pydantic-ai": "pydantic-ai",
+    "pydantic_ai": "pydantic-ai",
+    "pydanticai": "pydantic-ai",
+    "smolagents": "smolagents",
+    "smol": "smolagents",
+    "smolagent": "smolagents",
+    "litellm": "litellm",
+    "litellm-proxy": "litellm",
+    "dify": "dify",
     "langchain": "langchain",
     "langgraph": "langchain",
     "lc": "langchain",
@@ -2405,7 +2576,6 @@ _ALIASES: dict[str, str] = {
     "opentelemetry": "otel",
     "open-telemetry": "otel",
     "langdock": "otel",
-    "dify": "otel",
     "no-code": "otel",
     "zero-code": "otel",
 }
@@ -2434,30 +2604,26 @@ def get_instrumentation_guide(framework: str) -> str:
     """
     key = _ALIASES.get(framework.lower().strip())
     if key is None:
-        supported = "langchain, python, typescript, tools, haystack, voice, otel"
+        supported = ", ".join(sorted(_GUIDE_DOCS))
         return (
             f"Unknown framework '{framework}'. Supported values: {supported}.\n\n"
-            "Use list_agents to check what agents are already instrumented."
+            "Also accepted as aliases: "
+            + ", ".join(sorted(k for k in _ALIASES if k not in _GUIDE_DOCS))
+            + ".\n\nUse list_agents to check what agents are already instrumented."
         )
 
-    guide = _GUIDES[key]
+    # A short inline guide exists for the original seven keys only. The rest
+    # rely on the full doc, which is bundled into the wheel at build time.
+    guide = _GUIDES.get(key, "")
 
-    # Append the full doc if it's available on disk (richer content)
-    doc_map = {
-        "langchain": "integrate-langchain-agent.md",
-        "python": "integrate-custom-python-agent.md",
-        "typescript": "integrate-typescript-agent.md",
-        "tools": "integrate-custom-python-agent.md",
-        "haystack": "integrate-haystack-agent.md",
-        "voice": "integrations/voice-frameworks.md",
-        "otel": "integrate-langdock.md",
-    }
-    doc_path = _DOCS / doc_map[key]
-    if doc_path.exists():
-        full = doc_path.read_text(encoding="utf-8")
-        return guide + "\n\n---\n\n" + full
-
-    return guide
+    # _read_doc, not _DOCS: resolving relative to __file__ lands in
+    # site-packages on a pip install, where there is no repo checkout, and
+    # every one of these returned "(doc not found)". The doc resources already
+    # went through _read_doc; this tool was the one caller that did not.
+    full = _read_doc(_GUIDE_DOCS[key])
+    if full.startswith("(doc not found"):
+        return guide or full
+    return (guide + "\n\n---\n\n" + full) if guide else full
 
 
 @mcp.tool()
@@ -2481,7 +2647,7 @@ def get_agent_token_stats(agent_id: str) -> str:
         agent_id: The agent ID to query.
     """
     try:
-        data = client.get(f"/v1/agents/{agent_id}/token-stats")
+        data = client.get(f"/v1/agents/{_seg_opaque(agent_id, 'agent_id')}/token-stats")
     except Exception as exc:
         return f"Could not fetch token stats for '{agent_id}': {exc}"
 
@@ -2550,6 +2716,65 @@ def get_agent_token_stats(agent_id: str) -> str:
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
+# Loopback. --sse starts a plain HTTP server with NO authentication of its own
+# in any supported `mcp` version — whoever can reach the port calls every
+# registered tool with the operator's DUNETRACE_API_KEY, which under
+# AUTH_MODE=dev is admin. It therefore binds here unless the operator names a
+# different address on the command line.
+DEFAULT_SSE_HOST = "127.0.0.1"
+
+
+def _is_loopback(host: str) -> bool:
+    """True for an address that is only reachable from this machine."""
+    h = (host or "").strip().strip("[]").lower()
+    if h in ("localhost", "localhost.localdomain"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        # A hostname we can't resolve offline, or an empty string (which
+        # uvicorn reads as "all interfaces"). Treat as exposed.
+        return False
+
+
+def _bind_warning(host: str, readonly: bool) -> Optional[str]:
+    """The startup banner for a non-loopback --sse bind, or None for loopback.
+
+    Returned rather than printed so it is testable and so main() decides where
+    it goes (stderr — stdout is the stdio transport's wire in the other mode).
+    """
+    if _is_loopback(host):
+        return None
+    lines = [
+        f"⚠️  dunetrace-mcp --sse is binding {host}, which is NOT loopback.",
+        "    This server has no authentication of its own: anyone who can reach",
+        "    the port can call every registered tool using your DUNETRACE_API_KEY",
+        "    (admin, under AUTH_MODE=dev).",
+    ]
+    if not readonly:
+        lines += [
+            "    DUNETRACE_MCP_READONLY=false — the WRITE tools are exposed too.",
+            '    create_policy(action="stop") terminates live agent runs as soon as',
+            "    the SDK next pulls policies, and delete_policy removes existing",
+            "    guardrails.",
+        ]
+    lines += [
+        "    Put it behind an authenticating reverse proxy, or drop --host to bind",
+        f"    {DEFAULT_SSE_HOST}.",
+    ]
+    return "\n".join(lines)
+
+
+def _package_version() -> str:
+    """The installed dunetrace-mcp version, or "unknown" when running from a
+    source tree with no distribution metadata."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("dunetrace-mcp")
+    except Exception:
+        return "unknown"
+
 
 def main() -> None:
     import argparse, os
@@ -2575,9 +2800,24 @@ def main() -> None:
         help="Port for SSE mode (default: 8000)",
     )
     parser.add_argument(
+        "--host",
+        default=DEFAULT_SSE_HOST,
+        help=(
+            f"Bind address for SSE mode (default: {DEFAULT_SSE_HOST}). "
+            "There is no authentication on this server — exposing it beyond "
+            "loopback hands every tool, and your API key, to anyone who can "
+            "reach the port."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
-        version="dunetrace-mcp 0.1.4",
+        # Read from installed package metadata, never hardcoded. The literal
+        # here said 0.1.4 while pyproject said 0.4.5 — three releases of drift
+        # on the one output a bug report relies on being true. An operator
+        # debugging an unexpected tool would have concluded they were on a
+        # build predating the read-only gate.
+        version=f"dunetrace-mcp {_package_version()}",
     )
 
     api_url = os.environ.get("DUNETRACE_API_URL", "http://localhost:8002")
@@ -2596,7 +2836,17 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.sse:
+        # Set the host explicitly rather than inheriting the library default:
+        # `mcp` 1.6.0 and 1.9.0 default host="0.0.0.0", 1.9.4+ default
+        # "127.0.0.1", and none of them authenticate. The pin in pyproject.toml
+        # is >=1.9.4 so the default is loopback too, but the assignment is what
+        # makes the bind address a property of this code rather than of
+        # whichever `mcp` the operator happens to have resolved.
+        mcp.settings.host = args.host
         mcp.settings.port = args.port
+        warning = _bind_warning(args.host, _MCP_READONLY)
+        if warning:
+            print(warning, file=sys.stderr, flush=True)
         mcp.run(transport="sse")
     else:
         mcp.run(transport="stdio")

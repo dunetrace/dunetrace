@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 
 from explainer_svc.models import Explanation
 
@@ -54,6 +55,59 @@ def _rate_context_text(explanation: Explanation) -> str:
         return f":information_source: First occurrence of this pattern in the last 7 days"
     else:
         return f":bar_chart: {affected}/{total} runs affected ({pct}) in the last 7 days"
+
+
+# Underscores are deliberately NOT stripped: tool names and agent ids
+# routinely contain them (`web_search`), and removing them corrupts the
+# identifier the reader needs.
+_MRKDWN_CHARS = re.compile(r"[`*~]")
+_NOTIFICATION_MAX = 220
+
+
+def _plain(text: str) -> str:
+    """Strip mrkdwn markers — the notification fallback is rendered verbatim."""
+    return _MRKDWN_CHARS.sub("", text).strip()
+
+
+def notification_text(explanation: Explanation, suppressed_count: int = 0) -> str:
+    """One-line plain-text summary for the desktop/mobile notification.
+
+    Slack builds the notification preview from the top-level `blocks` first
+    and falls back to the top-level `text` (`message.text`); mobile
+    notifications use `message.text` *exclusively*. These payloads carry
+    neither top-level blocks nor — before this — a top-level `text`, so both
+    platforms had no source of preview text and the client rendered
+    "no preview available".
+
+    Kept plain on purpose: a notification does not render mrkdwn, so
+    backticks and asterisks would appear literally.
+
+    Note this string is ALSO visible in the channel, as the message body
+    above the coloured card: Slack only treats `text` as a pure fallback
+    when the payload has top-level `blocks`, and ours are nested inside an
+    `attachments` entry (that nesting is what supplies the severity colour
+    bar). Moving the blocks up would silence the duplicate line but would
+    also break the mobile preview entirely, since mobile reads only
+    `message.text` — so the visible line is the deliberate trade.
+    https://docs.slack.dev/messaging/formatting-message-text
+    """
+    parts = [f"{explanation.severity}: {_plain(explanation.title)}"]
+    if explanation.agent_id:
+        parts.append(f"agent {_plain(explanation.agent_id)}")
+    if explanation.run_id:
+        parts.append(f"run {_plain(explanation.run_id)}")
+    if explanation.total_tokens and explanation.cost_usd:
+        parts.append(f"~{_fmt_cost(explanation.cost_usd)} wasted")
+    if getattr(explanation, "rate_context", {}).get("is_systemic"):
+        rc = explanation.rate_context
+        parts.append(f"systemic: {rc.get('affected_runs', 0)}/{rc.get('total_runs', 0)} runs in 7d")
+    if suppressed_count > 0:
+        parts.append(f"+{suppressed_count} suppressed")
+
+    text = " · ".join(parts)
+    if len(text) > _NOTIFICATION_MAX:
+        text = text[: _NOTIFICATION_MAX - 1].rstrip() + "…"
+    return text
 
 
 def _fmt_window(seconds: int) -> str:
@@ -231,7 +285,13 @@ def format_slack(
         }
     )
 
-    return {"attachments": [{"color": color, "blocks": blocks}]}
+    summary = notification_text(explanation, suppressed_count)
+    return {
+        # Drives the notification preview; also renders as the message body
+        # (no top-level `blocks` here) — see notification_text's docstring.
+        "text": summary,
+        "attachments": [{"color": color, "fallback": summary, "blocks": blocks}],
+    }
 
 
 def format_slack_simple(explanation: Explanation) -> dict:
@@ -248,13 +308,15 @@ def format_slack_simple(explanation: Explanation) -> dict:
     ]
     if explanation.suggested_fixes:
         lines.append(f"\n*Fix:* {explanation.suggested_fixes[0].description}")
+    summary = notification_text(explanation)
     return {
+        "text": summary,
         "attachments": [
             {
                 "color": color,
-                "fallback": explanation.title,
+                "fallback": summary,
                 "text": "\n".join(lines),
                 "mrkdwn_in": ["text"],
             }
-        ]
+        ],
     }

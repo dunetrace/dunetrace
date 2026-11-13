@@ -64,7 +64,14 @@ async def _handle_approval_action(action_id: str, value: dict, user_name: str) -
     signature was already verified above — this callback carries no Dunetrace
     API key, so the signed value blob is the trust anchor (same model the
     signal-alert buttons already use)."""
-    approval_id = int(value.get("approval_id", 0))
+    # int() on caller-supplied text. Every other parse in this handler is
+    # defensive and answers 400, so a non-numeric id escaping as an unhandled
+    # 500 was an oversight rather than a contract.
+    try:
+        approval_id = int(value.get("approval_id", 0))
+    except (TypeError, ValueError):
+        logger.warning("Slack callback: non-numeric approval_id")
+        return Response(status_code=400)
     org_id = value.get("org_id", "")
     if not approval_id or not org_id:
         return Response(status_code=400)
@@ -102,15 +109,38 @@ async def slack_callback(request: Request) -> Response:
     """Receive Slack interactive button payloads."""
     body = await request.body()
 
-    # Signature verification — skip in dev mode when secret is not set
+    # Signature verification. This route is mounted WITHOUT the API-key
+    # dependency every other router carries, and it writes: it grants and
+    # denies approvals, resolves signals, and silences a detector for an agent
+    # — all against an org_id read straight out of the caller's own payload.
+    # The Slack signature is therefore the only thing standing between an
+    # anonymous POST and those writes, so a missing secret must FAIL CLOSED.
+    #
+    # It used to fall through to "skip verification", and the guard was on the
+    # secret rather than on dev mode, so a production install that delivered
+    # alerts through an incoming webhook (which needs no signing secret — the
+    # common setup) exposed unauthenticated cross-tenant approval decisions.
+    # That is the same gate POST /v1/approvals/{id}/decision requires the
+    # `approve` scope to pass.
     if settings.SLACK_SIGNING_SECRET:
         ts = request.headers.get("X-Slack-Request-Timestamp", "")
         sig = request.headers.get("X-Slack-Signature", "")
         if not _verify_signature(body, ts, sig):
             logger.warning("Slack callback: invalid signature — rejecting")
             return Response(status_code=403)
+    elif settings.is_dev:
+        logger.warning(
+            "SLACK_SIGNING_SECRET is not set — accepting an UNVERIFIED Slack "
+            "callback because AUTH_MODE=%s. Never run this way in production.",
+            settings.AUTH_MODE,
+        )
     else:
-        logger.debug("SLACK_SIGNING_SECRET not set — skipping signature verification")
+        logger.error(
+            "Slack callback rejected: SLACK_SIGNING_SECRET is not configured, so "
+            "the payload cannot be verified as coming from Slack. Set it from the "
+            "Slack app's Basic Information page to enable interactive buttons."
+        )
+        return Response(status_code=403)
 
     # Parse payload (Slack sends application/x-www-form-urlencoded)
     try:
@@ -144,7 +174,11 @@ async def slack_callback(request: Request) -> Response:
     if action_id in ("approve_request", "deny_request"):
         return await _handle_approval_action(action_id, value, user_name)
 
-    signal_id = int(value.get("signal_id", 0))
+    try:
+        signal_id = int(value.get("signal_id", 0))
+    except (TypeError, ValueError):
+        logger.warning("Slack callback: non-numeric signal_id")
+        return Response(status_code=400)
     agent_id = value.get("agent_id", "")
     failure_type = value.get("failure_type", "")
     org_id = value.get("org_id", "")

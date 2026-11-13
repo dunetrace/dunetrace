@@ -285,6 +285,102 @@ def _emit_stream_response(run, acc: dict, t0: float, call_index: Optional[int] =
     )
 
 
+class _FrameworkScopedIterator:
+    """Holds ``_in_framework_call`` True for the duration of each ``__next__``
+    and for nothing else.
+
+    The LangChain ``stream``/``astream`` patches used to be generator functions
+    that did ``token = _in_framework_call.set(True)`` and reset in a ``finally``.
+    A ContextVar set inside a generator mutates the *caller's* context the first
+    time the generator is advanced, and the ``finally`` only runs when the
+    generator is exhausted, closed or garbage collected — which
+    ``for chunk in chain.stream(q): if done: break`` never does. The flag then
+    stayed True in the caller's context, and every openai/anthropic/mistral/
+    botocore/httpx/requests patch reads ``None if _in_framework_call.get()``
+    before emitting. So the rest of the run recorded nothing: no LLM calls, no
+    tool calls, no HTTP — a run indistinguishable from an agent that did no
+    work at all, which is precisely the shape TOOL_AVOIDANCE and
+    GOAL_ABANDONMENT fire on.
+
+    Setting and resetting inside ``__next__`` keeps the flag scoped to the frame
+    that needs it: the framework's own code runs under it, the caller's loop
+    body never does, and an abandoned iterator leaves nothing behind.
+    """
+
+    __slots__ = ("_source", "_it")
+
+    def __init__(self, source):
+        self._source = source
+        self._it = None
+
+    def __iter__(self):
+        return self
+
+    def _iterator(self):
+        if self._it is None:
+            # iter(), not the object itself: ``stream`` is a generator function
+            # on BaseChatModel but a subclass may return any iterable.
+            self._it = iter(self._source)
+        return self._it
+
+    def __next__(self):
+        token = _in_framework_call.set(True)
+        try:
+            return next(self._iterator())
+        finally:
+            _in_framework_call.reset(token)
+
+    def close(self):
+        """Forwarded so ``contextlib.closing`` and an explicit ``close()`` still
+        reach the underlying generator — its own ``finally`` blocks are how
+        LangChain releases callbacks."""
+        close = getattr(self._it if self._it is not None else self._source, "close", None)
+        if close is None:
+            return None
+        token = _in_framework_call.set(True)
+        try:
+            return close()
+        finally:
+            _in_framework_call.reset(token)
+
+
+class _AsyncFrameworkScopedIterator:
+    """``_FrameworkScopedIterator`` for ``astream``. Same reasoning: a ContextVar
+    set inside an async generator leaks into the awaiting task's context and is
+    restored only on exhaustion, which ``break`` out of an ``async for`` skips."""
+
+    __slots__ = ("_source", "_it")
+
+    def __init__(self, source):
+        self._source = source
+        self._it = None
+
+    def __aiter__(self):
+        return self
+
+    def _iterator(self):
+        if self._it is None:
+            self._it = self._source.__aiter__()
+        return self._it
+
+    async def __anext__(self):
+        token = _in_framework_call.set(True)
+        try:
+            return await self._iterator().__anext__()
+        finally:
+            _in_framework_call.reset(token)
+
+    async def aclose(self):
+        aclose = getattr(self._it if self._it is not None else self._source, "aclose", None)
+        if aclose is None:
+            return None
+        token = _in_framework_call.set(True)
+        try:
+            return await aclose()
+        finally:
+            _in_framework_call.reset(token)
+
+
 class _StreamProxy:
     """Transparent wrapper around a provider stream that measures it in flight.
 
@@ -1007,13 +1103,26 @@ def _emit_anthropic_response(run, resp, t0: float) -> None:
 
 
 def _anthropic_content(resp) -> Optional[str]:
-    """Text of the first content block, "" for a text-free block, None if the
-    response shape could not be read at all. See _openai_content."""
-    try:
-        block = resp.content[0]
-    except (AttributeError, IndexError, TypeError):
+    """Concatenated text of ALL content blocks, "" for a text-free turn, None if
+    the response shape could not be read at all. See _openai_content.
+
+    Anthropic replies are a LIST of blocks, and the text is not necessarily in
+    block 0. With extended thinking enabled block 0 is the thinking block, whose
+    `text` is empty — reading only the first block reported output_length 0 for
+    every response from a reasoning model. Any multi-block reply (text + tool_use,
+    or several text blocks) was likewise truncated to its first block. Same shape
+    as _bedrock_converse_text, which joins for exactly this reason.
+
+    Blocks are pydantic objects, not dicts, so text is read with getattr. A block
+    with no text attribute (thinking, tool_use, redacted_thinking) contributes
+    nothing, which keeps a tool-only turn at "" — the shape was read fine and the
+    model genuinely produced no text. Only an unreadable envelope is None: no
+    `content` attribute, or a `content` that is not a list.
+    """
+    content = getattr(resp, "content", None)
+    if not isinstance(content, list):
         return None
-    return getattr(block, "text", "") or ""
+    return "".join(str(getattr(b, "text", "") or "") for b in content)
 
 
 def _anthropic_stream_collector(acc: dict, event) -> None:
@@ -1915,26 +2024,34 @@ def _patch_langchain(
 
     @functools.wraps(_orig_stream)
     def _patched_stream(self, input, config=None, *, stop=None, **kwargs):
+        # Deliberately NOT a generator function — see _FrameworkScopedIterator.
+        # The flag is held around the call that builds the stream (a subclass
+        # may do real work there) and around each advance of it, never across
+        # the yields the caller's loop body runs between.
         config = _inject_into_config(config)
         token = _in_framework_call.set(True)
         try:
-            yield from _orig_stream(self, input, config, stop=stop, **kwargs)
+            stream = _orig_stream(self, input, config, stop=stop, **kwargs)
         finally:
             _in_framework_call.reset(token)
+        return _FrameworkScopedIterator(stream)
 
     BaseChatModel.stream = _patched_stream
 
     _orig_astream = BaseChatModel.astream
 
     @functools.wraps(_orig_astream)
-    async def _patched_astream(self, input, config=None, *, stop=None, **kwargs):
+    def _patched_astream(self, input, config=None, *, stop=None, **kwargs):
+        # Plain def returning an async iterator: `async for` needs __aiter__,
+        # not a coroutine, and an async generator here would leak the flag into
+        # the awaiting task exactly as the sync one did.
         config = _inject_into_config(config)
         token = _in_framework_call.set(True)
         try:
-            async for chunk in _orig_astream(self, input, config, stop=stop, **kwargs):
-                yield chunk
+            stream = _orig_astream(self, input, config, stop=stop, **kwargs)
         finally:
             _in_framework_call.reset(token)
+        return _AsyncFrameworkScopedIterator(stream)
 
     BaseChatModel.astream = _patched_astream
 

@@ -26,7 +26,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api_svc.auth import require_org
+from api_svc.auth import require_org, require_scope
 from api_svc.db.queries import (
     consume_github_install_state,
     mint_github_install_state,
@@ -102,7 +102,7 @@ async def install_callback(installation_id: int, state: str) -> dict:
     "", summary="Configure repos/branches/reviewers for this org's GitHub App installation"
 )
 async def set_github_config(
-    body: GitHubConfigRequest, org_id: str = Depends(require_org)
+    body: GitHubConfigRequest, org_id: str = Depends(require_scope("admin"))
 ) -> GitHubIntegrationStatus:
     ok = await set_org_github_config(
         org_id,
@@ -137,7 +137,7 @@ async def get_github_config(org_id: str = Depends(require_org)) -> GitHubIntegra
 
 
 @router.delete("", summary="Remove this org's GitHub integration", status_code=204)
-async def remove_github_config(org_id: str = Depends(require_org)):
+async def remove_github_config(org_id: str = Depends(require_scope("admin"))):
     deleted = await delete_org_github_integration(org_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="No GitHub integration configured.")

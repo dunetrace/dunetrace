@@ -1,0 +1,6 @@
+{
+  "_comment": "Ratchet for scripts/check_schema_owners.py --check. Counts may only go down; regenerate with --baseline after moving a table into migrations. The target is 0 and 0.",
+  "multi_owner_tables": 0,
+  "stray_columns": 0,
+  "tables": []
+}

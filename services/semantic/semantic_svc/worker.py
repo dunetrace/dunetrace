@@ -21,8 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
+from dunetrace_schemas import metrics as _metrics
+from dunetrace_schemas.migrations import CURRENT_SCHEMA_VERSION
+
+import semantic_svc.db as _db
 from semantic_svc.config import settings
 from semantic_svc.config_loader import load_evaluator_config, load_sampling_rates
 from semantic_svc.sampling import (
@@ -73,6 +78,166 @@ logging.basicConfig(
 )
 logger = logging.getLogger("dunetrace.semantic")
 
+# ── Metrics & readiness ───────────────────────────────────────────────────────
+# Served by dunetrace_schemas.metrics' stdlib HTTP server on METRICS_PORT
+# (/metrics, /ready, /health). run_worker() starts it in the enabled path only:
+# a disabled worker logs one line and exits 0, and there is nothing to scrape.
+_M_BACKLOG = _metrics.gauge(
+    "dunetrace_semantic_backlog",
+    "Unevaluated runs found by the most recent poll (capped at BATCH_SIZE).",
+)
+_M_PROCESSED = _metrics.counter(
+    "dunetrace_semantic_processed_total",
+    "Runs a sampling decision was recorded for, by outcome (sampled | skipped).",
+    ("result",),
+)
+_M_FAILURES = _metrics.counter(
+    "dunetrace_semantic_failures_total",
+    "Errors the worker contained, by where they happened.",
+    ("where",),
+)
+_M_EXTERNAL_SECONDS = _metrics.histogram(
+    "dunetrace_semantic_external_call_seconds",
+    "Wall-clock seconds per evaluator invocation (one LLM-backed DeepEval call).",
+    ("provider",),
+    buckets=_metrics.DEFAULT_LATENCY_BUCKETS,
+)
+_M_EXTERNAL_CALLS = _metrics.counter(
+    "dunetrace_semantic_external_calls_total",
+    "Evaluator invocations, by LLM provider and outcome (ok | error).",
+    ("provider", "status"),
+)
+_M_POLL_SECONDS = _metrics.histogram(
+    "dunetrace_semantic_poll_seconds",
+    "Wall-clock seconds per poll cycle.",
+    buckets=_metrics.DEFAULT_LATENCY_BUCKETS,
+)
+
+# /ready reports the poll loop stale once this many POLL_INTERVALs have passed
+# without a successful cycle.
+_STALE_AFTER_INTERVALS = 3
+# A cycle that is STILL RUNNING gets this much longer before it reads as wedged.
+# Freshness used to be computed purely from the last COMPLETED cycle against
+# 3 x the poll interval, but one cycle can gather up to BATCH_SIZE runs and run four run-level plus three conversation-level LLM evaluators over each, which takes minutes —
+# so the worker reported unhealthy for most of every busy cycle, which is
+# precisely when it has work. An orchestrator acting on that restarts the
+# busiest worker mid-batch. The grace is a bound, not an exemption: a genuinely
+# wedged loop still goes stale, just later.
+_INFLIGHT_GRACE_SECS = 900.0
+# time.monotonic() of the last successful poll cycle. run_worker() seeds it
+# once the schema is ready, so the first cycle gets the full grace window;
+# None means the worker has not reached its loop yet.
+_last_poll_ok_at: float | None = None
+# time.monotonic() of when the current (or last) cycle STARTED. A slow cycle and
+# a dead loop look identical from completion times alone; this is what separates
+# them.
+_poll_started_at: float | None = None
+
+
+def _mark_poll_started() -> None:
+    global _poll_started_at
+    _poll_started_at = time.monotonic()
+
+
+def _mark_poll_ok() -> None:
+    global _last_poll_ok_at
+    _last_poll_ok_at = time.monotonic()
+
+
+def _poll_freshness(last_ok_at: float | None, now: float, interval: float) -> tuple[bool, dict]:
+    """Whether the poll loop is still turning.
+
+    Fresh while the last SUCCESSFUL cycle is within _STALE_AFTER_INTERVALS ×
+    interval — only successful cycles count, so a loop whose every cycle fails
+    (DB gone, a wedged evaluator) reads as not-ready rather than as healthy
+    because the process happens to be alive.
+
+    A cycle that is STILL RUNNING is judged against _INFLIGHT_GRACE_SECS
+    instead, so a long-but-healthy cycle is not mistaken for a dead one. See
+    the constant for why that distinction is load-bearing here.
+    """
+    in_flight = _poll_started_at is not None and (
+        last_ok_at is None or _poll_started_at > last_ok_at
+    )
+    if in_flight:
+        age = max(0.0, now - float(_poll_started_at))
+        limit = max(_STALE_AFTER_INTERVALS * interval, _INFLIGHT_GRACE_SECS)
+        fresh = age <= limit
+        return fresh, {
+            "poll": "ok" if fresh else "stale",
+            "in_flight": True,
+            "last_poll_age_seconds": round(age, 3),
+            "stale_after_seconds": limit,
+        }
+    if last_ok_at is None:
+        return False, {"poll": "never", "in_flight": False}
+    age = max(0.0, now - last_ok_at)
+    limit = _STALE_AFTER_INTERVALS * interval
+    fresh = age <= limit
+    return fresh, {
+        "poll": "ok" if fresh else "stale",
+        "in_flight": False,
+        "last_poll_age_seconds": round(age, 3),
+        "stale_after_seconds": limit,
+    }
+
+
+async def _ready_check() -> tuple[bool, dict]:
+    """GET /ready: the DB answers at the required schema version AND a poll
+    cycle completed recently. The metrics server thread schedules this onto the
+    worker's event loop with a short timeout, so a wedged loop is a 503 rather
+    than a hung probe."""
+    pool = _db._pool
+    if pool is None:
+        db_ok, info = False, {"db": "no_pool", "required": CURRENT_SCHEMA_VERSION}
+    else:
+        db_ok, info = await _metrics.db_ready(pool, CURRENT_SCHEMA_VERSION)
+    fresh, poll_info = _poll_freshness(_last_poll_ok_at, time.monotonic(), settings.POLL_INTERVAL)
+    info.update(poll_info)
+    return db_ok and fresh, info
+
+
+async def _observed_evaluate(evaluator, payload, provider):
+    """Run one evaluator off the event loop and observe the call.
+
+    audit Finding 20: DeepEval's metric.measure() manages its own event loop;
+    calling it directly inside this async worker loop corrupts the loop
+    (IndexError: pop from an empty deque) and crash-loops the worker. A thread
+    gives DeepEval its own loop, isolated from ours.
+
+    Duration and outcome are recorded per LLM provider. The exception is
+    re-raised: each call site decides what one failure costs (see the
+    containment comments there), this only observes it.
+    """
+    label = str(provider or "unknown")
+    status = "error"
+    elapsed = 0.0
+
+    def _call():
+        # Timed INSIDE the worker thread, so the observation is the provider
+        # call and nothing else. Stamping before `to_thread` also counted the
+        # wait for a free thread in the default executor — and poll_once gathers
+        # all BATCH_SIZE runs with no semaphore, so 100 runs x 4 evaluators is
+        # 400 submissions against ~32 threads and the last one waits ~12 waves.
+        # Its sample then read as a 60s provider latency when the provider
+        # answered in 5, i.e. the panel said "OpenAI is slow" when the real
+        # answer was "this worker is over-subscribed".
+        nonlocal elapsed
+        t0 = time.perf_counter()
+        try:
+            return evaluator.evaluate(payload)
+        finally:
+            elapsed = time.perf_counter() - t0
+
+    try:
+        result = await asyncio.to_thread(_call)
+        status = "ok"
+        return result
+    finally:
+        _M_EXTERNAL_SECONDS.labels(provider=label).observe(elapsed)
+        _M_EXTERNAL_CALLS.labels(provider=label, status=status).inc()
+
+
 # Loaded once at startup, like detector_svc/detectors.py's _CONFIG — restart
 # the semantic worker container to apply a semantic-sampling.yml/
 # semantic-evaluators.yml change.
@@ -101,6 +266,10 @@ _CONVERSATION_MAX_RUNS = 5
 # has one configured," not "not built yet" — checked via .get(name), so an
 # unconfigured evaluator just never gets a second opinion, no error.
 _second_opinion_evaluators: dict[str, object] = {}
+# name -> the provider each second-opinion evaluator was built with, so its
+# external-call metrics carry the right provider label (it is, by design,
+# usually not the primary one). Populated beside _second_opinion_evaluators.
+_second_opinion_providers: dict[str, str] = {}
 
 _EVALUATOR_CLASSES = {
     HallucinationEvaluator.name: HallucinationEvaluator,
@@ -279,6 +448,7 @@ def _build_second_opinion_evaluators() -> dict[str, object]:
             )
             continue
         built[name] = cls(provider, second_opinion_model)
+        _second_opinion_providers[name] = provider
     return built
 
 
@@ -301,7 +471,7 @@ async def _run_evaluators(
     the number of signals actually written (auto-suppressed findings don't
     count).
     """
-    events = await fetch_run_events(run_id)
+    events = await fetch_run_events(org_id, run_id)
     run = build_evaluation_input(events)
     if run is None:
         return 0
@@ -312,10 +482,7 @@ async def _run_evaluators(
         evaluator = _evaluators.get(name)
         if evaluator is None:
             continue
-        # audit Finding 20: DeepEval's metric.measure() manages its own event
-        # loop; calling it directly inside this async worker loop corrupts the
-        # loop (IndexError: pop from an empty deque) and crash-loops the worker.
-        # Run it in a thread so DeepEval gets its own loop, isolated from ours.
+        # Off the event loop and observed — see _observed_evaluate.
         #
         # Contained per evaluator: a provider error (rate limit, outage, a
         # response the schema parser rejects) must cost this one finding, not the
@@ -324,8 +491,9 @@ async def _run_evaluators(
         # down — and every evaluator already run for this run is billable, so the
         # retry pays for them a second time.
         try:
-            result = await asyncio.to_thread(evaluator.evaluate, run)
+            result = await _observed_evaluate(evaluator, run, settings.SEMANTIC_LLM_PROVIDER)
         except Exception:
+            _M_FAILURES.labels(where="evaluator").inc()
             logger.exception("Evaluator %s failed for run %s — skipping it", name, run_id)
             continue
         # Logged regardless of whether it fired — see semantic_evaluation_log's
@@ -363,14 +531,18 @@ async def _run_evaluators(
         if severity == "HIGH":
             second_evaluator = _second_opinion_evaluators.get(name)
             if second_evaluator is not None:
-                # audit Finding 20: isolate DeepEval's sync loop (see above).
                 # A failed second opinion degrades to "no second opinion" — the
                 # primary finding still stands at HIGH. Confirming a finding is
                 # an enhancement; it must not be able to discard the finding it
                 # was meant to confirm.
                 try:
-                    second_result = await asyncio.to_thread(second_evaluator.evaluate, run)
+                    second_result = await _observed_evaluate(
+                        second_evaluator,
+                        run,
+                        _second_opinion_providers.get(name, settings.SEMANTIC_LLM_PROVIDER),
+                    )
                 except Exception:
+                    _M_FAILURES.labels(where="second_opinion").inc()
                     logger.exception(
                         "Second opinion for %s failed on run %s — keeping the "
                         "primary finding unconfirmed",
@@ -438,7 +610,7 @@ async def _maybe_run_conversation_evaluator(
     if not _conversation_evaluators:
         return 0
 
-    conversation_external_id = await fetch_run_conversation_id(run_id)
+    conversation_external_id = await fetch_run_conversation_id(org_id, run_id)
     if not conversation_external_id:
         return 0
 
@@ -465,7 +637,7 @@ async def _maybe_run_conversation_evaluator(
         )
         return 0
 
-    runs_events = [(rid, await fetch_run_events(rid)) for rid in sibling_run_ids]
+    runs_events = [(rid, await fetch_run_events(org_id, rid)) for rid in sibling_run_ids]
     conversation_input = build_conversation_evaluation_input(runs_events)
     if conversation_input is None:
         return 0
@@ -476,11 +648,13 @@ async def _maybe_run_conversation_evaluator(
     # signal per evaluator that fired.
     signals_written = 0
     for evaluator in _conversation_evaluators.values():
-        # audit Finding 20: isolate DeepEval's sync loop (see _run_evaluators).
         # Contained for the same reason as the run-level loop above.
         try:
-            result = await asyncio.to_thread(evaluator.evaluate, conversation_input)
+            result = await _observed_evaluate(
+                evaluator, conversation_input, settings.SEMANTIC_LLM_PROVIDER
+            )
         except Exception:
+            _M_FAILURES.labels(where="conversation_evaluator").inc()
             logger.exception(
                 "Conversation evaluator %s failed for conversation %s — skipping it",
                 getattr(evaluator, "name", evaluator),
@@ -525,8 +699,8 @@ async def process_run(
 ) -> tuple[bool, int]:
     """Returns (sampled, signals_written)."""
     structural, retrieval, agent_config = await asyncio.gather(
-        has_structural_signal(run_id),
-        has_retrieval_event(run_id),
+        has_structural_signal(org_id, run_id),
+        has_retrieval_event(org_id, run_id),
         fetch_agent_semantic_config(org_id, agent_id),
     )
 
@@ -591,6 +765,7 @@ async def process_run(
             run_id, agent_id, agent_version, org_id
         )
     except Exception as exc:
+        _M_FAILURES.labels(where="conversation").inc()
         logger.warning("Conversation evaluation failed for run_id=%s: %s", run_id, exc)
 
     await mark_run_processed(run_id, agent_id, agent_version, org_id, sampled, reason)
@@ -600,6 +775,7 @@ async def process_run(
 async def poll_once() -> tuple[int, int, int]:
     """Returns (runs_seen, runs_sampled, signals_written)."""
     runs = await fetch_unevaluated_runs(limit=settings.BATCH_SIZE)
+    _M_BACKLOG.set(len(runs))
     if not runs:
         return 0, 0, 0
 
@@ -608,6 +784,8 @@ async def poll_once() -> tuple[int, int, int]:
     )
     sampled_count = sum(1 for sampled, _ in results if sampled)
     signals_count = sum(count for _, count in results)
+    _M_PROCESSED.labels(result="sampled").inc(sampled_count)
+    _M_PROCESSED.labels(result="skipped").inc(len(runs) - sampled_count)
     return len(runs), sampled_count, signals_count
 
 
@@ -619,6 +797,14 @@ async def run_worker() -> None:
         )
         return
 
+    # Observability comes up first so a slow DB start reads as a 503 /ready
+    # rather than a connection refused. start_metrics_server never raises —
+    # metrics are observability, not a dependency; METRICS_PORT=0 disables it.
+    _metrics.register_standard("semantic", settings.APP_VERSION)
+    metrics_server = _metrics.start_metrics_server(
+        settings.METRICS_PORT, _ready_check, asyncio.get_running_loop()
+    )
+
     global _evaluators, _second_opinion_evaluators, _conversation_evaluators
     _evaluators = _build_evaluators()
     _second_opinion_evaluators = _build_second_opinion_evaluators()
@@ -626,21 +812,40 @@ async def run_worker() -> None:
 
     await init_pool()
     await ensure_semantic_schema()
-    logger.info("Semantic worker started. poll_interval=%ss", settings.POLL_INTERVAL)
+    # ensure_semantic_schema applied, then required, CURRENT_SCHEMA_VERSION —
+    # so that is the version this process is now running against.
+    _metrics.set_schema_version(CURRENT_SCHEMA_VERSION)
+    _mark_poll_ok()  # seed /ready freshness: the first cycle gets the full grace window
+    logger.info(
+        "Semantic worker started. poll_interval=%ss metrics_port=%s",
+        settings.POLL_INTERVAL,
+        settings.METRICS_PORT,
+    )
     try:
         while True:
+            started = time.perf_counter()
+            _mark_poll_started()
             try:
                 runs, sampled, signals = await poll_once()
+                _mark_poll_ok()
                 if runs:
                     logger.info(
                         "Cycle complete. runs=%d sampled=%d signals=%d", runs, sampled, signals
                     )
             except Exception:
+                _M_FAILURES.labels(where="poll").inc()
                 logger.exception("Poll cycle failed")
+            _M_POLL_SECONDS.observe(time.perf_counter() - started)
             await asyncio.sleep(settings.POLL_INTERVAL)
     except asyncio.CancelledError:
         logger.info("Semantic worker cancelled")
     finally:
+        if metrics_server is not None:
+            try:
+                metrics_server.shutdown()
+                metrics_server.server_close()
+            except Exception:  # shutdown must never mask the real exit reason
+                logger.debug("metrics server shutdown failed", exc_info=True)
         await close_pool()
 
 

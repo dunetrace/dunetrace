@@ -150,14 +150,18 @@ class TestExpressionPolicies(unittest.TestCase):
 
 class TestMixedConditions(unittest.TestCase):
     def _mixed(self):
-        # signal fired AND args.destructive == true  (brief's coexistence example)
+        # signal fired AND the run has already errored twice. This used to use
+        # args.destructive, but args is only supplied at the before_tool_call
+        # gate, so that combination could never fire and is now rejected at
+        # registration. The AND-of-legacy-and-expression semantics under test
+        # are unchanged; only the prefix moved to one that resolves.
         return Policy(
             name="mixed",
             condition={
                 "trigger": "signal",
                 "operator": "contains",
                 "value": "TOOL_ARGUMENT_FABRICATION",
-                "match": {"args.destructive": {"eq": True}},
+                "match": {"run.error_count": {"gte": 2}},
             },
             action={"type": "stop"},
         )
@@ -165,17 +169,17 @@ class TestMixedConditions(unittest.TestCase):
     def test_both_true_matches(self):
         p = self._mixed()
         metrics = {"signal": ["TOOL_ARGUMENT_FABRICATION"]}
-        self.assertTrue(p.matches(metrics, _ctx(args={"destructive": True})))
+        self.assertTrue(p.matches(metrics, _ctx(run={"error_count": 3})))
 
     def test_legacy_true_expr_false_does_not_match(self):
         p = self._mixed()
         metrics = {"signal": ["TOOL_ARGUMENT_FABRICATION"]}
-        self.assertFalse(p.matches(metrics, _ctx(args={"destructive": False})))
+        self.assertFalse(p.matches(metrics, _ctx(run={"error_count": 0})))
 
     def test_legacy_false_expr_true_does_not_match(self):
         p = self._mixed()
         metrics = {"signal": ["SOMETHING_ELSE"]}
-        self.assertFalse(p.matches(metrics, _ctx(args={"destructive": True})))
+        self.assertFalse(p.matches(metrics, _ctx(run={"error_count": 3})))
 
     def test_mixed_expr_true_but_no_context_does_not_match(self):
         p = self._mixed()

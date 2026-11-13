@@ -1652,6 +1652,258 @@ class TestAutoInstrumentLangChain(unittest.TestCase):
         self.assertIs(self.BaseChatModel.invoke, invoke_after_first)
         dt.shutdown(timeout=1)
 
+    # ── stream()/astream() must not leak the re-entrancy flag ────────────────
+    #
+    # _patched_stream/_patched_astream were generator functions doing
+    # `token = _in_framework_call.set(True)` with a reset in `finally`. A
+    # ContextVar set inside a generator mutates the CALLER's context on first
+    # advance, and the finally only runs on exhaustion/close/GC — which
+    # `for chunk in chain.stream(q): if done: break` never reaches. The flag
+    # then stayed True in the caller's context, and every openai / anthropic /
+    # mistral / botocore / httpx / requests patch reads
+    # `run = None if _in_framework_call.get() else _current_run.get()` before
+    # emitting. The rest of the run therefore recorded nothing at all — zero
+    # LLM calls, zero tool calls, zero HTTP — which is indistinguishable from
+    # an agent that did no work, the trigger shape for TOOL_AVOIDANCE and
+    # GOAL_ABANDONMENT.
+
+    def _patch_multi_chunk_stream(self, name, observed):
+        """Replace BaseChatModel.stream/astream with a multi-chunk version that
+        records the flag it observes, BEFORE _patch_langchain wraps it. Restored
+        by tearDown's _restore_pristine_langchain_methods for the real class;
+        restored here for the stub, which has no pristine snapshot."""
+        from langchain_core.language_models.chat_models import BaseChatModel as _BCM
+
+        original = _BCM.__dict__.get(name)
+        self.addCleanup(lambda: setattr(_BCM, name, original))
+
+        if name == "stream":
+
+            def _fake(inner_self, input, config=None, *, stop=None, **kwargs):
+                from dunetrace.context import _in_framework_call
+
+                for i in range(3):
+                    observed.append(_in_framework_call.get())
+                    yield f"chunk-{i}"
+
+        else:
+
+            async def _fake(inner_self, input, config=None, *, stop=None, **kwargs):
+                from dunetrace.context import _in_framework_call
+
+                for i in range(3):
+                    observed.append(_in_framework_call.get())
+                    yield f"chunk-{i}"
+
+        setattr(_BCM, name, _fake)
+        return _BCM
+
+    def test_abandoned_stream_does_not_leave_the_flag_set(self):
+        from dunetrace.context import _in_framework_call
+
+        observed = []
+        self._patch_multi_chunk_stream("stream", observed)
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        model = self.BaseChatModel()
+        self.assertFalse(_in_framework_call.get())
+
+        # The reference is deliberately held. CPython refcounting closes an
+        # unreferenced generator immediately, which papers the leak over in a
+        # tight test loop but not in real code, where the stream is a local of
+        # a still-running function (or the interpreter is not CPython).
+        stream = model.stream("hello")
+        next(iter(stream))  # advance once, then abandon
+
+        self.assertFalse(_in_framework_call.get())
+        self.assertEqual(observed, [True])  # flag WAS set while the stream ran
+        del stream
+        dt.shutdown(timeout=1)
+
+    def test_inner_patches_still_emit_after_an_abandoned_stream(self):
+        """The consequence, expressed the way the provider patches express it:
+        `run = None if _in_framework_call.get() else _current_run.get()`."""
+        from dunetrace.context import _current_run, _in_framework_call
+
+        self._patch_multi_chunk_stream("stream", [])
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        model = self.BaseChatModel()
+        with dt.run("my-agent"):
+            stream = model.stream("hello")
+            next(iter(stream))  # abandoned mid-flight, reference still held
+            resolved = None if _in_framework_call.get() else _current_run.get()
+            self.assertIsNotNone(resolved)  # was None before the fix
+            del stream
+        dt.shutdown(timeout=1)
+
+    def test_flag_is_not_set_between_chunks(self):
+        """Scoped to each advance, not held across the caller's loop body — so
+        an LLM or tool call made while processing chunk N is still recorded."""
+        from dunetrace.context import _in_framework_call
+
+        observed = []
+        self._patch_multi_chunk_stream("stream", observed)
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        between = []
+        model = self.BaseChatModel()
+        for chunk in model.stream("hello"):
+            between.append(_in_framework_call.get())
+
+        self.assertEqual(between, [False, False, False])
+        self.assertEqual(observed, [True, True, True])
+        self.assertFalse(_in_framework_call.get())
+        dt.shutdown(timeout=1)
+
+    def test_exhausted_stream_yields_every_chunk(self):
+        """The wrapper must still be a plain iterator over the same chunks."""
+        self._patch_multi_chunk_stream("stream", [])
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        model = self.BaseChatModel()
+        self.assertEqual(list(model.stream("hello")), ["chunk-0", "chunk-1", "chunk-2"])
+        dt.shutdown(timeout=1)
+
+    def test_abandoned_astream_does_not_leave_the_flag_set(self):
+        from dunetrace.context import _in_framework_call
+
+        observed = []
+        self._patch_multi_chunk_stream("astream", observed)
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        model = self.BaseChatModel()
+
+        async def drive():
+            stream = model.astream("hello")
+            await stream.__aiter__().__anext__()  # abandoned, reference held
+            leaked = _in_framework_call.get()
+            del stream
+            return leaked
+
+        self.assertFalse(asyncio.run(drive()))
+        self.assertEqual(observed, [True])
+        dt.shutdown(timeout=1)
+
+    def test_astream_yields_every_chunk(self):
+        self._patch_multi_chunk_stream("astream", [])
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        model = self.BaseChatModel()
+
+        async def drive():
+            return [c async for c in model.astream("hello")]
+
+        self.assertEqual(asyncio.run(drive()), ["chunk-0", "chunk-1", "chunk-2"])
+        dt.shutdown(timeout=1)
+
+    def test_closing_an_abandoned_stream_reaches_the_underlying_generator(self):
+        """close() is how LangChain's own generators run their finally blocks."""
+        closed = []
+        from langchain_core.language_models.chat_models import BaseChatModel as _BCM
+
+        original = _BCM.__dict__.get("stream")
+        self.addCleanup(lambda: setattr(_BCM, "stream", original))
+
+        def _fake(inner_self, input, config=None, *, stop=None, **kwargs):
+            try:
+                yield "a"
+                yield "b"
+            finally:
+                closed.append(True)
+
+        _BCM.stream = _fake
+
+        dt = _make_client()
+        from dunetrace.auto import _patch_langchain
+
+        _patch_langchain(client=dt, default_agent_id="my-agent")
+
+        from dunetrace.context import _in_framework_call
+
+        stream = self.BaseChatModel().stream("hello")
+        next(iter(stream))
+        stream.close()
+        self.assertEqual(closed, [True])
+        self.assertFalse(_in_framework_call.get())
+        dt.shutdown(timeout=1)
+
+
+class TestFrameworkScopedIterator(unittest.TestCase):
+    """The primitive behind the stream patches, tested without langchain."""
+
+    def test_flag_is_scoped_to_each_advance(self):
+        from dunetrace.auto import _FrameworkScopedIterator
+        from dunetrace.context import _in_framework_call
+
+        inside = []
+
+        def gen():
+            for i in range(3):
+                inside.append(_in_framework_call.get())
+                yield i
+
+        it = _FrameworkScopedIterator(gen())
+        self.assertEqual(next(it), 0)
+        self.assertFalse(_in_framework_call.get())  # abandoned mid-iteration
+        self.assertEqual(list(it), [1, 2])
+        self.assertFalse(_in_framework_call.get())
+        self.assertEqual(inside, [True, True, True])
+
+    def test_accepts_a_plain_iterable(self):
+        """A BaseChatModel subclass may return a list rather than a generator."""
+        from dunetrace.auto import _FrameworkScopedIterator
+
+        self.assertEqual(list(_FrameworkScopedIterator(["a", "b"])), ["a", "b"])
+
+    def test_close_is_a_noop_for_a_source_without_one(self):
+        from dunetrace.auto import _FrameworkScopedIterator
+
+        self.assertIsNone(_FrameworkScopedIterator(["a"]).close())
+
+    def test_async_flag_is_scoped_to_each_advance(self):
+        from dunetrace.auto import _AsyncFrameworkScopedIterator
+        from dunetrace.context import _in_framework_call
+
+        inside = []
+
+        async def agen():
+            for i in range(3):
+                inside.append(_in_framework_call.get())
+                yield i
+
+        async def drive():
+            it = _AsyncFrameworkScopedIterator(agen())
+            first = await it.__anext__()
+            leaked = _in_framework_call.get()
+            rest = [x async for x in it]
+            return first, leaked, rest, _in_framework_call.get()
+
+        first, leaked, rest, after = asyncio.run(drive())
+        self.assertEqual(first, 0)
+        self.assertFalse(leaked)
+        self.assertEqual(rest, [1, 2])
+        self.assertFalse(after)
+        self.assertEqual(inside, [True, True, True])
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 12. auto_instrument(crewai=...) — Crew/Agent kickoff run boundary

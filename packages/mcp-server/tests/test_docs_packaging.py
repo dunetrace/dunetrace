@@ -45,9 +45,26 @@ def _bundled_docs() -> list[str]:
 
 
 def _requested_docs() -> list[str]:
-    """Every filename server.py passes to _read_doc()."""
+    """Every doc server.py can serve.
+
+    Two sources, because there are two ways a doc reaches a caller:
+
+    1. ``_read_doc("literal")`` — the ``dunetrace://docs/*`` resources, one
+       hard-coded filename each.
+    2. ``_GUIDE_DOCS`` — the map ``get_instrumentation_guide`` looks a framework
+       up in. These reach ``_read_doc`` through a variable, so the literal scan
+       above cannot see them. Missing that was how nine guides ended up served
+       but unbundled: fine from a checkout, "(doc not found)" from a wheel.
+    """
     source = _SERVER_PY.read_text(encoding="utf-8")
-    return sorted(set(re.findall(r'_read_doc\("([^"]+)"\)', source)))
+    literal = set(re.findall(r'_read_doc\("([^"]+)"\)', source))
+
+    block = re.search(r"_GUIDE_DOCS: dict\[str, str\] = \{(.*?)\n\}", source, re.DOTALL)
+    assert block, "_GUIDE_DOCS not found in server.py"
+    mapped = set(re.findall(r':\s*"([^"]+\.md)"', block.group(1)))
+    assert mapped, "_GUIDE_DOCS parsed but empty — the regex has drifted"
+
+    return sorted(literal | mapped)
 
 
 class TestBundleList:
@@ -145,7 +162,11 @@ class TestWheelContents:
             pytest.skip(f"no wheel built for version {version}")
 
         names = zipfile.ZipFile(wheels[-1]).namelist()
-        shipped = {n.rsplit("/", 1)[-1] for n in names if n.endswith(".md")}
+        # Compare on the path relative to _docs/, not the basename. A bundled
+        # doc may sit in a subdirectory (integrations/…), and flattening both
+        # sides would pass a wheel that put the file in the wrong place — and
+        # fail one that put it in the right place.
+        shipped = {n.split("/_docs/", 1)[1] for n in names if "/_docs/" in n and n.endswith(".md")}
         missing = sorted(set(_bundled_docs()) - shipped)
         assert not missing, (
             f"{wheels[-1].name} is missing {missing} — the build hook in setup.py "
