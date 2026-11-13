@@ -11,13 +11,19 @@ against a fake exporter.
 from __future__ import annotations
 
 import unittest
+import uuid
 
 import pytest
 
 try:
-    from opentelemetry.sdk.trace.export import SpanExportResult
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
 
     from dunetrace import otel
+    from dunetrace.integrations.otel import DunetraceOTelExporter
+    from dunetrace.models import AgentEvent, EventType
     from dunetrace.otel import OTelConfig, _CircuitBreakerExporter
 
     _OTEL_AVAILABLE = True
@@ -235,12 +241,60 @@ class TestBuildProvider:
             with_org.shutdown()
             without_org.shutdown()
 
-    def test_sampler_is_parent_based_ratio(self):
+    def _run_span_count(self, monkeypatch, sampling_ratio, run_id):
+        # Keep the production BatchSpanProcessor off the network: without this,
+        # provider.shutdown() flushes a sampled span to the real OTLP endpoint.
+        monkeypatch.setattr(otel, "_build_span_exporter", lambda _config: InMemorySpanExporter())
+        cfg = OTelConfig(
+            enabled=True, endpoint="http://localhost:4317", sampling_ratio=sampling_ratio
+        )
+        provider = otel.build_tracer_provider(cfg)
+        memory = InMemorySpanExporter()
+        provider.add_span_processor(SimpleSpanProcessor(memory))
+        try:
+            # Wired the way client.py wires the env-driven exporter.
+            exporter = DunetraceOTelExporter(
+                tracer_provider=provider, sampling_ratio=cfg.sampling_ratio
+            )
+            for et, payload in (
+                (EventType.RUN_STARTED, {"model": "gpt-4o", "tools": []}),
+                (EventType.RUN_COMPLETED, {}),
+            ):
+                exporter.handle(
+                    AgentEvent(
+                        event_type=et,
+                        run_id=run_id,
+                        agent_id="a",
+                        agent_version="v",
+                        step_index=0,
+                        payload=payload,
+                    )
+                )
+            return len(memory.get_finished_spans())
+        finally:
+            provider.shutdown()
+
+    def test_sampling_ratio_zero_drops_run_spans(self, monkeypatch):
+        # DunetraceOTelExporter starts every run under a sampled remote parent,
+        # so a provider-level ParentBased sampler alone kept every run whatever
+        # the ratio. The exporter now decides per run.
+        assert self._run_span_count(monkeypatch, 0.0, str(uuid.uuid4())) == 0
+
+    def test_sampling_ratio_one_keeps_run_spans(self, monkeypatch):
+        assert self._run_span_count(monkeypatch, 1.0, str(uuid.uuid4())) == 1
+
+    def test_partial_ratio_follows_run_sampled(self, monkeypatch):
+        for _ in range(20):
+            run_id = str(uuid.uuid4())
+            expected = 1 if otel.run_sampled(run_id, 0.5) else 0
+            assert self._run_span_count(monkeypatch, 0.5, run_id) == expected
+
+    def test_provider_sampler_still_respects_parents(self):
         cfg = OTelConfig(enabled=True, endpoint="http://localhost:4317", sampling_ratio=0.25)
         provider = otel.build_tracer_provider(cfg)
         try:
-            # ParentBased wraps a TraceIdRatioBased root; assert we didn't get
-            # the always-on default sampler.
+            # Customer spans opened on get_tracer() under their own trace keep
+            # standard OTel semantics: children follow the parent's decision.
             assert provider.sampler.__class__.__name__ == "ParentBased"
         finally:
             provider.shutdown()
@@ -404,3 +458,59 @@ class TestHttpTracesUrl:
 
     def test_non_url_is_left_for_the_exporter(self):
         assert otel._http_traces_url("collector:4318") == "collector:4318"
+# ── run_sampled: the per-run decision both SDKs and the detector share ───────
+
+
+class TestRunSampled:
+    def test_ratio_is_a_real_probability_over_uuid_run_ids(self):
+        """The bug this replaced: TraceIdRatioBased read the UUID's low 64 bits,
+        whose top two are always the variant bits 10, so 0.1/0.25/0.5 exported
+        0% and 0.9 exported 100%."""
+        from dunetrace.otel import run_sampled
+
+        ids = [str(uuid.uuid4()) for _ in range(4000)]
+        for ratio in (0.1, 0.25, 0.5, 0.75, 0.9):
+            kept = sum(run_sampled(r, ratio) for r in ids) / len(ids)
+            assert abs(kept - ratio) < 0.04, (ratio, kept)
+
+    def test_uuid1_run_ids_are_not_clustered(self):
+        from dunetrace.otel import run_sampled
+
+        ids = [str(uuid.uuid1()) for _ in range(2000)]
+        kept = sum(run_sampled(r, 0.3) for r in ids) / len(ids)
+        assert abs(kept - 0.3) < 0.05
+
+    def test_deterministic_and_monotonic(self):
+        from dunetrace.otel import run_sampled
+
+        rid = str(uuid.uuid4())
+        assert run_sampled(rid, 0.4) == run_sampled(rid, 0.4)
+        # A run kept at a lower ratio is kept at every higher one.
+        kept_at = [r for r in (0.1, 0.3, 0.5, 0.7, 0.9) if run_sampled(rid, r)]
+        if kept_at:
+            assert all(run_sampled(rid, r) for r in (0.1, 0.3, 0.5, 0.7, 0.9) if r >= kept_at[0])
+
+    def test_edges(self):
+        from dunetrace.otel import run_sampled
+
+        assert run_sampled("anything", 1.0) is True
+        assert run_sampled("anything", 0.0) is False
+        assert run_sampled("not-a-uuid", 0.999999) in (True, False)
+
+    def test_known_vector(self):
+        """Pins the algorithm so the TS SDK can assert the same values."""
+        from dunetrace.otel import run_sampled
+
+        # sha256 first 8 bytes: 0xdb8055e0e0307d5a and 0x11e594f481958c10.
+        assert run_sampled("00000000-0000-4000-8000-000000000000", 0.5) is False
+        assert run_sampled("00000000-0000-4000-8000-000000000001", 0.5) is True
+
+
+class TestParseRatioNonFinite:
+    def test_nan_and_inf_fall_back_to_the_default(self):
+        from dunetrace.otel import _parse_ratio
+
+        assert _parse_ratio("nan") == 1.0
+        assert _parse_ratio("inf") == 1.0
+        assert _parse_ratio("-inf") == 1.0
+        assert _parse_ratio("0.3") == 0.3
