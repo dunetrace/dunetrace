@@ -101,6 +101,12 @@ BASELINE_FIELDS: Dict[str, str] = {
     "p75_duration_s": "baseline_p75_duration_s",
 }
 
+# SLOW_STEP's per-tool latency map ({tool_name: P75 ms}) — a dict, not a
+# scalar, so it is outside BASELINE_FIELDS. Mirrors
+# ``dunetrace_schemas.baselines.PER_TOOL_LATENCY_RESPONSE_KEY``; the detector
+# test-suite's parity test pins the two.
+PER_TOOL_BASELINE_FIELD = ("p75_latency_by_tool_ms", "baseline_p75_latency_by_tool")
+
 # The in-path instance per detector class. Only detectors present here are
 # ever built client-side: PromptInjectionDetector, HandoffContextLossDetector
 # and DelegationLoopDetector are absent from TIER1_DETECTORS on purpose (they
@@ -302,6 +308,16 @@ def apply_baselines(state: RunState, baselines: Optional[Dict[str, Any]]) -> Non
             continue
         if getattr(state, attr, None) is None:
             setattr(state, attr, float(value))
+    key, attr = PER_TOOL_BASELINE_FIELD
+    by_tool = baselines.get(key)
+    if isinstance(by_tool, dict) and getattr(state, attr, None) is None:
+        clean = {
+            name: float(v)
+            for name, v in by_tool.items()
+            if isinstance(name, str) and name and _is_number(v) and v >= 0
+        }
+        if clean:
+            setattr(state, attr, clean)
 
 
 @dataclass
