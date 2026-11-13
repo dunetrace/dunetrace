@@ -30,9 +30,12 @@ against.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
+from dunetrace.detectors import tool_name_by_step
 from dunetrace.models import RunState
+from dunetrace_schemas.baselines import MAX_TOOLS_PER_BASELINE, PER_TOOL_LATENCY_COLUMN
 
 # Mirrors ContextBloatDetector.MIN_CALLS / MIN_LAST_TOKENS and the first_tokens
 # floor. Duplicated as module constants rather than imported from the detector
@@ -78,6 +81,30 @@ def _gaps_after(state: RunState, event_type: str) -> List[float]:
     return gaps
 
 
+def _per_tool_step_p75(state: RunState) -> Optional[Dict[str, float]]:
+    """{tool_name: P75 of this run's step latency for that tool}.
+
+    Exactly the quantity SlowStepDetector compares a tool step against: the
+    step's ``step_durations_ms`` entry, keyed by the tool that initiated the
+    step (``tool_name_by_step``). Not ``_gaps_after`` — that pools every
+    ``tool.called`` gap, including the near-zero ones between parallel calls
+    sharing one step, which the detector never measures.
+
+    Capped at MAX_TOOLS_PER_BASELINE tools (most-called first) so an agent with
+    dynamically named tools cannot grow an unbounded row per run.
+    """
+    names = tool_name_by_step(state)
+    samples: Dict[str, List[float]] = defaultdict(list)
+    for step_idx, tool_name in names.items():
+        duration = state.step_durations_ms.get(step_idx)
+        if duration is not None and duration >= 0:
+            samples[tool_name].append(float(duration))
+    if not samples:
+        return None
+    kept = sorted(samples, key=lambda t: (-len(samples[t]), t))[:MAX_TOOLS_PER_BASELINE]
+    return {t: p75 for t in kept if (p75 := _p75(samples[t])) is not None}
+
+
 def _token_growth(state: RunState) -> Optional[float]:
     """Positional last/first prompt tokens — the exact quantity
     ContextBloatDetector compares against this baseline."""
@@ -91,8 +118,9 @@ def _token_growth(state: RunState) -> Optional[float]:
     return last / first
 
 
-def build_baseline_metrics(state: RunState) -> Dict[str, Optional[float]]:
-    """The per-run scalars stored for later P75 aggregation.
+def build_baseline_metrics(state: RunState) -> Dict[str, Any]:
+    """The per-run values stored for later P75 aggregation: one float per
+    scalar baseline, plus the per-tool latency map under PER_TOOL_LATENCY_COLUMN.
 
     A ``None`` means "this run does not qualify for that baseline" and is stored
     as SQL NULL, which the aggregate skips — so a run can contribute to the
@@ -120,4 +148,5 @@ def build_baseline_metrics(state: RunState) -> Dict[str, Optional[float]]:
         "llm_tool_ratio": llm_tool_ratio,
         "total_tokens": float(total_tokens) if total_tokens > 0 else None,
         "duration_s": duration_s if (duration_s or 0) > 0 else None,
+        PER_TOOL_LATENCY_COLUMN: _per_tool_step_p75(state),
     }

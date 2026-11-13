@@ -16,8 +16,12 @@ except ImportError:  # pragma: no cover - allows tests without db driver
 from dunetrace_schemas.baselines import (
     BASELINE_LOOKBACK,
     MIN_BASELINE_RUNS,
+    MAX_TOOLS_PER_BASELINE,
+    PER_TOOL_LATENCY_RESPONSE_KEY,
     all_metric_baselines_sql,
     baselines_from_row,
+    per_tool_from_rows,
+    per_tool_latency_baselines_sql,
     latest_agent_version_sql,
 )
 from ingest_svc.config import settings
@@ -1015,7 +1019,28 @@ async def fetch_agent_baselines(
             "",  # no run to exclude — the SDK asks before its run has been recorded
             lookback,
         )
-    return baselines_from_row(row, min_runs)
+        out = baselines_from_row(row, min_runs)
+        # SLOW_STEP's per-tool thresholds. Its own try: the column belongs to the
+        # detector's DDL, so on a rollout where ingest boots against a database
+        # the new detector hasn't touched yet, the scalars must still be served.
+        try:
+            rows = await conn.fetch(
+                per_tool_latency_baselines_sql(),
+                org_id,
+                agent_id,
+                agent_version,
+                "",
+                lookback,
+                min_runs,
+                MAX_TOOLS_PER_BASELINE,
+            )
+            by_tool = per_tool_from_rows(rows)
+        except Exception as exc:
+            logger.warning("per-tool baseline read failed for agent=%s: %s", agent_id, exc)
+            by_tool = None
+    if out is not None:
+        out[PER_TOOL_LATENCY_RESPONSE_KEY] = by_tool
+    return out
 
 
 async def create_api_key(
