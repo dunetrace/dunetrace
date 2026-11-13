@@ -109,7 +109,7 @@ class TestGeneratedModulesMatchSource(unittest.TestCase):
         by_name = dict(source.ENUMS)
         self.assertEqual(len(by_name["EventType"]), 24)
         self.assertEqual(len(by_name["Severity"]), 4)
-        self.assertEqual(len(by_name["FailureType"]), 39)
+        self.assertEqual(len(by_name["FailureType"]), 41)
         values = {name: value for name, value, _ in by_name["FailureType"]}
         self.assertEqual(values["CONFIDENT_HALLUCINATION"], "CONFIDENT_HALLUCINATION_PROXY")
         self.assertEqual(values["CUSTOM"], "CUSTOM")
