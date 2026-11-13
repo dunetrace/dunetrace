@@ -588,8 +588,10 @@ describe("Dunetrace.wrapOpenAI()", () => {
     await dt.shutdown();
   });
 
-  it("does not emit outside a run context", async () => {
-    const dt = new Dunetrace({ endpoint: "http://localhost:8001" });
+  it("with implicit runs off, does not emit outside a run context", async () => {
+    // Implicit runs (on by default) would open a run for this call; the
+    // attach-only contract is the opt-out behaviour.
+    const dt = new Dunetrace({ endpoint: "http://localhost:8001", implicitRuns: false });
     const events: AgentEvent[] = [];
     dt._emit = (e) => events.push(e);
 

@@ -24,6 +24,10 @@ import type { AgentEvent } from "./models.js";
  */
 export interface BatchEmitter {
   ship(batch: AgentEvent[]): Promise<boolean>;
+  /** Deliver a batch before returning, for the one moment async work cannot
+   *  run: an uncaught exception, after which Node exits without firing
+   *  `beforeExit`. Optional; an emitter without it loses the crash's events. */
+  shipSync?(batch: AgentEvent[], timeoutMs?: number): boolean;
 }
 
 /** POSTs each batch to the ingest API. The default emitter — same behavior
@@ -37,6 +41,40 @@ export class HttpBatchEmitter implements BatchEmitter {
     this._ingestUrl = endpoint.replace(/\/$/, "") + "/v1/ingest";
     this._apiKey = apiKey;
     this._timeoutMs = timeoutMs;
+  }
+
+  /**
+   * POST a batch synchronously by running a short-lived child Node process and
+   * waiting for it (bounded by `timeoutMs`). Only the crash hook uses this: the
+   * process is about to exit, the event loop will not run again, and a
+   * synchronous child is the only way left to put the run.errored on the wire.
+   * The API key goes to the child through its environment, not its argv.
+   */
+  shipSync(batch: AgentEvent[], timeoutMs = 2000): boolean {
+    if (batch.length === 0) return true;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-Dunetrace-Agent": batch[0]?.agent_id ?? "",
+        ...(this._apiKey ? { Authorization: `Bearer ${this._apiKey}` } : {}),
+      };
+      const body = JSON.stringify({ api_key: this._apiKey, agent_id: batch[0]?.agent_id ?? "", events: batch });
+      const script =
+        "const c=[];process.stdin.on('data',d=>c.push(d));process.stdin.on('end',async()=>{" +
+        "try{const r=await fetch(process.env.DT_URL,{method:'POST',headers:JSON.parse(process.env.DT_HEADERS)," +
+        "body:Buffer.concat(c)});process.exit(r.ok?0:1)}catch{process.exit(1)}})";
+      execFileSync(process.execPath, ["-e", script], {
+        input: body,
+        env: { DT_URL: this._ingestUrl, DT_HEADERS: JSON.stringify(headers) },
+        timeout: timeoutMs,
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async ship(batch: AgentEvent[]): Promise<boolean> {

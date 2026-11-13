@@ -38,7 +38,7 @@ usage-only chunk with an empty ``choices`` list and break callers doing
                   long-term, and entity memory become memory.* events.
 
 The memory patches (LangGraph ``BaseStore``, CrewAI memory) only ever attach to an
-already-open ``dt.run()`` — like the openai/anthropic patches — and emit
+already-open run -- they never open one, unlike the openai/anthropic patches -- and emit
 ``memory.*`` annotation events (they don't advance the step counter). Framework
 memory APIs don't expose the *provenance* of a written value, so auto-captured
 writes carry no ``source``; use the manual ``run.memory_written(..., source=...)``
@@ -84,6 +84,8 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import os
+import weakref
 import inspect
 import importlib
 import json
@@ -92,7 +94,14 @@ import sys
 import time
 from typing import TYPE_CHECKING, List, Optional
 
-from dunetrace.context import _current_run, _http_suppressed, _in_framework_call
+from dunetrace.context import (
+    _current_run,
+    _http_suppressed,
+    _in_framework_call,
+    active_run,
+    explicit_run,
+)
+from dunetrace.implicit import resolve_run
 from dunetrace.policies import ApprovalDenied, PolicyViolation
 
 if TYPE_CHECKING:
@@ -102,6 +111,18 @@ logger = logging.getLogger("dunetrace.auto")
 
 # Tracks which frameworks have already been patched (prevents double-wrapping).
 _PATCHED: set[str] = set()
+
+# The client the last auto_instrument(client=...) ran for, held weakly. Patches
+# built inside _patch_*(client=...) capture their client in a closure; the
+# Mistral helpers are module-level and read it from here instead.
+_ACTIVE_CLIENT: "Optional[weakref.ReferenceType]" = None
+
+
+def _active_client() -> "Optional[Dunetrace]":
+    ref = _ACTIVE_CLIENT
+    return ref() if ref is not None else None
+
+
 # Package -> installed version, for every provider actually patched this process.
 # Emitted on run.started so a bad run can be correlated with the exact SDK and
 # provider-library versions that produced it. The SDK version previously existed
@@ -210,7 +231,7 @@ def _http_run():
     up the stack is already recording this call."""
     if _in_framework_call.get() or _http_suppressed.get():
         return None
-    return _current_run.get()
+    return active_run()
 
 
 # ── Streaming ─────────────────────────────────────────────────────────────────
@@ -720,7 +741,11 @@ def _patch_openai(
 
     @functools.wraps(_orig_create)
     def _patched_create(self, *, messages=None, model="unknown", **kwargs):
-        run = None if _in_framework_call.get() else _current_run.get()
+        run = (
+            None
+            if _in_framework_call.get()
+            else resolve_run(client, "openai.chat.completions.create")
+        )
         t0 = time.monotonic()
         if run:
             _safe_emit(
@@ -766,7 +791,11 @@ def _patch_openai(
 
         @functools.wraps(_orig_acreate)
         async def _patched_acreate(self, *, messages=None, model="unknown", **kwargs):
-            run = None if _in_framework_call.get() else _current_run.get()
+            run = (
+                None
+                if _in_framework_call.get()
+                else resolve_run(client, "openai.chat.completions.create")
+            )
             t0 = time.monotonic()
             if run:
                 _safe_emit(
@@ -933,7 +962,7 @@ def _patch_anthropic(
 
     @functools.wraps(_orig_create)
     def _patched_create(self, *, model="unknown", messages=None, max_tokens=1024, **kwargs):
-        run = None if _in_framework_call.get() else _current_run.get()
+        run = None if _in_framework_call.get() else resolve_run(client, "anthropic.messages.create")
         t0 = time.monotonic()
         if run:
             _safe_emit(
@@ -975,7 +1004,11 @@ def _patch_anthropic(
         async def _patched_acreate(
             self, *, model="unknown", messages=None, max_tokens=1024, **kwargs
         ):
-            run = None if _in_framework_call.get() else _current_run.get()
+            run = (
+                None
+                if _in_framework_call.get()
+                else resolve_run(client, "anthropic.messages.create")
+            )
             t0 = time.monotonic()
             if run:
                 _safe_emit(
@@ -1029,7 +1062,11 @@ def _patch_anthropic(
         def _make_stream_patch(orig_stream, is_async):
             @functools.wraps(orig_stream)
             def _patched_stream(self, *, model="unknown", messages=None, **kwargs):
-                run = None if _in_framework_call.get() else _current_run.get()
+                run = (
+                    None
+                    if _in_framework_call.get()
+                    else resolve_run(client, "anthropic.messages.create")
+                )
                 t0 = time.monotonic()
                 if run:
                     _safe_emit(
@@ -1249,7 +1286,9 @@ def _mistral_deployment(sub_sdk, server_url: Optional[str] = None) -> str:
 
 def _mistral_call_start(sub_sdk, model: str, kwargs: dict):
     """Common preamble for every patched Mistral method."""
-    run = None if _in_framework_call.get() else _current_run.get()
+    run = (
+        None if _in_framework_call.get() else resolve_run(_active_client(), "mistral.chat.complete")
+    )
     t0 = time.monotonic()
     if run:
         # Embeddings and FIM have no messages= to estimate from, so the estimate
@@ -1675,7 +1714,7 @@ def _patch_botocore(
         if not _is_bedrock_llm_call(self, operation_name):
             return _orig_make_api_call(self, operation_name, api_params)
 
-        run = None if _in_framework_call.get() else _current_run.get()
+        run = None if _in_framework_call.get() else resolve_run(client, "bedrock.invoke_model")
         model = api_params.get("modelId") or "unknown"
         t0 = time.monotonic()
         if run:
@@ -2208,7 +2247,7 @@ def _patch_crewai(
 
     @functools.wraps(_orig_crew_kickoff)
     def _patched_crew_kickoff(self, inputs=None, **kwargs):
-        if _current_run.get() is not None:
+        if explicit_run() is not None:
             return _orig_crew_kickoff(self, inputs, **kwargs)
         agent_id = _crew_agent_id(self, inputs)
         with client.run(agent_id, user_input=str((inputs or {}).get("topic", ""))) as run:
@@ -2227,7 +2266,7 @@ def _patch_crewai(
 
         @functools.wraps(_orig_crew_kickoff_async)
         async def _patched_crew_kickoff_async(self, inputs=None, **kwargs):
-            if _current_run.get() is not None:
+            if explicit_run() is not None:
                 return await _orig_crew_kickoff_async(self, inputs, **kwargs)
             agent_id = _crew_agent_id(self, inputs)
             with client.run(agent_id, user_input=str((inputs or {}).get("topic", ""))) as run:
@@ -2247,7 +2286,7 @@ def _patch_crewai(
 
         @functools.wraps(_orig_agent_kickoff)
         def _patched_agent_kickoff(self, messages, *args, **kwargs):
-            if _current_run.get() is not None:
+            if active_run() is not None:
                 return _orig_agent_kickoff(self, messages, *args, **kwargs)
             agent_id = resolve_agent_id(
                 framework_native_agent_id=getattr(self, "role", None),
@@ -2270,7 +2309,7 @@ def _patch_crewai(
 
         @functools.wraps(_orig_agent_kickoff_async)
         async def _patched_agent_kickoff_async(self, messages, *args, **kwargs):
-            if _current_run.get() is not None:
+            if active_run() is not None:
                 return await _orig_agent_kickoff_async(self, messages, *args, **kwargs)
             agent_id = resolve_agent_id(
                 framework_native_agent_id=getattr(self, "role", None),
@@ -2355,7 +2394,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_put)
     def _patched_put(self, namespace, key, value, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_written(_store_key(namespace, key), _mem_text(value)))
         return _orig_put(self, namespace, key, value, *args, **kwargs)
@@ -2366,7 +2405,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_get)
     def _patched_get(self, namespace, key, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_read(_store_key(namespace, key)))
         return _orig_get(self, namespace, key, *args, **kwargs)
@@ -2377,7 +2416,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_delete)
     def _patched_delete(self, namespace, key, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_cleared(_store_key(namespace, key)))
         return _orig_delete(self, namespace, key, *args, **kwargs)
@@ -2388,7 +2427,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_aput)
     async def _patched_aput(self, namespace, key, value, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_written(_store_key(namespace, key), _mem_text(value)))
         return await _orig_aput(self, namespace, key, value, *args, **kwargs)
@@ -2399,7 +2438,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_aget)
     async def _patched_aget(self, namespace, key, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_read(_store_key(namespace, key)))
         return await _orig_aget(self, namespace, key, *args, **kwargs)
@@ -2410,7 +2449,7 @@ def _patch_langgraph_store() -> None:
 
     @functools.wraps(_orig_adelete)
     async def _patched_adelete(self, namespace, key, *args, **kwargs):
-        run = _current_run.get()
+        run = active_run()
         if run is not None:
             _safe_memory(lambda: run.memory_cleared(_store_key(namespace, key)))
         return await _orig_adelete(self, namespace, key, *args, **kwargs)
@@ -2443,7 +2482,7 @@ def _wrap_crewai_memory_class(cls, mem_key: str) -> bool:
 
         @functools.wraps(_orig_save)
         def _patched_save(self, *args, _orig=_orig_save, _k=mem_key, **kwargs):
-            run = _current_run.get()
+            run = active_run()
             if run is not None:
                 val = args[0] if args else kwargs.get("value", kwargs.get("item"))
                 _safe_memory(lambda: run.memory_written(_k, _mem_text(val)))
@@ -2457,7 +2496,7 @@ def _wrap_crewai_memory_class(cls, mem_key: str) -> bool:
 
         @functools.wraps(_orig_search)
         def _patched_search(self, *args, _orig=_orig_search, **kwargs):
-            run = _current_run.get()
+            run = active_run()
             if run is not None:
                 q = args[0] if args else kwargs.get("query", kwargs.get("task"))
                 if q:
@@ -2472,7 +2511,7 @@ def _wrap_crewai_memory_class(cls, mem_key: str) -> bool:
 
         @functools.wraps(_orig_reset)
         def _patched_reset(self, *args, _orig=_orig_reset, **kwargs):
-            run = _current_run.get()
+            run = active_run()
             if run is not None:
                 _safe_memory(lambda: run.memory_cleared(None))
             return _orig(self, *args, **kwargs)
@@ -2518,6 +2557,228 @@ def _estimate_tokens(messages) -> int:
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
+# ── Framework entry points: exact runs without dt.run() ──────────────────────
+#
+# A run needs a start and an end. These patches take both from the framework:
+# the run opens when the entry point is called and closes when it returns (or
+# when the stream it returned is exhausted). Nothing is guessed, so these are
+# ordinary runs, unlike the implicit ones dunetrace.implicit opens on idle.
+# Each is a no-op when a run is already active, which is what makes nested
+# graphs and sub-agents attach to their parent instead of opening their own.
+
+
+def _entry_agent_id(client, default_agent_id, framework_name, fallback: str) -> str:
+    """The agent_id for an entry-point run. What the user configured
+    (``dt.init(agent_id=...)``, ``auto_instrument(agent_id=...)``,
+    DUNETRACE_AGENT_ID) always wins; a framework-supplied name is only used
+    when nothing was configured, and only a deliberate one (callers pass None
+    for a framework default such as FastAPI's "FastAPI" title)."""
+    configured = (
+        default_agent_id
+        or getattr(client, "_default_agent_id", "")
+        or os.environ.get("DUNETRACE_AGENT_ID", "")
+    )
+    if configured:
+        return configured
+    if isinstance(framework_name, str) and framework_name.strip():
+        return framework_name.strip()
+    return fallback
+
+
+def _entry_run(client, agent_id: str, opened_by: str):
+    """A context manager for an entry-point run, or None when one should not
+    open: no client to open it with, or a real run is already active."""
+    if client is None or explicit_run() is not None:
+        return None
+    # An implicit run active here is closed by client.run() itself.
+    return client.run(agent_id, _opened_by=opened_by)
+
+
+_LANGGRAPH_DEFAULT_NAMES = {"", "LangGraph", "Pregel", None}
+
+
+def _patch_langgraph_entry(
+    client: "Optional[Dunetrace]" = None, default_agent_id: Optional[str] = None
+) -> None:
+    """Open a run around a compiled LangGraph graph's ``invoke``/``ainvoke``/
+    ``stream``/``astream`` when none is active. Subgraphs and the LangChain
+    calls inside attach to it, so the depth problem that keeps LangChain from
+    opening its own runs does not arise here: the outermost call is the one
+    that sees no run."""
+    if "langgraph" in _PATCHED:
+        return
+    try:
+        from langgraph.pregel import Pregel
+    except ImportError:
+        logger.debug("langgraph not installed — skipping entry-point auto-instrument")
+        return
+    if client is None:
+        logger.warning(
+            "Dunetrace: langgraph entry-point instrumentation requires a client — "
+            "use dt.init() or dt.auto_instrument(). Skipping."
+        )
+        return
+
+    def _agent_id(graph) -> str:
+        name = getattr(graph, "name", None)
+        return _entry_agent_id(
+            client,
+            default_agent_id,
+            None if name in _LANGGRAPH_DEFAULT_NAMES else name,
+            "langgraph",
+        )
+
+    _orig_invoke = Pregel.invoke
+
+    @functools.wraps(_orig_invoke)
+    def _invoke(self, *args, **kwargs):
+        cm = _entry_run(client, _agent_id(self), "langgraph.invoke")
+        if cm is None:
+            return _orig_invoke(self, *args, **kwargs)
+        with cm as run:
+            result = _orig_invoke(self, *args, **kwargs)
+            run.final_answer()
+            return result
+
+    _orig_ainvoke = Pregel.ainvoke
+
+    @functools.wraps(_orig_ainvoke)
+    async def _ainvoke(self, *args, **kwargs):
+        cm = _entry_run(client, _agent_id(self), "langgraph.ainvoke")
+        if cm is None:
+            return await _orig_ainvoke(self, *args, **kwargs)
+        with cm as run:
+            result = await _orig_ainvoke(self, *args, **kwargs)
+            run.final_answer()
+            return result
+
+    _orig_stream = Pregel.stream
+
+    @functools.wraps(_orig_stream)
+    def _stream(self, *args, **kwargs):
+        cm = _entry_run(client, _agent_id(self), "langgraph.stream")
+        if cm is None:
+            yield from _orig_stream(self, *args, **kwargs)
+            return
+        inner = _orig_stream(self, *args, **kwargs)
+        with cm as run:
+            try:
+                yield from inner
+            except GeneratorExit:
+                # The consumer stopped early (break, or close()). GeneratorExit
+                # is a BaseException client.run() does not handle, so without
+                # this the run never got its terminal event. Close the graph's
+                # own stream and end the run normally.
+                inner.close()
+                run.exit_reason = run.exit_reason or "consumer_stopped"
+                return
+            run.final_answer()
+
+    _orig_astream = Pregel.astream
+
+    @functools.wraps(_orig_astream)
+    async def _astream(self, *args, **kwargs):
+        cm = _entry_run(client, _agent_id(self), "langgraph.astream")
+        if cm is None:
+            async for chunk in _orig_astream(self, *args, **kwargs):
+                yield chunk
+            return
+        inner = _orig_astream(self, *args, **kwargs)
+        with cm as run:
+            try:
+                async for chunk in inner:
+                    yield chunk
+            except GeneratorExit:
+                # aclose() from the consumer: close LangGraph's own generator
+                # now rather than at garbage collection, and end the run.
+                await inner.aclose()
+                run.exit_reason = run.exit_reason or "consumer_stopped"
+                return
+            run.final_answer()
+
+    Pregel.invoke = _invoke
+    Pregel.ainvoke = _ainvoke
+    Pregel.stream = _stream
+    Pregel.astream = _astream
+    _PATCHED.add("langgraph")
+    _record_instrumented("langgraph")
+    logger.debug("langgraph entry points auto-instrumented")
+
+
+def _patch_fastapi(
+    client: "Optional[Dunetrace]" = None, default_agent_id: Optional[str] = None
+) -> None:
+    """Install a lazy request boundary (LazyRunASGIMiddleware) on every FastAPI
+    app constructed after this point: a request becomes a run at its first LLM
+    call, and requests that never call a model produce none. Apps built before
+    dt.init() are not touched: call init() before constructing the app."""
+    if "fastapi" in _PATCHED:
+        return
+    try:
+        from fastapi import FastAPI
+    except ImportError:
+        logger.debug("fastapi not installed — skipping middleware auto-install")
+        return
+    if client is None:
+        return
+    from dunetrace.middleware import LazyRunASGIMiddleware
+
+    _orig_init = FastAPI.__init__
+
+    @functools.wraps(_orig_init)
+    def _patched_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        try:
+            title = getattr(self, "title", None)
+            agent_id = _entry_agent_id(
+                client, default_agent_id, None if title == "FastAPI" else title, "fastapi"
+            )
+            self.add_middleware(LazyRunASGIMiddleware, dt=client, agent_id=agent_id)
+        except Exception:
+            logger.debug("Dunetrace: could not install the FastAPI middleware", exc_info=True)
+
+    FastAPI.__init__ = _patched_init
+    _PATCHED.add("fastapi")
+    _record_instrumented("fastapi")
+    logger.debug("fastapi middleware auto-install enabled")
+
+
+def _patch_flask(
+    client: "Optional[Dunetrace]" = None, default_agent_id: Optional[str] = None
+) -> None:
+    """Wrap ``wsgi_app`` of every Flask app constructed after this point with a
+    lazy request boundary (LazyRunWSGIMiddleware): a request becomes a run at its
+    first LLM call, and requests that never call a model produce none."""
+    if "flask" in _PATCHED:
+        return
+    try:
+        from flask import Flask
+    except ImportError:
+        logger.debug("flask not installed — skipping middleware auto-install")
+        return
+    if client is None:
+        return
+    from dunetrace.middleware import LazyRunWSGIMiddleware
+
+    _orig_init = Flask.__init__
+
+    @functools.wraps(_orig_init)
+    def _patched_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        try:
+            # Flask's name is the import name ("app", "__main__"), not a
+            # deliberate service name, so it is never used as the agent id.
+            agent_id = _entry_agent_id(client, default_agent_id, None, "flask")
+            self.wsgi_app = LazyRunWSGIMiddleware(self.wsgi_app, dt=client, agent_id=agent_id)
+        except Exception:
+            logger.debug("Dunetrace: could not install the Flask middleware", exc_info=True)
+
+    Flask.__init__ = _patched_init
+    _PATCHED.add("flask")
+    _record_instrumented("flask")
+    logger.debug("flask middleware auto-install enabled")
+
+
 _PATCHERS = {
     "openai": _patch_openai,
     "anthropic": _patch_anthropic,
@@ -2527,6 +2788,9 @@ _PATCHERS = {
     "requests": _patch_requests,
     "langchain": _patch_langchain,
     "crewai": _patch_crewai,
+    "langgraph": _patch_langgraph_entry,
+    "fastapi": _patch_fastapi,
+    "flask": _patch_flask,
 }
 
 
@@ -2541,15 +2805,18 @@ def auto_instrument(
 
     :param frameworks: List of framework names to patch. ``None`` patches all
                        detected installed frameworks.
-    :param client: Required for ``langchain``/``crewai`` — those integrations
-                   can open their own run when no ``dt.run()`` is active, and
-                   need a client to do it with. Unused by the other four
-                   frameworks, which only ever attach to an already-open run.
+    :param client: The client runs are opened with: by the framework entry
+                   points (langgraph, crewai, fastapi, flask) and, for patched
+                   LLM calls outside any run, as implicit runs. Without one,
+                   every patch is attach-only.
     :param default_agent_id: Fallback agent_id for runs ``langchain``/``crewai``
                        open themselves. Normally set via ``dt.init(agent_id=...)``
                        or the ``DUNETRACE_AGENT_ID`` environment variable rather
                        than passed here directly.
     """
+    global _ACTIVE_CLIENT
+    if client is not None:
+        _ACTIVE_CLIENT = weakref.ref(client)
     targets = frameworks if frameworks is not None else list(_PATCHERS)
     for name in targets:
         patcher = _PATCHERS.get(name)

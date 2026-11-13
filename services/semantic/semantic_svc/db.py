@@ -709,6 +709,7 @@ async def write_semantic_signal(
     confidence: float,
     evidence: dict,
     org_id: str,
+    shadow: bool = False,
 ) -> int:
     """Write a semantic evaluator's finding to the shared failure_signals
     table. failure_type is the evaluator's own name (TEXT, bypassing the
@@ -717,6 +718,9 @@ async def write_semantic_signal(
     step. shadow=FALSE — semantic signals are alert-eligible immediately,
     gated by alerts_svc's per-evaluator confidence floor (Phase 1.4.1)
     instead of the shadow/LIVE_DETECTORS graduation structural detectors use.
+    The exception is ``shadow=True``: a finding on a run whose boundary the SDK
+    guessed (an implicit run) is stored but never alerted, exactly as the
+    detector holds that run's structural signals.
 
     Returns the new row's id — the caller (worker._run_evaluators) needs it
     to record signal group membership (Phase 1.4.2).
@@ -727,7 +731,7 @@ async def write_semantic_signal(
             INSERT INTO failure_signals
                 (failure_type, severity, run_id, agent_id, agent_version,
                  step_index, confidence, evidence, shadow, co_signal_count, org_id, source)
-            VALUES ($1, $2, $3, $4, $5, 0, $6, $7::jsonb, FALSE, 0, $8, 'semantic')
+            VALUES ($1, $2, $3, $4, $5, 0, $6, $7::jsonb, $9, 0, $8, 'semantic')
             RETURNING id
             """,
             evaluator,
@@ -738,6 +742,7 @@ async def write_semantic_signal(
             confidence,
             json.dumps(evidence),
             org_id,
+            shadow,
         )
 
 
