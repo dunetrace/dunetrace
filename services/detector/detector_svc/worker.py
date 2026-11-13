@@ -37,6 +37,7 @@ from detector_svc.db import (
     fetch_destination_baseline,
     fetch_duration_baseline,
     fetch_latency_baseline,
+    fetch_per_tool_latency_baselines,
     fetch_memory_writes,
     fetch_llm_tool_ratio_baseline,
     fetch_run_events,
@@ -543,6 +544,11 @@ async def _handle_processing_failure(
     return 0
 
 
+async def _none() -> None:
+    """Awaitable placeholder for a skipped gather() slot."""
+    return None
+
+
 async def process_run(
     run_id: str,
     agent_id: str,
@@ -588,6 +594,7 @@ async def process_run(
             state.baseline_p75_llm_tool_ratio,
             state.baseline_p75_total_tokens,
             state.baseline_p75_duration_s,
+            state.baseline_p75_latency_by_tool,
         ) = await asyncio.gather(
             fetch_step_count_baseline(org_id, agent_id, agent_version, run_id),
             fetch_latency_baseline(org_id, agent_id, agent_version, run_id, "tool.called"),
@@ -596,6 +603,11 @@ async def process_run(
             fetch_llm_tool_ratio_baseline(org_id, agent_id, agent_version, run_id),
             fetch_total_tokens_baseline(org_id, agent_id, agent_version, run_id),
             fetch_duration_baseline(org_id, agent_id, agent_version, run_id),
+            # Only SLOW_STEP's tool steps read it — a run with no tool calls
+            # does not pay for the query.
+            fetch_per_tool_latency_baselines(org_id, agent_id, agent_version, run_id)
+            if state.tool_calls
+            else _none(),
         )
         detectors = await get_detectors(agent_id, org_id)
         signals = run_detectors(state, detectors=detectors)

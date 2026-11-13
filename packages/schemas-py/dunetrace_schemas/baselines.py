@@ -55,6 +55,73 @@ BASELINE_RESPONSE_KEYS: dict[str, str] = {
 }
 
 
+# Per-tool SLOW_STEP latency. Not one of BASELINE_COLUMNS: it is a map
+# {tool_name: P75 ms}, stored per run in the JSONB column below and reported
+# under its own response key, so the scalar machinery above stays scalar.
+PER_TOOL_LATENCY_COLUMN = "gap_p75_by_tool_ms"
+PER_TOOL_LATENCY_RESPONSE_KEY = "p75_latency_by_tool_ms"
+
+# Upper bound on tools per baseline map — both per stored run and per response.
+# An agent with dynamically named tools would otherwise grow an unbounded JSONB
+# row per run and an unbounded /v1/detector-config payload. Tools past the cap
+# fall back to the agent-wide tool baseline, which is the pre-per-tool
+# behaviour, not a loss of detection.
+MAX_TOOLS_PER_BASELINE = 64
+
+
+def per_tool_latency_baselines_sql() -> str:
+    """Per-tool P75 of each run's own per-tool P75 step latency.
+
+    Same placeholder contract as the scalar baselines (``$1``-``$5``) plus
+    ``$6`` min_runs and ``$7`` the tool cap. Returns one row per tool with at
+    least `$6` samples: ``tool_name``, ``sample_size``, ``p75``. The window is
+    the newest `$5` clean runs that recorded any per-tool latency, so a tool
+    needs to appear in `$6` of those to get a baseline of its own; rarer tools
+    fall back to the agent-wide tool baseline.
+
+    P75-of-per-run-P75s, like the stored scalar ``gap_p75_tool_ms``: one long
+    run calling a tool 200 times contributes one sample, not 200.
+    """
+    return f"""
+            WITH recent AS (
+                SELECT {PER_TOOL_LATENCY_COLUMN} AS m
+                FROM run_baseline_metrics
+                WHERE org_id        = $1
+                  AND agent_id      = $2
+                  AND agent_version = $3
+                  AND run_id       != $4
+                  AND clean
+                  AND {PER_TOOL_LATENCY_COLUMN} IS NOT NULL
+                ORDER BY recorded_at DESC
+                LIMIT $5
+            ),
+            per_tool AS (
+                SELECT kv.key AS tool_name, kv.value::double precision AS v
+                FROM recent, jsonb_each_text(recent.m) AS kv
+                WHERE jsonb_typeof(recent.m -> kv.key) = 'number'
+            )
+            SELECT tool_name,
+                   COUNT(*)                                          AS sample_size,
+                   PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY v)   AS p75
+            FROM per_tool
+            GROUP BY tool_name
+            HAVING COUNT(*) >= $6
+            ORDER BY COUNT(*) DESC, tool_name
+            LIMIT $7
+            """
+
+
+def per_tool_from_rows(rows: Any) -> Optional[dict[str, float]]:
+    """Rows of per_tool_latency_baselines_sql() -> {tool_name: p75_ms}, or None
+    when no tool has enough history."""
+    out = {
+        str(r["tool_name"]): float(r["p75"])
+        for r in rows or ()
+        if r["tool_name"] is not None and r["p75"] is not None
+    }
+    return out or None
+
+
 def _check_column(column: str) -> None:
     if column not in BASELINE_COLUMNS:
         raise ValueError(f"{column!r} is not a baseline column: {BASELINE_COLUMNS}")

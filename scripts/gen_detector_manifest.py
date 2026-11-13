@@ -57,6 +57,7 @@ FIELD_TOKENS: dict[str, set[str]] = {
     "events": {"run", "llm", "tool", "retrieval", "memory", "external"},
     "baseline_p75_steps": {"baseline"},
     "baseline_p75_latency_tool": {"baseline"},
+    "baseline_p75_latency_by_tool": {"baseline"},
     "baseline_p75_latency_llm": {"baseline"},
     "baseline_p75_token_growth": {"baseline"},
     "baseline_p75_llm_tool_ratio": {"baseline"},

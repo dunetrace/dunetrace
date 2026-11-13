@@ -373,3 +373,54 @@ class TestCaching:
         get_limiter()._agent_windows.clear()
         r = await _get(client, agent_id="agent-xyz")
         assert r.status_code == 200
+
+
+# ── fetch_agent_baselines: per-tool map rides along with the scalars ─────────
+
+
+def _scalar_row(n: int = 50) -> dict:
+    from dunetrace_schemas.baselines import BASELINE_COLUMNS
+
+    row: dict = {}
+    for c in BASELINE_COLUMNS:
+        row[f"{c}_n"] = n
+        row[f"{c}_p75"] = 1.0
+    return row
+
+
+def _pool_with(conn):
+    from unittest.mock import MagicMock
+
+    pool = MagicMock()
+    pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
+    pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+    return pool
+
+
+class TestPerToolBaselines:
+    async def test_per_tool_map_is_served(self, monkeypatch):
+        import ingest_svc.db.postgres as pg
+
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(return_value=_scalar_row())
+        conn.fetch = AsyncMock(return_value=[{"tool_name": "search", "p75": 120.0}])
+        monkeypatch.setattr(pg, "_pool", _pool_with(conn))
+        out = await pg.fetch_agent_baselines("org", "agent", "v1")
+        assert out["p75_latency_by_tool_ms"] == {"search": 120.0}
+        args = conn.fetch.call_args[0]
+        assert args[1] == "org", "per-tool read must be org-scoped"
+
+    async def test_per_tool_failure_still_serves_the_scalars(self, monkeypatch):
+        """The column belongs to the detector's DDL: ingest booting against a DB
+        the new detector hasn't touched yet must not lose every baseline."""
+        import ingest_svc.db.postgres as pg
+
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(return_value=_scalar_row())
+        conn.fetch = AsyncMock(
+            side_effect=RuntimeError('column "gap_p75_by_tool_ms" does not exist')
+        )
+        monkeypatch.setattr(pg, "_pool", _pool_with(conn))
+        out = await pg.fetch_agent_baselines("org", "agent", "v1")
+        assert out["p75_steps"] == 1.0
+        assert out["p75_latency_by_tool_ms"] is None
