@@ -35,9 +35,12 @@ Accessing the run inside a handler::
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Iterable, List, Optional, TYPE_CHECKING
 
-from dunetrace.context import _current_run
+from dunetrace.context import PendingEntry, _current_run, _pending_entry, active_run
+
+logger = logging.getLogger("dunetrace.middleware")
 
 if TYPE_CHECKING:
     from dunetrace.client import Dunetrace
@@ -150,3 +153,87 @@ class DunetraceWSGIMiddleware:
                 raise
             finally:
                 _current_run.reset(token)
+
+
+# ── Lazy request boundaries (auto-installed) ──────────────────────────────────
+#
+# dt.init() installs these on FastAPI and Flask apps (dunetrace.auto). Unlike
+# the middleware above, which opens a run for every request, they only mark the
+# request as a run boundary: the run opens at the request's first patched LLM
+# call and closes when the request ends. A health check, a static file, an
+# OPTIONS preflight or any request that never calls a model produces no run.
+#
+# They step aside when a run is already active: a DunetraceASGIMiddleware the
+# user added by hand (outermost, since add_middleware stacks outward) has opened
+# one, and the request's calls attach to it -- no second, nested run.
+
+
+def _close_pending(pending: PendingEntry, exc: Optional[BaseException]) -> None:
+    if pending.cm is None:
+        return  # the request never called a model: nothing was opened
+    ctx = pending.ctx
+    try:
+        if isinstance(exc, Exception):
+            pending.cm.__exit__(type(exc), exc, exc.__traceback__)
+        else:
+            if ctx is not None and ctx.exit_reason is None:
+                ctx.final_answer()
+            pending.cm.__exit__(None, None, None)
+    except Exception:
+        logger.debug("Dunetrace: closing the request run failed", exc_info=True)
+    finally:
+        if ctx is not None:
+            ctx._closed = True
+
+
+class LazyRunASGIMiddleware:
+    """Marks each HTTP request as a run boundary; the run opens on the first
+    LLM call. Installed automatically by ``dt.init()`` on FastAPI apps."""
+
+    def __init__(self, app: Callable, dt: "Dunetrace", agent_id: str) -> None:
+        self.app = app
+        self.dt = dt
+        self.agent_id = agent_id
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http" or active_run() is not None:
+            await self.app(scope, receive, send)
+            return
+        user_input = f"{scope.get('method', '')} {scope.get('path', '/')}".strip()
+        pending = PendingEntry(self.dt, self.agent_id, "http.request", user_input)
+        token = _pending_entry.set(pending)
+        exc: Optional[BaseException] = None
+        try:
+            await self.app(scope, receive, send)
+        except BaseException as e:
+            exc = e
+            raise
+        finally:
+            _pending_entry.reset(token)
+            _close_pending(pending, exc)
+
+
+class LazyRunWSGIMiddleware:
+    """WSGI counterpart of :class:`LazyRunASGIMiddleware`. Installed
+    automatically by ``dt.init()`` on Flask apps."""
+
+    def __init__(self, app: Callable, dt: "Dunetrace", agent_id: str) -> None:
+        self.app = app
+        self.dt = dt
+        self.agent_id = agent_id
+
+    def __call__(self, environ: dict, start_response: Callable) -> Iterable[bytes]:
+        if active_run() is not None:
+            return self.app(environ, start_response)
+        user_input = f"{environ.get('REQUEST_METHOD', '')} {environ.get('PATH_INFO', '/')}".strip()
+        pending = PendingEntry(self.dt, self.agent_id, "http.request", user_input)
+        token = _pending_entry.set(pending)
+        exc: Optional[BaseException] = None
+        try:
+            return self.app(environ, start_response)
+        except BaseException as e:
+            exc = e
+            raise
+        finally:
+            _pending_entry.reset(token)
+            _close_pending(pending, exc)

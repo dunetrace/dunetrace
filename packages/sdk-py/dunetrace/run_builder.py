@@ -120,6 +120,7 @@ def build_run_state(events: list[dict]) -> RunState:
             state.available_tools = payload.get("tools", [])
             state.input_text = payload.get("input_text")
             state.system_prompt = payload.get("system_prompt") or None
+            state.implicit = payload.get("implicit") is True
 
         # run.completed - record exit reason
         elif event_type == "run.completed":

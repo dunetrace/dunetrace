@@ -14,7 +14,8 @@ import {
   type RedactionSettings,
 } from "./redaction.js";
 import { HttpBatchEmitter, type BatchEmitter } from "./emitters.js";
-import { runStorage as _runStorage, getCurrentRun } from "./context.js";
+import { runStorage as _runStorage, clearRunOpener, getCurrentRun, setRunOpener, type EntryRunHandle } from "./context.js";
+import { parseDsn, dsnHost } from "./dsn.js";
 import { registerOwnEndpoint, wrapAnthropicClient, wrapOpenAIClient } from "./auto.js";
 import * as otel from "./otel.js";
 import { rootSpanIdHex, traceIdHex } from "./otel-ids.js";
@@ -70,6 +71,63 @@ function _installExitFlushHook(): void {
   });
 }
 
+// ── Crash hook ───────────────────────────────────────────────────────────────
+//
+// `uncaughtExceptionMonitor` observes without changing what Node does next:
+// the process still crashes exactly as before. Installed once per process for
+// the clients that open runs on their own; each turns the crash into
+// run.errored on its open implicit runs, or on a one-event run when none is
+// open, so an unhandled exception is never silent. Exceptions `dt.run()`
+// already recorded are skipped.
+const _crashClients = new Set<WeakRef<Dunetrace>>();
+const _recordedErrors = new WeakSet<object>();
+let _crashHookInstalled = false;
+
+function _markRecorded(err: unknown): void {
+  if (typeof err === "object" && err !== null) _recordedErrors.add(err);
+}
+
+function _installCrashHook(): void {
+  if (_crashHookInstalled) return;
+  if (typeof process === "undefined" || typeof process.on !== "function") return;
+  _crashHookInstalled = true;
+  process.on("uncaughtExceptionMonitor", (err: unknown) => {
+    for (const ref of _crashClients) {
+      try { ref.deref()?._recordCrash(err); } catch { /* never throw from a crash hook */ }
+    }
+  });
+}
+
+function _envBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
+function _scriptName(): string {
+  try {
+    const argv1 = process.argv[1] ?? "";
+    const base = argv1.split(/[\\/]/).pop() ?? "";
+    return base || "implicit";
+  } catch {
+    return "implicit";
+  }
+}
+
+interface ImplicitHandle {
+  run: DunetraceRun;
+  finish: (err?: unknown) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+  openedAt: number;
+}
+
+/** Hard caps on a guessed run, as in the Python SDK: a busy async context with
+ *  no request boundary never goes idle, so without them an implicit run grows
+ *  without bound. Hitting either closes it (exit_reason max_age / max_events);
+ *  the next call opens a fresh one. */
+const IMPLICIT_MAX_AGE_MS = 600_000;
+const IMPLICIT_MAX_EVENTS = 1000;
+
 export class Dunetrace {
   private _ingestUrl:  string | null;
   private _apiKey:     string;
@@ -90,15 +148,38 @@ export class Dunetrace {
    *  flush's own async work settles, and without this it would start a second
    *  flush on top of the first. */
   private _exitFlushing = false;
+  /** Runs this client opened on its own, by run id, with their idle timers.
+   *  See _openImplicitRun for how they end. */
+  private _implicitOpen = new Map<string, ImplicitHandle>();
+  /** Entry-point runs (wrapGenerateText / wrapStreamText) not yet finished. */
+  private _entryOpen = new Map<string, (err?: unknown) => void>();
+  private _implicitRuns: boolean;
+  private _implicitIdleMs: number;
+  private _defaultAgentId: string;
+  private _implicitAnnounced = false;
+  private _crashRef: WeakRef<Dunetrace> | null = null;
 
   constructor(opts: ClientOptions = {}) {
-    const base      = (opts.endpoint ?? "http://localhost:8001").replace(/\/$/, "");
+    // A DSN carries endpoint and key in one value. Explicit options and the
+    // dedicated env vars win over it, so adding one never changes an
+    // existing configuration.
+    const dsn = opts.dsn ?? process.env.DUNETRACE_DSN ?? "";
+    let dsnEndpoint = "";
+    let dsnKey = "";
+    if (dsn) {
+      try {
+        ({ endpoint: dsnEndpoint, apiKey: dsnKey } = parseDsn(dsn));
+      } catch (err) {
+        process.stderr.write(`[dunetrace] ignoring DUNETRACE_DSN for host ${dsnHost(dsn)}: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+    const base      = (opts.endpoint ?? (process.env.DUNETRACE_ENDPOINT || dsnEndpoint || "http://localhost:8001")).replace(/\/$/, "");
     this._ingestUrl = base + "/v1/ingest";
     // Tell HTTP instrumentation to ignore our own traffic. Without this, shipping
     // a batch would emit a tool.called describing the ship, which buffers another
     // event, which ships — a feedback loop against our own ingest.
     registerOwnEndpoint(base);
-    this._apiKey    = opts.apiKey ?? "";
+    this._apiKey    = opts.apiKey ?? (process.env.DUNETRACE_API_KEY || dsnKey || "");
     this._emitJson  = opts.emitAsJson ?? false;
     this._buffer     = new EventBuffer(opts.bufferSize ?? 10_000);
     this._timeoutMs  = opts.timeoutMs  ?? 5_000;
@@ -117,6 +198,28 @@ export class Dunetrace {
     // otel.init() never throws and returns false when unconfigured, so this is
     // a no-op for anyone not using OTel.
     this._exporter   = opts.exporter ?? (otel.init() ? otel.createEventSink() : null);
+
+    // Runs that open themselves. See _openImplicitRun for the rules on when
+    // they end. The most recent client is the one instrumentation asks.
+    this._implicitRuns   = opts.implicitRuns ?? _envBool("DUNETRACE_IMPLICIT_RUNS", true);
+    const idleS          = opts.implicitRunIdleS ?? Number(process.env.DUNETRACE_IMPLICIT_RUN_IDLE_S);
+    this._implicitIdleMs = Math.max(0.01, Number.isFinite(idleS) && idleS > 0 ? idleS : 30) * 1000;
+    this._defaultAgentId = opts.defaultAgentId ?? process.env.DUNETRACE_AGENT_ID ?? "";
+    if (this._implicitRuns) {
+      // Weakly held: the process-wide opener must not keep a client alive
+      // (that defeated the exit-flush registry's WeakRef design).
+      const self = new WeakRef(this);
+      setRunOpener({
+        implicit: (openedBy) => self.deref()?._openImplicitRun(openedBy) ?? null,
+        entry:    (openedBy, agentId) => self.deref()?._openEntryRun(openedBy, agentId) ?? null,
+      }, this);
+      this._crashRef = new WeakRef(this);
+      _crashClients.add(this._crashRef);
+      _installCrashHook();
+    } else {
+      // Most recent client wins in both directions: this one opted out.
+      setRunOpener(null);
+    }
 
     const interval = opts.flushIntervalMs ?? 200;
     this._drainTimer = setInterval(() => { this._drain(); }, interval);
@@ -144,10 +247,45 @@ export class Dunetrace {
     opts:    RunOptions,
     fn:      (run: DunetraceRun) => Promise<T>,
   ): Promise<T> {
+    const { run, finish } = this._startRun(agentId, opts);
+    let result: T;
+    try {
+      result = await _runStorage.run(run, () => fn(run));
+    } catch (err) {
+      finish(err);
+      _markRecorded(err);
+      throw err;
+    }
+    finish();
+    return result;
+  }
+
+  /**
+   * Open a run: build the DunetraceRun, emit run.started, and hand back a
+   * `finish` that emits the terminal event once. `run()` wraps this in the
+   * async context; the implicit and entry-point paths below use it directly
+   * because their end is decided elsewhere (an idle timer, a framework
+   * callback, process exit).
+   */
+  private _startRun(
+    agentId: string,
+    opts:    RunOptions,
+    extra:   { openedBy?: string; implicit?: boolean } = {},
+  ): { run: DunetraceRun; finish: (err?: unknown) => void } {
     const model   = opts.model        ?? "unknown";
     const tools   = opts.tools        ?? [];
     const version = agentVersion(opts.systemPrompt ?? "", model, tools);
     const run     = new DunetraceRun(agentId, version, this, opts.runId);
+    run.openedBy  = extra.openedBy ?? null;
+    run.implicit  = extra.implicit === true;
+
+    // A declared run never nests under a guessed one: close the implicit run
+    // active in this context first, so the events that follow belong to the
+    // run the agent declared.
+    const active = _runStorage.getStore();
+    if (!run.implicit && active && active.implicit && !active.closed) {
+      this._closeImplicit(active.runId, "explicit_run_opened");
+    }
 
     // Auto-thread parent_run_id: if this run opens while another run is already
     // active (this call is nested inside an enclosing run's fn, so
@@ -156,8 +294,10 @@ export class Dunetrace {
     // runs into a parent/child graph with no manual id threading — the substrate
     // the server-side DELEGATION_LOOP and HANDOFF_CONTEXT_LOSS detectors consume.
     // An explicit parentRunId always wins. Propagation follows AsyncLocalStorage,
-    // so it survives awaits within the same async context.
-    const parentRunId = opts.parentRunId ?? _runStorage.getStore()?.runId ?? null;
+    // so it survives awaits within the same async context. A closed or implicit
+    // run is never a parent.
+    const parent = active && !active.closed && !active.implicit ? active : null;
+    const parentRunId = opts.parentRunId ?? parent?.runId ?? null;
 
     // Only a sink that actually produces OTel spans gets the correlation ids,
     // and only for a run it will export: an id for a dropped run is a
@@ -200,6 +340,10 @@ export class Dunetrace {
       startedPayload["system_prompt_truncated"]       = true;
       startedPayload["system_prompt_original_length"] = prompt.originalLength;
     }
+    // A run the SDK opened says so, and names the call that opened it. The
+    // detector reads `implicit` and holds the run's signals in shadow.
+    if (run.openedBy) startedPayload["opened_by"] = run.openedBy;
+    if (run.implicit) startedPayload["implicit"]  = true;
     if (otelSampled !== null) startedPayload["otel_sampled"] = otelSampled;
 
     _safeEmit(() => { this._emit({
@@ -215,41 +359,182 @@ export class Dunetrace {
       conversation_id: opts.conversationId ?? null,
     }); }, "dt.run");
 
-    let result: T;
-    try {
-      result = await _runStorage.run(run, () => fn(run));
-    } catch (err) {
+    const finish = (err?: unknown): void => {
+      if (run.closed) return;
+      run.closed = true;
+      if (err !== undefined) {
+        _safeEmit(() => { this._emit({
+          event_type:    "run.errored",
+          run_id:        run.runId,
+          agent_id:      agentId,
+          agent_version: version,
+          step_index:    run.currentStep(),
+          timestamp:     Date.now() / 1000,
+          payload: this._terminalPayload(run.runId, {
+            error_type: (err instanceof Error) ? err.name : "Error",
+            error:      String(err),
+            step_index: run.currentStep(),
+          }),
+        }); }, "dt.run");
+        return;
+      }
       _safeEmit(() => { this._emit({
-        event_type:    "run.errored",
+        event_type:    "run.completed",
         run_id:        run.runId,
         agent_id:      agentId,
         agent_version: version,
         step_index:    run.currentStep(),
         timestamp:     Date.now() / 1000,
         payload: this._terminalPayload(run.runId, {
-          error_type: (err instanceof Error) ? err.name : "Error",
-          error:      String(err),
-          step_index: run.currentStep(),
+          total_steps:     run.currentStep(),
+          exit_reason:     run.exitReason() ?? "completed",
+          tool_call_count: run.getEvents().filter(e => e.event_type === "tool.called").length,
         }),
       }); }, "dt.run");
-      throw err;
+    };
+
+    return { run, finish };
+  }
+
+  // ── Runs that open themselves ──────────────────────────────────────────────
+  //
+  // Every event belongs to a run, and a run needs a start and an end. When
+  // instrumentation finds no run, the client decides both. How the run ENDS,
+  // in the order tried:
+  //
+  //   1. A framework says so. `wrapGenerateText` / `wrapStreamText` open an
+  //      exact run around the call (_openEntryRun) and close it when the call
+  //      settles. Ordinary runs; nothing is guessed.
+  //   2. The caller's own `dt.run()` closes an implicit run active in the same
+  //      context (`exit_reason: explicit_run_opened`), so a real run never
+  //      nests under a guessed one.
+  //   3. Idle. A bare LLM call with no boundary in sight opens an *implicit*
+  //      run and enters it into this async context; the calls that follow
+  //      attach to it. It closes after implicitRunIdleS seconds with no
+  //      events (`exit_reason: idle`). This is the rule for scripts. It is a
+  //      guess, and the run says so on the wire (`implicit: true`,
+  //      `opened_by`); the detector holds its signals in shadow.
+  //   4. Process exit. shutdown() and the exit flush close whatever implicit
+  //      runs are open (`exit_reason: process_exit`).
+  //   5. A crash. An uncaught exception errors the open implicit runs, or a
+  //      one-event run when none is open.
+  //
+  // The known weak spot is a long-lived server with no request boundary:
+  // calls from many requests in one async context share an implicit run
+  // until it goes idle. That is why implicit runs are shadowed, and why the
+  // entry-point rules run first.
+
+  _openImplicitRun(openedBy: string): DunetraceRun | null {
+    if (!this._implicitRuns) return null;
+    const agentId = this._defaultAgentId || _scriptName();
+    const { run, finish } = this._startRun(agentId, {}, { openedBy, implicit: true });
+    // enterWith: the rest of this synchronous execution and every async
+    // continuation from it sees this run, which is how the calls that follow
+    // attach without any code at the call site.
+    _runStorage.enterWith(run);
+    const handle: ImplicitHandle = { run, finish, timer: null, openedAt: Date.now() };
+    this._implicitOpen.set(run.runId, handle);
+    this._armIdle(handle);
+    if (!this._implicitAnnounced) {
+      this._implicitAnnounced = true;
+      process.stderr.write(
+        `[dunetrace] no run was open when ${openedBy} was called, so one was opened for agent ` +
+        `"${agentId}". It closes after ${Math.round(this._implicitIdleMs / 1000)}s without events or at ` +
+        `process exit, and its signals are held in shadow. Wrap the agent in dt.run() or use ` +
+        `wrapGenerateText() for exact run boundaries.\n`,
+      );
     }
+    return run;
+  }
 
-    _safeEmit(() => { this._emit({
-      event_type:    "run.completed",
-      run_id:        run.runId,
-      agent_id:      agentId,
-      agent_version: version,
-      step_index:    run.currentStep(),
-      timestamp:     Date.now() / 1000,
-      payload: this._terminalPayload(run.runId, {
-        total_steps:     run.currentStep(),
-        exit_reason:     run.exitReason() ?? "completed",
-        tool_call_count: run.getEvents().filter(e => e.event_type === "tool.called").length,
-      }),
-    }); }, "dt.run");
+  _openEntryRun(openedBy: string, agentId?: string): EntryRunHandle | null {
+    if (!this._implicitRuns) return null;
+    // What the user configured wins over a name derived from the entry point.
+    const id = this._defaultAgentId || agentId || openedBy.split(".")[0] || "agent";
+    const { run, finish } = this._startRun(id, {}, { openedBy });
+    // Tracked until it finishes, so a stream that is aborted, never consumed,
+    // or whose callbacks never fire still gets its terminal event at
+    // shutdown() / process exit instead of being left stalled.
+    this._entryOpen.set(run.runId, finish);
+    const tracked = (err?: unknown): void => {
+      this._entryOpen.delete(run.runId);
+      finish(err);
+    };
+    return { run, finish: tracked };
+  }
 
-    return result;
+  private _armIdle(handle: ImplicitHandle): void {
+    if (handle.timer !== null) clearTimeout(handle.timer);
+    const sinceOpen = Date.now() - handle.openedAt;
+    const untilCap = Math.max(0, IMPLICIT_MAX_AGE_MS - sinceOpen);
+    handle.timer = setTimeout(() => {
+      if (Date.now() - handle.openedAt >= IMPLICIT_MAX_AGE_MS) {
+        this._closeImplicit(handle.run.runId, "max_age");
+      } else if (handle.run._busy()) {
+        // A request or stream still in flight is not idle: closing under it
+        // would attach its response to a run that already ended.
+        this._armIdle(handle);
+      } else {
+        this._closeImplicit(handle.run.runId, "idle");
+      }
+    }, Math.min(this._implicitIdleMs, untilCap || this._implicitIdleMs));
+    // Never keep the process alive just to close a guessed run; exit closes it.
+    if (typeof handle.timer.unref === "function") handle.timer.unref();
+  }
+
+  private _closeImplicit(runId: string, exitReason: string, err?: unknown): boolean {
+    const handle = this._implicitOpen.get(runId);
+    if (!handle) return false;
+    this._implicitOpen.delete(runId);
+    if (handle.timer !== null) clearTimeout(handle.timer);
+    if (err === undefined) handle.run._setExitReasonIfUnset(exitReason);
+    handle.finish(err);
+    return true;
+  }
+
+  /** Close every implicit run this client has open. @internal */
+  _closeImplicitRuns(exitReason: string, err?: unknown): number {
+    let n = 0;
+    for (const runId of [...this._implicitOpen.keys()]) {
+      if (this._closeImplicit(runId, exitReason, err)) n += 1;
+    }
+    // Entry runs still open at exit (a stream never consumed or aborted).
+    for (const [runId, finish] of [...this._entryOpen]) {
+      this._entryOpen.delete(runId);
+      finish(err);
+      n += 1;
+    }
+    return n;
+  }
+
+  /** How many implicit runs are open. @internal */
+  _implicitOpenCount(): number {
+    return this._implicitOpen.size;
+  }
+
+  /** Turn an uncaught exception into run.errored. @internal */
+  _recordCrash(err: unknown): number {
+    if (typeof err === "object" && err !== null && _recordedErrors.has(err)) return 0;
+    let n = this._closeImplicitRuns("crash", err);
+    if (n === 0 && this._implicitRuns) {
+      const { finish } = this._startRun(this._defaultAgentId || _scriptName(), {}, {
+        openedBy: "uncaughtException",
+        implicit: true,
+      });
+      finish(err);
+      n = 1;
+    }
+    if (n > 0) {
+      _markRecorded(err);
+      // Node exits right after an uncaught exception without firing
+      // beforeExit, and the drain timer is unref'd, so an async flush never
+      // happens. Deliver what is buffered synchronously, when the emitter can.
+      const ship = this._emitter.shipSync;
+      if (typeof ship === "function") {
+        try { ship.call(this._emitter, this._buffer.drainAll()); } catch { /* crash path: never throw */ }
+      }
+    }
+    return n;
   }
 
   // ── Tool wrapper ───────────────────────────────────────────────────────────
@@ -394,6 +679,15 @@ export class Dunetrace {
       _clientFinalizer?.unregister(this._exitRef);
       this._exitRef = null;
     }
+    if (this._crashRef !== null) {
+      _crashClients.delete(this._crashRef);
+      this._crashRef = null;
+    }
+    // A stopped client never opens runs whose events nobody would drain.
+    clearRunOpener(this);
+    // Terminal events for runs the SDK opened on its own, before the buffer
+    // drains, so they leave in the same flush.
+    this._closeImplicitRuns("process_exit");
     const deadline = Date.now() + timeoutMs;
     while (this._buffer.length > 0 && Date.now() < deadline) {
       await this.flush();
@@ -415,6 +709,15 @@ export class Dunetrace {
       // audit Finding 14: stamp a stable id once, at buffer entry, so a retry of
       // the same buffered event ships the same id and the ingest side dedups it.
       if (!event.event_id) event.event_id = randomUUID();
+      // Activity on an implicit run pushes its idle deadline out.
+      const implicit = this._implicitOpen.get(event.run_id);
+      if (implicit && event.event_type !== "run.completed" && event.event_type !== "run.errored") {
+        if (implicit.run.getEvents().length >= IMPLICIT_MAX_EVENTS) {
+          queueMicrotask(() => { this._closeImplicit(implicit.run.runId, "max_events"); });
+        } else {
+          this._armIdle(implicit);
+        }
+      }
       if (this._emitJson) this._writeJsonLine(event);
       // Fan out to the optional OTel exporter. It never throws (see handle()), but
       // guard anyway so a sink defect can't break the agent's own event path.
@@ -472,12 +775,13 @@ export class Dunetrace {
    */
   _flushBeforeExit(): Promise<void> {
     if (this._exitFlushing) return Promise.resolve();
+    // Terminal events for runs this client opened on its own go out in the
+    // same flush.
+    this._closeImplicitRuns("process_exit");
     // The OTel batch processor has no exit hook of its own, so a short-lived
-    // process would otherwise leave its last spans in the queue. The provider
-    // is shared by every client, so otel.flushForExit() runs once per process
-    // and returns null afterwards: every flush is pending work that makes Node
-    // fire `beforeExit` again, and repeating it would keep the loop alive. It
-    // never rejects and is bounded, so a silent collector cannot hold the exit.
+    // process would otherwise leave its last spans in the queue. Concurrent
+    // callers (one per client) share the flush in flight; it never rejects and
+    // is bounded, so a silent collector cannot hold the exit.
     const spans = otel.flushForExit();
     if (this._buffer.length === 0 && spans === null) return Promise.resolve();
     this._exitFlushing = true;
