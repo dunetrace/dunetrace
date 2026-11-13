@@ -17,17 +17,17 @@ with dt.run("my-agent", user_input=question):
     answer = my_agent(question)
 ```
 
-> **Patching is half the job.** Every target except `crewai` is a silent no-op
-> outside an open run: the call succeeds, returns normally, and emits **no
-> events and no warning**. If you add `auto_instrument()` and see nothing in the
-> dashboard, this is almost always why. `crewai` is the one exception, because
-> it patches `Crew.kickoff`/`Agent.kickoff` and can open its own run. Full
-> reasoning in [Why LangChain needs `dt.run()` but CrewAI
-> doesn't](#why-langchain-needs-dtrun-but-crewai-doesnt) below.
+> **Every event needs a run.** With `dt.init()`, a patched LLM call outside any
+> run opens one itself (an *implicit* run, see [Runs that open
+> themselves](#runs-that-open-themselves)), and LangGraph, CrewAI, FastAPI and
+> Flask entry points open exact runs. Without a client (a bare
+> `auto_instrument()`), or with `implicit_runs=False`, the patches are
+> attach-only: a call outside a run succeeds and emits **no events and no
+> warning**. HTTP and memory patches are always attach-only.
 >
-> A run context comes from any one of: `with dt.run(...)`, the `@dt.agent` /
-> `@dt.trace` decorators, or `DunetraceASGIMiddleware` /
-> `DunetraceWSGIMiddleware`.
+> An exact run comes from any one of: `with dt.run(...)`, the `@dt.agent` /
+> `@dt.trace` decorators, `DunetraceASGIMiddleware` / `DunetraceWSGIMiddleware`,
+> or a framework entry point listed below.
 
 Supported frameworks: `openai`, `anthropic`, `mistral`, `botocore` (AWS
 Bedrock), `httpx`, `requests`, `langchain` (covers LangGraph), `crewai`. Pass `frameworks=[...]` to either call
@@ -75,8 +75,9 @@ A working setup prints at least `['run.started', ..., 'run.completed']` with
 the patch is installed but your LLM client is not one of the patched targets, or
 the call happens in a different process.
 
-If you see nothing at all, no run was open. That is the failure this page exists
-to describe.
+If you see nothing at all, no run was open and none could be opened: the client
+was built with `implicit_runs=False`, or `auto_instrument()` ran without a client
+(use `dt.init()`).
 
 ---
 
@@ -126,7 +127,11 @@ Agent(role="researcher").kickoff("find the latest AI news")
 
 ---
 
-## Why LangChain needs `dt.run()` but CrewAI doesn't
+## Why LangChain needs a boundary but CrewAI doesn't
+
+(With `dt.init()`, a compiled LangGraph graph is a boundary itself: `invoke` and
+`stream` open an exact run. What follows applies to plain LangChain chains and
+agents that are not LangGraph graphs; their calls still get an implicit run.)
 
 Both integrations reuse an existing manual integration (`DunetraceCallbackHandler`
 for LangChain, `DunetraceCrewCallback`'s global hooks for CrewAI) rather than
@@ -247,3 +252,97 @@ so this caveat is OpenAI-only.
 
 A stream that fails partway through is recorded with `finish_reason="error"` and
 the exception text, rather than as a clean `stop`.
+
+## Runs that open themselves
+
+Every event belongs to a run, and a run needs a start and an end. `dt.run()`,
+the decorators and the middleware give both explicitly. Since this feature,
+`dt.init()` alone is enough: the SDK decides where a run starts and, the
+harder half, where it ends, for code that never calls Dunetrace.
+
+### How a run ends, in the order the SDK tries them
+
+1. **A framework says so.** Entry points with a natural end open an exact run
+   and close it when they return. Nothing is guessed; these are ordinary runs.
+
+   | Entry point | Opens a run when | Closes it when |
+   |---|---|---|
+   | FastAPI / Flask app (boundary auto-installed on apps built after `dt.init()`) | the request's first LLM call | the response is sent |
+   | LangGraph `invoke` / `ainvoke` / `stream` / `astream` on a compiled graph | called with no run active | the call returns or the stream is exhausted |
+   | CrewAI `kickoff` | called with no run active | it returns |
+   | OpenAI Agents `Runner` (trace processor) | the trace starts | the trace ends |
+   | Vercel AI `wrapGenerateText` / `wrapStreamText` (TypeScript) | called with no run active | the promise settles / `onFinish` or `onError` fires |
+
+   Nested calls attach to the run that is already open, which is how subgraphs
+   and sub-agents land under their parent instead of opening their own.
+
+   HTTP requests are **lazy** run boundaries: a request becomes a run only when
+   it calls a model, so health checks, static files and preflights produce no
+   runs. If you already added `DunetraceASGIMiddleware` / `DunetraceWSGIMiddleware`
+   by hand, the auto-installed boundary steps aside and your run is used: one run
+   per request, never two. The run's `agent_id` is what you configured
+   (`dt.init(agent_id=...)`, `DUNETRACE_AGENT_ID`); a framework name (a FastAPI
+   `title`, a LangGraph graph `name`) is used only when nothing was configured,
+   and default names ("FastAPI", Flask's import name) never are.
+
+2. **Your own `dt.run()`** closes an implicit run that was open in the same
+   context (`exit_reason: explicit_run_opened`), so a declared run never nests
+   under a guessed one.
+
+3. **Idle.** When a patched LLM call (`openai`, `anthropic`, `mistral`,
+   Bedrock) arrives with no run active and no framework boundary in sight, the
+   SDK opens an *implicit* run and attaches the calls that follow in the same
+   thread or task to it. That run closes after 30 seconds with no events
+   (`DUNETRACE_IMPLICIT_RUN_IDLE_S`, or `implicit_run_idle_s=` on the client).
+   This is the rule for scripts and notebooks. It is a guess, and the run says
+   so: `run.started` carries `implicit: true` and `opened_by` (the call that
+   opened it), and the terminal event's `exit_reason` is `idle`. A call still
+   in flight (a slow model call, a stream being read) is not idle. An implicit
+   run is also closed after 10 minutes or 1,000 events (`max_age`,
+   `max_events`) so a busy thread never grows one without bound; the next call
+   opens a fresh one. HTTP-only activity never opens a run; it attaches when
+   one exists.
+
+4. **Process exit.** `dt.shutdown()` and the at-exit flush close whatever
+   implicit runs are still open (`exit_reason: process_exit`).
+
+5. **A crash.** After `dt.init()`, an unhandled exception on the main thread
+   or a worker thread becomes `run.errored` on the run active in that
+   context, or on a one-event run when none is open, so a crash is never
+   silent. The traceback still prints exactly as before.
+
+### What the detector does with an implicit run
+
+A guessed boundary is not a declared one. The detector treats an implicit run
+the way it treats a run whose events were shed under overload: every signal is
+stored in shadow with confidence capped at 0.5 and severity at MEDIUM, evidence
+carries `incomplete_data: {"reason": "implicit_run"}`, and the run feeds neither
+issue tracking nor baselines. Implicit runs show up in the dashboard's shadow
+section and never alert; the semantic worker stores its findings on them in
+shadow too. **Policies never act on an implicit run**: they are record-only, so
+a `stop` or `require_approval` policy cannot fire out of a bare LLM call in code
+that never opened a run. Runs opened by a framework entry point are ordinary
+runs: they alert normally and policies apply.
+
+The known weak spot is a synchronous server whose worker threads outlive
+requests and that has no request boundary: without the middleware, the calls
+of many requests on one thread would share an implicit run until the thread
+goes idle. That is why implicit runs are shadowed, why the middleware is
+auto-installed, and why the entry-point rules run first.
+
+### Turning it off
+
+`Dunetrace(implicit_runs=False)` or `DUNETRACE_IMPLICIT_RUNS=0` restores the
+attach-only behaviour: a patched call outside a run records nothing, and no
+crash hooks are installed. Entry-point runs and the middleware are unaffected.
+
+### One value to configure: the DSN
+
+```bash
+export DUNETRACE_DSN=https://<api_key>@ingest.example.com
+```
+
+`Dunetrace()` reads the endpoint and the key from it. An explicit `endpoint`
+or `api_key` argument, or `DUNETRACE_ENDPOINT` / `DUNETRACE_API_KEY`, wins over
+the corresponding part of the DSN. The key still travels as a bearer token;
+the DSN is a convenience, and the SDK never logs it whole.

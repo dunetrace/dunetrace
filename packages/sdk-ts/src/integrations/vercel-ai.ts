@@ -20,6 +20,7 @@ import type {
   TypedToolError,
 } from "ai";
 import { getCurrentRun, type Dunetrace } from "../client.js";
+import { openEntryRun, runStorage } from "../context.js";
 import { resultLength } from "../util.js";
 import type { DunetraceRun } from "../run.js";
 import type { RunOptions } from "../models.js";
@@ -85,10 +86,31 @@ export function instrumentStreamTextOptions<OPTIONS extends StreamTextOptions>(
   return injectStepInstrumentation(opts);
 }
 
-/** Wrap a `generateText` import to auto-instrument every call. */
+/**
+ * Wrap a `generateText` import to auto-instrument every call.
+ *
+ * `generateText` is a run boundary with a natural end: the call. When no run
+ * is active the client opens one around it (`opened_by: "ai.generateText"`)
+ * and closes it when the promise settles, so a script or handler that never
+ * calls `dt.run()` still gets exact runs. Inside an active run the call
+ * attaches to it, as before.
+ */
 export function wrapGenerateText(generateTextFn: typeof generateText): typeof generateText {
-  const wrapped = (async (opts: GenerateTextOptions) =>
-    generateTextFn(instrumentGenerateTextOptions(opts))) as typeof generateText;
+  const wrapped = (async (opts: GenerateTextOptions) => {
+    const handle = openEntryRun("ai.generateText");
+    if (!handle) return generateTextFn(instrumentGenerateTextOptions(opts));
+    return runStorage.run(handle.run, async () => {
+      try {
+        const result = await generateTextFn(instrumentGenerateTextOptions(opts));
+        handle.run.finalAnswer();
+        handle.finish();
+        return result;
+      } catch (err) {
+        handle.finish(err);
+        throw err;
+      }
+    });
+  }) as typeof generateText;
   return wrapped;
 }
 
@@ -101,8 +123,53 @@ export function wrapGenerateText(generateTextFn: typeof generateText): typeof ge
  * and break drop-in usage like `wrapped(opts).textStream`.
  */
 export function wrapStreamText(streamTextFn: typeof streamText): typeof streamText {
-  return ((opts: StreamTextOptions) =>
-    streamTextFn(instrumentStreamTextOptions(opts))) as typeof streamText;
+  return ((opts: StreamTextOptions) => {
+    const handle = openEntryRun("ai.streamText");
+    if (!handle) return streamTextFn(instrumentStreamTextOptions(opts));
+    // The natural end of a stream is its `onFinish`, `onError` or `onAbort`.
+    // Chain ours after the caller's so the run closes when the stream does. A
+    // stream that never reaches any of them (never consumed, the process is
+    // exiting) is tracked by the client and closed at shutdown / exit.
+    type Hooks = {
+      onFinish?: (e: unknown) => unknown;
+      onError?: (e: unknown) => unknown;
+      onAbort?: (e: unknown) => unknown;
+    };
+    const user = opts as unknown as Hooks;
+    const chained = {
+      ...opts,
+      onFinish: async (event: unknown) => {
+        try { if (user.onFinish) await user.onFinish(event); }
+        finally { handle.run.finalAnswer(); handle.finish(); }
+      },
+      onError: async (event: unknown) => {
+        try {
+          if (user.onError) await user.onError(event);
+          // Installing an onError replaces the AI SDK's default, which logs the
+          // error. Keep that behaviour when the caller did not supply their own,
+          // so a stream failure is not silenced by instrumentation.
+          // eslint-disable-next-line no-console
+          else console.error((event as { error?: unknown })?.error ?? event);
+        } finally {
+          handle.finish((event as { error?: unknown })?.error ?? event);
+        }
+      },
+      onAbort: async (event: unknown) => {
+        try { if (user.onAbort) await user.onAbort(event); }
+        finally {
+          handle.run._setExitReasonIfUnset("aborted");
+          handle.finish();
+        }
+      },
+    } as unknown as StreamTextOptions;
+    try {
+      return runStorage.run(handle.run, () => streamTextFn(instrumentStreamTextOptions(chained)));
+    } catch (err) {
+      // streamText throwing synchronously (bad options): no callback will fire.
+      handle.finish(err);
+      throw err;
+    }
+  }) as typeof streamText;
 }
 
 /** Open a Dunetrace run, call generateText with instrumentation, and close the run. */
