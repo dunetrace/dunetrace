@@ -2546,16 +2546,9 @@ def _json_malformed(text: str) -> bool:
     signal policy the in-path pass re-reads every earlier call's args at each
     step, and the same strings come back each time."""
     try:
-        parsed = json.loads(text, parse_constant=_reject_constant)
+        json.loads(text, parse_constant=_reject_constant)
     except (ValueError, RecursionError):
         return True
-    # LangChain wraps every tool input as {"input": <tool_input>} before
-    # encoding it, so a malformed payload arrives as a valid JSON string inside
-    # a valid wrapper. Judge the inner value when it is itself a JSON attempt.
-    if isinstance(parsed, dict) and len(parsed) == 1 and isinstance(parsed.get("input"), str):
-        inner = parsed["input"]
-        if len(inner) <= MalformedToolCallDetector.MAX_ARGS_CHARS and _JSON_ATTEMPT.match(inner):
-            return _json_malformed(inner)
     return False
 
 

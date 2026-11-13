@@ -40,7 +40,7 @@ CORPUS = [
     ("unterminated object", '{"title": "Refund", "body": "late"', True),
     ("unquoted key", '{title: "x"}', True),  # malformed, but not judged by shape: documented miss
     ("comment inside JSON", '{"a": 1 // note\n}', True),
-    ("LangChain-wrapped malformed input", json.dumps({"input": '{"title": }'}), True),
+    ("LangChain raw malformed input", '{"title": }', True),
     # Plain text that starts with a bracket.
     ("GraphQL query", "{ user(id: 1) { name } }", False),
     ("log line", "[INFO] restart service", False),
@@ -55,6 +55,8 @@ CORPUS = [
     ("valid array", '[{"id": 1}, {"id": 2}]', False),
     ("empty object", "{}", False),
     ("LangChain-wrapped plain input", json.dumps({"input": "refund policy"}), False),
+    ("valid input containing Python code", json.dumps({"input": "{'a': 1}"}), False),
+    ("valid input containing broken JSON", json.dumps({"input": '{"title": }'}), False),
     (
         "SDK: dict with UUID key",
         serialize_capped({__import__("uuid").UUID(int=1): 1}, None)[0],

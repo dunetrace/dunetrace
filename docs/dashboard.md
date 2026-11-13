@@ -165,7 +165,7 @@ Shadow signals are stored but not alerted — they are detectors in evaluation m
 - **Alerts page** — shadow signals appear below live alerts with a dashed border, reduced opacity, and a `SHADOW` badge.
 - **Agents page** — each agent card shows an ungraduated shadow signal count.
 
-To graduate a detector from shadow to live, add it to `LIVE_DETECTORS` in `services/detector/detector_svc/db.py`. → [docs/detectors.md#shadow-mode](detectors.md#shadow-mode)
+To graduate a detector from shadow to live, add it to `LIVE_DETECTORS` in `packages/schemas-py/dunetrace_schemas/detector_status.py`. → [docs/detectors.md#shadow-mode](detectors.md#shadow-mode)
 
 ---
 

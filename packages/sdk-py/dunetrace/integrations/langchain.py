@@ -90,6 +90,7 @@ class _RunCtx:
     child_tool_names: Dict[str, str] = field(
         default_factory=dict
     )  # lc_run_id → tool_name at call time
+    child_retrieval_indexes: Dict[str, str] = field(default_factory=dict)
     ctx_token: Any = field(default=None, repr=False)  # _current_run reset token
 
     @property
@@ -576,7 +577,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             if lc_run_id:
                 self._register_child(lc_run_id, str(kwargs.get("parent_run_id") or ""))
             tool_name = serialized.get("name", kwargs.get("name", "unknown"))
-            self._safe_call(ctx.dt_ctx.tool_called, tool_name, {"input": input_str})
+            self._safe_call(ctx.dt_ctx.tool_called, tool_name, input_str)
             if lc_run_id:
                 ctx.child_steps[lc_run_id] = ctx.step
                 ctx.child_tool_names[lc_run_id] = tool_name
@@ -591,7 +592,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
             ctx = self._ctx(kwargs)
             if not ctx:
                 return
-            self._safe_call(ctx.dt_ctx.tool_called, action.tool, {"input": action.tool_input})
+            self._safe_call(ctx.dt_ctx.tool_called, action.tool, action.tool_input)
         except PolicyViolation:
             raise
         except Exception as exc:
@@ -676,6 +677,8 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                     else "unknown"
                 ),
             )
+            if lc_run_id:
+                ctx.child_retrieval_indexes[lc_run_id] = index_name or "unknown"
             from dunetrace.models import EventType
 
             self._safe_emit(
@@ -713,6 +716,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 EventType.RETRIEVAL_RESPONDED,
                 ctx,
                 {
+                    "index_name": ctx.child_retrieval_indexes.pop(lc_run_id, "unknown"),
                     "result_count": result_count,
                     "top_score": top_score,
                 },
@@ -734,6 +738,7 @@ class DunetraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
                 EventType.RETRIEVAL_RESPONDED,
                 ctx,
                 {
+                    "index_name": ctx.child_retrieval_indexes.pop(lc_run_id, "unknown"),
                     "result_count": 0,
                     "top_score": None,
                     "error": str(error),

@@ -68,7 +68,7 @@ Semantic findings never trigger a policy — see
 | `PREMATURE_TERMINATION` | Agent claims success right after a tool call it made actually failed | HIGH/CRITICAL |
 | `UNREAD_TOOL_ERROR` | Tool failed, agent's next action doesn't acknowledge it | MEDIUM/HIGH |
 | `TOOL_ARGUMENT_FABRICATION` | Tool call argument references an entity not present anywhere in prior context | HIGH/CRITICAL |
-| `MALFORMED_TOOL_CALL` | Tool args look structured but cannot be parsed as JSON or a Python literal | HIGH |
+| `MALFORMED_TOOL_CALL` | Tool args look like JSON but cannot be parsed as strict JSON | HIGH |
 | `RETRIEVED_CONTENT_INJECTION` | Retrieved or fetched content contains text directed at the agent as an instruction | HIGH/CRITICAL |
 | `HANDOFF_CONTEXT_LOSS` | Multi-agent handoff loses a large chunk of the parent agent's context | HIGH |
 | `AGENT_HANDOFF_FAILURE` | A handoff-named tool call fails or returns an empty/insufficient payload | HIGH |
@@ -213,7 +213,7 @@ Most built-in detectors are live (`shadow = false`). Six are not:
 `SCATTERSHOT_TOOL_USE`, `UNRESOLVED_AMBIGUITY`, `RAG_QUALITY_DEGRADATION` and `MALFORMED_TOOL_CALL` remain shadowed by default
 until their precision is checked against real traffic. A new built-in detector should be added to
 `_DETECTOR_CLASSES`, and only added to `LIVE_DETECTORS` in
-`services/detector/detector_svc/db.py` once validated; leaving it out of
+`packages/schemas-py/dunetrace_schemas/detector_status.py` once validated; leaving it out of
 `LIVE_DETECTORS` is what keeps it in shadow mode while you evaluate it.
 
 User-defined custom detectors always start in shadow mode — signals are stored and counted, but no Slack/webhook alert fires until you activate the detector in the dashboard or via the API.
@@ -734,7 +734,7 @@ A tool call whose `args` is a JSON attempt that is not valid JSON: trailing comm
 
 #### Signal
 
-For each tool call, in step order: if `args` opens like JSON (an object starting with a key or `}`, or an array starting with a value or `]`), it is parsed with strict `json.loads` (`NaN`/`Infinity` rejected). LangChain's `{"input": "<tool input>"}` wrapper is looked through, so a malformed inner payload is judged rather than its valid wrapper. Arguments recorded truncated (`args_length` larger than what arrived) and arguments over `max_args_chars` (default 32,768) are skipped, which also bounds the in-path cost; parse results are cached because a signal policy re-reads every earlier call at each step. One signal for the first malformed call, with the tool name, step, and a capped argument snippet. A calibration corpus and report ship with it: `scripts/calibrate_malformed_tool_call.py`.
+For each tool call, in step order: if `args` opens like JSON (an object starting with a key or `}`, or an array starting with a value or `]`), it is parsed with strict `json.loads` (`NaN`/`Infinity` rejected). LangChain records the original tool arguments directly. String-valued fields inside valid JSON stay opaque. Arguments recorded truncated (`args_length` larger than what arrived) and arguments over `max_args_chars` (default 32,768) are skipped, which also bounds the in-path cost; parse results are cached because a signal policy re-reads every earlier call at each step. One signal for the first malformed call, with the tool name, step, and a capped argument snippet. A calibration corpus and report ship with it: `scripts/calibrate_malformed_tool_call.py`.
 
 #### Severity and rollout
 

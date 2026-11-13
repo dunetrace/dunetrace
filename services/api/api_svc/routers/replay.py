@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api_svc.auth import require_org
+from dunetrace_schemas.detector_status import LIVE_DETECTORS
 
 logger = logging.getLogger("dunetrace.api.replay")
 router = APIRouter(tags=["Replay"])
@@ -371,11 +372,13 @@ async def replay_run(
             replay_signal_list.append(dict(orig_inj))
 
     orig_types = {s["failure_type"] for s in original_signals}
-    # A type that was shadow on the original run and still fires is neither
-    # resolved nor new: it is out of the live comparison on both sides.
-    unchanged_shadow = shadow_types - orig_types
+    # Preserve original live types, including custom detectors, while excluding
+    # shadow detectors that first fire during replay.
     replay_signal_list = [
-        s for s in replay_signal_list if s["failure_type"] not in unchanged_shadow
+        s
+        for s in replay_signal_list
+        if s["failure_type"] in orig_types
+        or (s["failure_type"] in LIVE_DETECTORS and s["failure_type"] not in shadow_types)
     ]
     replay_types = {s["failure_type"] for s in replay_signal_list}
 

@@ -2044,10 +2044,10 @@ class TestMalformedToolCallDetector(unittest.TestCase):
                     self.d.on_run_completion(self._state([make_tool_call("t", 1, args=text)]))
                 )
 
-    def test_sees_through_langchains_input_wrapper(self):
+    def test_string_input_fields_are_opaque(self):
         wrapped = '{"input": "{\\"title\\": }"}'
         sig = self.d.on_run_completion(self._state([make_tool_call("t", 1, args=wrapped)]))
-        self.assertIsNotNone(sig)
+        self.assertIsNone(sig)
         ok = '{"input": "refund policy"}'
         self.assertIsNone(self.d.on_run_completion(self._state([make_tool_call("t", 1, args=ok)])))
 

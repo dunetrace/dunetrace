@@ -288,7 +288,7 @@
         "tool"
       ],
       "enriches": [],
-      "why": "Checks each ToolCall.args value that begins with `{` or `[` and fires only when neither JSON nor a Python literal can parse it."
+      "why": "Checks JSON-shaped ToolCall.args values and fires when strict JSON parsing fails."
     },
     "RETRIEVED_CONTENT_INJECTION": {
       "requires": [
