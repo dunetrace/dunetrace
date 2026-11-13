@@ -81,7 +81,7 @@ from dunetrace import Dunetrace
 import openai
 
 dt = Dunetrace()
-dt.init(agent_id="support-agent")   # auto-instruments installed clients (OpenAI, Anthropic, Mistral, Bedrock, LangChain, CrewAI, httpx, requests)
+dt.init(agent_id="support-agent")   # auto-instruments installed clients (OpenAI, Anthropic, Mistral, Bedrock, LangChain, LangGraph, CrewAI, FastAPI, Flask, httpx, requests)
 
 @dt.agent("support-agent", model="gpt-4o")
 def my_agent(question: str) -> str:

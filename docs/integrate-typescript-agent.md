@@ -252,7 +252,7 @@ A bug in event emission can never fail your LLM call: emission is wrapped so it 
 
 ### Per-client wrapping
 
-To instrument one client instead of the whole SDK, the wrappers shown above (`dt.wrapOpenAI`, `dt.wrapAnthropic`, `dt.tool`, `dt.trace`) remain available. Each is a no-op outside a `dt.run()` context, so it's safe to wrap once at startup and call normally everywhere else.
+To instrument one client instead of the whole SDK, the wrappers shown above (`dt.wrapOpenAI`, `dt.wrapAnthropic`, `dt.tool`, `dt.trace`) remain available, so it's safe to wrap once at startup and call normally everywhere else. Inside a `dt.run()` context they attach to that run; a wrapped LLM call outside one opens an implicit run (see [Runs that open themselves](#runs-that-open-themselves)), and `dt.tool` outside a run records nothing.
 
 `dt.trace()` wraps an entire agent function so it opens and closes its own run automatically:
 

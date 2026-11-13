@@ -174,7 +174,9 @@ See [integrate-vercel-ai.md](../../docs/integrate-vercel-ai.md) for streaming, N
 A wrapped OpenAI, Anthropic or Mistral call with no run active opens an
 implicit run; the calls that follow attach to it, and it closes after 30s
 without events, at `dt.shutdown()`, or at process exit. The run is marked
-(`implicit: true`, `opened_by`) and its signals are held in shadow. For the
+(`implicit: true`, `opened_by`), its signals are held in shadow, and policies
+never act on it. A call still in flight keeps the run open, and a run is closed
+after 10 minutes or 1,000 events at the latest. For the
 Vercel AI SDK, `wrapGenerateText` / `wrapStreamText` open an exact run around
 each call instead. Uncaught exceptions become `run.errored`. Turn the guessing
 off with `implicitRuns: false`. `DUNETRACE_DSN=https://<api_key>@host` sets

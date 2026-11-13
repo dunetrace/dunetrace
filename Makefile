@@ -40,7 +40,7 @@ test-mcp:
 	python -m pytest packages/mcp-server/tests/ -v
 
 test-semantic:
-	PYTHONPATH=packages/schemas-py:services/explainer:services/semantic python -m pytest services/semantic/tests/ -v
+	PYTHONPATH=packages/schemas-py:packages/sdk-py:services/explainer:services/semantic python -m pytest services/semantic/tests/ -v
 
 test-integrations:
 	PYTHONPATH=packages/schemas-py:services/integrations python -m pytest services/integrations/tests/ -v

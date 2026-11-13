@@ -58,6 +58,23 @@ LangChain/LangGraph and CrewAI agents need zero manual callback wiring — see [
 
 **FastAPI / Flask** — one line each, see [docs/integrate-custom-python-agent.md](../../docs/integrate-custom-python-agent.md).
 
+## Runs that open themselves
+
+After `dt.init()`, every event still belongs to a run even if you never write
+one. LangGraph `invoke`/`stream`, CrewAI `kickoff`, and each FastAPI/Flask
+request that calls a model open an exact run around themselves (the request
+boundary is installed on apps built after `dt.init()`, and steps aside for a
+`DunetraceASGIMiddleware` you added yourself). A patched LLM call outside all of
+those opens an *implicit* run: the calls that follow attach to it, and it closes
+after 30s without events (not while a call or stream is in flight), after 10
+minutes or 1,000 events, at `dt.shutdown()`, or at process exit. It is marked
+(`implicit: true`, `opened_by`), its signals are held in shadow, and policies
+never act on it. An unhandled exception becomes `run.errored`. Turn the
+guessing off with `Dunetrace(implicit_runs=False)` or `DUNETRACE_IMPLICIT_RUNS=0`.
+`DUNETRACE_DSN=https://<api_key>@host` sets endpoint and key in one value. The
+rules, in order, are in
+[docs/integrations/auto-instrumentation.md](../../docs/integrations/auto-instrumentation.md#runs-that-open-themselves).
+
 ## What it detects
 
 37 detectors run on every completed run — no configuration, no LLM. A few of the main ones:

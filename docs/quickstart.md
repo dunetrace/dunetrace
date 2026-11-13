@@ -106,11 +106,16 @@ if __name__ == "__main__":
     dt.shutdown()
 ```
 
-> **Something has to open a run.** `@dt.trace`, `@dt.agent`, an explicit
-> `with dt.run(...)`, or the ASGI/WSGI middleware. `dt.auto_instrument()` on its
-> own records nothing: outside a run its patches are a silent no-op, with no
-> error and no warning. This is the single most common reason a first
-> integration shows no data.
+> **Every event belongs to a run.** `@dt.trace`, `@dt.agent` or an explicit
+> `with dt.run(...)` give exact run boundaries, and so do framework entry points
+> after `dt.init()`: a LangGraph `invoke`/`stream`, a CrewAI `kickoff`, and each
+> FastAPI/Flask request that calls a model. A patched LLM call outside all of
+> those still records, in an *implicit* run the SDK opens and closes itself
+> (shadowed and record-only, see
+> [auto-instrumentation.md](integrations/auto-instrumentation.md#runs-that-open-themselves)).
+> The one setup that records nothing is a bare module-level
+> `dunetrace.auto.auto_instrument()` with no client, or `implicit_runs=False`:
+> then calls outside a run are a silent no-op.
 
 ### 4. Confirm events arrived
 

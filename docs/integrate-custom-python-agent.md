@@ -171,13 +171,13 @@ interpreter shutdown (seconds, default `2`), or to `0` to disable it entirely.
 so every LLM/HTTP call **inside an open run** is tracked with no manual event
 calls.
 
-> **These patches only react to a run that is already open.** With the sole
-> exception of `crewai`, which patches `Crew.kickoff`/`Agent.kickoff` and can
-> open its own run, every target above is a silent no-op outside a run context:
-> your code runs, the call succeeds, and **zero events are emitted, with no
-> warning**. The run context is what `@dt.agent` / `@dt.trace` below (or an
-> explicit `with dt.run(...)`, or the ASGI/WSGI middleware) provides. See
-> [auto-instrumentation.md](./integrations/auto-instrumentation.md).
+> **Give the agent a run boundary.** `@dt.agent` / `@dt.trace` below (or an
+> explicit `with dt.run(...)`, or the ASGI/WSGI middleware) mark exactly where a
+> run starts and ends. Without one, a patched LLM call still records: after
+> `dt.init()` it opens an *implicit* run that closes after 30s idle, held in
+> shadow and never acted on by policies, because its boundary is a guess.
+> HTTP-only activity attaches to a run but never opens one. See
+> [auto-instrumentation.md](./integrations/auto-instrumentation.md#runs-that-open-themselves).
 
 The decorator supplies the run, so this is tracked:
 
