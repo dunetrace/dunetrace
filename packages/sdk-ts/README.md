@@ -186,17 +186,17 @@ endpoint and key in one value. The rules, in order, are in
 Opt-in, env-driven, and additive to the normal ingest path:
 
 ```bash
-npm install @opentelemetry/api@1 @opentelemetry/sdk-trace-base@1 @opentelemetry/resources@1 \
-  @opentelemetry/exporter-trace-otlp-grpc@0.57
+npm install @opentelemetry/api @opentelemetry/sdk-trace-base @opentelemetry/resources \
+  @opentelemetry/exporter-trace-otlp-grpc
 
 export DUNETRACE_OTEL_ENABLED=1
 export DUNETRACE_OTEL_ENDPOINT=http://localhost:4317
 ```
 
-For OTLP over HTTP use `@opentelemetry/exporter-trace-otlp-proto@0.57`,
+For OTLP over HTTP use `@opentelemetry/exporter-trace-otlp-proto`,
 `DUNETRACE_OTEL_PROTOCOL=http/protobuf` and an endpoint such as
-`http://localhost:4318/v1/traces`. The 1.x trace SDK and 0.57 exporters are the
-supported line.
+`http://localhost:4318` (a bare base URL gets `/v1/traces` appended). Both the
+1.x and 2.x OpenTelemetry SDK lines work.
 
 `new Dunetrace()` builds the export pipeline when these are set and stamps each
 run with `run.otelTraceId`, the trace to look the run up by in your backend,
