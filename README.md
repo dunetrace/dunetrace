@@ -87,7 +87,8 @@ await dt.run("support-agent", { model: "gpt-4o" }, async (run) => {   // one run
 });
 ```
 
-LLM calls, tool calls and streaming are tracked with no changes at the call site.
+LLM calls (streaming included) and outbound HTTP calls are tracked with no changes at the call
+site. Mark local tool functions with `@dt.tool` (TypeScript: `dt.tool()`) to record those too.
 
 **Why wrap the entry point?** `@dt.agent()` / `dt.run()` mark where a run starts and ends.
 Without them Dunetrace still records your LLM calls as an *implicit run*, but holds that run's

@@ -6,8 +6,8 @@ language: typescript
 install: npm install dunetrace ai
 primary_symbol: dunetrace.wrapGenerateText
 mechanism: option-injection
-opens_own_run: false
-requires_run_context: true
+opens_own_run: true
+requires_run_context: false
 target_file: the module that calls generateText or streamText
 target_example: `app/api/chat/route.ts`, `src/agent.ts`
 target_hints: ["generateText(", "streamText(", "from 'ai'"]
@@ -44,7 +44,13 @@ Start the backend once, locally, before running this: `docker compose up -d`. Re
 ## Where this goes
 
 `wrapGenerateText` / `wrapStreamText` are applied **once at startup**,
-to the imported function. The `dt.run()` goes around the call site.
+to the imported function. With no run open, each wrapped call opens its own
+run and closes it when the call returns or the stream finishes; the agent id
+is `new Dunetrace({ defaultAgentId })`, else `DUNETRACE_AGENT_ID`, else `ai`.
+`DUNETRACE_IMPLICIT_RUNS=0` turns this off, and the wrappers then need a
+`dt.run()` around them.
+Put a `dt.run()` around the call site when one agent turn makes several calls
+or you want to name the run there; the wrapped calls then join it.
 
 Find it with:
 
@@ -61,7 +67,7 @@ Router](#nextjs-app-router) for the shape that gets this right.
 
 ## What this does
 
-`wrapGenerateText`/`wrapStreamText` hook into the AI SDK's step lifecycle (`onStepEnd`) — every LLM call and tool call inside a `dt.run()` context is captured automatically, including multi-step tool loops. Your own `onStepStart`/`onStepEnd`/`onEnd` callbacks are preserved and still run.
+`wrapGenerateText`/`wrapStreamText` hook into the AI SDK's step lifecycle (`onStepEnd`) — every LLM call and tool call is captured automatically, including multi-step tool loops, in the enclosing `dt.run()` or in the run the wrapper opens itself. Your own `onStepStart`/`onStepEnd`/`onEnd` callbacks are preserved and still run.
 
 ## Streaming
 
@@ -88,7 +94,7 @@ SCENARIO=failures python packages/sdk-py/examples/decorator_agent.py
 
 Work down this list. The first two cover almost every case.
 
-1. **Is a run open?** This integration attaches to a run that is already open. Outside one it emits nothing, silently. Confirm your top-level call is inside `dt.run(...)` (or a decorator that opens one).
+1. **Is the wrapped function the one being called?** The wrappers open their own run, so there is nothing else to wrap. Confirm `wrapGenerateText` / `wrapStreamText` ran at startup, a `new Dunetrace()` exists, and the call site uses the wrapped function rather than a direct `generateText` / `streamText` import.
 
 2. **Did the process flush?** Events ship from a background thread. Call
    `await dt.shutdown()` before the process exits, or the buffer dies with it.
@@ -203,6 +209,6 @@ return new Response(result.text);   // already drained
 
 ### Troubleshooting
 
-- **No events in the dashboard** — confirm the wrapped call happens inside `dt.run()` (or use `traceGenerateText`); call `await dt.shutdown()` before exit
+- **No events in the dashboard** — confirm the call site uses the wrapped function, not a direct `generateText` / `streamText` import; call `await dt.shutdown()` before exit
 - **No events from a streamed run** — `onStepEnd` only fires once the stream is consumed; make sure you read `result.textStream`
 - **Type errors** — install a matching `ai` peer dependency (`npm install ai@^7`)

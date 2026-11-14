@@ -8,7 +8,6 @@ primary_symbol: dunetrace.Dunetrace
 mechanism: context-manager
 opens_own_run: true
 requires_run_context: false
-wrappers_require_run_context: true
 target_file: the module exporting your agent's entry function
 target_example: `src/agent.ts`, `app/api/chat/route.ts`, or `src/index.ts`
 target_hints: ["new OpenAI(", "new Anthropic(", "chat.completions.create", "messages.create"]
@@ -56,8 +55,10 @@ Start the backend once, locally, before running this: `docker compose up -d`. Re
 ## Where this goes
 
 `dt.run()` goes around the **one call that represents a whole agent
-turn**. The client wrappers (`dt.wrapOpenAI`, `dt.wrapAnthropic`) and
+turn**. The client wrappers (`dt.wrapOpenAI`, `dt.wrapAnthropic`) or
 `autoInstrument()` go once at startup, wherever the client is constructed.
+**Without one of them, LLM calls are not recorded**: a run then reports only
+`dt.tool()` functions. `autoInstrument()` also records outbound `fetch` calls.
 
 Find the entry point by locating the LLM call:
 
@@ -69,13 +70,15 @@ In a Next.js App Router project that is usually a route handler such as
 `app/api/chat/route.ts`, and the `dt.run()` wraps the handler body. In a plain
 Node service it is usually `src/agent.ts`.
 
-Wrapping the client without opening a run records nothing. If you would rather
-not restructure the entry point, `dt.trace(fn, "agent-id")` wraps a function so
-it opens and closes its own run.
+Wrapping the client without opening a run still records, as an *implicit* run
+that closes after 30s idle, but its signals stay in shadow (no alerts) because
+the boundary is a guess. Open a run at the entry point. If you would rather not
+restructure it, `dt.trace(fn, "agent-id")` wraps a function so it opens and
+closes its own run.
 
 ## What this does
 
-Wrap your agent's entry point in `dt.run(...)`. Everything called inside that callback — LLM calls, tool calls — is auto-traced and shipped to the backend in the background. Dunetrace detects structural failures (tool loops, retry storms, cost spikes, and 34 more) within ~15 seconds — no other code changes.
+Wrap your agent's entry point in `dt.run(...)`. Inside that callback, LLM calls through a wrapped or auto-instrumented client, `dt.tool()` functions and (with `autoInstrument()`) outbound `fetch` calls are traced and shipped to the backend in the background. Dunetrace detects structural failures (tool loops, retry storms, cost spikes, and 34 more) within ~15 seconds — no other code changes.
 
 ## Recommended usage pattern
 
@@ -295,7 +298,7 @@ await dt.shutdown();
 
 Work down this list. The first two cover almost every case.
 
-1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm the registration call (`Dunetrace`) actually ran, and ran **before** the first agent invocation.
+1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm `autoInstrument()` (or the client wrapper) actually ran, and ran **before** the first LLM call. Without it the run carries `dt.tool()` calls but no LLM calls.
 
 2. **Did the process flush?** Events ship from a background thread. Call
    `await dt.shutdown()` before the process exits, or the buffer dies with it.

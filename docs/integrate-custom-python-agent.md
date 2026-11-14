@@ -31,6 +31,7 @@ Save as `agent.py` and run it. No API key and no LLM account needed:
 from dunetrace import Dunetrace
 
 dt = Dunetrace()  # local dev, no API key needed
+dt.init()         # patch installed LLM/HTTP clients so their calls are recorded
 
 @dt.tool
 def web_search(query: str) -> list:
@@ -53,9 +54,15 @@ Start the backend once, locally, before running this: `docker compose up -d`.
 
 ## Where this goes
 
+Call `dt.init()` once at startup, before the first LLM call. It patches the
+installed LLM clients (OpenAI, Anthropic, Mistral, Bedrock) plus httpx and
+requests. **Without it, LLM calls are not recorded**: a decorated function then
+reports only its `@dt.tool` calls.
+
 Put `@dt.trace` on the **one function that represents a whole agent
-turn**, and `@dt.tool` on each function the agent calls as a tool. Nothing else
-moves.
+turn**, and `@dt.tool` on each local function the agent calls as a tool
+(outbound HTTP calls through httpx or requests are recorded without it). Nothing
+else moves.
 
 Find the entry function by locating the LLM call and walking up to the nearest
 function that owns a complete request:
@@ -66,8 +73,8 @@ grep -rn "chat.completions.create\|messages.create" --include=*.py .
 
 In a typical layout that function lives in `app/agent.py` or `src/agent.py`. If
 the LLM call sits directly inside a FastAPI or Flask route, do not decorate the
-route: add the ASGI/WSGI middleware instead (see Advanced), which makes each
-HTTP request one run.
+route: after `dt.init()` each HTTP request that calls an LLM is already one run
+(the ASGI/WSGI middleware in Advanced does the same by hand).
 
 If more than one function looks like an entry point, instrument the outermost
 one. Two nested `dt.run()` contexts are recorded as a parent and child run, not
@@ -75,7 +82,7 @@ as one flat run, which is usually not what you want for a single agent.
 
 ## What this does
 
-Wrap your agent's entry point with `@dt.trace` and your tool functions with `@dt.tool`. Dunetrace then auto-traces every tool and LLM call made inside that function, ships the trace to the backend, and detects structural failures (tool loops, retry storms, cost spikes, and 34 more) within ~15 seconds — no other code changes.
+Call `dt.init()` at startup, wrap your agent's entry point with `@dt.trace` and your tool functions with `@dt.tool`. Dunetrace then records every LLM call and tool call made inside that function, ships the trace to the backend, and detects structural failures (tool loops, retry storms, cost spikes, and 34 more) within ~15 seconds — no other code changes.
 
 ## Recommended usage pattern
 
@@ -216,7 +223,7 @@ This runs three agents that intentionally trigger `TOOL_LOOP`, `RETRY_STORM`, an
 
 Work down this list. The first two cover almost every case.
 
-1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm the registration call (`Dunetrace`) actually ran, and ran **before** the first agent invocation.
+1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm `dt.init()` actually ran, and ran **before** the first LLM call. Without it the run carries `@dt.tool` calls but no LLM calls.
 
 2. **Did the process flush?** Events ship from a background thread. Call
    `dt.shutdown()` before the process exits, or the buffer dies with it.

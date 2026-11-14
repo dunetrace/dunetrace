@@ -30,6 +30,7 @@ from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
 from dunetrace import Dunetrace, get_current_run
 
 dt = Dunetrace()   # local dev, no API key needed
+dt.init()          # patch the openai client LlamaIndex calls, so its LLM calls are recorded
 
 # Any query engine works. This one indexes ./data so the file runs as written.
 query_engine = VectorStoreIndex.from_documents(
@@ -79,7 +80,9 @@ the query engine construction.
 
 LlamaIndex has no callback integration in this SDK, so the retrieval events are
 emitted by hand inside the traced function. That is the one place this guide
-asks you to add calls rather than a decorator.
+asks you to add calls rather than a decorator. The LLM calls are recorded
+through `dt.init()`, which patches the provider client LlamaIndex uses
+underneath; without it the run carries retrieval events only.
 
 ## What this does
 
@@ -94,7 +97,7 @@ Run your agent once, then check the dashboard at `http://localhost:3000` — the
 
 Work down this list. The first two cover almost every case.
 
-1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm the registration call (`trace`) actually ran, and ran **before** the first agent invocation.
+1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm `dt.init()` actually ran, and ran **before** the first query. Without it the run carries retrieval events but no LLM calls.
 
 2. **Did the process flush?** Events ship from a background thread. Call
    `dt.shutdown()` before the process exits, or the buffer dies with it.
