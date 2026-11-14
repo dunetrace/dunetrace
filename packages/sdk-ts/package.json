@@ -1,6 +1,6 @@
 {
   "name": "dunetrace",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "The runtime reliability layer for AI agents.",
   "author": "Dunetrace UG (haftungsbeschränkt) <vikas@dunetrace.com>",
   "license": "Apache-2.0",
