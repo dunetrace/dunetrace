@@ -218,7 +218,7 @@ scrape_configs:
           - elevenlabs:9105     # only answers while ELEVENLABS_WORKER_ENABLED=true
 ```
 
-Set `APP_VERSION` (or `GIT_COMMIT`) in deploy so `dunetrace_build_info` identifies the build; unset, it reports the package version.
+`dunetrace_build_info`, `/health` and `/ready` report the build version: the release tag on a published GHCR image (the release workflow stamps it into the image), or `dev` on an unstamped local build. To stamp a local build, set it at build time: `APP_VERSION=0.6.0 docker compose build` (`docker-compose.yml` passes it as a build arg). Do not add `APP_VERSION` to a compose `environment:` block: any entry there replaces the image's value, and a bare `APP_VERSION:` with no value removes it outright.
 
 ### Metric catalogue
 

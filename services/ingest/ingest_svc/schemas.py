@@ -57,7 +57,7 @@ class HealthResponse(BaseModel):
     ReadyResponse for that."""
 
     status: str = "ok"
-    version: str = "0.5.0"
+    version: str = "dev"
 
 
 class ReadyResponse(BaseModel):

@@ -222,14 +222,14 @@ if _PYDANTIC:
         ReadyResponse for that."""
 
         status: str = "ok"
-        version: str = "0.5.0"
+        version: str = "dev"
 
     class ReadyResponse(_Model):
         """GET /ready — readiness, not liveness: 503 body when the DB or the
         shared schema is not usable. Mirrors dunetrace_schemas.metrics.db_ready."""
 
         status: str = "ok"
-        version: str = "0.5.0"
+        version: str = "dev"
         db: str = "unknown"
         schema_version: Optional[int] = None
         required: int = 0
@@ -844,12 +844,12 @@ else:
     @dataclass
     class HealthResponse:
         status: str = "ok"
-        version: str = "0.5.0"
+        version: str = "dev"
 
     @dataclass
     class ReadyResponse:
         status: str = "ok"
-        version: str = "0.5.0"
+        version: str = "dev"
         db: str = "unknown"
         schema_version: Optional[int] = None
         required: int = 0

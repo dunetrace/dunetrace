@@ -93,10 +93,10 @@ services:
       MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-500}
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-60}
       RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-600}
-      # Null, not "": passes the host's value through when set and leaves the
-      # variable unset otherwise, so the version baked into the published image
-      # survives. `${APP_VERSION:-}` would overwrite it with an empty string.
-      APP_VERSION:
+      # No APP_VERSION here, on purpose. The published image carries it (the
+      # release workflow stamps the tag as an ENV), and any environment entry for
+      # it replaces that: a bare `APP_VERSION:` does not pass through, it REMOVES
+      # the variable, so every v0.6.0 service reported its hardcoded fallback.
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/ready')\" || exit 1"]
       interval: 10s
@@ -141,7 +141,6 @@ services:
       DUNETRACE_OTEL_SERVICE_NAME: ${DUNETRACE_OTEL_SERVICE_NAME:-dunetrace}
       DUNETRACE_OTEL_SAMPLING_RATIO: ${DUNETRACE_OTEL_SAMPLING_RATIO:-1.0}
       DUNETRACE_OTEL_CAPTURE_CONTENT: ${DUNETRACE_OTEL_CAPTURE_CONTENT:-true}
-      APP_VERSION:
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9101/ready')\" || exit 1"]
       interval: 30s
@@ -206,7 +205,6 @@ services:
       DIGEST_ENABLED: ${DIGEST_ENABLED:-true}
       DIGEST_DAY: ${DIGEST_DAY:-0}
       DIGEST_HOUR: ${DIGEST_HOUR:-9}
-      APP_VERSION:
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9102/ready')\" || exit 1"]
       interval: 30s
@@ -253,7 +251,6 @@ services:
       PAGE_SIZE_DEFAULT: ${PAGE_SIZE_DEFAULT:-50}
       PAGE_SIZE_MAX: ${PAGE_SIZE_MAX:-500}
       DEFAULT_KEY_RATE_LIMIT_RPM: ${DEFAULT_KEY_RATE_LIMIT_RPM:-600}
-      APP_VERSION:
     volumes:
       # Voice cost rates. Optional — the API falls back to built-in defaults if
       # the file is absent, which is what this stack silently did.
@@ -304,7 +301,6 @@ services:
       POLL_INTERVAL: 15
       METRICS_PORT: 9103
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      APP_VERSION:
       SEMANTIC_WORKER_ENABLED: ${SEMANTIC_WORKER_ENABLED:-false}
       SEMANTIC_LLM_PROVIDER: ${SEMANTIC_LLM_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -344,7 +340,6 @@ services:
       INTEGRATIONS_WORKER_ENABLED: ${INTEGRATIONS_WORKER_ENABLED:-false}
       DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      APP_VERSION:
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9104/ready')\" || exit 1"]
       interval: 30s
@@ -374,7 +369,6 @@ services:
       ELEVENLABS_WORKER_ENABLED: ${ELEVENLABS_WORKER_ENABLED:-false}
       DUNETRACE_MASTER_KEY: ${DUNETRACE_MASTER_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      APP_VERSION:
     command: ["python", "-m", "integrations_svc.elevenlabs_worker"]
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9105/ready')\" || exit 1"]

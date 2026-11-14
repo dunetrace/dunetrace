@@ -159,7 +159,7 @@ class TestSchemas(unittest.TestCase):
     def test_health_response_defaults(self):
         h = HealthResponse()
         self.assertEqual(h.status, "ok")
-        self.assertEqual(h.version, "0.5.0")
+        self.assertEqual(h.version, "dev")
 
     def test_agent_list_response_shape(self):
         resp = AgentListResponse(

@@ -36,7 +36,9 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     # audit Finding 34: real build version reported by /health (was hardcoded
     # 0.1.0). Set APP_VERSION (or GIT_COMMIT) in deploy to identify the build.
-    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
+    # Unstamped builds report "dev": a literal version here goes stale (it
+    # read 0.5.0 on the v0.6.0 images). Published images carry the tag.
+    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "dev"
     # Fails CLOSED: an unset AUTH_MODE means full auth, not skipped auth. Dev
     # mode disables authentication entirely, so it must be an explicit opt-in —
     # a deployment that forgets to set this gets a locked-down API rather than

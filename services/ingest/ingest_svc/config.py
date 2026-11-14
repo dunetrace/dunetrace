@@ -28,7 +28,9 @@ class Settings:
     ENV: str = os.getenv("ENV", "dev")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     # audit Finding 34: real build version reported by /health (was hardcoded 0.1.0).
-    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
+    # Unstamped builds report "dev": a literal version here goes stale (it
+    # read 0.5.0 on the v0.6.0 images). Published images carry the tag.
+    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "dev"
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
         "postgresql://dunetrace:dunetrace@localhost:5432/dunetrace",

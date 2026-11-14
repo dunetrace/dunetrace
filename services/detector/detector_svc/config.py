@@ -32,9 +32,10 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     # Build identity reported by dunetrace_build_info{service="detector"}.
     # Same convention as ingest_svc/api_svc: APP_VERSION (or GIT_COMMIT) is set
-    # in deploy; the fallback is the package version, so a source checkout is
-    # still identifiable.
-    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
+    # in deploy (published images carry the release tag).
+    # Unstamped builds report "dev": a literal version here goes stale (it
+    # read 0.5.0 on the v0.6.0 images). Published images carry the tag.
+    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "dev"
     # Port for the worker's /metrics, /ready and /health endpoints (served from
     # a daemon thread by dunetrace_schemas.metrics.start_metrics_server; not
     # published outside the compose network). 0 disables the server.

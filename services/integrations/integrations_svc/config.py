@@ -65,9 +65,10 @@ class Settings:
     WAKE_INTERVAL: float = float(os.getenv("WAKE_INTERVAL", "15"))
 
     # Build identity for dunetrace_build_info{service=...,version=...}. Same
-    # resolution as ingest_svc/api_svc: APP_VERSION, else GIT_COMMIT, else the
-    # package version. Set one of them in deploy to identify the build.
-    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
+    # resolution as ingest_svc/api_svc: APP_VERSION, else GIT_COMMIT, else "dev".
+    # Unstamped builds report "dev": a literal version here goes stale (it
+    # read 0.5.0 on the v0.6.0 images). Published images carry the tag.
+    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "dev"
     # Ports for each worker's own /metrics, /ready and /health (stdlib HTTP
     # server from dunetrace_schemas.metrics, bound on every interface so the
     # compose healthcheck and an in-network scraper can reach it; compose does

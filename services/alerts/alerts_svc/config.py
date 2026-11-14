@@ -103,7 +103,9 @@ class Settings:
 
     # Build identity, reported on dunetrace_build_info{service="alerts"}. Same
     # resolution order as ingest_svc/api_svc so one deploy sets it once.
-    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "0.5.0"
+    # Unstamped builds report "dev": a literal version here goes stale (it
+    # read 0.5.0 on the v0.6.0 images). Published images carry the tag.
+    APP_VERSION: str = os.getenv("APP_VERSION") or os.getenv("GIT_COMMIT") or "dev"
 
     # Prometheus /metrics + /ready + /health on a daemon thread (see
     # dunetrace_schemas.metrics.start_metrics_server). Not published by
