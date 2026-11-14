@@ -40,6 +40,13 @@ function ev(
   };
 }
 
+/** A span's parent id on either OpenTelemetry line (2.x replaced
+ *  `parentSpanId` with `parentSpanContext`). */
+function parentId(span: ReadableSpan): string | undefined {
+  const s = span as ReadableSpan & { parentSpanId?: string; parentSpanContext?: { spanId?: string } };
+  return s.parentSpanContext?.spanId ?? s.parentSpanId;
+}
+
 function spanByName(spans: ReadableSpan[], name: string): ReadableSpan | undefined {
   return spans.find((s) => s.name === name);
 }
@@ -111,7 +118,7 @@ describe("DunetraceOtelExporter — LLM span (GenAI conventions)", () => {
     expect(llm.kind).toBe(SpanKind.CLIENT);
     // parented onto the run span, same trace
     expect(llm.spanContext().traceId).toBe(run.spanContext().traceId);
-    expect(llm.parentSpanId).toBe(run.spanContext().spanId);
+    expect(parentId(llm)).toBe(run.spanContext().spanId);
     // current GenAI conventions, not deprecated gen_ai.system / prompt_tokens
     expect(llm.attributes["gen_ai.operation.name"]).toBe("chat");
     expect(llm.attributes["gen_ai.provider.name"]).toBe("openai");

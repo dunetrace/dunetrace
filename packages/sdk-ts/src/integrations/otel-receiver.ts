@@ -151,8 +151,16 @@ export class DunetraceOtelReceiver implements SpanExporter {
 
 // ── Span helpers ───────────────────────────────────────────────────────────────
 
+/** A span with no parent. OpenTelemetry 2.x replaced `parentSpanId` with
+ *  `parentSpanContext`; reading only the 1.x field made every span of a 2.x
+ *  pipeline a root, so a trace was emitted before its real root arrived and the
+ *  agent id came from whichever child sorted first. Read both. */
 function isRoot(span: ReadableSpan): boolean {
-  return !span.parentSpanId;
+  const s = span as ReadableSpan & {
+    parentSpanId?: string;
+    parentSpanContext?: { spanId?: string };
+  };
+  return !(s.parentSpanContext?.spanId ?? s.parentSpanId);
 }
 
 /** HrTime ([seconds, nanos]) to float milliseconds, for ordering and durations. */

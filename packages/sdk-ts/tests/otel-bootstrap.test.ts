@@ -51,6 +51,13 @@ afterEach(async () => {
   }
 });
 
+/** A span's parent id on either OpenTelemetry line (2.x replaced
+ *  `parentSpanId` with `parentSpanContext`). */
+function parentId(span: ReadableSpan): string | undefined {
+  const s = span as ReadableSpan & { parentSpanId?: string; parentSpanContext?: { spanId?: string } };
+  return s.parentSpanContext?.spanId ?? s.parentSpanId;
+}
+
 function enabledConfig(overrides: Partial<otel.OtelConfig> = {}): otel.OtelConfig {
   return otel.configFromEnv({ enabled: true, endpoint: "http://collector:4318/v1/traces", ...overrides }, {});
 }
@@ -171,10 +178,14 @@ describe("buildTracerProvider / init", () => {
     expect(otel.isEnabled()).toBe(true);
   });
 
-  it("stamps service, version, and org on the resource", () => {
+  it("stamps service, version, and org on the resource", async () => {
     const memory = new InMemorySpanExporter();
     otel.init(enabledConfig({ orgId: "org-9", serviceName: "svc" }), { exporterFactory: () => memory });
-    const attrs = otel.getTracerProvider()!.resource.attributes;
+    // Read the resource off an exported span: OpenTelemetry 2.x no longer
+    // exposes it on the provider, and the span is what a backend receives.
+    otel.getTracerProvider()!.getTracer("probe").startSpan("probe").end();
+    await otel.forceFlush();
+    const attrs = memory.getFinishedSpans()[0].resource.attributes;
     expect(attrs["service.name"]).toBe("svc");
     expect(attrs["dunetrace.org_id"]).toBe("org-9");
     // The SDK's own version, not service.version: that belongs to whoever
@@ -425,8 +436,8 @@ describe("Dunetrace client auto-wiring", () => {
     expect(root.spanContext().traceId).toBe(runId.replace(/-/g, ""));
     // The run span's own id is SDK-assigned; what the run carries is the id of
     // the synthetic parent it hangs under, which is how a backend finds it.
-    expect(root.parentSpanId).toBe(runId.replace(/-/g, "").slice(16));
-    expect(root.spanContext().spanId).not.toBe(root.parentSpanId);
+    expect(parentId(root)).toBe(runId.replace(/-/g, "").slice(16));
+    expect(root.spanContext().spanId).not.toBe(parentId(root));
     // captureContent=false came through from env: no URL on the tool span.
     const tool = spans.find((s) => s.name === "dunetrace.tool.lookup")!;
     expect(tool.attributes["url.full"]).toBeUndefined();

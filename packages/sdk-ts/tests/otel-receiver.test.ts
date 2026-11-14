@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { BasicTracerProvider, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import {
+  BasicTracerProvider,
+  SimpleSpanProcessor,
+  type ReadableSpan,
+  type SpanExporter,
+} from "@opentelemetry/sdk-trace-base";
 import { trace, context, SpanKind, SpanStatusCode, type Tracer, type Span } from "@opentelemetry/api";
 import { Dunetrace } from "../src/client.js";
 import { NoopBatchEmitter } from "../src/emitters.js";
@@ -196,6 +201,32 @@ describe("DunetraceOtelReceiver — trace assembly", () => {
     const { captured, tracer } = setup(); // no agentId
     const root = tracer.startSpan("my-cool-agent");
     child(tracer, root, "chat gpt-4o", { "gen_ai.request.model": "gpt-4o" });
+    root.end();
+    await flush();
+
+    expect(captured[0].agent_id).toBe("my-cool-agent");
+  });
+
+  it("assembles OpenTelemetry 1.x spans too (parentSpanId, no parentSpanContext)", async () => {
+    const captured: AgentEvent[] = [];
+    const dt = new Dunetrace({ exporter: { handle: (e) => captured.push(e) }, emitter: new NoopBatchEmitter() });
+    const receiver = new DunetraceOtelReceiver(dt, "");
+    // Re-shape each finished span the way the 1.x SDK delivered it.
+    const as1x = (s: ReadableSpan): ReadableSpan =>
+      Object.assign(Object.create(Object.getPrototypeOf(s)), s, {
+        parentSpanContext: undefined,
+        parentSpanId: s.parentSpanContext?.spanId,
+      });
+    const v1: SpanExporter = {
+      export: (spans, done) => receiver.export(spans.map(as1x), done),
+      shutdown: () => receiver.shutdown(),
+    };
+    const tracer = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(v1)] }).getTracer("v1-sim");
+
+    const root = tracer.startSpan("my-cool-agent");
+    child(tracer, root, "chat gpt-4o", { "gen_ai.request.model": "gpt-4o" });
+    await flush();
+    expect(captured).toHaveLength(0); // the child alone is held, not emitted as a run of its own
     root.end();
     await flush();
 
