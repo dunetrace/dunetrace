@@ -7,6 +7,7 @@ clone to a merged PR.
 
 - **[Good first issues](https://github.com/dunetrace/dunetrace/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)** —
   most are "add one structural detector," which is a clean, self-contained change.
+- **Stuck on setup or a missing signal?** See [docs/troubleshooting.md](docs/troubleshooting.md) before opening an issue.
 - **Adding a detector?** Follow the step-by-step
   [Adding a detector guide](docs/contributing/adding-a-detector.md) — it walks the
   full registration path (the one thing newcomers usually miss is regenerating
