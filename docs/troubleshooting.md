@@ -52,8 +52,9 @@ machine, `localhost` is that process's localhost, not the Dunetrace host — set
 `DUNETRACE_ENDPOINT` to an address reachable from the SDK (the compose service
 name is `ingest`).
 
-For the TypeScript SDK, pass `endpoint` and `apiKey` to the constructor rather
-than relying on the Python SDK's environment-variable names.
+The TypeScript SDK reads the same `DUNETRACE_ENDPOINT`, `DUNETRACE_API_KEY`
+and `DUNETRACE_DSN` environment variables; explicit constructor options
+(`endpoint`, `apiKey`, `dsn`) take precedence over them.
 
 ### 1.3 Did a run actually open?
 
@@ -90,8 +91,9 @@ dt.shutdown()          # Python
 await dt.shutdown()    # TypeScript
 ```
 
-For a quick check, `Dunetrace(debug=True)` logs every event as it is buffered
-and every batch as it is shipped.
+For a quick check, `Dunetrace(debug=True)` enables debug logging; the HTTP
+emitter logs each shipped batch with its event count and status. It does not
+log every buffered event.
 
 ### 1.5 Did ingest accept the batch?
 
@@ -116,6 +118,9 @@ curl -s localhost:8002/v1/agents
 curl -s "localhost:8002/v1/agents/<agent-id>/runs?limit=5"
 ```
 
+In dev mode these need no header. Against a production deployment, add
+`-H "Authorization: Bearer $DUNETRACE_ADMIN_KEY"` to both.
+
 A working run has `step_count` above zero. An agent that has never reported
 still returns `200` with an empty `runs` list, so check the list, not the
 status code.
@@ -136,8 +141,14 @@ mode, not broken detectors.
 View them in either place:
 
 ```bash
-curl -s "localhost:8002/v1/agents/<agent-id>/signals?include_shadow=true"
+# Add -H "Authorization: Bearer $DUNETRACE_ADMIN_KEY" in production.
+curl -s "localhost:8002/v1/agents/<agent-id>/signals?limit=500&include_shadow=true"
 ```
+
+The endpoint returns the agent's newest signals, not only the run you are
+debugging. The default page is 50 signals; `limit=500` reduces the chance of
+missing an older shadow signal. If `page.has_more` is true, request the next
+`offset`, and match the signal's `run_id` to the run you are debugging.
 
 The dashboard fetches all signals with `?include_shadow=true` and renders
 shadow signals below live alerts with a dashed border, reduced opacity and a
@@ -147,7 +158,17 @@ agent. See [Dashboard › Shadow signals](dashboard.md#shadow-signals).
 To promote a detector, add it to `LIVE_DETECTORS` in
 `packages/schemas-py/dunetrace_schemas/detector_status.py`. The file's rule is
 to do that only after verifying precision above 80% on real traffic. That is a
-code change: rebuild (or run from source) and restart the detector service.
+code change. The GHCR detector image copies this file at build time, so editing
+the host file and restarting the container does not pick it up. In a source
+checkout:
+
+```bash
+docker compose build detector
+docker compose up -d --force-recreate detector
+```
+
+The GHCR compose file only pulls a prebuilt image, so use the source compose
+file or run the detector from source.
 
 ### 2.2 Is the run implicit?
 
@@ -171,11 +192,14 @@ buffer/backpressure problem before judging the detector.
 
 ### 2.4 Does the detector need more history?
 
-Several baseline-based detectors need at least 20 historical runs before they
-can fire, including `CONTEXT_BLOAT`, `SLOW_STEP`, `STEP_COUNT_INFLATION`,
-`COST_SPIKE`, `REASONING_STALL` and `SESSION_LATENCY`. Before the baseline is
-ready they use a static fallback where one exists, and stay quiet where one
-does not. This is expected for a new agent.
+Several baseline-based detectors need at least 20 **clean** historical runs
+before they can fire, including `CONTEXT_BLOAT`, `SLOW_STEP`,
+`STEP_COUNT_INFLATION`, `COST_SPIKE`, `REASONING_STALL` and
+`SESSION_LATENCY`. A run counts only if it reached `run.completed` and produced
+no live signal, for the same `agent_id` + `agent_version`; shadow signals do
+not disqualify it. The P75 is computed from the last 50 such runs. Before the
+baseline is ready they use a static fallback where one exists, and stay quiet
+where one does not. This is expected for a new agent.
 
 The detector worker polls every 5 seconds (`POLL_INTERVAL`). The dashboard
 refreshes every 15 seconds. A signal can therefore take a few seconds to
@@ -225,14 +249,15 @@ docker compose -f docker-compose.ghcr.yml restart detector alerts ingest
 per-detector `alert_policy`, and `ingest` serves the merged thresholds to the
 SDK's in-path detector pass at `GET /v1/detector-config`.
 
-### 3.3 Is an agent-category override hiding the default?
+### 3.3 Is an agent-id override hiding the default?
 
-`detectors.yml` supports per-agent-category sections. The worker builds each
-detector from the `default` section plus the agent's category section, falling
-back to `default` when no matching section exists. If you added an override
-under a category name the agent is not tagged with, it will not apply. The
-commented examples in the file show `web-research` and `coding`; the full
-model is in [Detectors › Tuning thresholds](detectors.md#tuning-thresholds).
+`detectors.yml` supports per-agent sections keyed by the exact `agent_id`.
+The worker passes the run's `agent_id` directly to `get_detectors`, which
+merges the `default` section with the section whose key equals that ID; if
+none matches, only `default` applies. An override under a category name or tag
+that is not the exact `agent_id` will be ignored. The commented examples in
+the file show `web-research` and `coding` as possible IDs; the full model is
+in [Detectors › Tuning thresholds](detectors.md#tuning-thresholds).
 
 ### 3.4 Is the detector still shadow?
 
@@ -272,14 +297,19 @@ running service, not just in `.env`:
 
 ```bash
 docker compose -f docker-compose.ghcr.yml ps
-docker compose -f docker-compose.ghcr.yml logs --tail=50 ingest api
+docker compose -f docker-compose.ghcr.yml exec ingest env \
+  | grep -E '^(ENV|AUTH_MODE)='
+docker compose -f docker-compose.ghcr.yml exec api env \
+  | grep -E '^(ENV|AUTH_MODE)='
 ```
 
-A service logging `auth_mode=dev` is unauthenticated; a service logging
-`auth_mode=prod` requires a key. `.env` is read by compose for interpolation,
-not injected into containers as a file; a variable only reaches a service if
-that service's `environment:` block names it. See [`.env.example`](../.env.example)
-for the full explanation.
+A service printing `AUTH_MODE=dev` is unauthenticated; `AUTH_MODE=prod`
+requires a key. If a service cannot start, use `logs --tail=50 ingest api`
+and look for the startup `auth_mode=...` line instead.
+
+`.env` is read by compose for interpolation, not injected into containers as a
+file; a variable only reaches a service if that service's `environment:` block
+names it. See [`.env.example`](../.env.example) for the full explanation.
 
 ### 4.2 Production returns 401
 
@@ -288,18 +318,22 @@ for the full explanation.
 call is missing its trusted org header. Check the agent's `DUNETRACE_API_KEY`
 and that it is sent as `Authorization: Bearer <key>`.
 
-Keys are minted in two steps. First bootstrap an admin key from ingest, using
-the deployment's `ADMIN_API_KEY`:
+Keys are minted in two steps. Export the deployment's bootstrap secret in
+your shell first; compose reads `.env` for interpolation, but it does not
+populate the shell that runs `curl`. Then call ingest:
 
 ```bash
+export ADMIN_API_KEY='<value from the deployment secret>'
 curl -X POST http://localhost:8001/v1/keys \
   -H 'Content-Type: application/json' \
   -d '{"org_id": "my-company", "org_name": "My Company", "admin_key": "'"$ADMIN_API_KEY"'"}'
 ```
 
-Then mint a narrower key for the agent:
+The response's `key` field is the admin key, returned once. Save it, then use
+it to mint a narrower key for the agent:
 
 ```bash
+export DUNETRACE_ADMIN_KEY='<key returned above>'
 curl -X POST http://localhost:8002/v1/keys \
   -H "Authorization: Bearer $DUNETRACE_ADMIN_KEY" \
   -H 'Content-Type: application/json' \
@@ -373,7 +407,10 @@ Also include:
 - the agent ID and run ID (the dashboard's run detail has a copy-ID button);
 - `step_count`, `signal_count`, `dropped_events` and whether the run is
   `implicit`;
-- the `Dunetrace(debug=True)` output around the failing call.
+- the `Dunetrace(debug=True)` logs around the failing call.
 
-If the run is visible but the signal is not, include the output of
-`/v1/agents/<agent-id>/signals?include_shadow=true` for that run.
+If the run is visible but the signal is not, include the matching signal from
+`/v1/agents/<agent-id>/signals?include_shadow=true`. That endpoint returns the
+agent's newest signals, not a single run's; select the entry whose `run_id`
+matches the run you are debugging, and redact customer data, emails, URLs,
+prompts, tool outputs and credentials before posting.
