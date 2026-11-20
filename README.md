@@ -118,6 +118,7 @@ Plain code: [custom Python agent](docs/integrate-custom-python-agent.md) ·
   this machine (another container, a server), set `DUNETRACE_ENDPOINT` to the ingest URL.
 - Runs appear but never any failures: wrap the entry point (above), since implicit runs stay in shadow.
 - Still stuck: `/dunetrace-setup` also debugs integrations that send no events.
+- Step-by-step checks: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 More demos (LangChain, the Vercel AI SDK on local Ollama, approvals, policies, agent memory,
 voice) → [examples index](examples/README.md). Deploying beyond localhost →
