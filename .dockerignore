@@ -1,5 +1,5 @@
 # Build context exclusions. Every image in this repo builds with `context: .`
-# (services/*/Dockerfile and the legacy root Dockerfile), so without this file
+# (services/*/Dockerfile), so without this file
 # the whole working tree — host caches, virtualenvs, screenshots and the real
 # .env — is uploaded to the daemon and anything a COPY happens to cover is
 # baked into the published image.
