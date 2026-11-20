@@ -158,16 +158,21 @@ Work down this list. The first two cover almost every case.
 
 1. **Was a run open?** See the callout in step 3. Check the
    `requires_run_context` line at the top of your framework's guide.
-2. **Did the process flush?** Events ship from a background thread. Call
-   `dt.shutdown()` (Python) or `await dt.shutdown()` (TypeScript) before exit.
+2. **Did the process flush?** A normal exit flushes on its own. A process that
+   is killed, exits through `os._exit()` / `process.exit()`, or is frozen (a
+   serverless function after it returns) does not: call `dt.shutdown()`
+   (Python) or `await dt.shutdown()` (TypeScript) before that happens.
 3. **Is the backend reachable?** Re-run the `/ready` checks from step 1.
-4. **Turn on debug logging.** `Dunetrace(debug=True)`.
+4. **Watch the events.** `emit_as_json=True` (Python) or `emitAsJson: true`
+   (TypeScript) prints every event as a JSON line; `Dunetrace(debug=True)`
+   (Python) also logs each batch as it ships.
 
 Runs appearing with no signals is usually correct rather than a fault. A healthy
-run produces none, and several detectors stay dormant until the agent has enough
-history to build baselines.
+run produces none, and only `STEP_COUNT_INFLATION` waits for run history; the
+other detectors use static thresholds until a baseline exists.
 
-Each integration guide has a fuller "If nothing arrives" section.
+Each integration guide has a fuller "If nothing arrives" section, and
+[Troubleshooting](troubleshooting.md) works through every case step by step.
 
 ---
 

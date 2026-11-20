@@ -58,19 +58,18 @@ Work down this list. The first two cover almost every case.
 
 1. **Is a run open?** Confirm "Allow assistant logs" is enabled and the tracing URL is reachable from Langdock's servers, not a loopback address.
 
-2. **Did the process flush?** Events ship from a background thread. Call
-   `await dt.shutdown()` before the process exits, or the buffer dies with it.
-
-3. **Did the traces reach ingest?**
+2. **Did the traces reach ingest?**
 
    ```bash
    docker compose logs ingest --tail=20   # look for "OTLP traces received"
    ```
 
 **Runs appear but no signals?** That is usually correct, not a fault. The
-detector polls every 5 seconds, and a healthy run produces no signals. Several
-detectors also need cross-run baselines and stay dormant until the agent has
-run history. Check `docker compose logs detector` if you expected one.
+detector polls every 5 seconds, and a healthy run produces no signals. Only
+`STEP_COUNT_INFLATION` waits for run history (20 clean runs); the other
+detectors use static thresholds until a baseline exists. Check
+`docker compose logs detector` if you expected one, and see
+[Troubleshooting](troubleshooting.md#2-my-run-completed-but-i-see-no-signals).
 
 ---
 

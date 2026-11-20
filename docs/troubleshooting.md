@@ -150,10 +150,10 @@ happens:
 - for an [implicit run](#22-is-the-run-implicit), after the SDK closes it on
   30 seconds without events;
 - for a run whose process died before sending a terminal event, after
-  `STALL_TIMEOUT_SECS` without events (60 seconds in the compose files).
+  `STALL_TIMEOUT_SECS` without events (90 seconds as `.env.example` sets it).
 
-So a run that is still open, or closed a moment ago, can be missing for up to a
-minute. Then check the run itself:
+So a run that is still open, or closed a moment ago, can be missing for a
+minute or more. Then check the run itself:
 
 ```bash
 curl -s localhost:8002/v1/agents
@@ -469,8 +469,8 @@ show it.
 
 Two longer waits are also built in. An implicit run closes only after 30
 seconds without events, and a run whose process died before sending
-`run.completed` is processed only after `STALL_TIMEOUT_SECS` (60 seconds in
-the compose files) without events. Neither shows up in the runs list, or
+`run.completed` is processed only after `STALL_TIMEOUT_SECS` (90 seconds as
+`.env.example` sets it) without events. Neither shows up in the runs list, or
 produces signals, before then.
 
 If it is longer than that:

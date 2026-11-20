@@ -1225,7 +1225,10 @@ Fires once per run, on the first handoff tool that matches.
 
 **Data-availability note**: the empty/short checks need `tool_responded`'s
 `success` and `output`/`output_length` to be instrumented. A handoff tool call
-with no recorded response (`success=None`) is never flagged.
+with no recorded response (`success=None`) is never flagged. The reverse trap:
+a `tool_responded()` call that passes neither `output=` nor `output_length=`
+records a length of `0`, so every such handoff fires `short_output`. Pass one
+of the two for handoff tools.
 
 #### Severity
 

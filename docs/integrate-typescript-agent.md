@@ -300,8 +300,11 @@ Work down this list. The first two cover almost every case.
 
 1. **Is a run open?** This integration opens its own run, so there is nothing to wrap. Confirm `autoInstrument()` (or the client wrapper) actually ran, and ran **before** the first LLM call. Without it the run carries `dt.tool()` calls but no LLM calls.
 
-2. **Did the process flush?** Events ship from a background thread. Call
-   `await dt.shutdown()` before the process exits, or the buffer dies with it.
+2. **Did the process flush?** A normal exit flushes what is still buffered, but
+   a process that is killed, exits through `process.exit()`, or is frozen (a
+   serverless function after it returns) loses it. Call `await dt.shutdown()`
+   before the process ends, or `await dt.flush()` before a handler returns. See
+   [Troubleshooting](troubleshooting.md#14-did-the-process-flush-before-exit).
 
 3. **Is the backend reachable?** Both should return `{"status":"ok",...}`:
 
@@ -318,13 +321,15 @@ Work down this list. The first two cover almost every case.
    curl -s "localhost:8002/v1/agents/<your-agent-id>/runs?limit=5"
    ```
 
-5. **Turn on debug logging.** `new Dunetrace({ debug: true })` logs every event as it is buffered and
-   every batch as it ships.
+5. **Watch the events.** `new Dunetrace({ emitAsJson: true })` also prints every
+   event as a JSON line.
 
 **Runs appear but no signals?** That is usually correct, not a fault. The
-detector polls every 5 seconds, and a healthy run produces no signals. Several
-detectors also need cross-run baselines and stay dormant until the agent has
-run history. Check `docker compose logs detector` if you expected one.
+detector polls every 5 seconds, and a healthy run produces no signals. Only
+`STEP_COUNT_INFLATION` waits for run history (20 clean runs); the other
+detectors use static thresholds until a baseline exists. Check
+`docker compose logs detector` if you expected one, and see
+[Troubleshooting](troubleshooting.md#2-my-run-completed-but-i-see-no-signals).
 
 ---
 
