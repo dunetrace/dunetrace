@@ -193,6 +193,24 @@ class TestInlineScriptHash(unittest.TestCase):
         self.assertEqual(cds.expected_script_hashes(b'<script src="a.js"></script>'), [])
         self.assertEqual(cds.extract_inline_scripts(b"<SCRIPT>x()</SCRIPT>"), [b"x()"])
 
+    def test_end_tag_variants_the_browser_accepts_end_the_script(self):
+        """A browser ends script data at '</script' + whitespace, '/' or '>'.
+        A bare '</script>' pattern ran past these, hashing bytes the browser
+        never executes as part of the script."""
+        for end in (
+            b"</script >",
+            b"</script\n>",
+            b"</script\t\n bar>",
+            b"</script/>",
+            b"</SCRIPT >",
+        ):
+            html = b"<script>x()" + end + b"<p>after</p><script>y()</script>"
+            self.assertEqual(cds.extract_inline_scripts(html), [b"x()", b"y()"], end)
+        # '</scriptx>' is not an end tag: it stays inside the script body.
+        self.assertEqual(
+            cds.extract_inline_scripts(b"<script>a</scriptx>b</script>"), [b"a</scriptx>b"]
+        )
+
     def test_matching_hash_passes(self):
         html = build_html()
         nginx = build_nginx(hash_of(html))

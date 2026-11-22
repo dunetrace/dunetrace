@@ -41,20 +41,20 @@ def mock_db(monkeypatch):
         AsyncMock(side_effect=lambda events, batch_id, org_id: len(events)),
     )
     # Patched where routers/ingest.py actually looks it up (`from ingest_svc.db
-    # import verify_api_key` binds a local name there) — patching
-    # ingest_svc.db.postgres.verify_api_key instead is a no-op, since that
+    # import org_id_for_key` binds a local name there) — patching
+    # ingest_svc.db.postgres.org_id_for_key instead is a no-op, since that
     # module-level binding was already copied before this fixture runs.
-    # verify_api_key returns org_id (not agent_id) since v0.5.0 — keys are
+    # org_id_for_key returns org_id (not agent_id) since v0.5.0 — keys are
     # org-scoped, agent_id is just per-event data, unrelated to which key sent it.
     monkeypatch.setattr(
-        "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value="org-test")
+        "ingest_svc.routers.ingest.org_id_for_key", AsyncMock(return_value="org-test")
     )
     # BOTH call sites, because in production they are the same function called
     # with the same key. set_org_context (main.py) verifies first and caches the
     # result on request.state; _resolve_org_id reuses it rather than repeating
     # an uncached api_keys SELECT on the hot path. Patching only the route's
     # binding left the two disagreeing, which no real deployment can do.
-    monkeypatch.setattr("ingest_svc.main.verify_api_key", AsyncMock(return_value="org-test"))
+    monkeypatch.setattr("ingest_svc.main.org_id_for_key", AsyncMock(return_value="org-test"))
 
 
 @pytest.fixture
@@ -287,20 +287,20 @@ class TestValidation:
 class TestAuth:
     async def test_invalid_key_returns_401(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+            "ingest_svc.routers.ingest.org_id_for_key", AsyncMock(return_value=None)
         )
         r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_bad"))
         assert r.status_code == 401
 
     async def test_401_has_detail(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+            "ingest_svc.routers.ingest.org_id_for_key", AsyncMock(return_value=None)
         )
         r = await client.post("/v1/ingest", json=make_batch(api_key="dt_live_bad"))
         assert "detail" in r.json()
 
     async def test_valid_key_accepted(self, client):
-        # mock_db fixture patches verify_api_key to return "agent-xyz",
+        # mock_db fixture patches org_id_for_key to return "agent-xyz",
         # matching make_batch()'s default agent_id
         r = await client.post("/v1/ingest", json=make_batch())
         assert r.status_code == 202
@@ -331,7 +331,7 @@ class TestAuth:
 # that ran the DB check would 401 regardless of key validity. See
 # ingest_svc/auth.py::is_trusted.
 #
-# mock_db's default verify_api_key mock unconditionally returns "agent-xyz"
+# mock_db's default org_id_for_key mock unconditionally returns "agent-xyz"
 # regardless of the api_key passed in, so "still enforces" tests below must
 # explicitly override it to return None to simulate a bad/unresolvable key —
 # they can no longer rely on an unmocked lookup naturally failing.
@@ -376,7 +376,7 @@ class TestTrustedGateway:
     async def test_missing_trusted_header_still_enforces_api_keys_check(self, client, monkeypatch):
         monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
         monkeypatch.setattr(
-            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+            "ingest_svc.routers.ingest.org_id_for_key", AsyncMock(return_value=None)
         )
 
         r = await client.post("/v1/ingest", json=make_batch(api_key="not-a-dev-key"))
@@ -385,7 +385,7 @@ class TestTrustedGateway:
     async def test_wrong_trusted_token_still_enforces_api_keys_check(self, client, monkeypatch):
         monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
         monkeypatch.setattr(
-            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+            "ingest_svc.routers.ingest.org_id_for_key", AsyncMock(return_value=None)
         )
 
         r = await client.post(
@@ -399,7 +399,7 @@ class TestTrustedGateway:
         # INTERNAL_TOKEN unset (dev default "") — is_trusted() must return
         # False even if a client sends an empty x-internal-token header.
         monkeypatch.setattr(
-            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+            "ingest_svc.routers.ingest.org_id_for_key", AsyncMock(return_value=None)
         )
 
         r = await client.post(
@@ -424,7 +424,7 @@ class TestTrustedGateway:
     ):
         monkeypatch.setattr("ingest_svc.config.settings.INTERNAL_TOKEN", "shared-secret")
         monkeypatch.setattr(
-            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+            "ingest_svc.routers.ingest.org_id_for_key", AsyncMock(return_value=None)
         )
 
         r = await client.post(
@@ -535,7 +535,7 @@ class TestRateLimitMiddleware:
         # agent_remaining must be genuinely absent from the response, not the
         # header present with value "None".
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         for _ in range(3):
             await client.post(
@@ -667,7 +667,7 @@ class TestPolicyFetchAuth:
             seen.append(key)
             return "org-1"
 
-        monkeypatch.setattr("ingest_svc.routers.ingest.verify_api_key", _spy)
+        monkeypatch.setattr("ingest_svc.routers.ingest.org_id_for_key", _spy)
         await client.get(
             "/v1/policies",
             params={"agent_id": "agent-xyz", "api_key": "from-query"},
@@ -680,41 +680,41 @@ class TestPolicyFetchAuth:
         assert r.status_code == 401
 
 
-# ── verify_api_key (real implementation, not the router-level mock) ────────────
+# ── org_id_for_key (real implementation, not the router-level mock) ────────────
 
 
 class TestVerifyApiKeyDevMode:
     async def test_dev_mode_dt_dev_key_resolves_to_default_org(self, monkeypatch):
-        from ingest_svc.db.postgres import verify_api_key
+        from ingest_svc.db.postgres import org_id_for_key
 
         monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "dev")
-        assert await verify_api_key("dt_dev_anything") == "default"
+        assert await org_id_for_key("dt_dev_anything") == "default"
 
     async def test_dev_mode_empty_key_resolves_to_default_org(self, monkeypatch):
-        from ingest_svc.db.postgres import verify_api_key
+        from ingest_svc.db.postgres import org_id_for_key
 
         monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "dev")
-        assert await verify_api_key("") == "default"
+        assert await org_id_for_key("") == "default"
 
     async def test_non_dev_mode_dt_dev_key_is_not_special_cased(self, monkeypatch):
         # dt_dev_* is only a wildcard in dev mode (is_dev checks AUTH_MODE, the
         # same knob api_svc uses — not ENV). In prod, it's just a string that
         # won't match any row
         # and correctly resolves to no org.
-        from ingest_svc.db.postgres import verify_api_key
+        from ingest_svc.db.postgres import org_id_for_key
 
         monkeypatch.setattr("ingest_svc.db.postgres.settings.AUTH_MODE", "prod")
         monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
-        assert await verify_api_key("dt_dev_anything") is None
+        assert await org_id_for_key("dt_dev_anything") is None
 
     async def test_db_error_never_logs_the_raw_api_key(self, monkeypatch, caplog):
         """CodeQL: clear-text logging of sensitive info. Some DB drivers embed
         bound parameter values in their exception's string representation —
-        verify_api_key() must log only the exception type, never str(exc) or
+        org_id_for_key() must log only the exception type, never str(exc) or
         the key itself, even when the underlying error object does contain it."""
         import logging
 
-        from ingest_svc.db.postgres import verify_api_key
+        from ingest_svc.db.postgres import org_id_for_key
 
         secret_key = "dt_live_super_secret_value_12345"
 
@@ -742,7 +742,7 @@ class TestVerifyApiKeyDevMode:
         monkeypatch.setattr("ingest_svc.db.postgres._pool", _FakePool())
 
         with caplog.at_level(logging.ERROR, logger="dunetrace.ingest.db"):
-            result = await verify_api_key(secret_key)
+            result = await org_id_for_key(secret_key)
 
         assert result is None
         assert secret_key not in caplog.text
@@ -1431,7 +1431,7 @@ def _json_otlp_body(agent_id: str = "otlp-agent") -> dict:
 class TestOtlpEndpoint:
     async def test_json_body_accepted(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         r = await client.post(
             "/v1/otlp/traces",
@@ -1443,7 +1443,7 @@ class TestOtlpEndpoint:
 
     async def test_protobuf_body_accepted(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         r = await client.post(
             "/v1/otlp/traces",
@@ -1461,7 +1461,7 @@ class TestOtlpEndpoint:
         import json as _json
 
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         compressed = _gzip.compress(_json.dumps(_json_otlp_body()).encode())
         r = await client.post(
@@ -1479,7 +1479,7 @@ class TestOtlpEndpoint:
         import gzip as _gzip
 
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         compressed = _gzip.compress(_protobuf_export_request_bytes())
         r = await client.post(
@@ -1495,7 +1495,7 @@ class TestOtlpEndpoint:
 
     async def test_malformed_json_returns_400(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         r = await client.post(
             "/v1/otlp/traces",
@@ -1506,7 +1506,7 @@ class TestOtlpEndpoint:
 
     async def test_malformed_protobuf_returns_400(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         r = await client.post(
             "/v1/otlp/traces",
@@ -1520,7 +1520,7 @@ class TestOtlpEndpoint:
 
     async def test_malformed_gzip_returns_400(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         r = await client.post(
             "/v1/otlp/traces",
@@ -1534,7 +1534,7 @@ class TestOtlpEndpoint:
         assert r.status_code == 400
 
     async def test_invalid_api_key_returns_401(self, client, monkeypatch):
-        monkeypatch.setattr("ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value=None))
+        monkeypatch.setattr("ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value=None))
         r = await client.post(
             "/v1/otlp/traces",
             json=_json_otlp_body(),
@@ -1562,7 +1562,7 @@ class TestOtlpEndpoint:
 
     async def test_empty_resource_spans_returns_200_without_persisting(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         r = await client.post(
             "/v1/otlp/traces",
@@ -1580,7 +1580,7 @@ class TestOtlpEndpoint:
         store = InMemoryEventStore()
         set_event_store(store)
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         try:
             r = await client.post(
@@ -1610,7 +1610,7 @@ class TestOtlpRateLimiting:
 
     async def test_otlp_traces_is_rate_limited(self, client, fresh_limiter, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         for _ in range(3):
             r = await client.post(
@@ -1634,7 +1634,7 @@ class TestOtlpRateLimiting:
         every request (which would make two different real keys share
         one quota)."""
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-test")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-test")
         )
         for _ in range(3):
             await client.post(

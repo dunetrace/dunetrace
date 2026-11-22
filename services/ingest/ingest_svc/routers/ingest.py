@@ -21,8 +21,8 @@ from ingest_svc.db import (
     get_pool,
     insert_deploy_event,
     scrub_old_signal_evidence,
-    verify_api_key,
-    create_api_key,
+    org_id_for_key,
+    mint_key,
     fetch_policies,
     get_agent_quota,
     set_agent_quota,
@@ -109,7 +109,7 @@ async def _resolve_org_id(request: Request, api_key: str) -> str:
             )
         return org_id
 
-    # Deliberately NOT reusing set_org_context's earlier verify_api_key result,
+    # Deliberately NOT reusing set_org_context's earlier org_id_for_key result,
     # even though it is the same function called with the same key one layer
     # up. Caching it on request.state would make this route's AUTHENTICATION
     # decision depend on middleware state: the middleware only parses the body
@@ -117,7 +117,7 @@ async def _resolve_org_id(request: Request, api_key: str) -> str:
     # turns into a silent authorisation, and a caller rejected here could be
     # admitted by a stale cache. One extra indexed lookup on a hashed key is a
     # fair price for keeping the auth decision self-contained.
-    org_id = await verify_api_key(api_key)
+    org_id = await org_id_for_key(api_key)
     if org_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -335,7 +335,7 @@ async def create_key(body: KeyCreateRequest) -> KeyCreateResponse:
     _check_admin_key(body.admin_key)
     name = body.org_name or body.org_id
     scopes = body.scopes if body.scopes is not None else [ADMIN]
-    created = await create_api_key(
+    created = await mint_key(
         body.org_id, org_name=name, rate_limit_rpm=body.rate_limit_rpm, scopes=scopes
     )
     # key_prefix is the non-secret identifier GET /v1/keys lists; the key

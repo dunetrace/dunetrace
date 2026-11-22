@@ -8,7 +8,7 @@ from .event_store import (
 from .postgres import (
     check_db,
     close_pool,
-    create_api_key,
+    mint_key,
     ensure_schema,
     fetch_otel_ingestion_enabled,
     flush_otel_stats,
@@ -22,14 +22,14 @@ from .postgres import (
     scrub_old_signal_evidence,
     set_agent_quota,
     set_otel_ingestion_enabled,
-    verify_api_key,
+    org_id_for_key,
 )
 
 __all__ = [
     "init_pool",
     "close_pool",
     "check_db",
-    "create_api_key",
+    "mint_key",
     "ensure_schema",
     "fetch_policies",
     "get_agent_quota",
@@ -42,7 +42,7 @@ __all__ = [
     "retention_looks_stale",
     "scrub_old_signal_evidence",
     "set_agent_quota",
-    "verify_api_key",
+    "org_id_for_key",
     "EventStore",
     "PostgresEventStore",
     "InMemoryEventStore",

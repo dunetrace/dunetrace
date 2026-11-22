@@ -11,10 +11,10 @@ no admin key could ever exist.
 
 Two layers here:
 
-* Route tests — ``create_api_key`` is patched where the router binds it
-  (``ingest_svc.routers.ingest.create_api_key``) with a fake that records the
+* Route tests — ``mint_key`` is patched where the router binds it
+  (``ingest_svc.routers.ingest.mint_key``) with a fake that records the
   scopes it was handed and normalises them exactly as the real function does.
-* DB tests — the real ``create_api_key`` against a mock asyncpg pool, asserting
+* DB tests — the real ``mint_key`` against a mock asyncpg pool, asserting
   the INSERT carries the normalised scopes array.
 
 DB is mocked — no Postgres needed. Reuses test_ingest.py's mock_db/client
@@ -54,7 +54,7 @@ def admin_env(monkeypatch):
 
 @pytest.fixture
 def fake_create(monkeypatch):
-    """Stand-in for ingest_svc.db.postgres.create_api_key, patched where
+    """Stand-in for ingest_svc.db.postgres.mint_key, patched where
     routers/ingest.py looks it up. Records every call and returns the same
     shape the real function does, normalising scopes the same way — so a route
     test asserts both what the route *asks for* and what the caller *sees*."""
@@ -78,7 +78,7 @@ def fake_create(monkeypatch):
             "scopes": list(normalise(scopes)),
         }
 
-    monkeypatch.setattr("ingest_svc.routers.ingest.create_api_key", _fake)
+    monkeypatch.setattr("ingest_svc.routers.ingest.mint_key", _fake)
     return calls
 
 
@@ -199,7 +199,7 @@ class TestBootstrapKeyAdminGate:
         assert fake_create == []
 
 
-# ── DB layer: postgres.py::create_api_key writes scopes ────────────────────────
+# ── DB layer: postgres.py::mint_key writes scopes ────────────────────────
 
 
 def _txn_pool(monkeypatch):
@@ -226,9 +226,9 @@ class TestCreateApiKeyWritesScopes:
         """The bug: this INSERT omitted the scopes column, so the DB default
         (ARRAY['ingest']) always won."""
         conn = _txn_pool(monkeypatch)
-        from ingest_svc.db.postgres import create_api_key
+        from ingest_svc.db.postgres import mint_key
 
-        created = await create_api_key("org-a", scopes=["Admin", "bogus", "admin"])
+        created = await mint_key("org-a", scopes=["Admin", "bogus", "admin"])
 
         sql, *params = _api_keys_insert(conn)
         assert "scopes" in sql
@@ -240,9 +240,9 @@ class TestCreateApiKeyWritesScopes:
         same ingest-only default the Customer API's create_api_key has. Asking
         for admin is the bootstrap *route's* decision, not this function's."""
         conn = _txn_pool(monkeypatch)
-        from ingest_svc.db.postgres import create_api_key
+        from ingest_svc.db.postgres import mint_key
 
-        created = await create_api_key("org-a")
+        created = await mint_key("org-a")
 
         sql, *params = _api_keys_insert(conn)
         assert params[-1] == ["ingest"]
@@ -250,9 +250,9 @@ class TestCreateApiKeyWritesScopes:
 
     async def test_all_unknown_falls_back_to_ingest(self, monkeypatch):
         conn = _txn_pool(monkeypatch)
-        from ingest_svc.db.postgres import create_api_key
+        from ingest_svc.db.postgres import mint_key
 
-        created = await create_api_key("org-a", scopes=["superuser"])
+        created = await mint_key("org-a", scopes=["superuser"])
 
         _sql, *params = _api_keys_insert(conn)
         assert params[-1] == ["ingest"]
@@ -262,9 +262,9 @@ class TestCreateApiKeyWritesScopes:
         from dunetrace_schemas.keys import hash_api_key, key_prefix
 
         conn = _txn_pool(monkeypatch)
-        from ingest_svc.db.postgres import create_api_key
+        from ingest_svc.db.postgres import mint_key
 
-        created = await create_api_key("org-a", org_name="Org A", rate_limit_rpm=900, scopes=None)
+        created = await mint_key("org-a", org_name="Org A", rate_limit_rpm=900, scopes=None)
 
         assert created["key"].startswith("dt_")
         assert created["key_prefix"] == key_prefix(created["key"])
@@ -280,7 +280,7 @@ class TestCreateApiKeyWritesScopes:
 
     async def test_raises_when_no_pool(self, monkeypatch):
         monkeypatch.setattr("ingest_svc.db.postgres._pool", None)
-        from ingest_svc.db.postgres import create_api_key
+        from ingest_svc.db.postgres import mint_key
 
         with pytest.raises(RuntimeError, match="pool not ready"):
-            await create_api_key("org-a", scopes=["admin"])
+            await mint_key("org-a", scopes=["admin"])

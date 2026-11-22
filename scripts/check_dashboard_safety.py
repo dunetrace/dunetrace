@@ -92,8 +92,15 @@ FORBIDDEN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 # An inline <script> (no src= attribute) and its body. Bytes, because the CSP
 # hash is over the exact bytes the browser receives.
+#
+# The end tag is matched the way the HTML tokenizer ends script data: "</script"
+# followed by whitespace, '/' or '>', then anything up to the '>'. A bare
+# "</script>" missed "</script >" and "</script\n>", which a browser treats as
+# the end of the script — the body extracted here would then run on past it,
+# and the hash would no longer be over the bytes the browser executes.
 _INLINE_SCRIPT_RE = re.compile(
-    rb"<script(?P<attrs>\s[^>]*)?>(?P<body>.*?)</script>", re.DOTALL | re.IGNORECASE
+    rb"<script(?P<attrs>\s[^>]*)?>(?P<body>.*?)</script(?:[\t\n\f\r /][^>]*)?>",
+    re.DOTALL | re.IGNORECASE,
 )
 _SRC_ATTR_RE = re.compile(rb"\bsrc\s*=", re.IGNORECASE)
 
@@ -151,7 +158,8 @@ def scan_dashboard_dir(root: Path) -> list[str]:
 
 def extract_inline_scripts(html: bytes) -> list[bytes]:
     """Bodies of every <script> without a src= attribute, as raw bytes — the
-    exact bytes between the opening tag's '>' and '</script>'."""
+    exact bytes between the opening tag's '>' and the end tag (any of
+    '</script>', '</script >', '</script\n>' …)."""
     bodies: list[bytes] = []
     for m in _INLINE_SCRIPT_RE.finditer(html):
         attrs = m.group("attrs") or b""
