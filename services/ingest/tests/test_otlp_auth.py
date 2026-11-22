@@ -98,7 +98,7 @@ def _otlp_body(resource_attrs=None):
 class TestAuthAccepted:
     async def test_bearer_key(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-1")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-1")
         )
         r = await client.post(
             "/v1/otlp/traces", json=_otlp_body(), headers={"Authorization": "Bearer good-key"}
@@ -107,7 +107,7 @@ class TestAuthAccepted:
 
     async def test_x_dunetrace_api_key_header(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-1")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-1")
         )
         r = await client.post(
             "/v1/otlp/traces", json=_otlp_body(), headers={"X-Dunetrace-API-Key": "good-key"}
@@ -120,7 +120,7 @@ class TestAuthAccepted:
         async def verify(key):
             return "org-1" if key == "rkey" else None
 
-        monkeypatch.setattr("ingest_svc.routers.otlp.verify_api_key", AsyncMock(side_effect=verify))
+        monkeypatch.setattr("ingest_svc.routers.otlp.org_id_for_key", AsyncMock(side_effect=verify))
         body = _otlp_body(
             resource_attrs=[
                 {"key": "service.name", "value": {"stringValue": "a"}},
@@ -133,7 +133,7 @@ class TestAuthAccepted:
 
 class TestAuthRejected:
     async def test_invalid_key_rejected_401(self, client, monkeypatch, store):
-        monkeypatch.setattr("ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value=None))
+        monkeypatch.setattr("ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value=None))
         r = await client.post(
             "/v1/otlp/traces", json=_otlp_body(), headers={"Authorization": "Bearer bad"}
         )
@@ -142,7 +142,7 @@ class TestAuthRejected:
         store.insert_events.assert_not_called()
 
     async def test_missing_auth_rejected_when_key_invalid(self, client, monkeypatch):
-        monkeypatch.setattr("ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value=None))
+        monkeypatch.setattr("ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value=None))
         r = await client.post("/v1/otlp/traces", json=_otlp_body())
         assert r.status_code == 401
 
@@ -171,7 +171,7 @@ class TestTrusted:
 class TestMalformed:
     async def test_malformed_json_400(self, client, monkeypatch, store):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-1")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-1")
         )
         r = await client.post(
             "/v1/otlp/traces",
@@ -188,7 +188,7 @@ class TestMalformed:
 class TestEnablement:
     async def test_disabled_org_rejected_403(self, client, monkeypatch, store):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-1")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-1")
         )
         monkeypatch.setattr(
             "ingest_svc.routers.otlp.fetch_otel_ingestion_enabled", AsyncMock(return_value=False)
@@ -253,7 +253,7 @@ class TestFailureIsolation:
 
     async def test_oversized_body_413(self, client, monkeypatch, store):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-1")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-1")
         )
         monkeypatch.setattr("ingest_svc.config.settings.OTLP_MAX_BODY_BYTES", 50)
         r = await client.post(
@@ -264,7 +264,7 @@ class TestFailureIsolation:
 
     async def test_gzip_bomb_413(self, client, monkeypatch, store):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-1")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-1")
         )
         monkeypatch.setattr("ingest_svc.config.settings.OTLP_MAX_DECOMPRESSED_BYTES", 10)
         payload = gzip.compress(json.dumps(_otlp_body()).encode())  # expands past 10 bytes
@@ -282,7 +282,7 @@ class TestFailureIsolation:
 
     async def test_span_rate_limit_429_with_retry_after(self, client, monkeypatch, store):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-1")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-1")
         )
 
         class _DeniedLimiter:
@@ -299,7 +299,7 @@ class TestFailureIsolation:
 
     async def test_backpressure_429(self, client, monkeypatch, store):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-1")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-1")
         )
 
         class _FullGuard:
@@ -320,7 +320,7 @@ class TestFailureIsolation:
         """End-to-end: a burst of concurrent requests against a low per-org rate
         gets partly admitted and partly shed with 429 — one org can't flood."""
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-load")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-load")
         )
         monkeypatch.setattr("ingest_svc.config.settings.OTLP_MAX_SPANS_PER_SEC", 10)  # burst 20
         body = _otlp_body()  # one span per request

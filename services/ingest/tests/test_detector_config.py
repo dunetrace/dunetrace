@@ -73,7 +73,7 @@ def env(monkeypatch, yaml_path):
     monkeypatch.setattr("ingest_svc.db.postgres.ensure_schema", AsyncMock())
     monkeypatch.setattr("ingest_svc.db.postgres.check_db", AsyncMock(return_value="ok"))
     monkeypatch.setattr(
-        "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value="org-test")
+        "ingest_svc.routers.ingest.org_id_for_key", AsyncMock(return_value="org-test")
     )
     monkeypatch.setattr("ingest_svc.config.settings.DETECTOR_CONFIG", yaml_path)
     packs = AsyncMock(return_value=["voice"])
@@ -134,7 +134,7 @@ class TestAuth:
             seen.append(key)
             return "org-1"
 
-        monkeypatch.setattr("ingest_svc.routers.ingest.verify_api_key", _spy)
+        monkeypatch.setattr("ingest_svc.routers.ingest.org_id_for_key", _spy)
         await client.get(
             "/v1/detector-config",
             params={"agent_id": "agent-xyz", "api_key": "from-query"},
@@ -148,7 +148,7 @@ class TestAuth:
 
     async def test_invalid_key_is_rejected(self, client, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.ingest.verify_api_key", AsyncMock(return_value=None)
+            "ingest_svc.routers.ingest.org_id_for_key", AsyncMock(return_value=None)
         )
         r = await _get(client, agent_id="agent-xyz")
         assert r.status_code == 401

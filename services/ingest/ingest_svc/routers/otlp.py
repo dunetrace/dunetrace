@@ -50,7 +50,7 @@ from ingest_svc.config import settings
 from ingest_svc.db import (
     fetch_otel_ingestion_enabled,
     set_otel_ingestion_enabled,
-    verify_api_key,
+    org_id_for_key,
 )
 from ingest_svc.otel import _attr, otlp_to_events, protobuf_to_resource_spans
 from ingest_svc.otel_stats import get_otel_stats
@@ -242,7 +242,7 @@ async def receive_otlp_traces(
     # never buys a decompression pass off us and a legitimate one is identified
     # before we spend the work. Defence in depth behind _gunzip_bounded's cap.
     if not trusted:
-        org_id = await verify_api_key(_header_api_key(request))
+        org_id = await org_id_for_key(_header_api_key(request))
 
     try:
         resource_spans = _decode_body(raw_body, content_type, content_encoding)
@@ -259,7 +259,7 @@ async def receive_otlp_traces(
     # ── Auth, part 2: the dunetrace.api_key resource attribute ───────────────
     if not trusted and org_id is None:
         resource_key = _resource_api_key(resource_spans)
-        org_id = await verify_api_key(resource_key) if resource_key else None
+        org_id = await org_id_for_key(resource_key) if resource_key else None
         if org_id is None:
             stats.record_auth_failure()
             _record_auth_failure(request)

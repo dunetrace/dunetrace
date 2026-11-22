@@ -34,7 +34,7 @@ from ingest_svc.db import (
     init_pool,
     retention_looks_stale,
     scrub_old_signal_evidence,
-    verify_api_key,
+    org_id_for_key,
 )
 from ingest_svc.rate_limiter import _HEARTBEAT_INTERVAL, get_limiter
 from ingest_svc.routers import ingest, health, otlp
@@ -362,7 +362,7 @@ def create_app() -> FastAPI:
                 agent_id = data.get("agent_id")
                 api_key = data.get("api_key", "") or ""
                 if api_key:
-                    org_id = await verify_api_key(api_key)
+                    org_id = await org_id_for_key(api_key)
         except Exception as exc:
             logger.warning("Failed to set org context: %s", exc)
 

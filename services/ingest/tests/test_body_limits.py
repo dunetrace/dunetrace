@@ -90,9 +90,9 @@ def spies(mock_db, monkeypatch):
     insert_deploy = AsyncMock(return_value=7)
     monkeypatch.setattr("ingest_svc.routers.ingest.insert_deploy_event", insert_deploy)
     verify_route = AsyncMock(return_value="org-test")
-    monkeypatch.setattr("ingest_svc.routers.ingest.verify_api_key", verify_route)
+    monkeypatch.setattr("ingest_svc.routers.ingest.org_id_for_key", verify_route)
     verify_mw = AsyncMock(return_value="org-test")
-    monkeypatch.setattr("ingest_svc.main.verify_api_key", verify_mw)
+    monkeypatch.setattr("ingest_svc.main.org_id_for_key", verify_mw)
     return SimpleNamespace(
         insert_events=insert_events,
         insert_deploy=insert_deploy,
@@ -297,7 +297,7 @@ class TestLogging:
 class TestOtlpIsCappedSeparately:
     async def test_ingest_cap_does_not_gate_otlp(self, client, small_cap, spies, monkeypatch):
         monkeypatch.setattr(
-            "ingest_svc.routers.otlp.verify_api_key", AsyncMock(return_value="org-1")
+            "ingest_svc.routers.otlp.org_id_for_key", AsyncMock(return_value="org-1")
         )
         monkeypatch.setattr(
             "ingest_svc.routers.otlp.fetch_otel_ingestion_enabled", AsyncMock(return_value=True)

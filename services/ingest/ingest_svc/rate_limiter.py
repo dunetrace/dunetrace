@@ -86,7 +86,7 @@ class RateLimiter:
             pool = get_pool()
             if pool:
                 async with pool.acquire() as conn:
-                    # Matched on the hash, like verify_api_key. Both key minting
+                    # Matched on the hash, like org_id_for_key. Both key minting
                     # paths write hash_api_key(key) into BOTH `key` and
                     # `key_hash` (the `key` column is NOT NULL from the pre-hash
                     # schema), so comparing the plaintext against `key` matched
@@ -104,7 +104,7 @@ class RateLimiter:
                     rpm = row["rate_limit_rpm"]
         except Exception as exc:
             # Type name only, not the exception object — same reasoning as
-            # verify_api_key() in db/postgres.py: this query is also bound
+            # org_id_for_key() in db/postgres.py: this query is also bound
             # with the raw api_key, which some DB drivers echo into error
             # message strings.
             logger.debug("rpm lookup failed: %s", type(exc).__name__)

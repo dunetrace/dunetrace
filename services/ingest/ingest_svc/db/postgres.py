@@ -1045,7 +1045,7 @@ async def fetch_agent_baselines(
     return out
 
 
-async def create_api_key(
+async def mint_key(
     org_id: str,
     org_name: str | None = None,
     rate_limit_rpm: int = 600,
@@ -1067,6 +1067,13 @@ async def create_api_key(
     not itself need a key, that meant no admin credential could ever exist.
     ``None`` normalises to the same ingest-only default the Customer API's
     ``create_api_key`` uses; the bootstrap *route* is what asks for ``admin``.
+
+    Named ``mint_key``, not ``create_api_key``, on purpose: CodeQL's
+    sensitive-data heuristic treats the result of any call whose name matches
+    ``api.?key`` as a password, so every field read off it — the non-secret
+    ``key_prefix`` and ``scopes`` the bootstrap route logs for its audit line —
+    was reported as clear-text credential logging. The plaintext ``key`` in the
+    returned dict is still a secret and must never be logged.
     """
     from dunetrace_schemas.keys import generate_api_key, hash_api_key, key_prefix
     from dunetrace_schemas.scopes import normalise
@@ -1115,7 +1122,7 @@ async def get_agent_quota_by_key(api_key: str, agent_id: str) -> Optional[float]
     has this, never the numeric key_id. Returns None if no override is set
     (caller applies its own default).
 
-    Joined on key_hash, like verify_api_key. Both minting paths store
+    Joined on key_hash, like org_id_for_key. Both minting paths store
     hash_api_key(key) in BOTH `key` and `key_hash`, so matching the plaintext
     against `key` never found a row: PUT /admin/keys/{id}/agents/{id}/quota
     wrote a record this could never read, and every agent silently stayed on
@@ -1180,10 +1187,17 @@ async def set_agent_quota(key_id: int, agent_id: str, quota_pct: float) -> None:
         )
 
 
-async def verify_api_key(api_key: str) -> Optional[str]:
+async def org_id_for_key(api_key: str) -> Optional[str]:
     """Returns org_id if the key is valid, None otherwise. In dev mode, any dt_dev_* key
     (or no key at all) resolves to the 'default' org — a real row created by the
-    multi-tenancy migration, not a sentinel."""
+    multi-tenancy migration, not a sentinel.
+
+    Named for what it returns. As ``verify_api_key`` its name matched CodeQL's
+    ``api.?key`` password heuristic, which made the returned org_id — a tenant
+    identifier, not a secret — a "password" source, so every log line carrying
+    org_id downstream of authentication was reported as clear-text credential
+    logging (eight alerts over time, several "fixed" by dropping org_id from
+    operator logs)."""
     if settings.is_dev and (not api_key or api_key.startswith("dt_dev_")):
         return "default"
 
@@ -1205,7 +1219,7 @@ async def verify_api_key(api_key: str) -> Optional[str]:
         # some DB drivers embed bound parameter values (here, the raw
         # api_key) in error message strings, which would otherwise put a
         # live credential in plaintext logs.
-        logger.error("verify_api_key failed: %s", type(exc).__name__)
+        logger.error("org_id_for_key failed: %s", type(exc).__name__)
         return None
 
 

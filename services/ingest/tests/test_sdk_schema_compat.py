@@ -56,7 +56,7 @@ def mock_db(monkeypatch):
     # comment in tests/test_ingest.py's mock_db fixture. Return value matches
     # the agent_id _record_a_full_run() below uses for every event.
     monkeypatch.setattr(
-        "ingest_svc.routers.ingest.verify_api_key",
+        "ingest_svc.routers.ingest.org_id_for_key",
         AsyncMock(return_value="schema-compat-agent"),
     )
 

@@ -233,7 +233,7 @@ class TestRateLimiterRpmCache(unittest.IsolatedAsyncioTestCase):
 
     async def test_db_error_never_logs_the_raw_api_key(self):
         """CodeQL: clear-text logging of sensitive info — same finding, same
-        fix, as verify_api_key() in db/postgres.py: this query is also bound
+        fix, as org_id_for_key() in db/postgres.py: this query is also bound
         with the raw api_key, so the exception logged on failure must never
         include str(exc) itself, only its type name."""
         secret_key = "dt_live_super_secret_value_12345"
