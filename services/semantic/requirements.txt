@@ -14,6 +14,12 @@ python-dotenv>=1.2.2,<2.0.0
 # of what an exact pin is for: it guaranteed divergence the moment 6.0.3 shipped.
 PyYAML>=6.0
 deepeval==4.0.9
+# deepeval 4.0.9 calls sentry_sdk.init(profiles_sample_rate=...) at import time,
+# and sentry-sdk 3.0 rejects that option ("Unknown option"), so with 3.x every
+# import of deepeval raises TypeError: the worker cannot start and its tests
+# cannot collect. deepeval does not cap sentry-sdk itself. Lift this when a
+# deepeval release supports sentry-sdk 3.
+sentry-sdk>=2,<3
 anthropic>=0.40
 # Only imported when SEMANTIC_LLM_PROVIDER=mistral. Pinned to v2+: v2.0 moved
 # every module under mistralai.client, and evaluators/mistral_model.py imports
