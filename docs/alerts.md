@@ -180,7 +180,7 @@ Signals in shadow mode are stored and visible in the dashboard but never deliver
 
 ## Per-detector destination routing
 
-By default every alertable signal goes to every globally-enabled destination (Slack and/or the generic webhook). To route specific failure types to specific destinations, add a `destinations` list to that detector's block in `detectors.yml`:
+By default every alertable signal goes to every enabled destination: Slack and/or the generic webhook, plus Linear for orgs that have connected it. To route specific failure types to specific destinations, add a `destinations` list to that detector's block in `detectors.yml`:
 
 ```yaml
 default:
@@ -189,4 +189,4 @@ default:
     destinations: [slack]   # only Slack, even if WEBHOOK_URL is also configured
 ```
 
-Valid values: `slack`, `webhook`, `linear` (Linear delivery itself is not yet implemented — a detector routed only to `linear` today delivers nowhere until that lands). Restart the alerts worker (`docker compose restart alerts`) to apply changes.
+Valid values: `slack`, `webhook`, `linear`. `linear` files a Linear issue, but only for an org that has connected Linear (`POST /v1/orgs/integrations/linear`, admin scope). There is no global fallback, so in an org without that integration a detector routed only to `linear` delivers nowhere. Restart the alerts worker (`docker compose restart alerts`) to apply changes.
