@@ -28,6 +28,8 @@ ENV/
 
 # Testing & coverage
 .pytest_cache/
+# τ²-bench harness: downloaded corpus and replay outputs (see benchmarks/README.md)
+benchmarks/.cache/
 .coverage
 htmlcov/
 .tox/

@@ -48,6 +48,11 @@ test-integrations:
 test-sdk-ts:
 	cd packages/sdk-ts && npm test
 
+# τ²-bench measurement harness (benchmarks/). The replay tests need a Postgres
+# and skip without one; see benchmarks/README.md for BENCH_TEST_DATABASE_URL.
+test-bench:
+	PYTHONPATH=benchmarks:packages/schemas-py:packages/sdk-py:services/ingest:services/detector python -m pytest benchmarks/tests/ -v
+
 # Cross-service: asserts the tables declared by more than one service agree.
 # No PYTHONPATH — it parses the sources rather than importing them.
 test-schema-parity:
@@ -74,4 +79,4 @@ check-schema-owners:
 	python -m unittest scripts.test_check_schema_owners
 
 test:
-	$(MAKE) test-sdk-py test-schemas test-ingest test-detector test-explainer test-alerts test-api test-mcp test-semantic test-integrations test-schema-parity test-sdk-ts
+	$(MAKE) test-sdk-py test-schemas test-ingest test-detector test-explainer test-alerts test-api test-mcp test-semantic test-integrations test-schema-parity test-sdk-ts test-bench

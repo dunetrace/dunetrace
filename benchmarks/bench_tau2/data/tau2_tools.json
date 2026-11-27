@@ -1,0 +1,101 @@
+{
+  "source": {
+    "repo": "https://github.com/sierra-research/tau2-bench",
+    "license": "MIT License, Copyright (c) 2025 Sierra Research. Tool names, ToolType annotations and the agent prompt template are taken from it unchanged.",
+    "commit": "c60471675690a1f26cdb8419dbb7ed2142f149d1",
+    "note": "Identical bytes at 5a629d14503111171dc7166a3cf8bf3870b73a79. The corpus also ran on commits 7324fb57, ef9454a8, ce61684b and two unrecorded ones, none of which are public. Tools with a successful call in a file but absent here (for example get_item_details) are added per file by tools.available_tools().",
+    "files": {
+      "src/tau2/domains/airline/tools.py": "3987f21c286314cb48764f97052934ff4fd60e27a0b2e4a43423911adf8eaa26",
+      "src/tau2/domains/retail/tools.py": "7063727dfcaa428d2b78745ed025210312f080506c3d24a7059383945e50613f",
+      "src/tau2/domains/telecom/tools.py": "388552434d1b8225e33e7958bdb6efccfe92b49e11d1838568d9b559514e9d01",
+      "src/tau2/domains/telecom/user_tools.py": "03fa751eeea3734313a3f5274223d42750fd5c1a28f2624265a678f271ac309d",
+      "src/tau2/agent/llm_agent.py": "d13412ff502859f0ef0492af0128f1b2666be32640057ba8e076d2602af084d8"
+    }
+  },
+  "agent_tools": {
+    "airline": {
+      "book_reservation": "write",
+      "calculate": "generic",
+      "cancel_reservation": "write",
+      "get_flight_status": "read",
+      "get_reservation_details": "read",
+      "get_user_details": "read",
+      "list_all_airports": "read",
+      "search_direct_flight": "read",
+      "search_onestop_flight": "read",
+      "send_certificate": "write",
+      "transfer_to_human_agents": "generic",
+      "update_reservation_baggages": "write",
+      "update_reservation_flights": "write",
+      "update_reservation_passengers": "write"
+    },
+    "retail": {
+      "calculate": "generic",
+      "cancel_pending_order": "write",
+      "exchange_delivered_order_items": "write",
+      "find_user_id_by_email": "read",
+      "find_user_id_by_name_zip": "read",
+      "get_order_details": "read",
+      "get_product_details": "read",
+      "get_user_details": "read",
+      "list_all_product_types": "read",
+      "modify_pending_order_address": "write",
+      "modify_pending_order_items": "write",
+      "modify_pending_order_payment": "write",
+      "modify_user_address": "write",
+      "return_delivered_order_items": "write",
+      "transfer_to_human_agents": "generic"
+    },
+    "telecom": {
+      "disable_roaming": "write",
+      "enable_roaming": "write",
+      "get_bills_for_customer": "read",
+      "get_customer_by_id": "read",
+      "get_customer_by_name": "read",
+      "get_customer_by_phone": "read",
+      "get_data_usage": "read",
+      "get_details_by_id": "read",
+      "refuel_data": "write",
+      "resume_line": "write",
+      "send_payment_request": "write",
+      "suspend_line": "write",
+      "transfer_to_human_agents": "generic"
+    }
+  },
+  "user_tools": {
+    "telecom": {
+      "can_send_mms": "read",
+      "check_apn_settings": "read",
+      "check_app_permissions": "read",
+      "check_app_status": "read",
+      "check_data_restriction_status": "read",
+      "check_installed_apps": "read",
+      "check_network_mode_preference": "read",
+      "check_network_status": "read",
+      "check_payment_request": "read",
+      "check_sim_status": "read",
+      "check_status_bar": "read",
+      "check_vpn_status": "read",
+      "check_wifi_calling_status": "read",
+      "check_wifi_status": "read",
+      "connect_vpn": "write",
+      "disconnect_vpn": "write",
+      "grant_app_permission": "write",
+      "make_payment": "write",
+      "reboot_device": "write",
+      "reseat_sim_card": "write",
+      "reset_apn_settings": "write",
+      "run_speed_test": "read",
+      "set_apn_settings": "write",
+      "set_network_mode_preference": "write",
+      "toggle_airplane_mode": "write",
+      "toggle_data": "write",
+      "toggle_data_saver_mode": "write",
+      "toggle_roaming": "write",
+      "toggle_wifi": "write",
+      "toggle_wifi_calling": "write"
+    }
+  },
+  "agent_instruction": "You are a customer service agent that helps the user according to the <policy> provided below.\nIn each turn you can either:\n- Send a message to the user.\n- Make a tool call.\nYou cannot do both at the same time.\n\nTry to be helpful and always follow the policy. Always make sure you generate valid JSON only.",
+  "system_prompt_template": "<instructions>\n{agent_instruction}\n</instructions>\n<policy>\n{domain_policy}\n</policy>"
+}
